@@ -1,0 +1,198 @@
+This is a solid engineering strategy. You are building **OPS (Oracle-Preserving Summarization)**, but you are scaffolding it with the configuration, LLM handling, and DSPy structures from **OmniThink**, and the text processing logic from **LangExtract**.
+
+Here is the **Full Codebase Map**. I have annotated each file to indicate whether you should **COPY** (from OmniThink/LangExtract), **ADAPT** (heavy modification), or **CREATE** (fresh implementation of OPS logic).
+
+### Directory Structure
+
+```text
+OpenOPS/
+├── config/
+│   └── settings.yaml          # [COPY] From OmniThink (LLM keys, hyperparameters)
+├── data/
+│   ├── raw/                   # Input PDFs/Docs
+│   ├── processed/             # Chunked JSONs (Output of LangExtract)
+│   └── trees/                 # Serialized OPS Trees (Pickle/JSON)
+├── src/
+│   ├── core/
+│   │   ├── llm_client.py      # [COPY] From OmniThink (Wraps DSPy/OpenAI/DeepSeek)
+│   │   ├── signatures.py      # [ADAPT] DSPy Signatures (The "Prompt" definitions)
+│   │   └── data_models.py     # [CREATE] The Node and Tree classes
+│   ├── preprocessing/
+│   │   └── chunker.py         # [COPY] From LangExtract (Smart text splitting)
+│   ├── ops_engine/
+│   │   ├── builder.py         # [CREATE] Recursive reduction (Leaves -> Root)
+│   │   ├── auditor.py         # [CREATE] The Probabilistic Audit logic (Spotlights A/B/C)
+│   │   └── optimizer.py       # [ADAPT] The Bootstrap logic (from OmniThink/DSPy)
+│   └── utils/
+│       └── visualization.py   # [CREATE] To view the tree and red flags
+├── main.py                    # Entry point
+└── requirements.txt
+```
+
+---
+
+### Detailed Implementation Plan
+
+#### 1. `src/core/llm_client.py`
+**Source:** **OmniThink** (`utils.py` or `model.py`)
+**Task:** OmniThink already has code to initialize DSPy with various backends (GPT-4, DeepSeek, local LLMs).
+*   **Action:** Copy their setup. Ensure you can swap the "Student" model (Summarizer) and the "Teacher" model (Oracle/Judge).
+
+#### 2. `src/preprocessing/chunker.py`
+**Source:** **LangExtract**
+**Task:** We need to turn a long PDF into $b_1, b_2, ... b_k$ (the leaves).
+*   **Action:** Extract the logic from LangExtract that cleans text and splits it based on token counts or semantic boundaries.
+*   **Why:** LangExtract handles the messy edge cases of splitting JSON-heavy or structured text better than standard splitters.
+
+#### 3. `src/core/data_models.py`
+**Source:** **New** (The OPS Backbone)
+**Task:** Define the data structure that holds the "State" of the summarization.
+
+```python
+from dataclasses import dataclass
+from typing import Optional, List
+
+@dataclass
+class OPSNode:
+    id: str
+    level: int  # 0 = Leaf
+    
+    # Content
+    raw_text_span: Optional[str]  # S(u) - Lazy loaded for internal nodes
+    summary: str                  # g(u)
+    
+    # Genealogy
+    left_child: Optional['OPSNode'] = None
+    right_child: Optional['OPSNode'] = None
+    
+    # Audit Status (The "Spotlight" results)
+    audit_passed: bool = False
+    discrepancy_score: float = 0.0
+    audit_trace: Optional[dict] = None # Stores the DSPy trace for debugging
+
+    @property
+    def is_leaf(self):
+        return self.left_child is None
+```
+
+#### 4. `src/core/signatures.py`
+**Source:** **Adapt** from OmniThink’s DSPy patterns.
+**Task:** Define the 3 core operations of OPS.
+
+```python
+import dspy
+
+# 1. The Summarizer (g)
+class RecursiveSummary(dspy.Signature):
+    """
+    Compress the input into a summary that preserves variables X, Y, and Z
+    as defined by the Research Rubric.
+    """
+    # We inject the "Rubric" (the Oracle definition) into the context
+    rubric = dspy.InputField(desc="The specific information to preserve")
+    content = dspy.InputField(desc="Raw text or concatenated child summaries")
+    summary = dspy.OutputField(desc="The information-preserving summary")
+
+# 2. The Approximate Oracle (f_hat)
+class OracleJudge(dspy.Signature):
+    """
+    Compare two inputs. Determine if they yield the same answer 
+    according to the Research Rubric.
+    """
+    rubric = dspy.InputField()
+    input_A = dspy.InputField()
+    input_B = dspy.InputField()
+    
+    # The output is NOT just a boolean, but a score (d_Y)
+    is_congruent = dspy.OutputField(desc="Boolean: Are they task-equivalent?")
+    discrepancy_score = dspy.OutputField(desc="Float 0.0 to 1.0 (0=Perfect Match)")
+    reasoning = dspy.OutputField(desc="Explanation of the drift")
+```
+
+#### 5. `src/ops_engine/builder.py`
+**Source:** **New** (Structure) + **OmniThink** (Async execution)
+**Task:** Build the tree bottom-up. This is the "Inverted OmniThink."
+
+*   **Logic:**
+    1.  **Level 0:** Run `RecursiveSummary` on all chunks (Leaves). *Use `dspy.async` to parallelize this—OmniThink has patterns for this.*
+    2.  **Level N:** Group nodes into pairs `(u_L, u_R)`.
+    3.  **Concatenate:** `content = u_L.summary + "\n\n" + u_R.summary`.
+    4.  **Summarize:** Run `RecursiveSummary` on `content` to get `u_parent`.
+    5.  Repeat until 1 node remains (Root).
+
+#### 6. `src/ops_engine/auditor.py`
+**Source:** **New** (The core OPS implementation)
+**Task:** Implement the sampling logic from Section 4 of the paper.
+
+```python
+import random
+
+class OPSAuditor:
+    def __init__(self, oracle_module, human_review_queue):
+        self.f_hat = oracle_module
+        self.queue = human_review_queue
+
+    def audit_tree(self, root_node, budget_n=10):
+        """
+        The Probabilistic Audit.
+        Does NOT check every node. Samples 'budget_n' edges.
+        """
+        nodes = self._collect_all_nodes(root_node)
+        
+        # 1. Sufficiency Check (Leaves)
+        leaves = [n for n in nodes if n.is_leaf]
+        samples = random.sample(leaves, k=min(len(leaves), budget_n))
+        for leaf in samples:
+            self._check_sufficiency(leaf)
+
+        # 2. Merge Consistency Check (Internal)
+        # Check: f*(g(left) + g(right)) vs f*(g(g(left) + g(right)))
+        internals = [n for n in nodes if not n.is_leaf]
+        samples = random.sample(internals, k=min(len(internals), budget_n))
+        for node in samples:
+            self._check_merge_consistency(node)
+
+    def _check_merge_consistency(self, node):
+        # The "Joint" Path: Raw concatenation of summaries
+        joint_input = node.left_child.summary + node.right_child.summary
+        
+        # The "Disjoint" Path: The parent summary
+        disjoint_input = node.summary
+
+        # Ask f_hat (DSPy Judge)
+        result = self.f_hat(input_A=joint_input, input_B=disjoint_input)
+        
+        if result.discrepancy_score > 0.1:
+            # FLAG FOR HUMAN REVIEW (f*)
+            self.queue.add(node, result)
+```
+
+#### 7. `src/ops_engine/optimizer.py`
+**Source:** **Adapt** from OmniThink/DSPy
+**Task:** The bootstrap loop.
+*   **Logic:**
+    1.  Take the `audit_trace` from failed nodes in `auditor.py`.
+    2.  If the Human ($f^*$) reviewed a flag and said "Actually, the summary was wrong, here is the fix," that becomes a **Golden Example**.
+    3.  Use `dspy.BootstrapFewShot`.
+    4.  **Metric:** Pass/Fail on the `OracleJudge`.
+    5.  Compile the `RecursiveSummary` module to learn from these edge cases.
+
+---
+
+### The Workflow in Action
+
+1.  **Ingest:** `preprocessing/chunker.py` consumes your PDF via LangExtract.
+2.  **Build:** `ops_engine/builder.py` runs standard DSPy to build the tree.
+3.  **Audit:** `ops_engine/auditor.py` wakes up. It picks 10 random spots in the tree.
+4.  **Judge:** It runs `OracleJudge` (GPT-4o or DeepSeek).
+5.  **Flag:** It finds 2 nodes where the summary dropped a specific name required by the rubric.
+6.  **Human Loop:** You (the human) see a CLI prompt: *"Judge says these don't match. Is the summary bad?"* You say "Yes."
+7.  **Optimize:** The system adds that failure to the prompt examples.
+8.  **Re-run:** You rebuild the tree (or just the affected sub-branches) with the smarter model.
+
+### Immediate Next Steps for You
+
+1.  **Fork OmniThink** to get the `dspy` environment set up.
+2.  **Create the `OPSNode` class** (Step 3 above). This is the primitive everything else relies on.
+3.  **Create the `signatures.py`** (Step 4). Define your "Rubric" clearly here.
+4.  **Draft the `builder.py`**. Don't worry about the audit yet. Just get it to ingest a PDF and produce a root summary using the tree structure.

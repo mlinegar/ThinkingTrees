@@ -1,0 +1,17 @@
+OmniThink/
+xmc.dspy/
+langextract/
+data/
+outside_data/
+*.log
+*.code-workspace
+.vscode/
+.DS_Store
+.idea/
+*.iml
+__pycache__/
+*.pyc
+.env
+.env.*  
+tests/
+venv/
