@@ -13,10 +13,8 @@ from .rubrics import RILE_PRESERVATION_RUBRIC, RILE_TASK_CONTEXT
 from .ops_pipeline import ManifestoOPSPipeline, SimplePipeline, PipelineConfig, ManifestoResult
 from .evaluation import ManifestoEvaluator, EvaluationMetrics, save_results, load_results
 from .position_oracle import (
-    RILESimilarityScorer,  # New, preferred API
-    RILEPositionOracle,    # Deprecated, use RILESimilarityScorer
-    SimpleRILEOracle,
-    create_position_oracle,
+    RILESimilarityScorer,  # Alias for create_rile_scorer
+    create_rile_scorer,    # Factory for RILE similarity scorer
 )
 
 # Training framework integration
@@ -30,11 +28,6 @@ from .training_integration import (
     create_rile_training_collector,
     train_rile_oracle,
     quick_train_from_results,
-    # Phase 5: Unified metric creation
-    create_rile_metric,
-    create_preservation_metric,
-    create_summarizer_metric,
-    create_evaluation_metric,
     create_rile_training_example,
 )
 
@@ -61,10 +54,8 @@ __all__ = [
     "save_results",
     "load_results",
     # Position oracles
-    "RILESimilarityScorer",  # New, preferred API
-    "RILEPositionOracle",    # Deprecated
-    "SimpleRILEOracle",
-    "create_position_oracle",
+    "RILESimilarityScorer",
+    "create_rile_scorer",
     # Training integration
     "create_rile_label_space",
     "ManifestoTrainingSource",
@@ -75,10 +66,5 @@ __all__ = [
     "create_rile_training_collector",
     "train_rile_oracle",
     "quick_train_from_results",
-    # Phase 5: Unified metric creation
-    "create_rile_metric",
-    "create_preservation_metric",
-    "create_summarizer_metric",
-    "create_evaluation_metric",
     "create_rile_training_example",
 ]

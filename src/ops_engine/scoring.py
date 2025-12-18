@@ -65,6 +65,32 @@ def normalize_error_to_score(error: float, max_error: float) -> float:
     return max(0.0, 1.0 - abs(error) / max_error)
 
 
+def score_to_error(score: float, max_error: float) -> float:
+    """
+    Inverse of normalize_error_to_score.
+
+    Given a normalized score (0-1 where 1=good), compute the error.
+
+    Args:
+        score: Normalized score in [0.0, 1.0] where 1.0 = perfect
+        max_error: The maximum error value (defines the scale)
+
+    Returns:
+        Error value: max_error * (1 - score)
+
+    Examples:
+        # Convert score back to RILE error
+        error = score_to_error(0.5, max_error=200.0)  # → 100.0 points
+
+        # Perfect score
+        error = score_to_error(1.0, max_error=200.0)  # → 0.0 points
+
+        # Worst score
+        error = score_to_error(0.0, max_error=200.0)  # → 200.0 points
+    """
+    return max_error * (1.0 - score)
+
+
 # =============================================================================
 # Bounded Scale (Generic)
 # =============================================================================
@@ -161,6 +187,93 @@ class BoundedScale:
 UNIT_SCALE = BoundedScale(0.0, 1.0)       # 0-1 probabilities/scores
 PERCENT_SCALE = BoundedScale(0.0, 100.0)  # Percentages
 SYMMETRIC_SCALE = BoundedScale(-1.0, 1.0)  # Sentiment, correlation
+
+
+# =============================================================================
+# Generic Similarity Scorer
+# =============================================================================
+
+class SimilarityScorer:
+    """
+    Generic similarity scorer for comparing two texts via extracted values.
+
+    This is the generic foundation for domain-specific scorers. It:
+    1. Extracts a numeric value from each text using value_extractor
+    2. Computes similarity using BoundedScale.values_to_score()
+    3. Returns an OracleScore
+
+    Example:
+        # RILE similarity scorer
+        def extract_rile(text: str) -> float:
+            # Call LLM to get RILE score
+            return rile_scorer(text=text)['rile_score']
+
+        rile_scale = BoundedScale(-100.0, 100.0)
+        scorer = SimilarityScorer(extract_rile, rile_scale)
+        result = scorer.score(original, summary, rubric)
+        print(result.score)  # 0.95 (similarity)
+
+        # Sentiment similarity
+        scorer = SimilarityScorer(sentiment_fn, SYMMETRIC_SCALE)
+    """
+
+    def __init__(
+        self,
+        value_extractor: Callable[[str], float],
+        scale: BoundedScale,
+        name: str = "value",
+    ):
+        """
+        Initialize the similarity scorer.
+
+        Args:
+            value_extractor: Function (text) -> float that extracts a value
+            scale: BoundedScale for normalizing the comparison
+            name: Name for the extracted value (used in reasoning)
+        """
+        self.value_extractor = value_extractor
+        self.scale = scale
+        self.name = name
+
+    def score(
+        self,
+        input_a: str,
+        input_b: str,
+        rubric: str = "",
+    ) -> 'OracleScore':
+        """
+        Score similarity between two texts.
+
+        Args:
+            input_a: First text
+            input_b: Second text
+            rubric: Optional context (not used in base implementation)
+
+        Returns:
+            OracleScore with similarity (1.0 = identical values)
+        """
+        try:
+            val_a = self.value_extractor(input_a)
+            val_b = self.value_extractor(input_b)
+
+            similarity = self.scale.values_to_score(val_a, val_b)
+            diff = abs(val_a - val_b)
+
+            return OracleScore(
+                score=similarity,
+                reasoning=f"{self.name}: {val_a:.1f} vs {val_b:.1f}, diff={diff:.1f}",
+                metadata={
+                    f'{self.name}_a': val_a,
+                    f'{self.name}_b': val_b,
+                    'difference': diff,
+                },
+            )
+
+        except Exception as e:
+            return OracleScore(
+                score=0.0,
+                reasoning=f"Scorer error: {str(e)}",
+            )
 
 
 # =============================================================================

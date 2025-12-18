@@ -56,11 +56,13 @@ from src.ops_engine.oracle_func_approximation import (
 from src.ops_engine.scoring import (
     OracleScore,
     ScoringOracle,
+    SimilarityScorer,
     LegacyOracleAdapter,
     as_scoring_oracle,
     oracle_as_metric,
     oracle_as_metric_with_feedback,
     normalize_error_to_score,
+    score_to_error,
     # Generic bounded scale (domain-agnostic)
     BoundedScale,
     UNIT_SCALE,
@@ -116,11 +118,13 @@ __all__ = [
     # Score-centric oracle types (new, preferred API)
     "OracleScore",
     "ScoringOracle",
+    "SimilarityScorer",
     "LegacyOracleAdapter",
     "as_scoring_oracle",
     "oracle_as_metric",
     "oracle_as_metric_with_feedback",
     "normalize_error_to_score",
+    "score_to_error",
     # Generic bounded scale (domain-agnostic)
     "BoundedScale",
     "UNIT_SCALE",

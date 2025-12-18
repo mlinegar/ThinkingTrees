@@ -49,38 +49,37 @@ def create_metric(
     scale: BoundedScale,
     ground_truth_field: str = 'ground_truth',
     prediction_field: str = 'label',
-    summary_weight: float = 0.7,
-    oracle_weight: float = 0.3,
     with_feedback: bool = False,
 ) -> Callable:
     """
-    Create a DSPy metric from any oracle and bounded scale.
+    Create a DSPy metric returning a normalized 0-1 score.
 
-    This is the generic metric factory. Domain-specific factories
-    should wrap this with appropriate defaults.
+    Score computation (euclidean distance normalized by scale range):
+        score = 1 - abs(predicted - ground_truth) / scale.range
+
+    For RILE (-100 to 100, range=200):
+        score = 1 - abs(pred - gt) / 200
+
+    Examples:
+        - pred=50, gt=50   → score = 1.0 (perfect match)
+        - pred=50, gt=-50  → score = 1 - 100/200 = 0.5
+        - pred=100, gt=-100 → score = 1 - 200/200 = 0.0 (max error)
 
     Args:
         oracle_fn: Function that scores text, returns value on the scale.
             Signature: (text: str) -> float  OR
             Signature: (text: str) -> Tuple[float, float, str] (value, confidence, reasoning)
-        scale: BoundedScale defining the value range
+        scale: BoundedScale defining the value range for normalization
         ground_truth_field: Field name for ground truth on gold example
         prediction_field: Field name for predicted value on prediction
-        summary_weight: Weight for summary quality (reserved for composite metrics)
-        oracle_weight: Weight for oracle score (reserved for composite metrics)
         with_feedback: Return dict with feedback for GEPA
 
     Returns:
-        DSPy-compatible metric function
+        DSPy-compatible metric function returning pure score (0-1).
+        Use create_combined_metric() to combine multiple metrics with weights.
 
     Example:
-        # Generic percentage-based metric
-        metric = create_metric(
-            oracle_fn=quality_scorer,
-            scale=PERCENT_SCALE,
-        )
-
-        # Domain-specific (e.g., RILE political positioning)
+        # RILE political positioning metric
         rile_scale = BoundedScale(-100.0, 100.0)
         metric = create_metric(
             oracle_fn=rile_oracle.predict,

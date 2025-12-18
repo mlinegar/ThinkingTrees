@@ -19,7 +19,7 @@ from .constants import RILE_RANGE
 from .data_loader import ManifestoSample
 from .rubrics import RILE_PRESERVATION_RUBRIC, RILE_TASK_CONTEXT
 from .signatures import RILEScorer
-from .position_oracle import RILEPositionOracle, SimpleRILEOracle
+from .position_oracle import RILESimilarityScorer
 
 
 logger = logging.getLogger(__name__)
@@ -181,15 +181,13 @@ class ManifestoOPSPipeline:
             )
             dspy.configure(lm=auditor_lm)
 
-            oracle = RILEPositionOracle(
-                threshold=self.config.rile_threshold,
-                task_context=self.config.task_context
-            )
+            oracle = RILESimilarityScorer(task_context=self.config.task_context)
         else:
-            # Use simple keyword-based oracle for testing
-            oracle = SimpleRILEOracle(threshold=self.config.rile_threshold)
+            # Still need LLM for RILE scoring
+            oracle = RILESimilarityScorer(task_context=self.config.task_context)
 
-        # Auditor
+        # Auditor - threshold normalized to similarity (0-1 where 1.0 = identical)
+        # rile_threshold (e.g., 10 points) -> 10/200 = 0.05 discrepancy -> 0.95 similarity
         audit_config = AuditConfig(
             sample_budget=self.config.audit_budget,
             discrepancy_threshold=self.config.rile_threshold / RILE_RANGE  # Normalize
@@ -340,7 +338,7 @@ class SimplePipeline:
         from src.ops_engine.builder import TruncatingSummarizer
 
         self.summarizer = TruncatingSummarizer(max_length=500)
-        self.oracle = SimpleRILEOracle(threshold=10.0)
+        self.oracle = RILESimilarityScorer()  # Requires LLM for RILE scoring
 
         build_config = BuildConfig(max_chunk_chars=max_chunk_chars)
         self._tree_builder = OPSTreeBuilder(
