@@ -1196,11 +1196,13 @@ def run_iterative_optimization(
         collect_summarization_training_data,
         collect_merge_training_data,
         create_oracle_trainset,
-        # Phase 5: Unified numeric metrics
-        create_rile_metric,
-        create_summarizer_metric,
     )
-    # Note: create_summarization_metric, create_merge_metric replaced by numeric metrics
+    from src.manifesto.constants import RILE_MIN, RILE_MAX
+    from src.ops_engine.scoring import BoundedScale
+    from src.ops_engine.training_framework.metrics import create_metric
+
+    # Create RILE scale for generic metric creation
+    RILE_SCALE = BoundedScale(RILE_MIN, RILE_MAX)
 
     print_banner("ITERATIVE OPTIMIZATION")
 
@@ -1297,10 +1299,17 @@ def run_iterative_optimization(
             oracle_trainset = create_oracle_trainset(results, bin_size=args.bin_size)
             logger.info(f"  {len(oracle_trainset)} training examples")
 
-            # Use numeric RILE metric (continuous error-based, not categorical)
-            # mode="ground_truth" compares predicted RILE to actual RILE
-            oracle_metric = create_rile_metric(None, mode="ground_truth", with_feedback=True)
-            logger.info("  Using numeric RILE metric (score = 1.0 - error/100)")
+            # Use generic scale-based metric (continuous error-based)
+            # Compares predicted label to ground truth using BoundedScale
+            def oracle_metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
+                ground_truth = getattr(gold, 'ground_truth_rile', None)
+                if ground_truth is None:
+                    ground_truth = float(getattr(gold, 'label', 0))
+                predicted = float(getattr(pred, 'label', 0))
+                score = RILE_SCALE.values_to_score(predicted, ground_truth)
+                feedback = f'Predicted {predicted:.0f}, expected {ground_truth:.0f}'
+                return {'score': score, 'feedback': feedback}
+            logger.info("  Using generic scale-based metric (score = 1.0 - error/range)")
 
             try:
                 # Use optimization LM if available
@@ -1351,9 +1360,21 @@ def run_iterative_optimization(
             logger.info(f"  {len(summarization_trainset)} leaf examples")
 
             if summarization_trainset:
-                # Use numeric RILE metric for summarizer training
-                summarization_metric = create_summarizer_metric(oracle_classifier)
-                logger.info("  Using numeric RILE summarizer metric")
+                # Use generic scale-based metric for summarizer training
+                # The oracle extracts a value from text, compared to ground truth
+                def summarization_metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
+                    ground_truth = getattr(gold, 'ground_truth_rile', None)
+                    if ground_truth is None:
+                        ground_truth = float(getattr(gold, 'label', 0))
+                    summary = getattr(pred, 'summary', None) or str(pred)
+                    try:
+                        predicted, _, _ = oracle_classifier.predict_rile(summary)
+                        score = RILE_SCALE.values_to_score(predicted, ground_truth)
+                        feedback = f'Predicted {predicted:.0f}, expected {ground_truth:.0f}'
+                        return {'score': score, 'feedback': feedback}
+                    except Exception as e:
+                        return {'score': 0.0, 'feedback': f'Error: {str(e)[:50]}'}
+                logger.info("  Using generic scale-based summarizer metric")
 
                 try:
                     with opt_context if opt_lm else dspy.context():
@@ -1385,9 +1406,20 @@ def run_iterative_optimization(
             logger.info(f"  {len(merge_trainset)} merge examples")
 
             if merge_trainset:
-                # Use same numeric RILE metric for merge summarizer
-                merge_metric = create_summarizer_metric(oracle_classifier)
-                logger.info("  Using numeric RILE merge metric")
+                # Use generic scale-based metric for merge summarizer
+                def merge_metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
+                    ground_truth = getattr(gold, 'ground_truth_rile', None)
+                    if ground_truth is None:
+                        ground_truth = float(getattr(gold, 'label', 0))
+                    merged = getattr(pred, 'merged_summary', None) or getattr(pred, 'summary', None) or str(pred)
+                    try:
+                        predicted, _, _ = oracle_classifier.predict_rile(merged)
+                        score = RILE_SCALE.values_to_score(predicted, ground_truth)
+                        feedback = f'Predicted {predicted:.0f}, expected {ground_truth:.0f}'
+                        return {'score': score, 'feedback': feedback}
+                    except Exception as e:
+                        return {'score': 0.0, 'feedback': f'Error: {str(e)[:50]}'}
+                logger.info("  Using generic scale-based merge metric")
 
                 try:
                     with opt_context if opt_lm else dspy.context():
