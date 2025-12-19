@@ -87,6 +87,9 @@ def create_dspy_optimizer(
     num_threads: int = 128,
     max_metric_calls: Optional[int] = None,
     labeled_k: int = 8,
+    num_candidates: int = 16,
+    max_bootstrapped_demos: int = 4,
+    max_rounds: int = 1,
 ):
     """
     Create a DSPy optimizer based on type.
@@ -114,19 +117,22 @@ def create_dspy_optimizer(
         return dspy.GEPA(metric=metric, **gepa_kwargs)
 
     elif optimizer_type == 'bootstrap':
-        logger.info(f"Creating BootstrapFewShot optimizer (threads={num_threads})")
+        logger.info(f"Creating BootstrapFewShot optimizer (threads={num_threads}, demos={max_bootstrapped_demos}, rounds={max_rounds})")
         return dspy.BootstrapFewShot(
             metric=metric,
-            max_bootstrapped_demos=4,
+            max_bootstrapped_demos=max_bootstrapped_demos,
             max_labeled_demos=labeled_k,
+            max_rounds=max_rounds,
         )
 
     elif optimizer_type == 'bootstrap_random_search':
-        logger.info(f"Creating BootstrapFewShotWithRandomSearch (threads={num_threads})")
+        logger.info(f"Creating BootstrapFewShotWithRandomSearch (threads={num_threads}, candidates={num_candidates}, demos={max_bootstrapped_demos}, rounds={max_rounds})")
         return dspy.BootstrapFewShotWithRandomSearch(
             metric=metric,
-            max_bootstrapped_demos=4,
+            max_bootstrapped_demos=max_bootstrapped_demos,
             max_labeled_demos=labeled_k,
+            num_candidate_programs=num_candidates,
+            max_rounds=max_rounds,
             num_threads=num_threads,
         )
 
@@ -149,6 +155,143 @@ def create_dspy_optimizer(
         logger.warning(f"Unknown optimizer type '{optimizer_type}', defaulting to GEPA")
         gepa_kwargs = build_gepa_kwargs(budget, num_threads, max_metric_calls)
         return dspy.GEPA(metric=metric, **gepa_kwargs)
+
+
+# =============================================================================
+# Oracle Pre-Caching for Metric Acceleration
+# =============================================================================
+
+def precache_oracle_predictions(
+    oracle_classifier,
+    trainset: List,
+    field_name: str = 'summary',
+    max_workers: int = 256,
+) -> Dict[str, Tuple[float, float, str]]:
+    """
+    Pre-compute oracle predictions for all training examples.
+
+    This dramatically speeds up optimization by caching oracle calls upfront
+    instead of making redundant LLM calls during each candidate evaluation.
+
+    Args:
+        oracle_classifier: The RILE oracle classifier with predict_rile() method
+        trainset: List of training examples (DSPy Examples or similar)
+        field_name: Field to extract text from (default: 'summary')
+        max_workers: Number of parallel workers for caching
+
+    Returns:
+        Dict mapping text -> (predicted_rile, confidence, reasoning)
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Collect unique texts to score
+    unique_texts = set()
+    for ex in trainset:
+        text = getattr(ex, field_name, None) or str(ex)
+        if text:
+            unique_texts.add(text)
+
+    if not unique_texts:
+        logger.warning("No texts found to cache")
+        return {}
+
+    logger.info(f"Pre-caching oracle for {len(unique_texts)} unique texts...")
+
+    cache = {}
+    completed = 0
+
+    def predict_one(text):
+        try:
+            return text, oracle_classifier.predict_rile(text)
+        except Exception as e:
+            return text, (0.0, 0.0, str(e))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(predict_one, text) for text in unique_texts]
+        for future in as_completed(futures):
+            text, result = future.result()
+            cache[text] = result
+            completed += 1
+            if completed % 100 == 0:
+                logger.info(f"  Cached {completed}/{len(unique_texts)} predictions")
+
+    logger.info(f"Cached {len(cache)} oracle predictions")
+    return cache
+
+
+# =============================================================================
+# Parallel Candidate Evaluation Patch
+# =============================================================================
+
+def patch_dspy_for_parallel_candidates(max_concurrent: int = 4):
+    """
+    Patch DSPy's BootstrapFewShotWithRandomSearch for parallel candidate evaluation.
+
+    By default, DSPy evaluates candidate programs one-at-a-time. This patch
+    allows evaluating multiple candidates concurrently for significant speedup.
+
+    Args:
+        max_concurrent: Number of candidates to evaluate in parallel
+    """
+    import dspy
+    from dspy.teleprompt.random_search import BootstrapFewShotWithRandomSearch
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import copy
+
+    original_compile = BootstrapFewShotWithRandomSearch.compile
+
+    def parallel_compile(self, student, trainset=None, valset=None, **kwargs):
+        # Get number of candidate sets to try (DSPy uses different attr names in different versions)
+        num_candidate_sets = getattr(self, 'num_candidate_sets', None)
+        if num_candidate_sets is None:
+            num_candidate_sets = getattr(self, 'num_candidate_programs', 16)
+        seeds = list(range(-3, num_candidate_sets))
+
+        logger.info(f"Running {len(seeds)} candidates with {max_concurrent} parallel workers")
+
+        results = []
+
+        def compile_one(seed):
+            import random
+            # Create a fresh copy for thread safety
+            local_self = copy.deepcopy(self)
+            local_student = copy.deepcopy(student)
+            # Override to evaluate just this seed
+            local_self.num_candidate_sets = 1
+            # Set random seed for reproducibility
+            random.seed(seed if seed >= 0 else None)
+            try:
+                compiled = original_compile(
+                    local_self, local_student, trainset=trainset, valset=valset, **kwargs
+                )
+                score = getattr(local_self, 'best_score', 0.0)
+                return seed, compiled, score, None
+            except Exception as e:
+                return seed, None, 0.0, str(e)
+
+        with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            futures = [executor.submit(compile_one, s) for s in seeds]
+            for future in as_completed(futures):
+                seed, compiled, score, error = future.result()
+                if error:
+                    logger.warning(f"Candidate seed={seed} failed: {error}")
+                else:
+                    results.append((seed, compiled, score))
+                    logger.info(f"Candidate seed={seed}: score={score:.2%}")
+
+        # Return best candidate
+        if results:
+            best = max(results, key=lambda x: x[2])
+            self.best_score = best[2]
+            logger.info(f"Best candidate: seed={best[0]}, score={best[2]:.2%}")
+            return best[1]
+
+        # Fallback to original if all failed
+        logger.warning("All parallel candidates failed, falling back to original")
+        return original_compile(self, student, trainset=trainset, valset=valset, **kwargs)
+
+    BootstrapFewShotWithRandomSearch.compile = parallel_compile
+    logger.info(f"Patched DSPy for {max_concurrent} parallel candidate evaluation")
 
 
 # =============================================================================
@@ -673,6 +816,16 @@ def main():
                        help="Number of demos for LabeledFewShot optimizer (default: 8)")
     parser.add_argument("--no-cache", action="store_true",
                        help="Disable DSPy caching")
+    parser.add_argument("--parallel-candidates", type=int, default=4,
+                       help="Number of candidate programs to evaluate in parallel (default: 4)")
+    parser.add_argument("--no-precache", action="store_true",
+                       help="Disable oracle pre-caching (slower but uses less memory)")
+    parser.add_argument("--num-candidates", type=int, default=16,
+                       help="Number of candidate programs to try (default: 16)")
+    parser.add_argument("--max-bootstrapped-demos", type=int, default=4,
+                       help="Max bootstrapped demonstrations per candidate (default: 4)")
+    parser.add_argument("--max-rounds", type=int, default=1,
+                       help="Max rounds of bootstrapping per candidate (default: 1)")
 
     # Metric settings
     parser.add_argument("--metric-type", choices=['distance', 'trace', 'judge', 'composite'],
@@ -701,6 +854,18 @@ def main():
                        help="Skip summarizer optimization (oracle only)")
     parser.add_argument("--skip-oracle-opt", action="store_true",
                        help="Skip oracle optimization (summarizer only)")
+
+    # Probabilistic audit training
+    parser.add_argument("--phase1-max-chunks", type=int, default=10,
+                       help="Max chunks for Phase 1 short-doc initialization (default: 10)")
+    parser.add_argument("--sample-rate", type=float, default=0.10,
+                       help="Sampling rate for probabilistic audit (default: 0.10 = 10%%)")
+    parser.add_argument("--min-sample-rate", type=float, default=0.05,
+                       help="Minimum sampling rate floor (default: 0.05 = 5%%)")
+    parser.add_argument("--skip-phase1", action="store_true",
+                       help="Skip Phase 1 initialization (use existing models or start from scratch)")
+    parser.add_argument("--use-probabilistic-audit", action="store_true",
+                       help="Use probabilistic audit training (sample nodes instead of all)")
 
     # Resume from previous run
     parser.add_argument("--resume-from", type=Path, default=None,
@@ -784,6 +949,10 @@ def main():
     # async_max_workers controls parallel async operations (default is 8, way too low)
     dspy.configure(lm=lm, async_max_workers=args.num_threads)
     logger.info(f"DSPy configured with vLLM (caching={'enabled' if not getattr(args, 'no_cache', False) else 'disabled'}, async_workers={args.num_threads})")
+
+    # Apply parallel candidate evaluation patch for faster optimization
+    if args.optimizer == 'bootstrap_random_search' and args.parallel_candidates > 1:
+        patch_dspy_for_parallel_candidates(max_concurrent=args.parallel_candidates)
 
     # Save config
     config_dict = vars(args)
@@ -1196,6 +1365,9 @@ def run_iterative_optimization(
         collect_summarization_training_data,
         collect_merge_training_data,
         create_oracle_trainset,
+        filter_short_documents,
+        collect_sampled_training_data,
+        get_sample_size,
     )
     from src.manifesto.constants import RILE_MIN, RILE_MAX
     from src.ops_engine.scoring import BoundedScale
@@ -1307,8 +1479,8 @@ def run_iterative_optimization(
                     ground_truth = float(getattr(gold, 'label', 0))
                 predicted = float(getattr(pred, 'label', 0))
                 score = RILE_SCALE.values_to_score(predicted, ground_truth)
-                feedback = f'Predicted {predicted:.0f}, expected {ground_truth:.0f}'
-                return {'score': score, 'feedback': feedback}
+                # Return float for BootstrapFewShot compatibility (GEPA needs dict)
+                return score
             logger.info("  Using generic scale-based metric (score = 1.0 - error/range)")
 
             try:
@@ -1323,6 +1495,9 @@ def run_iterative_optimization(
                         num_threads=args.num_threads,
                         max_metric_calls=args.max_metric_calls,
                         labeled_k=getattr(args, 'labeled_k', 8),
+                        num_candidates=getattr(args, 'num_candidates', 16),
+                        max_bootstrapped_demos=getattr(args, 'max_bootstrapped_demos', 4),
+                        max_rounds=getattr(args, 'max_rounds', 1),
                     )
 
                     compiled_oracle = oracle_optimizer.compile(
@@ -1340,6 +1515,16 @@ def run_iterative_optimization(
                 iter_stats["oracle_trained"] = True
                 iter_stats["oracle_score"] = oracle_score
                 logger.info(f"  Oracle trained (score: {oracle_score:.3f})")
+
+                # Save oracle checkpoint immediately
+                iter_checkpoint_dir = output_dir / f"iteration_{iteration}"
+                iter_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    oracle_classifier.save(iter_checkpoint_dir / "oracle.json")
+                    logger.info(f"  Oracle checkpoint saved")
+                except Exception as save_e:
+                    logger.debug(f"  Could not save oracle checkpoint: {save_e}")
+
             except Exception as e:
                 logger.error(f"  Oracle training failed: {e}")
                 iter_stats["oracle_trained"] = False
@@ -1350,99 +1535,192 @@ def run_iterative_optimization(
             iter_stats["oracle_skipped"] = True
 
         # Step 3: Optimize summarizers (unless skipped)
+        # Now runs LEAF and MERGE in PARALLEL for ~33% speedup
         summarizer_score = prev_summarizer_score
 
         if not args.skip_summarizer_opt:
-            logger.info("Step 3: Optimizing summarizers...")
+            from concurrent.futures import ThreadPoolExecutor
 
-            # 3a: Optimize leaf summarizer
-            summarization_trainset = collect_summarization_training_data(results)
-            logger.info(f"  {len(summarization_trainset)} leaf examples")
+            logger.info("Step 3: Optimizing summarizers in parallel...")
 
-            if summarization_trainset:
-                # Use generic scale-based metric for summarizer training
-                # The oracle extracts a value from text, compared to ground truth
+            # Collect training data - use probabilistic sampling if enabled
+            if getattr(args, 'use_probabilistic_audit', False):
+                logger.info(f"  Using probabilistic audit (sample_rate={args.sample_rate:.0%})")
+                summarization_trainset, merge_trainset = collect_sampled_training_data(
+                    results,
+                    sample_rate=args.sample_rate,
+                    min_rate=args.min_sample_rate,
+                )
+            else:
+                summarization_trainset = collect_summarization_training_data(results)
+                merge_trainset = collect_merge_training_data(results)
+
+            logger.info(f"  {len(summarization_trainset)} leaf examples, {len(merge_trainset)} merge examples")
+
+            # Define optimization functions for parallel execution
+            def optimize_leaf():
+                """Optimize leaf summarizer (runs in thread)."""
+                nonlocal leaf_summarizer
+                leaf_stats = {}
+
+                if not summarization_trainset:
+                    leaf_stats["leaf_optimized"] = False
+                    leaf_stats["leaf_error"] = "No training data"
+                    return leaf_summarizer, leaf_stats, prev_summarizer_score
+
+                dspy_trainset = [ex.to_dspy_example() for ex in summarization_trainset]
+
+                # Pre-cache oracle predictions
+                if not getattr(args, 'no_precache', False):
+                    leaf_oracle_cache = precache_oracle_predictions(
+                        oracle_classifier,
+                        dspy_trainset,
+                        field_name='summary',
+                        max_workers=args.num_threads,
+                    )
+                else:
+                    leaf_oracle_cache = {}
+
                 def summarization_metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
                     ground_truth = getattr(gold, 'ground_truth_rile', None)
                     if ground_truth is None:
                         ground_truth = float(getattr(gold, 'label', 0))
                     summary = getattr(pred, 'summary', None) or str(pred)
-                    try:
-                        predicted, _, _ = oracle_classifier.predict_rile(summary)
-                        score = RILE_SCALE.values_to_score(predicted, ground_truth)
-                        feedback = f'Predicted {predicted:.0f}, expected {ground_truth:.0f}'
-                        return {'score': score, 'feedback': feedback}
-                    except Exception as e:
-                        return {'score': 0.0, 'feedback': f'Error: {str(e)[:50]}'}
-                logger.info("  Using generic scale-based summarizer metric")
+
+                    if summary in leaf_oracle_cache:
+                        predicted, _, _ = leaf_oracle_cache[summary]
+                    else:
+                        try:
+                            predicted, _, _ = oracle_classifier.predict_rile(summary)
+                            leaf_oracle_cache[summary] = (predicted, 0.5, "live")
+                        except Exception:
+                            return 0.0
+
+                    return RILE_SCALE.values_to_score(predicted, ground_truth)
 
                 try:
                     with opt_context if opt_lm else dspy.context():
-                        summarizer_optimizer = create_dspy_optimizer(
+                        optimizer = create_dspy_optimizer(
                             optimizer_type=args.optimizer,
                             metric=summarization_metric,
                             budget=args.summarizer_budget,
                             num_threads=args.num_threads,
                             max_metric_calls=args.max_metric_calls,
                             labeled_k=getattr(args, 'labeled_k', 8),
+                            num_candidates=getattr(args, 'num_candidates', 16),
+                            max_bootstrapped_demos=getattr(args, 'max_bootstrapped_demos', 4),
+                            max_rounds=getattr(args, 'max_rounds', 1),
                         )
+                        compiled = optimizer.compile(student=leaf_summarizer, trainset=dspy_trainset)
 
-                        leaf_summarizer = summarizer_optimizer.compile(
-                            student=leaf_summarizer,
-                            trainset=[ex.to_dspy_example() for ex in summarization_trainset],
-                        )
+                    score = getattr(optimizer, 'best_score', 0.5)
+                    leaf_stats["leaf_optimized"] = True
+                    leaf_stats["leaf_score"] = score
+                    logger.info(f"  Leaf optimized (score: {score:.3f})")
 
-                    summarizer_score = getattr(summarizer_optimizer, 'best_score', 0.5)
-                    iter_stats["leaf_optimized"] = True
-                    iter_stats["leaf_score"] = summarizer_score
-                    logger.info(f"  Leaf optimized (score: {summarizer_score:.3f})")
+                    # Save checkpoint
+                    iter_dir = output_dir / f"iteration_{iteration}"
+                    iter_dir.mkdir(parents=True, exist_ok=True)
+                    try:
+                        compiled.save(iter_dir / "leaf_summarizer.json")
+                    except Exception:
+                        pass
+
+                    return compiled, leaf_stats, score
+
                 except Exception as e:
                     logger.error(f"  Leaf optimization failed: {e}")
-                    iter_stats["leaf_optimized"] = False
-                    iter_stats["leaf_error"] = str(e)
+                    leaf_stats["leaf_optimized"] = False
+                    leaf_stats["leaf_error"] = str(e)
+                    return leaf_summarizer, leaf_stats, prev_summarizer_score
 
-            # 3b: Optimize merge summarizer
-            merge_trainset = collect_merge_training_data(results)
-            logger.info(f"  {len(merge_trainset)} merge examples")
+            def optimize_merge():
+                """Optimize merge summarizer (runs in thread)."""
+                nonlocal merge_summarizer
+                merge_stats = {}
 
-            if merge_trainset:
-                # Use generic scale-based metric for merge summarizer
+                if not merge_trainset:
+                    merge_stats["merge_optimized"] = False
+                    merge_stats["merge_error"] = "No training data"
+                    return merge_summarizer, merge_stats
+
+                dspy_trainset = [ex.to_dspy_example() for ex in merge_trainset]
+
+                # Pre-cache oracle predictions
+                if not getattr(args, 'no_precache', False):
+                    merge_oracle_cache = precache_oracle_predictions(
+                        oracle_classifier,
+                        dspy_trainset,
+                        field_name='merged_summary',
+                        max_workers=args.num_threads,
+                    )
+                else:
+                    merge_oracle_cache = {}
+
                 def merge_metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
                     ground_truth = getattr(gold, 'ground_truth_rile', None)
                     if ground_truth is None:
                         ground_truth = float(getattr(gold, 'label', 0))
                     merged = getattr(pred, 'merged_summary', None) or getattr(pred, 'summary', None) or str(pred)
-                    try:
-                        predicted, _, _ = oracle_classifier.predict_rile(merged)
-                        score = RILE_SCALE.values_to_score(predicted, ground_truth)
-                        feedback = f'Predicted {predicted:.0f}, expected {ground_truth:.0f}'
-                        return {'score': score, 'feedback': feedback}
-                    except Exception as e:
-                        return {'score': 0.0, 'feedback': f'Error: {str(e)[:50]}'}
-                logger.info("  Using generic scale-based merge metric")
+
+                    if merged in merge_oracle_cache:
+                        predicted, _, _ = merge_oracle_cache[merged]
+                    else:
+                        try:
+                            predicted, _, _ = oracle_classifier.predict_rile(merged)
+                            merge_oracle_cache[merged] = (predicted, 0.5, "live")
+                        except Exception:
+                            return 0.0
+
+                    return RILE_SCALE.values_to_score(predicted, ground_truth)
 
                 try:
                     with opt_context if opt_lm else dspy.context():
-                        merge_optimizer = create_dspy_optimizer(
+                        optimizer = create_dspy_optimizer(
                             optimizer_type=args.optimizer,
                             metric=merge_metric,
                             budget=args.summarizer_budget,
                             num_threads=args.num_threads,
                             max_metric_calls=args.max_metric_calls,
                             labeled_k=getattr(args, 'labeled_k', 8),
+                            num_candidates=getattr(args, 'num_candidates', 16),
+                            max_bootstrapped_demos=getattr(args, 'max_bootstrapped_demos', 4),
+                            max_rounds=getattr(args, 'max_rounds', 1),
                         )
+                        compiled = optimizer.compile(student=merge_summarizer, trainset=dspy_trainset)
 
-                        merge_summarizer = merge_optimizer.compile(
-                            student=merge_summarizer,
-                            trainset=[ex.to_dspy_example() for ex in merge_trainset],
-                        )
-
-                    iter_stats["merge_optimized"] = True
+                    merge_stats["merge_optimized"] = True
                     logger.info("  Merge optimized")
+
+                    # Save checkpoint
+                    iter_dir = output_dir / f"iteration_{iteration}"
+                    iter_dir.mkdir(parents=True, exist_ok=True)
+                    try:
+                        compiled.save(iter_dir / "merge_summarizer.json")
+                    except Exception:
+                        pass
+
+                    return compiled, merge_stats
+
                 except Exception as e:
                     logger.error(f"  Merge optimization failed: {e}")
-                    iter_stats["merge_optimized"] = False
-                    iter_stats["merge_error"] = str(e)
+                    merge_stats["merge_optimized"] = False
+                    merge_stats["merge_error"] = str(e)
+                    return merge_summarizer, merge_stats
+
+            # Run both optimizations in parallel
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                leaf_future = executor.submit(optimize_leaf)
+                merge_future = executor.submit(optimize_merge)
+
+                # Wait for results
+                leaf_summarizer, leaf_stats, summarizer_score = leaf_future.result()
+                iter_stats.update(leaf_stats)
+
+                merge_summarizer, merge_stats = merge_future.result()
+                iter_stats.update(merge_stats)
+
+            logger.info("  Parallel summarizer optimization complete")
         else:
             logger.info("Step 3: Skipping summarizer optimization (--skip-summarizer-opt)")
             iter_stats["summarizer_skipped"] = True

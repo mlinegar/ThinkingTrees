@@ -11,6 +11,7 @@ Key features:
 - Review queue for collecting items needing verification
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable, Protocol, Set, Tuple, Dict, Any, Union
 from enum import Enum
@@ -756,51 +757,62 @@ class OPSAuditor:
         leaf_budget = self.config.sample_budget // 2 if self.config.audit_internal else self.config.sample_budget
         internal_budget = self.config.sample_budget - leaf_budget
 
-        # Audit leaves (sufficiency check - C1)
+        # Audit leaves (sufficiency check - C1) - concurrent for better GPU utilization
         if self.config.audit_leaves and leaves:
             leaf_samples = self._sample_nodes(leaves, leaf_budget)
-            for node in leaf_samples:
-                if self._should_audit(node):
-                    result, full_a, full_b = self._check_sufficiency(node, rubric)
-                    checks.append(result)
-                    audited_ids.add(node.id)
-                    self._update_node_audit(node, result, tree_id, rubric, full_a, full_b)
-                    sufficiency_samples += 1
-                    if not result.passed:
-                        sufficiency_violations += 1
+            leaf_results = self._batch_audit_nodes(leaf_samples, self._check_sufficiency, rubric)
+            for result, full_a, full_b, node in leaf_results:
+                checks.append(result)
+                audited_ids.add(node.id)
+                self._update_node_audit(node, result, tree_id, rubric, full_a, full_b)
+                sufficiency_samples += 1
+                if not result.passed:
+                    sufficiency_violations += 1
 
-        # Audit internal nodes (merge consistency check - C3 Case B)
+        # Audit internal nodes (merge consistency check - C3 Case B) - concurrent
         if self.config.audit_internal and internal:
             internal_samples = self._sample_nodes(internal, internal_budget)
-            for node in internal_samples:
-                if self._should_audit(node):
-                    result, full_a, full_b = self._check_merge_consistency(node, rubric)
-                    checks.append(result)
-                    audited_ids.add(node.id)
-                    self._update_node_audit(node, result, tree_id, rubric, full_a, full_b)
-                    merge_samples += 1
-                    if not result.passed:
-                        merge_violations += 1
+            internal_results = self._batch_audit_nodes(internal_samples, self._check_merge_consistency, rubric)
+            for result, full_a, full_b, node in internal_results:
+                checks.append(result)
+                audited_ids.add(node.id)
+                self._update_node_audit(node, result, tree_id, rubric, full_a, full_b)
+                merge_samples += 1
+                if not result.passed:
+                    merge_violations += 1
 
-        # Idempotence check (C2) - Re-summarize summaries and check oracle stability
+        # Idempotence check (C2) - Re-summarize summaries and check oracle stability - concurrent
         if self.config.audit_idempotence and internal and self.summarizer is not None:
             idem_samples = self._sample_nodes(internal, self.config.idempotence_budget)
-            for node in idem_samples:
-                result = self._check_idempotence(node, rubric)
+
+            def check_idempotence(node):
+                return self._check_idempotence(node, rubric)
+
+            with ThreadPoolExecutor(max_workers=20) as executor:
+                idem_results = list(executor.map(check_idempotence, idem_samples))
+
+            for result in idem_results:
                 checks.append(result)
                 idempotence_samples += 1
                 if not result.passed:
                     idempotence_violations += 1
 
-        # Substitution check (C3 Case A) - Check leaf boundary consistency
+        # Substitution check (C3 Case A) - Check leaf boundary consistency - concurrent
         if self.config.audit_substitution and len(leaves) >= 2 and self.summarizer is not None:
             # Get adjacent leaf pairs
             adjacent_pairs = self._get_adjacent_leaf_pairs(leaves)
             if adjacent_pairs:
                 sub_budget = min(self.config.substitution_budget, len(adjacent_pairs))
                 sampled_pairs = random.sample(adjacent_pairs, sub_budget)
-                for left_node, right_node in sampled_pairs:
-                    result = self._check_substitution(left_node, right_node, rubric)
+
+                def check_substitution(pair):
+                    left_node, right_node = pair
+                    return self._check_substitution(left_node, right_node, rubric)
+
+                with ThreadPoolExecutor(max_workers=20) as executor:
+                    sub_results = list(executor.map(check_substitution, sampled_pairs))
+
+                for result in sub_results:
                     checks.append(result)
                     substitution_samples += 1
                     if not result.passed:
@@ -829,6 +841,42 @@ class OPSAuditor:
             idempotence_samples=idempotence_samples,
             substitution_samples=substitution_samples
         )
+
+    def _batch_audit_nodes(
+        self,
+        nodes: List[OPSNode],
+        check_fn: Callable,
+        rubric: str,
+        max_workers: int = 20
+    ) -> List[Tuple["AuditCheckResult", str, str, OPSNode]]:
+        """
+        Run audit checks on nodes concurrently for better GPU utilization.
+
+        Args:
+            nodes: Nodes to audit
+            check_fn: Check function (e.g., _check_sufficiency or _check_merge_consistency)
+            rubric: Rubric for the oracle
+            max_workers: Maximum concurrent workers
+
+        Returns:
+            List of (result, full_a, full_b, node) tuples for nodes that were audited
+        """
+        results = []
+
+        def check_node(node):
+            if self._should_audit(node):
+                result, full_a, full_b = check_fn(node, rubric)
+                return (result, full_a, full_b, node)
+            return None
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(check_node, node) for node in nodes]
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    results.append(result)
+
+        return results
 
     def _sample_nodes(self, nodes: List[OPSNode], budget: int) -> List[OPSNode]:
         """

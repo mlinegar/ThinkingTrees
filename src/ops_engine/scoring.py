@@ -20,6 +20,7 @@ Usage:
 """
 
 import warnings
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, Protocol, Tuple, runtime_checkable
 
@@ -187,6 +188,139 @@ class BoundedScale:
 UNIT_SCALE = BoundedScale(0.0, 1.0)       # 0-1 probabilities/scores
 PERCENT_SCALE = BoundedScale(0.0, 100.0)  # Percentages
 SYMMETRIC_SCALE = BoundedScale(-1.0, 1.0)  # Sentiment, correlation
+
+
+# =============================================================================
+# Generic Oracle (Single-Text Prediction)
+# =============================================================================
+
+@dataclass
+class OraclePrediction:
+    """
+    Result from an Oracle predicting a value from a single text.
+
+    Unlike OracleScore (which compares two texts), OraclePrediction
+    represents a prediction about a single piece of text.
+
+    Attributes:
+        value: Predicted value on the oracle's scale
+        confidence: 0-1 confidence in the prediction
+        reasoning: Human-readable explanation
+
+    Example:
+        # RILE oracle predicting political position
+        pred = oracle.predict("This manifesto supports...")
+        print(pred.value)       # 45.2 (on -100 to +100 scale)
+        print(pred.confidence)  # 0.85
+        print(pred.reasoning)   # "Strong left-wing economic policy..."
+    """
+    value: float
+    confidence: float
+    reasoning: str
+
+    def __post_init__(self):
+        """Validate confidence is in [0, 1]."""
+        self.confidence = max(0.0, min(1.0, self.confidence))
+
+
+class Oracle(ABC):
+    """
+    Abstract base class for single-text prediction oracles.
+
+    An Oracle takes text and predicts a numeric value on a bounded scale.
+    This is the generic foundation for domain-specific oracles (e.g., RILE).
+
+    Unlike ScoringOracle (which compares two texts), Oracle predicts
+    a value from a single text - useful for classification and regression.
+
+    Example:
+        class SentimentOracle(Oracle):
+            def __init__(self):
+                super().__init__(SYMMETRIC_SCALE)  # -1 to +1
+
+            def predict(self, text: str) -> OraclePrediction:
+                sentiment = self._analyze(text)
+                return OraclePrediction(
+                    value=sentiment,
+                    confidence=0.9,
+                    reasoning="Positive language detected"
+                )
+
+        oracle = SentimentOracle()
+        pred = oracle.predict("I love this product!")
+        accuracy = oracle.score_accuracy(pred.value, ground_truth=0.8)
+    """
+
+    def __init__(self, scale: BoundedScale):
+        """
+        Initialize oracle with its output scale.
+
+        Args:
+            scale: BoundedScale defining the range of predicted values
+        """
+        self.scale = scale
+
+    @abstractmethod
+    def predict(self, text: str) -> OraclePrediction:
+        """
+        Predict a value for the given text.
+
+        Args:
+            text: Input text to analyze
+
+        Returns:
+            OraclePrediction with value, confidence, and reasoning
+        """
+        pass
+
+    def score_error(self, predicted: float, ground_truth: float) -> float:
+        """
+        Compute normalized error between prediction and ground truth.
+
+        Returns error in [0, 1] where 0 = perfect, 1 = max error.
+
+        Args:
+            predicted: Predicted value
+            ground_truth: True value
+
+        Returns:
+            Normalized error (0 = perfect)
+        """
+        error = abs(predicted - ground_truth)
+        return min(1.0, error / self.scale.range)
+
+    def score_accuracy(self, predicted: float, ground_truth: float) -> float:
+        """
+        Compute normalized accuracy between prediction and ground truth.
+
+        Returns accuracy in [0, 1] where 1 = perfect, 0 = max error.
+        This is the inverse of score_error and suitable for DSPy metrics.
+
+        Args:
+            predicted: Predicted value
+            ground_truth: True value
+
+        Returns:
+            Normalized accuracy (1 = perfect)
+        """
+        return 1.0 - self.score_error(predicted, ground_truth)
+
+    def predict_and_score(self, text: str, ground_truth: float) -> Tuple[OraclePrediction, float]:
+        """
+        Predict value and compute accuracy against ground truth.
+
+        Convenience method combining predict() and score_accuracy().
+
+        Args:
+            text: Input text to analyze
+            ground_truth: True value to compare against
+
+        Returns:
+            Tuple of (prediction, accuracy_score)
+        """
+        pred = self.predict(text)
+        accuracy = self.score_accuracy(pred.value, ground_truth)
+        return pred, accuracy
 
 
 # =============================================================================
