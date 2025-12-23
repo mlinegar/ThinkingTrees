@@ -1,0 +1,29 @@
+# Inference/runtime configuration for building OPS trees
+seed: 7
+
+model:
+  path: "/mnt/data/models/qwen/Qwen2.5-32B-Instruct"
+  max_model_len: 32768
+
+generation:
+  temperature: 0.3
+  max_tokens: 2048
+  top_p: 0.9
+
+chunking:
+  max_chars: 2000
+  min_chars: 100
+  strategy: "sentence"
+
+tree:
+  merge_strategy: "binary"
+  verbose: false
+
+artifacts:
+  output_dir: "data/trees"
+
+# Toggle lightweight evaluation during inference (e.g., quick QA checks)
+evaluation:
+  run_eval: false
+  eval_split: null
+  metrics: []

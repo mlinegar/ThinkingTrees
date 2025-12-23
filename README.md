@@ -15,7 +15,10 @@ ThinkingTrees builds **OPS (Oracle-Preserving Summarization)** trees that:
 ```
 ThinkingTrees/
 ├── config/
-│   └── settings.yaml          # LLM configuration, hyperparameters
+│   ├── settings.yaml          # Legacy vLLM + generation defaults
+│   ├── training.yaml          # Training hyperparameters, RNG seeds, artifacts
+│   ├── inference.yaml         # Runtime/generation settings for building trees
+│   └── audit.yaml             # Audit sampling policies and output paths
 ├── data/
 │   ├── raw/                   # Input documents (PDF, text, etc.)
 │   ├── processed/             # Chunked document JSONs
@@ -121,9 +124,17 @@ pip install -r requirements.txt
 # Run tests
 pytest tests/ -v
 
+# Train preference/distillation pipeline (produces checkpoints + metadata)
+python main.py train --config config/training.yaml
+
 # Build a tree from a document
-python main.py --input data/raw/document.txt --output data/trees/
+python main.py infer --input data/raw/document.txt --config config/inference.yaml --output data/trees/document.txt
+
+# Audit an existing tree and export a report
+python main.py audit --input data/trees/document.txt --config config/audit.yaml --output experiments/audit/report.yaml
 ```
+
+For a breakdown of expected inputs/outputs per mode and which configs control them, see [docs/ARTIFACTS.md](docs/ARTIFACTS.md).
 
 ## Testing Philosophy
 
