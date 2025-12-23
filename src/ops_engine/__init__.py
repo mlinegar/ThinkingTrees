@@ -17,8 +17,7 @@ from src.ops_engine.auditor import (
     AuditReport,
     AuditCheckResult,
     OracleJudge,
-    SimpleScorer,  # New, preferred API
-    SimpleOracleJudge,  # Deprecated, use SimpleScorer
+    SimpleScorer,
     AlwaysPassOracle,
     AlwaysFailOracle,
     SamplingStrategy,
@@ -26,6 +25,7 @@ from src.ops_engine.auditor import (
     FlaggedItem,
     ReviewPriority,
     audit_tree,
+    create_oracle_from_scorer,
 )
 
 from src.ops_engine.optimizer import (
@@ -52,6 +52,25 @@ from src.ops_engine.oracle_func_approximation import (
     train_oracle_func_from_reviews,
 )
 
+# Bootstrap training loop (Paper Section 3.11)
+from src.ops_engine.bootstrap_loop import (
+    OPSBootstrapTrainer,
+    BootstrapConfig,
+    BootstrapResult,
+    BootstrapIteration,
+    run_bootstrap_training,
+)
+
+# Unified OPS checks
+from src.ops_engine.checks import (
+    OPSCheckRunner,
+    CheckConfig,
+    CheckResult,
+    CheckType,
+    run_all_checks,
+    aggregate_check_stats,
+)
+
 # Score-centric oracle types (new, preferred API)
 from src.ops_engine.scoring import (
     OracleScore,
@@ -70,6 +89,18 @@ from src.ops_engine.scoring import (
     SYMMETRIC_SCALE,
 )
 
+# Top-down initialization (oracle-aligned demo seeding)
+from src.ops_engine.initialization import (
+    TopDownInitializer,
+    OracleAlignedDemo,
+    MergeAlignedDemo,
+    create_oracle_aligned_demos,
+    initialize_summarizer_with_demos,
+    create_quick_init_demos,
+    run_top_down_initialization,
+    train_on_short_docs,
+)
+
 __all__ = [
     # Builder
     "OPSTreeBuilder",
@@ -86,8 +117,7 @@ __all__ = [
     "AuditReport",
     "AuditCheckResult",
     "OracleJudge",
-    "SimpleScorer",  # New, preferred API
-    "SimpleOracleJudge",  # Deprecated
+    "SimpleScorer",
     "AlwaysPassOracle",
     "AlwaysFailOracle",
     "SamplingStrategy",
@@ -95,6 +125,7 @@ __all__ = [
     "FlaggedItem",
     "ReviewPriority",
     "audit_tree",
+    "create_oracle_from_scorer",
     # Optimizer
     "OPSOptimizer",
     "OptimizationConfig",
@@ -115,6 +146,19 @@ __all__ = [
     "ExampleLabel",
     "create_oracle_func_reviewer",
     "train_oracle_func_from_reviews",
+    # Bootstrap training loop (Paper Section 3.11)
+    "OPSBootstrapTrainer",
+    "BootstrapConfig",
+    "BootstrapResult",
+    "BootstrapIteration",
+    "run_bootstrap_training",
+    # Unified OPS checks
+    "OPSCheckRunner",
+    "CheckConfig",
+    "CheckResult",
+    "CheckType",
+    "run_all_checks",
+    "aggregate_check_stats",
     # Score-centric oracle types (new, preferred API)
     "OracleScore",
     "ScoringOracle",
@@ -130,4 +174,13 @@ __all__ = [
     "UNIT_SCALE",
     "PERCENT_SCALE",
     "SYMMETRIC_SCALE",
+    # Top-down initialization (oracle-aligned demo seeding)
+    "TopDownInitializer",
+    "OracleAlignedDemo",
+    "MergeAlignedDemo",
+    "create_oracle_aligned_demos",
+    "initialize_summarizer_with_demos",
+    "create_quick_init_demos",
+    "run_top_down_initialization",
+    "train_on_short_docs",
 ]

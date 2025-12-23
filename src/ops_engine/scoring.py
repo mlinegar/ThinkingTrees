@@ -665,8 +665,11 @@ def as_scoring_oracle(legacy_oracle: Callable) -> ScoringOracle:
         Object implementing ScoringOracle protocol
 
     Example:
-        old_oracle = SimpleOracleJudge()
-        new_oracle = as_scoring_oracle(old_oracle)
+        # Wrap a legacy oracle that returns (bool, float, str)
+        def my_legacy_oracle(a, b, rubric):
+            return True, 0.15, "some reasoning"
+
+        new_oracle = as_scoring_oracle(my_legacy_oracle)
         result = new_oracle.score(text_a, text_b, rubric)
         print(result.score)  # 0.85
     """

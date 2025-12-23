@@ -23,6 +23,7 @@ import warnings
 
 from src.core.data_models import OPSNode, OPSTree, AuditStatus, AuditResult
 from src.ops_engine.scoring import OracleScore, ScoringOracle, LegacyOracleAdapter
+from src.config.concurrency import ConcurrencyConfig, get_concurrency_config
 
 
 logger = logging.getLogger(__name__)
@@ -110,46 +111,41 @@ class SimpleScorer:
 
 
 # =============================================================================
-# Legacy Oracles (Deprecated, for backward compatibility)
+# Oracle Adapters
 # =============================================================================
 
-class SimpleOracleJudge:
+def create_oracle_from_scorer(
+    scorer: ScoringOracle,
+    threshold: float = 0.1,
+) -> Callable[[str, str, str], Tuple[bool, float, str]]:
     """
-    DEPRECATED: Use SimpleScorer instead.
+    Create a legacy oracle callable from a ScoringOracle.
 
-    Simple oracle that uses string similarity for testing.
-    Returns legacy (bool, float, str) tuple format.
+    This adapter allows using the new ScoringOracle API with code that
+    expects the legacy (bool, float, str) tuple format.
+
+    Args:
+        scorer: A ScoringOracle instance (e.g., SimpleScorer)
+        threshold: Discrepancy threshold for congruence (0.0-1.0)
+
+    Returns:
+        Callable with signature (input_a, input_b, rubric) -> (is_congruent, discrepancy, reasoning)
+
+    Example:
+        from src.ops_engine.scoring import SimpleScorer
+        scorer = SimpleScorer()
+        oracle = create_oracle_from_scorer(scorer, threshold=0.1)
+
+        # Now use with OPSAuditor
+        auditor = OPSAuditor(oracle=oracle, config=config)
     """
-
-    def __init__(self, threshold: float = 0.5):
-        self.threshold = threshold
-        self._scorer = SimpleScorer()
-        self._warned = False
-
-    def __call__(
-        self,
-        input_a: str,
-        input_b: str,
-        rubric: str
-    ) -> Tuple[bool, float, str]:
-        if not self._warned:
-            warnings.warn(
-                "SimpleOracleJudge is deprecated. Use SimpleScorer instead, "
-                "which returns OracleScore with score (1.0 = good) as primary output.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            self._warned = True
-
-        # Use new scorer internally
-        result = self._scorer.score(input_a, input_b, rubric)
-
-        # Convert to legacy format
+    def oracle_fn(input_a: str, input_b: str, rubric: str) -> Tuple[bool, float, str]:
+        result = scorer.score(input_a, input_b, rubric)
         discrepancy = result.to_discrepancy()
-        is_congruent = discrepancy <= self.threshold
-        reasoning = f"{result.reasoning}, threshold: {self.threshold}"
+        is_congruent = discrepancy <= threshold
+        return is_congruent, discrepancy, result.reasoning
 
-        return is_congruent, discrepancy, reasoning
+    return oracle_fn
 
 
 class AlwaysPassOracle:
@@ -225,6 +221,13 @@ class AuditConfig:
 
     # Seed for reproducibility
     random_seed: Optional[int] = None
+
+    # Concurrency settings (uses centralized config)
+    concurrency: Optional[ConcurrencyConfig] = None
+
+    def get_concurrency(self) -> ConcurrencyConfig:
+        """Get concurrency config, using default if not set."""
+        return self.concurrency or get_concurrency_config()
 
 
 @dataclass
@@ -660,7 +663,7 @@ class OPSAuditor:
     2. Merge Consistency (internal): Does parent preserve info from children?
 
     Example:
-        >>> oracle = SimpleOracleJudge(threshold=0.3)
+        >>> oracle = create_oracle_from_scorer(SimpleScorer(), threshold=0.3)
         >>> queue = ReviewQueue()
         >>> auditor = OPSAuditor(oracle, config=AuditConfig(sample_budget=5), review_queue=queue)
         >>> report = auditor.audit_tree(tree)
@@ -788,7 +791,8 @@ class OPSAuditor:
             def check_idempotence(node):
                 return self._check_idempotence(node, rubric)
 
-            with ThreadPoolExecutor(max_workers=20) as executor:
+            audit_workers = self.config.get_concurrency().audit_max_workers
+            with ThreadPoolExecutor(max_workers=audit_workers) as executor:
                 idem_results = list(executor.map(check_idempotence, idem_samples))
 
             for result in idem_results:
@@ -809,7 +813,8 @@ class OPSAuditor:
                     left_node, right_node = pair
                     return self._check_substitution(left_node, right_node, rubric)
 
-                with ThreadPoolExecutor(max_workers=20) as executor:
+                sub_workers = self.config.get_concurrency().audit_max_workers
+                with ThreadPoolExecutor(max_workers=sub_workers) as executor:
                     sub_results = list(executor.map(check_substitution, sampled_pairs))
 
                 for result in sub_results:
@@ -847,7 +852,7 @@ class OPSAuditor:
         nodes: List[OPSNode],
         check_fn: Callable,
         rubric: str,
-        max_workers: int = 20
+        max_workers: Optional[int] = None
     ) -> List[Tuple["AuditCheckResult", str, str, OPSNode]]:
         """
         Run audit checks on nodes concurrently for better GPU utilization.
@@ -856,7 +861,7 @@ class OPSAuditor:
             nodes: Nodes to audit
             check_fn: Check function (e.g., _check_sufficiency or _check_merge_consistency)
             rubric: Rubric for the oracle
-            max_workers: Maximum concurrent workers
+            max_workers: Maximum concurrent workers (uses config default if None)
 
         Returns:
             List of (result, full_a, full_b, node) tuples for nodes that were audited
@@ -868,6 +873,10 @@ class OPSAuditor:
                 result, full_a, full_b = check_fn(node, rubric)
                 return (result, full_a, full_b, node)
             return None
+
+        # Use concurrency config if max_workers not explicitly set
+        if max_workers is None:
+            max_workers = self.config.get_concurrency().audit_max_workers
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(check_node, node) for node in nodes]
@@ -1242,7 +1251,8 @@ class OPSAuditor:
 
 def audit_tree(
     tree: OPSTree,
-    oracle: Optional[Union[OracleJudge, ScoringOracle]] = None,
+    oracle: Optional[Union[OracleJudge, Callable]] = None,
+    scorer: Optional[ScoringOracle] = None,
     sample_budget: int = 10,
     threshold: float = 0.1
 ) -> AuditReport:
@@ -1251,15 +1261,28 @@ def audit_tree(
 
     Args:
         tree: Tree to audit
-        oracle: Oracle judge (defaults to SimpleOracleJudge)
+        oracle: Legacy oracle callable (deprecated, use scorer instead)
+        scorer: ScoringOracle instance (preferred, e.g., SimpleScorer)
         sample_budget: Number of nodes to sample
         threshold: Discrepancy threshold
 
     Returns:
         AuditReport
+
+    Example (preferred - using new ScoringOracle API):
+        from src.ops_engine.scoring import SimpleScorer
+        report = audit_tree(tree, scorer=SimpleScorer(), threshold=0.1)
+
+    Example (legacy - still supported but deprecated):
+        report = audit_tree(tree, oracle=my_oracle, threshold=0.1)
     """
     if oracle is None:
-        oracle = SimpleOracleJudge(threshold=threshold)
+        if scorer is not None:
+            # Use the new ScoringOracle API with adapter
+            oracle = create_oracle_from_scorer(scorer, threshold=threshold)
+        else:
+            # Default: use SimpleScorer with adapter (no deprecation warning)
+            oracle = create_oracle_from_scorer(SimpleScorer(), threshold=threshold)
 
     config = AuditConfig(
         sample_budget=sample_budget,
