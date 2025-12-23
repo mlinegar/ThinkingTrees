@@ -19,7 +19,7 @@ vllm:
     # NOTE: Required config fix - removed quantization_config from config.json
     qwen-30b-thinking:
       path: "/mnt/data/models/NVFP4/Qwen3-30B-A3B-Thinking-2507-FP4"
-      tensor_parallel: 1
+      tensor_parallel: 4
       max_model_len: 32768
 
     # Qwen3-235B: Large instruction model with compressed-tensors NVFP4
@@ -51,13 +51,38 @@ vllm:
       tensor_parallel: 1
       max_model_len: 32768
 
+    # NVIDIA Nemotron-3-Nano-30B: MoE model with FP8 quantization
+    # Architecture: NemotronForCausalLM | Similar to Qwen3-30B in size
+    nemotron-30b-fp8:
+      path: "/mnt/data/models/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8"
+      tensor_parallel: 4
+      max_model_len: 32768
+
+    # NVIDIA Qwen3-Nemotron-235B GenRM: Generative Reward Model for preference learning
+    # Architecture: Qwen3MoE | Memory: ~150 GiB (4-8 GPUs) | BF16
+    # Use for: Comparing summaries, generating preference data, RLHF training
+    # Special format: Uses response_1 and response_2 roles for comparison
+    # Produces: Helpfulness scores (1-5) and ranking score (1-6)
+    qwen3-nemotron-genrm:
+      path: "/mnt/data/models/nvidia/Qwen3-Nemotron-235B-A22B-GenRM"
+      tensor_parallel: 4
+      max_model_len: 40000
+
+    # NVIDIA Qwen3-Nemotron-235B GenRM GGUF: Same model with Q4_K_M quantization
+    # Architecture: Qwen3MoE | Memory: ~80 GiB (4 GPUs) | GGUF Q4_K_M
+    # Much lower memory footprint than BF16 version
+    qwen3-nemotron-genrm-gguf:
+      path: "/mnt/data/models/GGUF/Qwen3-Nemotron-235B-GenRM-Q4_K_M/Qwen3-Nemotron-235B-A22B-GenRM.i1-Q4_K_M.gguf"
+      tensor_parallel: 4
+      max_model_len: 32768
+
   # Server settings
   host: "0.0.0.0"
   port: 8000
   gpu_memory_utilization: 0.90
 
   # Default model to use
-  default: "qwen-80b"
+  default: "qwen-30b-thinking"
 
 # LLM Configuration
 llm:
@@ -68,6 +93,30 @@ llm:
   # Generation parameters
   max_tokens: 2000
   temperature: 0.3
+
+# Generation settings by pipeline stage
+generation:
+  summarizer:
+    temperature: 0.5
+    max_tokens: 2048
+    candidate_temperatures: [0.3, 0.5, 0.7, 0.9]
+  oracle:
+    temperature: 0.3
+    max_tokens: 2048
+  genrm_judge:
+    temperature: 0.6
+    top_p: 0.95
+    max_tokens: 2048
+  comparison_judge:
+    temperature: 0.3
+    max_tokens: 2048
+  synthetic_data:
+    temperature: 0.6
+    top_p: 0.95
+    max_tokens: 4096
+  ground_truth:
+    temperature: 0.3
+    max_tokens: 2048
 
 # Document Chunking
 chunking:
@@ -127,6 +176,36 @@ paths:
   raw_dir: "data/raw"
   processed_dir: "data/processed"
   trees_dir: "data/trees"
+
+# Speculative Decoding Configuration
+# Uses a smaller "draft" model to propose tokens, verified by larger "target" model
+# Result: 1.5-3x faster generation with identical outputs
+speculative:
+  # Default settings (can be overridden by presets)
+  num_speculative_tokens: 5         # Tokens to draft per step (5-8 typical)
+
+  # Preset combinations for different use cases
+  presets:
+    # Training: Large target model + small draft for faster DSPy optimization
+    training:
+      target: "qwen-80b"            # Large model for optimization quality
+      draft: "qwen-30b-thinking"    # Fast draft model
+      enabled: true
+      num_speculative_tokens: 5
+
+    # Inference: Just the small model with DSPy-optimized prompts
+    # The optimized prompts/demos from training help the small model perform well
+    inference:
+      target: "qwen-30b-thinking"   # Small model with optimized prompts
+      draft: null                   # No speculative decoding needed
+      enabled: false
+
+    # Heavy training: 235B target for maximum quality (requires 4+ GPUs)
+    training-heavy:
+      target: "qwen-235b"
+      draft: "qwen-30b-thinking"
+      enabled: true
+      num_speculative_tokens: 5
 
 # Logging
 logging:
