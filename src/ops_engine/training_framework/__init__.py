@@ -142,6 +142,32 @@ from .bootstrapping import (
     create_bootstrapped_trainset,
 )
 
+# Preference learning
+from .preference import (
+    PreferencePair,
+    PairwiseJudge,
+    PreferenceCollector,
+    PreferenceDataset,
+    GenerationConfig,
+)
+from .genrm_preference import (
+    GenRMJudge,
+    GenRMPreferenceCollector,
+)
+from .oracle_preference import (
+    OraclePreferenceCollector,
+    OraclePreferenceConfig,
+)
+from .ops_comparison_module import (
+    OPSLawComparison,
+    OPSComparisonModule,
+)
+from .oracle_ground_truth import (
+    ChunkGroundTruth,
+    ManifestoGroundTruthTree,
+    GroundTruthDataset,
+)
+
 __all__ = [
     # Core types
     'ViolationType',
@@ -234,6 +260,22 @@ __all__ = [
     'BootstrappedExample',
     'ProcessedDocument',
     'create_bootstrapped_trainset',
+
+    # Preference learning
+    'PreferencePair',
+    'PairwiseJudge',
+    'PreferenceCollector',
+    'PreferenceDataset',
+    'GenerationConfig',
+    'GenRMJudge',
+    'GenRMPreferenceCollector',
+    'OraclePreferenceCollector',
+    'OraclePreferenceConfig',
+    'OPSLawComparison',
+    'OPSComparisonModule',
+    'ChunkGroundTruth',
+    'ManifestoGroundTruthTree',
+    'GroundTruthDataset',
 
     # Online Learning (Phase 4)
     'OnlineLearningManager',

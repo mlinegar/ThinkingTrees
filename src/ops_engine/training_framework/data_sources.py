@@ -394,10 +394,18 @@ class UnifiedTrainingCollector:
             return self._cache
 
         examples = []
+        source_counts = []
         for source in self._sources:
             source_examples = source.get_examples()
             examples.extend(source_examples)
-            logger.info(f"Collected {len(source_examples)} examples from {source.source_type}")
+            if source_examples:  # Only track non-empty sources
+                source_name = source.source_type or "unnamed"
+                source_counts.append(f"{len(source_examples)} from {source_name}")
+
+        if source_counts:
+            logger.info(f"Collected {len(examples)} examples ({', '.join(source_counts)})")
+        else:
+            logger.info(f"Collected {len(examples)} examples")
 
         self._cache = examples
         return examples

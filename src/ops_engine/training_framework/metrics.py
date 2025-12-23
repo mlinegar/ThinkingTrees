@@ -37,6 +37,8 @@ from src.ops_engine.scoring import (
     normalize_error_to_score,
     BoundedScale,
     PERCENT_SCALE,
+    Oracle,
+    OraclePrediction,
 )
 
 
@@ -125,6 +127,326 @@ def create_metric(
             return {'score': score, 'feedback': feedback}
 
         return score
+
+    return metric
+
+
+# =============================================================================
+# Cached Oracle Metrics (for Optimization Efficiency)
+# =============================================================================
+
+def create_cached_oracle_metric(
+    oracle_classifier,
+    scale: BoundedScale,
+    ground_truth_field: str = 'ground_truth_rile',
+    summary_field: str = 'summary',
+    cache_size: int = 4096,
+    with_feedback: bool = False,
+):
+    """
+    Create a DSPy metric with thread-safe oracle prediction caching.
+
+    During optimization (e.g., BootstrapRandomSearch with 6 candidates × 750 examples),
+    the same summary texts are evaluated multiple times across candidates.
+    This cache eliminates ~80% of redundant oracle LLM calls.
+
+    Args:
+        oracle_classifier: Classifier with predict_rile(text) method
+            that returns (score, confidence, reasoning)
+        scale: BoundedScale for normalizing error to 0-1 score
+        ground_truth_field: Field name for ground truth on gold example
+        summary_field: Field name for summary text on prediction
+        cache_size: Maximum cache entries (LRU eviction when exceeded)
+        with_feedback: Return dict with feedback for GEPA
+
+    Returns:
+        Tuple of (metric_function, cache_dict) where:
+            - metric_function: DSPy-compatible metric
+            - cache_dict: The cache (for inspection/logging)
+
+    Example:
+        from src.ops_engine.scoring import BoundedScale
+
+        RILE_SCALE = BoundedScale(-100.0, 100.0)
+        metric, cache = create_cached_oracle_metric(
+            oracle_classifier=oracle,
+            scale=RILE_SCALE,
+        )
+
+        # Use in optimization
+        optimizer.compile(student, trainset, metric=metric)
+
+        # After optimization, log cache stats
+        logger.info(f"Oracle cache: {len(cache)} unique predictions cached")
+    """
+    import threading
+    from collections import OrderedDict
+
+    # Thread-safe LRU cache
+    _cache: OrderedDict = OrderedDict()
+    _lock = threading.Lock()
+    _stats = {'hits': 0, 'misses': 0}
+
+    def cached_predict(text: str) -> tuple:
+        """Thread-safe cached oracle prediction."""
+        with _lock:
+            if text in _cache:
+                # Move to end (LRU update) and return
+                _cache.move_to_end(text)
+                _stats['hits'] += 1
+                return _cache[text]
+
+        # Cache miss - call oracle (outside lock to allow parallelism)
+        try:
+            result = oracle_classifier.predict_rile(text)
+        except Exception as e:
+            result = (0.0, 0.0, f"Error: {str(e)[:50]}")
+
+        with _lock:
+            _stats['misses'] += 1
+            _cache[text] = result
+            # LRU eviction if over size
+            while len(_cache) > cache_size:
+                _cache.popitem(last=False)
+
+        return result
+
+    def metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
+        """Cached oracle metric compatible with DSPy optimizers."""
+        # Get ground truth
+        ground_truth = getattr(gold, ground_truth_field, None)
+        if ground_truth is None:
+            ground_truth = getattr(gold, 'label', 0.0)
+        try:
+            ground_truth = float(ground_truth)
+        except (ValueError, TypeError):
+            ground_truth = 0.0
+
+        # Get summary from prediction
+        if isinstance(pred, str):
+            summary = pred
+        else:
+            summary = getattr(pred, summary_field, None)
+            if summary is None:
+                summary = getattr(pred, 'merged_summary', None)
+            if summary is None:
+                summary = str(pred)
+
+        # Get cached prediction
+        predicted, confidence, reasoning = cached_predict(summary)
+
+        # Compute score using scale
+        score = scale.values_to_score(predicted, ground_truth)
+
+        if with_feedback:
+            feedback = f"Predicted {predicted:.1f}, expected {ground_truth:.1f}"
+            if abs(predicted - ground_truth) > 20:
+                feedback += f" (large error: {abs(predicted - ground_truth):.0f} points)"
+            return {'score': score, 'feedback': feedback}
+
+        return score
+
+    # Attach stats to cache for inspection
+    _cache.stats = _stats  # type: ignore
+
+    return metric, _cache
+
+
+def get_cache_stats(cache) -> dict:
+    """Get cache hit/miss statistics from a cached oracle metric."""
+    stats = getattr(cache, 'stats', {'hits': 0, 'misses': 0})
+    total = stats['hits'] + stats['misses']
+    hit_rate = stats['hits'] / total if total > 0 else 0.0
+    return {
+        'hits': stats['hits'],
+        'misses': stats['misses'],
+        'total': total,
+        'hit_rate': hit_rate,
+        'cache_size': len(cache),
+    }
+
+
+# =============================================================================
+# Path-Based Scoring for Probabilistic Audit
+# =============================================================================
+
+def path_aggregate_score(
+    node,
+    oracle: Oracle,
+    tree,
+    weight_by_level: bool = True,
+) -> float:
+    """
+    Aggregate oracle scores along the path from a node to root.
+
+    This enables training signals to flow through the tree structure
+    during probabilistic audit optimization.
+
+    Args:
+        node: The starting node (OPSNode with summary attribute)
+        oracle: Oracle instance for scoring summaries
+        tree: The tree containing the node (OPSTree with get_path_to_root)
+        weight_by_level: If True, weight higher nodes (closer to root) more heavily
+                        since errors compound upward
+
+    Returns:
+        Weighted average of oracle predictions along the path
+
+    Example:
+        score = path_aggregate_score(leaf_node, rile_oracle, tree)
+        # Returns weighted average of RILE scores from leaf to root
+    """
+    path = tree.get_path_to_root(node)
+
+    if not path:
+        # Node is root or path not available
+        pred = oracle.predict(node.summary)
+        return pred.value
+
+    scores = []
+    weights = []
+
+    for i, path_node in enumerate(path):
+        summary = getattr(path_node, 'summary', None)
+        if summary is None:
+            continue
+
+        pred = oracle.predict(summary)
+        scores.append(pred.value)
+
+        if weight_by_level:
+            # Weight increases toward root (higher index = closer to root)
+            weights.append(i + 1)
+        else:
+            weights.append(1.0)
+
+    if not scores:
+        return 0.0
+
+    total_weight = sum(weights)
+    return sum(s * w for s, w in zip(scores, weights)) / total_weight
+
+
+def create_probabilistic_audit_metric(
+    oracle: Oracle,
+    ground_truth_field: str = 'ground_truth',
+    local_weight: float = 0.7,
+    path_weight: float = 0.3,
+    with_feedback: bool = True,
+) -> Callable:
+    """
+    Create a metric for probabilistic audit training.
+
+    Combines:
+    - Local score: oracle(node.summary) - strong signal for the sampled node
+    - Path score: weighted aggregate along path to root - propagation signal
+    - Global score: oracle(root.summary) vs ground_truth - correctness (at root only)
+
+    This enables training with sampled nodes while maintaining whole-tree scoring.
+
+    Args:
+        oracle: Oracle instance with predict() and score_accuracy() methods
+        ground_truth_field: Field name for ground truth on gold example
+        local_weight: Weight for local (node-level) score (default 0.7)
+        path_weight: Weight for path-based score (default 0.3)
+        with_feedback: Return dict with feedback for GEPA compatibility
+
+    Returns:
+        DSPy-compatible metric function
+
+    Example:
+        from src.ops_engine.scoring import Oracle, BoundedScale
+
+        class RILEOracle(Oracle):
+            def predict(self, text): ...
+
+        oracle = RILEOracle(BoundedScale(-100, 100))
+        metric = create_probabilistic_audit_metric(oracle)
+
+        # Training example includes tree context
+        example = dspy.Example(
+            ground_truth=45.0,
+            _tree=tree,
+            _node=sampled_leaf,
+        )
+        score = metric(example, prediction)
+    """
+    def metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
+        # Get ground truth
+        ground_truth = getattr(gold, ground_truth_field, 0.0)
+
+        # Get summary from prediction
+        if isinstance(pred, str):
+            summary = pred
+        else:
+            summary = getattr(pred, 'summary', None)
+            if summary is None:
+                summary = getattr(pred, 'merged_summary', None)
+            if summary is None:
+                summary = str(pred)
+
+        feedback_parts = []
+
+        # Local score: oracle prediction on this node's summary
+        try:
+            local_pred = oracle.predict(summary)
+            local_score = oracle.score_accuracy(local_pred.value, ground_truth)
+        except Exception as e:
+            local_score = 0.0
+            feedback_parts.append(f"Oracle error: {str(e)[:50]}")
+
+        # Check for tree context
+        tree = getattr(gold, '_tree', None)
+        node = getattr(gold, '_node', None)
+
+        if tree is None or node is None:
+            # No tree context - use local score only
+            final_score = local_score
+            if with_feedback:
+                feedback = ' '.join(feedback_parts) if feedback_parts else "Local score only (no tree context)"
+                return {'score': final_score, 'feedback': feedback}
+            return final_score
+
+        # Check if we're at the root
+        is_root = (node == tree.root) if hasattr(tree, 'root') else False
+
+        if is_root:
+            # At root: local score IS the global score
+            # Use equal weighting of local and ground truth comparison
+            global_score = local_score  # Already comparing to ground_truth
+            final_score = 0.5 * local_score + 0.5 * global_score
+
+            if local_score < 0.8:
+                feedback_parts.append(
+                    f"Root summary: predicted {local_pred.value:.1f}, "
+                    f"expected {ground_truth:.1f}"
+                )
+        else:
+            # Not at root: combine local with path-based score
+            try:
+                path_value = path_aggregate_score(node, oracle, tree)
+                path_score = oracle.score_accuracy(path_value, ground_truth)
+            except Exception as e:
+                path_score = local_score  # Fallback to local
+                feedback_parts.append(f"Path scoring error: {str(e)[:30]}")
+
+            final_score = local_weight * local_score + path_weight * path_score
+
+            if final_score < 0.8:
+                feedback_parts.append(
+                    f"Node score: {local_score:.2f}, path score: {path_score:.2f}"
+                )
+
+        if not with_feedback:
+            return final_score
+
+        feedback = ' '.join(feedback_parts) if feedback_parts else "Good score preservation"
+        return {
+            'score': final_score,
+            'feedback': feedback,
+            'local_score': local_score,
+            'path_score': path_score if 'path_score' in dir() else None,
+        }
 
     return metric
 
@@ -1138,7 +1460,7 @@ def create_summarization_metric(
 def create_merge_metric(
     oracle_classifier,
     threshold: float = 10.0,
-    max_error: float = RILE_RANGE,
+    max_error: float = None,
 ) -> Callable:
     """
     Create a metric for evaluating merge quality.
@@ -1149,10 +1471,15 @@ def create_merge_metric(
     Args:
         oracle_classifier: Trained RILEOracleClassifier
         threshold: Maximum acceptable RILE drift
+        max_error: Maximum error scale for scoring. Defaults to RILE_RANGE (200.0).
 
     Returns:
         Metric function for merge evaluation
     """
+    # Resolve default max_error using lazy import to avoid module-level dependency
+    if max_error is None:
+        from src.manifesto.constants import RILE_RANGE
+        max_error = RILE_RANGE
 
     def metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
         """Evaluate merge quality for RILE preservation.
@@ -1279,7 +1606,7 @@ def create_oracle_metric(
     comparison_fn: Callable = None,
     input_field: str = "output",
     gold_field: str = None,
-    default_max_error: float = RILE_RANGE,
+    default_max_error: float = None,
 ) -> Callable:
     """
     Create a metric that uses any oracle/classifier as the scoring function.
@@ -1295,13 +1622,14 @@ def create_oracle_metric(
         input_field: Field name to extract from prediction for oracle input
         gold_field: Field name for ground truth (if None, uses same as input_field)
         default_max_error: Max error scale for default comparison function.
-                          Default is RILE_RANGE (200.0) for RILE-style scores.
+                          Defaults to RILE_RANGE (200.0) for RILE-style scores.
 
     Returns:
         Metric function compatible with DSPy optimizers
 
     Examples:
         # RILE oracle as metric
+        from src.manifesto.constants import RILE_RANGE
         metric = create_oracle_metric(
             oracle_fn=rile_oracle.predict,
             comparison_fn=lambda pred, gold: normalize_error_to_score(abs(pred - gold), RILE_RANGE),
@@ -1316,6 +1644,11 @@ def create_oracle_metric(
             input_field="summary",
         )
     """
+    # Resolve default max_error using lazy import to avoid module-level dependency
+    if default_max_error is None:
+        from src.manifesto.constants import RILE_RANGE
+        default_max_error = RILE_RANGE
+
     # Default comparison function for numeric scores
     if comparison_fn is None:
         def comparison_fn(oracle_out, gold_val):

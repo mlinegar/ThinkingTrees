@@ -8,7 +8,7 @@ Key features:
 - Swappable optimizers: GEPA (default), MIPROv2, BootstrapFewShot
 - Single-stage optimization with configurable budget
 - Multi-stage optimization with module freezing
-- Checkpointing with full metadata
+- Lightweight checkpointing (DSPy-native save format only)
 - Stage-specific metric support
 - Feedback-rich metrics for GEPA reflection
 
@@ -566,7 +566,10 @@ class OracleOptimizer:
         suffix: str = "",
     ) -> Path:
         """
-        Save classifier checkpoint with full metadata.
+        Save classifier checkpoint using DSPy's native save.
+
+        Only saves the DSPy program state (few-shot examples, compiled prompts).
+        Config and history can be reconstructed from run arguments and logs.
 
         Args:
             classifier: Classifier to save
@@ -579,30 +582,14 @@ class OracleOptimizer:
         filename = f"oracle_classifier_{timestamp}{suffix}.json"
         checkpoint_path = self.config.checkpoint_dir / filename
 
-        checkpoint_data = {
-            'timestamp': datetime.now().isoformat(),
-            'iteration': self._iteration_count,
-            'config': self.config.to_dict(),
-            'history': [r.to_dict() for r in self.optimization_history],
-        }
-
-        # Save classifier state if possible
+        # Use DSPy's native save - just the program state
         try:
-            if hasattr(classifier, 'dump_state'):
-                checkpoint_data['classifier_state'] = classifier.dump_state()
-
-            # Also try DSPy's save method
-            state_path = checkpoint_path.with_suffix('.state.json')
-            if hasattr(classifier, 'save'):
-                classifier.save(str(state_path))
-                checkpoint_data['state_path'] = str(state_path)
+            classifier.save(str(checkpoint_path))
+            logger.info(f"Saved checkpoint to {checkpoint_path}")
         except Exception as e:
-            logger.warning(f"Could not save full classifier state: {e}")
+            logger.warning(f"Could not save classifier state: {e}")
+            raise
 
-        with open(checkpoint_path, 'w') as f:
-            json.dump(checkpoint_data, f, indent=2)
-
-        logger.info(f"Saved checkpoint to {checkpoint_path}")
         return checkpoint_path
 
     def load_checkpoint(
@@ -611,42 +598,52 @@ class OracleOptimizer:
         classifier: Optional[dspy.Module] = None,
     ) -> Tuple[Optional[dspy.Module], Dict]:
         """
-        Load checkpoint and optionally restore classifier state.
+        Load checkpoint and restore classifier state.
+
+        Handles both new format (DSPy-native save) and legacy format
+        (metadata wrapper with embedded state).
 
         Args:
             checkpoint_path: Path to checkpoint file
-            classifier: Optional classifier to restore state into
+            classifier: Classifier instance to restore state into
 
         Returns:
-            Tuple of (classifier or None, checkpoint_metadata)
+            Tuple of (classifier, empty metadata dict)
         """
         checkpoint_path = Path(checkpoint_path)
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-        with open(checkpoint_path) as f:
-            checkpoint_data = json.load(f)
+        if classifier is None:
+            raise ValueError("classifier argument is required for loading")
 
-        # Restore history
-        if 'history' in checkpoint_data:
-            self.optimization_history = [
-                OptimizationResult.from_dict(r)
-                for r in checkpoint_data['history']
-            ]
+        # Try DSPy's native load first (new format)
+        try:
+            classifier.load(str(checkpoint_path))
+            logger.info(f"Loaded checkpoint from {checkpoint_path}")
+            return classifier, {}
+        except Exception as e:
+            logger.debug(f"DSPy native load failed, trying legacy format: {e}")
 
-        self._iteration_count = checkpoint_data.get('iteration', 0)
+        # Fall back to legacy format (metadata wrapper)
+        try:
+            with open(checkpoint_path) as f:
+                checkpoint_data = json.load(f)
 
-        # Try to restore classifier state
-        if classifier is not None:
-            try:
-                if 'classifier_state' in checkpoint_data:
-                    classifier.load_state(checkpoint_data['classifier_state'])
-                elif 'state_path' in checkpoint_data:
-                    classifier.load(checkpoint_data['state_path'])
-            except Exception as e:
-                logger.warning(f"Could not restore classifier state: {e}")
+            if 'classifier_state' in checkpoint_data:
+                classifier.load_state(checkpoint_data['classifier_state'])
+            elif 'state_path' in checkpoint_data:
+                classifier.load(checkpoint_data['state_path'])
+            else:
+                raise ValueError("No classifier state found in legacy checkpoint")
 
-        return classifier, checkpoint_data
+            # Restore iteration count if present
+            self._iteration_count = checkpoint_data.get('iteration', 0)
+            logger.info(f"Loaded legacy checkpoint from {checkpoint_path}")
+            return classifier, checkpoint_data
+        except Exception as e:
+            logger.error(f"Could not load checkpoint: {e}")
+            raise
 
     def get_latest_checkpoint(self) -> Optional[Path]:
         """Get path to most recent checkpoint."""

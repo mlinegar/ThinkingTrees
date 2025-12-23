@@ -2,12 +2,13 @@
 Configuration classes for the Oracle Approximation Training Framework.
 """
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
-# Default thread count for parallel metric evaluation
-DEFAULT_NUM_THREADS = 64
+# Default thread count for parallel metric evaluation - use all available cores
+DEFAULT_NUM_THREADS = os.cpu_count() or 64
 
 
 @dataclass

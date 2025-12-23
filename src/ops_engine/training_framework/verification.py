@@ -11,6 +11,7 @@ check that summaries preserve oracle-relevant information according to the laws:
 - C3B (Merge Consistency): oracle(merge) ≈ aggregate(oracle(children))
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Callable, Tuple
 import uuid
@@ -256,15 +257,16 @@ class OracleNodeVerifier:
             rubric=rubric,
         )
 
-        # Get predictions for each child
-        child_preds = []
-        for child in child_summaries:
-            pred = self.classifier(
+        # Get predictions for each child (concurrent for better GPU utilization)
+        def predict_child(child):
+            return self.classifier(
                 original_content=child,
                 summary=child,
                 rubric=rubric,
             )
-            child_preds.append(pred)
+
+        with ThreadPoolExecutor(max_workers=len(child_summaries)) as executor:
+            child_preds = list(executor.map(predict_child, child_summaries))
 
         # Aggregate child predictions
         expected_label = self._aggregate_predictions(
