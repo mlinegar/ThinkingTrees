@@ -1,0 +1,47 @@
+# Training configuration for ThinkingTrees preference and summarization pipelines
+seed: 1337
+
+model:
+  path: "/mnt/data/models/qwen/Qwen2.5-32B-Instruct"
+  adapter_dir: "experiments/adapters"
+  lr_schedule: "cosine"
+
+# Data sources
+data:
+  preference_dataset: "data/preferences/train.jsonl"
+  distilled_summaries_dir: "data/distilled_summaries"
+  raw_corpus: "data/raw"
+  validation_split: "validation"
+
+# Output artifacts
+artifacts:
+  checkpoint_dir: "experiments/checkpoints"
+  logs_dir: "experiments/logs"
+  eval_reports_dir: "experiments/eval_reports"
+
+# Optimization hyperparameters
+optimization:
+  learning_rate: 5.0e-6
+  batch_size: 4
+  gradient_accumulation: 8
+  max_steps: 2000
+  warmup_steps: 200
+  weight_decay: 0.1
+
+# Control whether to run evaluation and what to track
+# Eval toggles should be mirrored in audit.yaml for consistent behavior
+# and allow reproducible scoring.
+evaluation:
+  run_eval: true
+  eval_split: "validation"
+  metrics:
+    - rouge
+    - preference_accuracy
+  save_best_checkpoint: true
+
+# Generation defaults used during preference data bootstrapping and
+# summarizer distillation.
+generation:
+  temperature: 0.4
+  max_tokens: 1024
+  top_p: 0.9
