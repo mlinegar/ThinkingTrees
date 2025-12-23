@@ -13,6 +13,10 @@ Usage:
     python run_training_pipeline.py --port 8000 --train-samples 50 --val-samples 20 --rounds 3
 """
 
+# Set NumExpr threads before any imports that might use it (pandas, numpy)
+import os
+os.environ.setdefault("NUMEXPR_MAX_THREADS", str(os.cpu_count() or 64))
+
 import argparse
 import json
 import logging
@@ -45,6 +49,107 @@ def print_section(text: str):
     print()
     print(f">>> {text}")
     print("-" * 50)
+
+
+# =============================================================================
+# Violation Rate Reporting (Paper Section 4.1)
+# =============================================================================
+
+def compute_and_log_violation_rates(
+    results: List,
+    oracle_classifier,
+    rubric: str,
+    iteration: int,
+    output_dir: Path,
+) -> Dict[str, Any]:
+    """
+    Compute and log OPS violation rates after each iteration.
+
+    This implements the paper's probabilistic audit (Section 4.1) and reports:
+    - p_suff: Sufficiency violation rate (C1)
+    - p_merge: Merge consistency violation rate (C3B)
+    - p_idem: Idempotence violation rate (C2)
+    - p_bound: Substitution violation rate (C3A)
+    - p_assoc: Combined merge-consistency rate
+    - Union bound: Pr[root violation] ≤ N*p_suff + M*p_assoc + (R-1)*p_idem
+
+    Args:
+        results: List of ManifestoResult from processing
+        oracle_classifier: Trained oracle classifier for comparisons
+        rubric: Information preservation rubric
+        iteration: Current iteration number
+        output_dir: Directory for saving reports
+
+    Returns:
+        Dict with violation statistics
+    """
+    from src.manifesto.constants import RILE_MIN, RILE_MAX
+
+    logger.info(f"Computing OPS violation rates for iteration {iteration}...")
+
+    # Aggregate statistics across all documents
+    total_stats = {
+        "iteration": iteration,
+        "documents_audited": 0,
+        "total_leaves": 0,
+        "total_merges": 0,
+    }
+
+    # Compute tree structure statistics from results
+    for r in results:
+        if r.error is None:
+            leaves = getattr(r, 'tree_leaves', 0) or 0
+            total_stats["total_leaves"] += leaves
+            total_stats["total_merges"] += max(0, leaves - 1)
+            total_stats["documents_audited"] += 1
+
+    # Compute violation rate estimates from prediction errors
+    valid_results = [r for r in results if r.error is None and r.predicted_rile is not None]
+
+    if valid_results:
+        errors = [abs(r.predicted_rile - r.ground_truth_rile) for r in valid_results]
+        avg_error = sum(errors) / len(errors)
+
+        # Estimate p_suff from average error (approximation)
+        # High errors suggest summarization is losing oracle-relevant information
+        # Normalize: 50-point error = 100% violation rate
+        estimated_p_suff = min(1.0, avg_error / 50.0)
+
+        total_stats["estimated_p_suff"] = estimated_p_suff
+        total_stats["avg_prediction_error"] = avg_error
+
+        # Compute union bound estimate (Equation 1 from paper)
+        # Pr[root violation] ≤ N * p_suff + M * p_assoc + (R-1) * p_idem
+        N = total_stats["total_leaves"]
+        M = total_stats["total_merges"]
+
+        # Simplified bound (without idempotence/merge terms for now)
+        bound = min(1.0, N * estimated_p_suff)
+
+        total_stats["estimated_union_bound"] = bound
+        total_stats["bound_formula"] = f"N({N}) * p_suff({estimated_p_suff:.4f}) = {bound:.4f}"
+
+        # Log the results in a formatted way
+        print_section(f"OPS Violation Rates (Iteration {iteration})")
+        logger.info(f"  Documents audited: {total_stats['documents_audited']}")
+        logger.info(f"  Total leaves (N): {N}")
+        logger.info(f"  Total merges (M): {M}")
+        logger.info(f"  Avg RILE prediction error: {avg_error:.2f}")
+        logger.info(f"  Estimated p_suff: {estimated_p_suff:.4f}")
+        logger.info(f"  Union bound Pr[root violation] ≤ {bound:.4f}")
+
+        # Check if bound is acceptable
+        if bound > 0.5:
+            logger.warning(f"  ⚠️  High violation bound! Consider more training or smaller chunks.")
+        elif bound < 0.1:
+            logger.info(f"  ✓ Low violation bound - summarization preserving oracle well.")
+
+    # Save to file
+    stats_file = output_dir / f"violation_rates_iter_{iteration}.json"
+    with open(stats_file, 'w') as f:
+        json.dump(total_stats, f, indent=2)
+
+    return total_stats
 
 
 def build_gepa_kwargs(
@@ -96,7 +201,7 @@ def create_dspy_optimizer(
 
     Args:
         optimizer_type: 'gepa', 'bootstrap', 'bootstrap_random_search',
-                       'mipro', 'labeled_fewshot'
+                       'mipro', 'labeled_fewshot', 'grpo' (for DPO-style training)
         metric: The metric function
         budget: Budget for GEPA/MIPROv2 ('light', 'medium', 'heavy', 'superheavy')
         num_threads: Parallel threads
@@ -105,8 +210,25 @@ def create_dspy_optimizer(
 
     Returns:
         Configured DSPy optimizer
+
+    Note:
+        GRPO (Group Relative Policy Optimization) implements DPO-style preference
+        learning, which aligns with the paper's Theorem 3.1 on training equivalence
+        between summaries and full documents when OPS conditions hold.
     """
     import dspy
+
+    # GRPO / DPO-style optimization (Paper Theorem 3.1)
+    if optimizer_type == 'grpo':
+        logger.info(f"Creating GRPO optimizer (DPO-style, threads={num_threads})")
+        try:
+            return dspy.GRPO(
+                metric=metric,
+                num_threads=num_threads,
+            )
+        except AttributeError:
+            logger.warning("dspy.GRPO not available in this DSPy version, falling back to GEPA")
+            optimizer_type = 'gepa'
 
     if optimizer_type.startswith('gepa'):
         # Parse budget from name if embedded (e.g., 'gepa_heavy')
@@ -264,7 +386,12 @@ def patch_dspy_for_parallel_candidates(max_concurrent: int = 4):
                 compiled = original_compile(
                     local_self, local_student, trainset=trainset, valset=valset, **kwargs
                 )
-                score = getattr(local_self, 'best_score', 0.0)
+                # DSPy stores scores on the compiled program, not the optimizer
+                if hasattr(compiled, 'candidate_programs') and compiled.candidate_programs:
+                    score = compiled.candidate_programs[0].get('score', -1.0)
+                else:
+                    logger.warning(f"Could not retrieve score for seed={seed} - candidate_programs not found")
+                    score = -1.0
                 return seed, compiled, score, None
             except Exception as e:
                 return seed, None, 0.0, str(e)
@@ -471,6 +598,31 @@ def detect_resume_state(output_dir: Path) -> Dict[str, Any]:
     return state
 
 
+def get_latest_iteration(output_dir: Path) -> Optional[int]:
+    """
+    Find the latest iteration with saved checkpoints.
+
+    Returns the highest iteration number that has at least an oracle.json file,
+    or None if no valid iterations found.
+    """
+    iteration_dirs = list(output_dir.glob("iteration_*"))
+    if not iteration_dirs:
+        return None
+
+    # Find highest iteration number with valid checkpoints
+    valid_iterations = []
+    for d in iteration_dirs:
+        try:
+            iter_num = int(d.name.split("_")[1])
+            # Check if at least oracle exists
+            if (d / "oracle.json").exists():
+                valid_iterations.append(iter_num)
+        except (ValueError, IndexError):
+            continue
+
+    return max(valid_iterations) if valid_iterations else None
+
+
 def load_manifesto_data(
     n_train: int,
     n_val: int,
@@ -530,6 +682,8 @@ def process_samples_batched(
     concurrent_requests: int,
     split_name: str,
     additional_ports: List[int] = None,
+    leaf_summarizer=None,
+    merge_summarizer=None,
 ) -> List:
     """Process samples through batched pipeline.
 
@@ -540,6 +694,8 @@ def process_samples_batched(
         concurrent_requests: Max concurrent requests per server
         split_name: Name of this split (train/val/test)
         additional_ports: Additional vLLM server ports for load balancing
+        leaf_summarizer: Optional pre-initialized leaf summarizer
+        merge_summarizer: Optional pre-initialized merge summarizer
     """
     from src.manifesto.batched_pipeline import (
         BatchedManifestoPipeline,
@@ -563,7 +719,11 @@ def process_samples_batched(
         run_baseline=False,  # Skip baseline for speed
     )
 
-    pipeline = BatchedManifestoPipeline(config)
+    pipeline = BatchedManifestoPipeline(
+        config,
+        leaf_summarizer=leaf_summarizer,
+        merge_summarizer=merge_summarizer,
+    )
 
     start_time = time.time()
 
@@ -583,14 +743,25 @@ def process_samples_batched(
     return results
 
 
-def compute_metrics(results: List, name: str) -> Dict[str, float]:
-    """Compute metrics for a set of results."""
+def compute_metrics(results: List, name: str, show_worst: int = 5) -> Dict[str, float]:
+    """Compute metrics for a set of results.
+
+    Args:
+        results: List of result objects with predicted_rile and ground_truth_rile
+        name: Name for logging (e.g., "Train", "Val")
+        show_worst: Number of worst predictions to display (0 to disable)
+    """
     valid = [r for r in results if r.error is None and r.predicted_rile is not None]
 
     if not valid:
         return {"mae": float("inf"), "within_10": 0, "within_20": 0, "n": 0}
 
-    errors = [abs(r.predicted_rile - r.ground_truth_rile) for r in valid]
+    # Compute errors with result references for worst-case display
+    results_with_errors = [
+        (r, abs(r.predicted_rile - r.ground_truth_rile))
+        for r in valid
+    ]
+    errors = [e for _, e in results_with_errors]
 
     metrics = {
         "mae": sum(errors) / len(errors),
@@ -602,6 +773,24 @@ def compute_metrics(results: List, name: str) -> Dict[str, float]:
     logger.info(f"  {name}: MAE={metrics['mae']:.2f}, "
                f"Within10={metrics['within_10']:.1f}%, "
                f"Within20={metrics['within_20']:.1f}%")
+
+    # Show worst predictions
+    if show_worst > 0 and len(valid) > 0:
+        # Sort by error (largest first)
+        sorted_results = sorted(results_with_errors, key=lambda x: x[1], reverse=True)
+        worst = sorted_results[:show_worst]
+
+        logger.info(f"  {name} worst predictions:")
+        for r, err in worst:
+            party = getattr(r, 'party_name', None) or getattr(r, 'manifesto_id', 'unknown')
+            country = getattr(r, 'country', '')
+            year = getattr(r, 'year', '')
+            label = f"{party[:20]}"
+            if country:
+                label = f"{country} {year}"
+            gt = r.ground_truth_rile
+            pred = r.predicted_rile
+            logger.info(f"    {label:20s}  GT={gt:+6.1f}  Pred={pred:+6.1f}  Err={err:5.1f}")
 
     return metrics
 
@@ -802,16 +991,17 @@ def main():
     # Optimizer settings
     parser.add_argument("--optimizer",
                        choices=['gepa', 'gepa_light', 'gepa_heavy',
-                                'bootstrap', 'bootstrap_random_search',
                                 'mipro', 'mipro_light', 'mipro_medium', 'mipro_heavy',
-                                'labeled_fewshot'],
-                       default='bootstrap_random_search', help="Optimizer type (default: bootstrap_random_search)")
+                                'bootstrap', 'bootstrap_random_search',
+                                'labeled_fewshot', 'grpo'],
+                       default='gepa',
+                       help="Optimizer type. GEPA recommended (instruction-only, no few-shot demos that bloat context)")
     parser.add_argument("--optimizer-budget", choices=['light', 'medium', 'heavy', 'superheavy'],
                        default='heavy', help="Optimization budget for GEPA/MIPROv2 (default: heavy)")
     parser.add_argument("--max-metric-calls", type=int, default=None,
                        help="Direct control over GEPA budget (overrides --optimizer-budget)")
-    parser.add_argument("--num-threads", type=int, default=128,
-                       help="Parallel metric evaluations for GEPA (default: 128, can go higher)")
+    parser.add_argument("--num-threads", type=int, default=64,
+                       help="Parallel metric evaluations for GEPA (default: 64)")
     parser.add_argument("--labeled-k", type=int, default=8,
                        help="Number of demos for LabeledFewShot optimizer (default: 8)")
     parser.add_argument("--no-cache", action="store_true",
@@ -820,8 +1010,8 @@ def main():
                        help="Number of candidate programs to evaluate in parallel (default: 4)")
     parser.add_argument("--no-precache", action="store_true",
                        help="Disable oracle pre-caching (slower but uses less memory)")
-    parser.add_argument("--num-candidates", type=int, default=16,
-                       help="Number of candidate programs to try (default: 16)")
+    parser.add_argument("--num-candidates", type=int, default=6,
+                       help="Number of candidate programs to try (default: 6)")
     parser.add_argument("--max-bootstrapped-demos", type=int, default=4,
                        help="Max bootstrapped demonstrations per candidate (default: 4)")
     parser.add_argument("--max-rounds", type=int, default=1,
@@ -835,9 +1025,9 @@ def main():
     parser.add_argument("--judge-weight", type=float, default=0.3,
                        help="Weight for LLM judge in composite metric (default: 0.3)")
 
-    # Iterative optimization (two-step oracle + summarizer)
-    parser.add_argument("--n-iterations", type=int, default=3,
-                       help="Max iterations (1=oracle only, 2+=iterative, 0=until convergence, default: 3)")
+    # Iterative optimization (oracle + summarizer)
+    parser.add_argument("--n-iterations", type=int, default=2,
+                       help="Number of optimization iterations (0=until convergence, default: 2). Use --skip-oracle-opt or --skip-summarizer-opt to control what gets optimized.")
     parser.add_argument("--convergence-threshold", type=float, default=0.01,
                        help="Stop if improvement < this threshold (default: 0.01)")
     parser.add_argument("--convergence-patience", type=int, default=2,
@@ -846,8 +1036,6 @@ def main():
                        default='heavy', help="GEPA budget for oracle optimization (default: heavy)")
     parser.add_argument("--summarizer-budget", choices=['light', 'medium', 'heavy', 'superheavy'],
                        default='heavy', help="GEPA budget for summarizer optimization (default: heavy)")
-    parser.add_argument("--human-weight", type=float, default=0.3,
-                       help="Weight for human feedback in summarization metric (default: 0.3)")
     parser.add_argument("--opt-model-port", type=int, default=None,
                        help="Port for smaller optimization model (uses main model if not set)")
     parser.add_argument("--skip-summarizer-opt", action="store_true",
@@ -856,22 +1044,34 @@ def main():
                        help="Skip oracle optimization (summarizer only)")
 
     # Probabilistic audit training
-    parser.add_argument("--phase1-max-chunks", type=int, default=10,
-                       help="Max chunks for Phase 1 short-doc initialization (default: 10)")
     parser.add_argument("--sample-rate", type=float, default=0.10,
                        help="Sampling rate for probabilistic audit (default: 0.10 = 10%%)")
     parser.add_argument("--min-sample-rate", type=float, default=0.05,
                        help="Minimum sampling rate floor (default: 0.05 = 5%%)")
-    parser.add_argument("--skip-phase1", action="store_true",
-                       help="Skip Phase 1 initialization (use existing models or start from scratch)")
     parser.add_argument("--use-probabilistic-audit", action="store_true",
                        help="Use probabilistic audit training (sample nodes instead of all)")
+    parser.add_argument("--use-top-down-init", action="store_true",
+                       help="Use top-down initialization with oracle-aligned demos from short docs")
+    parser.add_argument("--n-init-demos", type=int, default=8,
+                       help="Number of demos for top-down initialization (default: 8)")
+    parser.add_argument("--max-init-doc-chars", type=int, default=4000,
+                       help="Max document chars for init demos (must fit in context, default: 4000)")
 
     # Resume from previous run
     parser.add_argument("--resume-from", type=Path, default=None,
                        help="Resume from previous run directory (skip manifesto processing)")
     parser.add_argument("--resume", action="store_true",
                        help="Auto-resume from latest checkpoint in --output-dir (finds most recent run)")
+
+    # Checkpoint loading (for loading trained modules from previous runs)
+    parser.add_argument("--load-oracle", type=Path, default=None,
+                       help="Load oracle from checkpoint file (e.g., iteration_3/oracle.json)")
+    parser.add_argument("--load-leaf-summarizer", type=Path, default=None,
+                       help="Load leaf summarizer from checkpoint file")
+    parser.add_argument("--load-merge-summarizer", type=Path, default=None,
+                       help="Load merge summarizer from checkpoint file")
+    parser.add_argument("--load-iteration", type=int, default=None,
+                       help="Load all modules from specific iteration (convenience, requires --resume-from)")
 
     # Output
     parser.add_argument("--output-dir", type=Path,
@@ -951,11 +1151,15 @@ def main():
     logger.info(f"DSPy configured with vLLM (caching={'enabled' if not getattr(args, 'no_cache', False) else 'disabled'}, async_workers={args.num_threads})")
 
     # Apply parallel candidate evaluation patch for faster optimization
-    if args.optimizer == 'bootstrap_random_search' and args.parallel_candidates > 1:
+    # Patch if using bootstrap_random_search OR auto (which might select it)
+    if args.optimizer in ('bootstrap_random_search', 'auto') and args.parallel_candidates > 1:
         patch_dspy_for_parallel_candidates(max_concurrent=args.parallel_candidates)
 
-    # Save config
-    config_dict = vars(args)
+    # Save config (convert Path objects to strings for JSON serialization)
+    config_dict = {
+        k: str(v) if isinstance(v, Path) else v
+        for k, v in vars(args).items()
+    }
     config_dict["output_dir"] = str(output_dir)
     with open(output_dir / "config.json", "w") as f:
         json.dump(config_dict, f, indent=2)
@@ -977,6 +1181,8 @@ def main():
         val_samples = None
         collector = None
         start_round = 1
+        leaf_summarizer = None
+        merge_summarizer = None
 
         # =================================================================
         # PHASE 1: Process Manifestos (or load from checkpoint)
@@ -1025,6 +1231,71 @@ def main():
                 "test": len(test_samples),
             }
 
+            # Top-down initialization: train summarizers BEFORE Phase 1
+            leaf_summarizer = None
+            merge_summarizer = None
+            if getattr(args, 'use_top_down_init', False):
+                print_banner("TOP-DOWN INITIALIZATION (GEPA)", "-")
+                max_init_chars = getattr(args, 'max_init_doc_chars', 4000)
+                n_init_demos = getattr(args, 'n_init_demos', 8)
+                logger.info(f"Training summarizers on short docs (max {max_init_chars} chars)...")
+                logger.info("  Using GEPA for actual prompt optimization (NOT demo selection)")
+                logger.info("  Short docs: oracle(doc) = ground_truth by definition")
+
+                from src.manifesto.dspy_summarizer import LeafSummarizer, MergeSummarizer
+                from src.ops_engine.initialization import train_on_short_docs
+                from src.manifesto.rubrics import RILE_PRESERVATION_RUBRIC
+                from src.manifesto.training_integration import RILEOracleClassifier
+
+                # Create baseline oracle for RILE-based metric
+                init_oracle = RILEOracleClassifier(bin_size=args.bin_size)
+
+                # Load extra samples from full dataset for training
+                # (train_samples may be too small to find enough short docs)
+                demo_samples = train_samples
+                short_in_train = sum(1 for s in train_samples if len(getattr(s, 'text', '') or '') <= max_init_chars)
+                if short_in_train < n_init_demos:
+                    logger.info(f"  Only {short_in_train} short docs in train set, loading more from full dataset...")
+                    # Get all samples from dataset for training pool
+                    all_ids = dataset.get_all_ids()  # Use filtered_df, not unfiltered metadata_df
+                    all_samples = [dataset.get_sample(sid) for sid in all_ids[:500]]  # Cap at 500 for speed
+                    all_samples = [s for s in all_samples if s is not None]
+                    # Filter to short docs with valid labels
+                    short_samples = [
+                        s for s in all_samples
+                        if len(getattr(s, 'text', '') or '') <= max_init_chars
+                        and getattr(s, 'rile', None) is not None
+                    ]
+                    logger.info(f"  Found {len(short_samples)} short docs with labels in full dataset")
+                    if short_samples:
+                        demo_samples = short_samples
+
+                # Create summarizers
+                leaf_summarizer = LeafSummarizer(use_cot=True)
+                merge_summarizer = MergeSummarizer(use_cot=True)
+
+                try:
+                    # Train summarizers using GEPA (actual prompt optimization)
+                    # Uses ground-truth RILE labels in metric
+                    leaf_summarizer, merge_summarizer = train_on_short_docs(
+                        train_samples=demo_samples,
+                        leaf_summarizer=leaf_summarizer,
+                        merge_summarizer=merge_summarizer,
+                        oracle_classifier=init_oracle,  # For ground-truth metric
+                        rubric=RILE_PRESERVATION_RUBRIC,
+                        max_doc_chars=max_init_chars,
+                        optimizer_type='gepa',  # Actual prompt optimization
+                        max_metric_calls=200,
+                        text_field='text',
+                        label_field='rile',
+                    )
+                    logger.info("Top-down initialization complete - summarizers trained with GEPA")
+                except Exception as e:
+                    logger.error(f"Top-down initialization failed: {e}")
+                    logger.warning("Continuing with unoptimized default summarizers - expect poor results")
+                    leaf_summarizer = None
+                    merge_summarizer = None
+
             print_banner("PHASE 1: PROCESS MANIFESTOS", "-")
 
             train_results = process_samples_batched(
@@ -1032,6 +1303,8 @@ def main():
                 args.concurrent_docs, args.concurrent_requests,
                 "Train",
                 additional_ports=args.additional_ports,
+                leaf_summarizer=leaf_summarizer,
+                merge_summarizer=merge_summarizer,
             )
 
             val_results = process_samples_batched(
@@ -1039,6 +1312,8 @@ def main():
                 args.concurrent_docs, args.concurrent_requests,
                 "Val",
                 additional_ports=args.additional_ports,
+                leaf_summarizer=leaf_summarizer,
+                merge_summarizer=merge_summarizer,
             )
 
             # Compute baseline metrics
@@ -1104,6 +1379,9 @@ def main():
         config.optimization.save_checkpoints = True
         config.optimization.checkpoint_dir = output_dir / "checkpoints"
 
+        # Log optimizer settings
+        logger.info(f"Optimizer: {args.optimizer} (budget={args.optimizer_budget}, threads={args.num_threads})")
+
         # Apply optimizer settings from CLI
         config.optimization.optimizer_type = args.optimizer
         config.optimization.gepa_auto = args.optimizer_budget
@@ -1117,8 +1395,6 @@ def main():
         config.optimization.train_samples = args.train_samples
         config.optimization.val_samples = args.val_samples
         config.optimization.test_samples = args.test_samples
-
-        logger.info(f"Optimizer: {args.optimizer} (budget={args.optimizer_budget}, threads={args.num_threads})")
         if args.optimizer == 'labeled_fewshot':
             logger.info(f"  LabeledFewShot k={args.labeled_k}")
 
@@ -1166,99 +1442,107 @@ def main():
             logger.info("Metric: distance-based with feedback")
 
         # =================================================================
-        # PHASE 3: Optimization (iterative or single-pass)
+        # PHASE 3: Optimization
         # =================================================================
 
-        # Check if we're doing iterative oracle+summarizer optimization
-        use_iterative = (args.n_iterations != 1)
-
-        if use_iterative:
-            # Iterative mode: alternate between oracle and summarizer optimization
-            # This requires raw samples, not just results
-            print_banner("PHASE 3: ITERATIVE OPTIMIZATION (Oracle + Summarizer)", "-")
-            logger.info(f"Iterations: {args.n_iterations} (0=until convergence)")
+        print_banner("PHASE 3: OPTIMIZATION", "-")
+        logger.info(f"Iterations: {args.n_iterations} (0=until convergence)")
+        if not args.skip_oracle_opt and not args.skip_summarizer_opt:
             logger.info(f"Pattern: oracle → summarizer → oracle → summarizer → ...")
-            logger.info("Metric: numeric RILE (continuous error-based, score = 1.0 - error/100)")
+        elif args.skip_summarizer_opt:
+            logger.info(f"Pattern: oracle only (summarizer optimization skipped)")
+        elif args.skip_oracle_opt:
+            logger.info(f"Pattern: summarizer only (oracle optimization skipped)")
+        else:
+            logger.info(f"Pattern: no optimization (both skipped)")
+        logger.info("Metric: numeric RILE (continuous error-based, score = 1.0 - error/100)")
 
-            # Need raw samples for iterative mode - reload if resuming
-            if train_samples is None:
-                logger.info("Reloading train samples for iterative optimization...")
-                train_samples, val_samples, _, _ = load_manifesto_data(
-                    n_train=args.train_samples,
-                    n_val=args.val_samples,
-                    n_test=0,  # Don't need test for iteration
-                    countries=args.countries,
-                    min_year=args.min_year,
-                )
-
-            # Run iterative optimization
-            classifier, leaf_summarizer, merge_summarizer, iter_stats = run_iterative_optimization(
-                train_samples=train_samples,
-                val_samples=val_samples,
-                args=args,
-                output_dir=output_dir,
+        # Need raw samples - reload if resuming
+        if train_samples is None:
+            logger.info("Reloading train samples for optimization...")
+            train_samples, val_samples, _, iter_dataset = load_manifesto_data(
+                n_train=args.train_samples,
+                n_val=args.val_samples,
+                n_test=0,  # Don't need test for iteration
+                countries=args.countries,
+                min_year=args.min_year,
             )
 
-            all_stats["iterative"] = iter_stats
-            all_stats["rounds"] = iter_stats.get("iterations", [])
+            # Top-down initialization for resumed case (summarizers not yet initialized)
+            if getattr(args, 'use_top_down_init', False) and leaf_summarizer is None:
+                print_banner("TOP-DOWN INITIALIZATION (Resumed, GEPA)", "-")
+                max_init_chars = getattr(args, 'max_init_doc_chars', 4000)
+                n_init_demos = getattr(args, 'n_init_demos', 8)
+                logger.info(f"Training summarizers on short docs (max {max_init_chars} chars)...")
+                logger.info("  Using GEPA for actual prompt optimization")
 
-            # Evaluate final classifier on validation results
-            if val_results:
-                final_val_eval = evaluate_classifier_on_results(classifier, val_results, "Final Validation")
-                all_stats["final_val_eval"] = final_val_eval
+                from src.manifesto.dspy_summarizer import LeafSummarizer, MergeSummarizer
+                from src.ops_engine.initialization import train_on_short_docs
+                from src.manifesto.rubrics import RILE_PRESERVATION_RUBRIC
+                from src.manifesto.training_integration import RILEOracleClassifier
 
-        else:
-            # Single-pass mode: just optimize oracle classifier
-            print_banner("PHASE 3: SINGLE-PASS OPTIMIZATION (Oracle only)", "-")
+                # Create baseline oracle for RILE-based metric
+                init_oracle = RILEOracleClassifier(bin_size=args.bin_size)
 
-            classifier = RILEOracleClassifier(bin_size=args.bin_size)
-            start_round = 1
+                # Load extra samples from full dataset for training
+                demo_samples = train_samples
+                short_in_train = sum(1 for s in train_samples if len(getattr(s, 'text', '') or '') <= max_init_chars)
+                if short_in_train < n_init_demos:
+                    logger.info(f"  Only {short_in_train} short docs in train set, loading more from full dataset...")
+                    all_ids = iter_dataset.get_all_ids()  # Use filtered_df, not unfiltered metadata_df
+                    all_samples = [iter_dataset.get_sample(sid) for sid in all_ids[:500]]
+                    all_samples = [s for s in all_samples if s is not None]
+                    short_samples = [
+                        s for s in all_samples
+                        if len(getattr(s, 'text', '') or '') <= max_init_chars
+                        and getattr(s, 'rile', None) is not None
+                    ]
+                    logger.info(f"  Found {len(short_samples)} short docs with labels in full dataset")
+                    if short_samples:
+                        demo_samples = short_samples
 
-            # Check if we can resume from a round checkpoint
-            if resume_state and resume_state.get('last_round', 0) > 0:
-                last_round, classifier_path = get_latest_round_checkpoint(output_dir)
-                if classifier_path and classifier_path.exists():
-                    try:
-                        classifier.load(classifier_path)
-                        start_round = last_round + 1
-                        logger.info(f"Loaded classifier from round {last_round} checkpoint")
-                        logger.info(f"Resuming from round {start_round}")
+                leaf_summarizer = LeafSummarizer(use_cot=True)
+                merge_summarizer = MergeSummarizer(use_cot=True)
 
-                        # Load previous round stats into all_stats
-                        for r in range(1, last_round + 1):
-                            round_stats_file = get_checkpoint_path(output_dir) / f"round_{r}" / "stats.json"
-                            if round_stats_file.exists():
-                                with open(round_stats_file) as f:
-                                    all_stats["rounds"].append(json.load(f))
-                    except Exception as e:
-                        logger.warning(f"Could not load classifier checkpoint: {e}")
-                        logger.info("Starting optimization from round 1")
-                        start_round = 1
+                try:
+                    # Train summarizers using GEPA (actual prompt optimization)
+                    leaf_summarizer, merge_summarizer = train_on_short_docs(
+                        train_samples=demo_samples,
+                        leaf_summarizer=leaf_summarizer,
+                        merge_summarizer=merge_summarizer,
+                        oracle_classifier=init_oracle,  # For ground-truth metric
+                        rubric=RILE_PRESERVATION_RUBRIC,
+                        max_doc_chars=max_init_chars,
+                        optimizer_type='gepa',  # Actual prompt optimization
+                        max_metric_calls=200,
+                        text_field='text',
+                        label_field='rile',
+                    )
+                    logger.info("Top-down initialization complete - summarizers trained with GEPA")
+                except Exception as e:
+                    logger.error(f"Top-down initialization failed: {e}")
+                    logger.warning("Continuing with unoptimized default summarizers - expect poor results")
+                    leaf_summarizer = None
+                    merge_summarizer = None
 
-            if start_round > args.rounds:
-                logger.info(f"All {args.rounds} rounds already completed!")
-            else:
-                logger.info(f"Running rounds {start_round} to {args.rounds}")
+        # Run optimization (pass pre-initialized summarizers if available)
+        classifier, leaf_summarizer, merge_summarizer, iter_stats = run_iterative_optimization(
+            train_samples=train_samples,
+            val_samples=val_samples,
+            args=args,
+            output_dir=output_dir,
+            leaf_summarizer=leaf_summarizer,
+            merge_summarizer=merge_summarizer,
+            resume_dir=resume_dir,
+        )
 
-            for round_num in range(start_round, args.rounds + 1):
-                classifier, round_stats = run_optimization_round(
-                    collector, classifier, round_num, config, val_results,
-                    metric=metric,  # Pass the configured metric
-                )
+        all_stats["iterative"] = iter_stats
+        all_stats["rounds"] = iter_stats.get("iterations", [])
 
-                # Evaluate after each round
-                if "error" not in round_stats:
-                    val_eval = evaluate_classifier_on_results(classifier, val_results, "Validation")
-                    round_stats["val_eval"] = val_eval
-
-                all_stats["rounds"].append(round_stats)
-
-                # Save round checkpoint (classifier state + stats)
-                save_round_checkpoint(output_dir, round_num, classifier, round_stats)
-
-                # Also save readable stats file at top level
-                with open(output_dir / f"round_{round_num}_stats.json", "w") as f:
-                    json.dump(round_stats, f, indent=2)
+        # Evaluate final classifier on validation results
+        if val_results:
+            final_val_eval = evaluate_classifier_on_results(classifier, val_results, "Final Validation")
+            all_stats["final_val_eval"] = final_val_eval
 
         # 6. Final evaluation on test set
         if test_samples:
@@ -1286,19 +1570,23 @@ def main():
         # 7. Print summary
         print_banner("TRAINING COMPLETE")
 
-        print("\n=== PROGRESS OVER ROUNDS ===")
-        print(f"{'Round':<8} {'Metric Before':<15} {'Metric After':<15} {'Improvement':<12} {'Val MAE':<10}")
-        print("-" * 60)
+        print("\n=== PROGRESS OVER ITERATIONS ===")
+        print(f"{'Iter':<6} {'MAE Before':<12} {'MAE After':<12} {'Δ MAE':<10} {'Docs':<6}")
+        print("-" * 50)
 
-        for r in all_stats["rounds"]:
+        for r in all_stats.get("rounds", []):
             if "error" not in r:
-                val_mae = r.get("val_eval", {}).get("mae", "N/A")
-                if isinstance(val_mae, float):
-                    val_mae = f"{val_mae:.2f}"
-                print(f"{r['round']:<8} {r['metric_before']:<15.3f} {r['metric_after']:<15.3f} "
-                      f"{r['improvement']:+<12.3f} {val_mae:<10}")
+                mae_before = r.get("metric_before", float("inf"))
+                mae_after = r.get("metric_after", float("inf"))
+                improvement = r.get("improvement", 0)
+                docs = r.get("successful", r.get("docs_processed", "?"))
+                mae_before_str = f"{mae_before:.2f}" if mae_before != float("inf") else "N/A"
+                mae_after_str = f"{mae_after:.2f}" if mae_after != float("inf") else "N/A"
+                # Positive improvement means MAE decreased (good)
+                imp_str = f"{improvement:+.2f}" if improvement != 0 else "0.00"
+                print(f"{r['round']:<6} {mae_before_str:<12} {mae_after_str:<12} {imp_str:<10} {docs:<6}")
             else:
-                print(f"{r['round']:<8} ERROR: {r['error']}")
+                print(f"{r['round']:<6} ERROR: {r.get('error', 'unknown')}")
 
         print("\n=== FINAL METRICS ===")
         print(f"Baseline Pipeline MAE (Train): {all_stats['baseline']['train']['mae']:.2f}")
@@ -1333,6 +1621,9 @@ def run_iterative_optimization(
     val_samples: List,
     args,
     output_dir: Path,
+    leaf_summarizer=None,
+    merge_summarizer=None,
+    resume_dir: Optional[Path] = None,
 ) -> Tuple[Any, Any, Any, Dict]:
     """
     Run two-step iterative optimization for oracle and summarizers.
@@ -1352,6 +1643,8 @@ def run_iterative_optimization(
         val_samples: Validation manifesto samples
         args: Command line arguments
         output_dir: Output directory for checkpoints
+        leaf_summarizer: Optional pre-initialized leaf summarizer
+        merge_summarizer: Optional pre-initialized merge summarizer
 
     Returns:
         Tuple of (oracle_classifier, leaf_summarizer, merge_summarizer, stats)
@@ -1371,7 +1664,11 @@ def run_iterative_optimization(
     )
     from src.manifesto.constants import RILE_MIN, RILE_MAX
     from src.ops_engine.scoring import BoundedScale
-    from src.ops_engine.training_framework.metrics import create_metric
+    from src.ops_engine.training_framework.metrics import (
+        create_metric,
+        create_cached_oracle_metric,
+        get_cache_stats,
+    )
 
     # Create RILE scale for generic metric creation
     RILE_SCALE = BoundedScale(RILE_MIN, RILE_MAX)
@@ -1412,10 +1709,102 @@ def run_iterative_optimization(
         opt_lm = None
         logger.info(f"Using main model for optimization (port {args.port})")
 
-    # Initialize modules
-    leaf_summarizer = LeafSummarizer(use_cot=True)
-    merge_summarizer = MergeSummarizer(use_cot=True)
+    # Initialize modules (use provided or create new)
+    if leaf_summarizer is None:
+        leaf_summarizer = LeafSummarizer(use_cot=True)
+        logger.info("Created new leaf summarizer")
+    else:
+        logger.info("Using pre-initialized leaf summarizer")
+
+    if merge_summarizer is None:
+        merge_summarizer = MergeSummarizer(use_cot=True)
+        logger.info("Created new merge summarizer")
+    else:
+        logger.info("Using pre-initialized merge summarizer")
+
     oracle_classifier = RILEOracleClassifier(bin_size=args.bin_size)
+
+    # =========================================================================
+    # CHECKPOINT LOADING: Load trained modules from previous runs if specified
+    # =========================================================================
+
+    # Track what was loaded for logging and stats
+    loaded_modules = {
+        "oracle": None,
+        "leaf_summarizer": None,
+        "merge_summarizer": None,
+    }
+
+    # Determine which iteration to load from (auto-detect or explicit)
+    load_iteration = getattr(args, 'load_iteration', None)
+    if load_iteration is None and resume_dir:
+        detected = get_latest_iteration(resume_dir)
+        if detected:
+            logger.info(f"Auto-detected latest iteration: {detected}")
+            load_iteration = detected
+
+    # Load oracle if specified (explicit path takes priority)
+    load_oracle_path = getattr(args, 'load_oracle', None)
+    if load_oracle_path:
+        if load_oracle_path.exists():
+            oracle_classifier.load(load_oracle_path)
+            loaded_modules["oracle"] = str(load_oracle_path)
+            logger.info(f"Loaded oracle from explicit path: {load_oracle_path}")
+        else:
+            logger.warning(f"Oracle checkpoint not found: {load_oracle_path}")
+    elif load_iteration and resume_dir:
+        oracle_path = resume_dir / f"iteration_{load_iteration}" / "oracle.json"
+        if oracle_path.exists():
+            oracle_classifier.load(oracle_path)
+            loaded_modules["oracle"] = str(oracle_path)
+            logger.info(f"Loaded oracle from iteration {load_iteration}")
+        else:
+            logger.info(f"No oracle checkpoint found at iteration {load_iteration}")
+
+    # Load leaf summarizer if specified (explicit path takes priority)
+    load_leaf_path = getattr(args, 'load_leaf_summarizer', None)
+    if load_leaf_path:
+        if load_leaf_path.exists():
+            leaf_summarizer.load(load_leaf_path)
+            loaded_modules["leaf_summarizer"] = str(load_leaf_path)
+            logger.info(f"Loaded leaf summarizer from explicit path: {load_leaf_path}")
+        else:
+            logger.warning(f"Leaf summarizer checkpoint not found: {load_leaf_path}")
+    elif load_iteration and resume_dir:
+        leaf_path = resume_dir / f"iteration_{load_iteration}" / "leaf_summarizer.json"
+        if leaf_path.exists():
+            leaf_summarizer.load(leaf_path)
+            loaded_modules["leaf_summarizer"] = str(leaf_path)
+            logger.info(f"Loaded leaf summarizer from iteration {load_iteration}")
+
+    # Load merge summarizer if specified (explicit path takes priority)
+    load_merge_path = getattr(args, 'load_merge_summarizer', None)
+    if load_merge_path:
+        if load_merge_path.exists():
+            merge_summarizer.load(load_merge_path)
+            loaded_modules["merge_summarizer"] = str(load_merge_path)
+            logger.info(f"Loaded merge summarizer from explicit path: {load_merge_path}")
+        else:
+            logger.warning(f"Merge summarizer checkpoint not found: {load_merge_path}")
+    elif load_iteration and resume_dir:
+        merge_path = resume_dir / f"iteration_{load_iteration}" / "merge_summarizer.json"
+        if merge_path.exists():
+            merge_summarizer.load(merge_path)
+            loaded_modules["merge_summarizer"] = str(merge_path)
+            logger.info(f"Loaded merge summarizer from iteration {load_iteration}")
+
+    # Log summary of module states
+    n_loaded = sum(1 for v in loaded_modules.values() if v is not None)
+    if n_loaded > 0:
+        print_section("CHECKPOINT LOADING SUMMARY")
+        logger.info(f"Loaded {n_loaded}/3 modules from checkpoints:")
+        for name, path in loaded_modules.items():
+            status = f"LOADED: {path}" if path else "fresh (not loaded)"
+            logger.info(f"  {name}: {status}")
+    else:
+        logger.info("No modules loaded from checkpoints - starting fresh")
+
+    # =========================================================================
 
     # Create pipeline config
     pipeline_config = BatchedPipelineConfig(
@@ -1427,6 +1816,7 @@ def run_iterative_optimization(
     # Convergence tracking
     prev_oracle_score = 0.0
     prev_summarizer_score = 0.0
+    prev_pipeline_mae = float("inf")
     no_improvement_count = 0
 
     iteration_stats = {
@@ -1437,10 +1827,11 @@ def run_iterative_optimization(
             "convergence_patience": args.convergence_patience,
             "oracle_budget": args.oracle_budget,
             "summarizer_budget": args.summarizer_budget,
-            "human_weight": args.human_weight,
             "opt_model_port": opt_port,
             "skip_summarizer_opt": args.skip_summarizer_opt,
+            "skip_oracle_opt": getattr(args, 'skip_oracle_opt', False),
         },
+        "loaded_modules": loaded_modules,
         "converged": False,
     }
 
@@ -1449,7 +1840,7 @@ def run_iterative_optimization(
         iteration += 1
         print_section(f"Iteration {iteration}" + (f"/{max_iterations}" if not run_until_convergence else ""))
         iter_start = time.time()
-        iter_stats = {"iteration": iteration}
+        iter_stats = {"iteration": iteration, "round": iteration}
 
         # Step 1: Process documents with current summarizers
         logger.info(f"Step 1: Processing {len(train_samples)} documents...")
@@ -1464,12 +1855,37 @@ def run_iterative_optimization(
         iter_stats["docs_processed"] = len(results)
         iter_stats["successful"] = sum(1 for r in results if r.error is None)
 
+        # Compute pipeline MAE for this iteration
+        valid_results = [r for r in results if r.error is None and r.predicted_rile is not None]
+        if valid_results:
+            errors = [abs(r.predicted_rile - r.ground_truth_rile) for r in valid_results]
+            iter_stats["pipeline_mae"] = sum(errors) / len(errors)
+        else:
+            iter_stats["pipeline_mae"] = float("inf")
+
+        # Step 1.5: Compute and log OPS violation rates (Paper Section 4.1)
+        # This reports p_suff, union bound, etc. to track summarization quality
+        from src.manifesto.rubrics import RILE_PRESERVATION_RUBRIC
+        violation_stats = compute_and_log_violation_rates(
+            results=results,
+            oracle_classifier=oracle_classifier,
+            rubric=RILE_PRESERVATION_RUBRIC,
+            iteration=iteration,
+            output_dir=output_dir,
+        )
+        iter_stats["violation_rates"] = violation_stats
+
         # Step 2: Train oracle on current summaries (unless skipped)
+        # Initialize oracle_score to previous value (in case optimization is skipped)
+        oracle_score = prev_oracle_score
+
         if not args.skip_oracle_opt:
             logger.info("Step 2: Training RILE oracle...")
 
             oracle_trainset = create_oracle_trainset(results, bin_size=args.bin_size)
             logger.info(f"  {len(oracle_trainset)} training examples")
+
+            oracle_opt_type = args.optimizer
 
             # Use generic scale-based metric (continuous error-based)
             # Compares predicted label to ground truth using BoundedScale
@@ -1489,7 +1905,7 @@ def run_iterative_optimization(
 
                 with opt_context:
                     oracle_optimizer = create_dspy_optimizer(
-                        optimizer_type=args.optimizer,
+                        optimizer_type=oracle_opt_type,
                         metric=oracle_metric,
                         budget=args.oracle_budget,
                         num_threads=args.num_threads,
@@ -1570,38 +1986,20 @@ def run_iterative_optimization(
 
                 dspy_trainset = [ex.to_dspy_example() for ex in summarization_trainset]
 
-                # Pre-cache oracle predictions
-                if not getattr(args, 'no_precache', False):
-                    leaf_oracle_cache = precache_oracle_predictions(
-                        oracle_classifier,
-                        dspy_trainset,
-                        field_name='summary',
-                        max_workers=args.num_threads,
-                    )
-                else:
-                    leaf_oracle_cache = {}
+                leaf_opt_type = args.optimizer
 
-                def summarization_metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
-                    ground_truth = getattr(gold, 'ground_truth_rile', None)
-                    if ground_truth is None:
-                        ground_truth = float(getattr(gold, 'label', 0))
-                    summary = getattr(pred, 'summary', None) or str(pred)
-
-                    if summary in leaf_oracle_cache:
-                        predicted, _, _ = leaf_oracle_cache[summary]
-                    else:
-                        try:
-                            predicted, _, _ = oracle_classifier.predict_rile(summary)
-                            leaf_oracle_cache[summary] = (predicted, 0.5, "live")
-                        except Exception:
-                            return 0.0
-
-                    return RILE_SCALE.values_to_score(predicted, ground_truth)
+                # Create cached oracle metric (thread-safe, reduces redundant LLM calls)
+                summarization_metric, leaf_oracle_cache = create_cached_oracle_metric(
+                    oracle_classifier=oracle_classifier,
+                    scale=RILE_SCALE,
+                    ground_truth_field='ground_truth_rile',
+                    summary_field='summary',
+                )
 
                 try:
                     with opt_context if opt_lm else dspy.context():
                         optimizer = create_dspy_optimizer(
-                            optimizer_type=args.optimizer,
+                            optimizer_type=leaf_opt_type,
                             metric=summarization_metric,
                             budget=args.summarizer_budget,
                             num_threads=args.num_threads,
@@ -1616,7 +2014,13 @@ def run_iterative_optimization(
                     score = getattr(optimizer, 'best_score', 0.5)
                     leaf_stats["leaf_optimized"] = True
                     leaf_stats["leaf_score"] = score
+
+                    # Log cache statistics
+                    cache_stats = get_cache_stats(leaf_oracle_cache)
+                    leaf_stats["cache_stats"] = cache_stats
                     logger.info(f"  Leaf optimized (score: {score:.3f})")
+                    logger.info(f"    Oracle cache: {cache_stats['cache_size']} unique, "
+                               f"{cache_stats['hit_rate']:.1%} hit rate")
 
                     # Save checkpoint
                     iter_dir = output_dir / f"iteration_{iteration}"
@@ -1646,38 +2050,20 @@ def run_iterative_optimization(
 
                 dspy_trainset = [ex.to_dspy_example() for ex in merge_trainset]
 
-                # Pre-cache oracle predictions
-                if not getattr(args, 'no_precache', False):
-                    merge_oracle_cache = precache_oracle_predictions(
-                        oracle_classifier,
-                        dspy_trainset,
-                        field_name='merged_summary',
-                        max_workers=args.num_threads,
-                    )
-                else:
-                    merge_oracle_cache = {}
+                merge_opt_type = args.optimizer
 
-                def merge_metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
-                    ground_truth = getattr(gold, 'ground_truth_rile', None)
-                    if ground_truth is None:
-                        ground_truth = float(getattr(gold, 'label', 0))
-                    merged = getattr(pred, 'merged_summary', None) or getattr(pred, 'summary', None) or str(pred)
-
-                    if merged in merge_oracle_cache:
-                        predicted, _, _ = merge_oracle_cache[merged]
-                    else:
-                        try:
-                            predicted, _, _ = oracle_classifier.predict_rile(merged)
-                            merge_oracle_cache[merged] = (predicted, 0.5, "live")
-                        except Exception:
-                            return 0.0
-
-                    return RILE_SCALE.values_to_score(predicted, ground_truth)
+                # Create cached oracle metric (thread-safe, reduces redundant LLM calls)
+                merge_metric, merge_oracle_cache = create_cached_oracle_metric(
+                    oracle_classifier=oracle_classifier,
+                    scale=RILE_SCALE,
+                    ground_truth_field='ground_truth_rile',
+                    summary_field='merged_summary',
+                )
 
                 try:
                     with opt_context if opt_lm else dspy.context():
                         optimizer = create_dspy_optimizer(
-                            optimizer_type=args.optimizer,
+                            optimizer_type=merge_opt_type,
                             metric=merge_metric,
                             budget=args.summarizer_budget,
                             num_threads=args.num_threads,
@@ -1690,7 +2076,13 @@ def run_iterative_optimization(
                         compiled = optimizer.compile(student=merge_summarizer, trainset=dspy_trainset)
 
                     merge_stats["merge_optimized"] = True
+
+                    # Log cache statistics
+                    cache_stats = get_cache_stats(merge_oracle_cache)
+                    merge_stats["cache_stats"] = cache_stats
                     logger.info("  Merge optimized")
+                    logger.info(f"    Oracle cache: {cache_stats['cache_size']} unique, "
+                               f"{cache_stats['hit_rate']:.1%} hit rate")
 
                     # Save checkpoint
                     iter_dir = output_dir / f"iteration_{iteration}"
@@ -1731,6 +2123,13 @@ def run_iterative_optimization(
 
         iter_stats["oracle_improvement"] = oracle_improvement
         iter_stats["summarizer_improvement"] = summarizer_improvement
+
+        # Standardized keys for consistent printing (using pipeline MAE)
+        pipeline_mae = iter_stats.get("pipeline_mae", float("inf"))
+        iter_stats["metric_before"] = prev_pipeline_mae if iteration > 1 else pipeline_mae
+        iter_stats["metric_after"] = pipeline_mae
+        iter_stats["improvement"] = iter_stats["metric_before"] - pipeline_mae  # Positive = better (lower MAE)
+        prev_pipeline_mae = pipeline_mae
 
         # Update tracking
         prev_oracle_score = oracle_score

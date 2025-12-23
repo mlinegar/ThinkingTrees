@@ -31,6 +31,7 @@ from openai import OpenAI
 from src.manifesto.data_loader import create_pilot_dataset
 from src.manifesto.rubrics import RILE_PRESERVATION_RUBRIC, RILE_TASK_CONTEXT
 from src.manifesto.evaluation import ManifestoEvaluator, save_results
+from src.config.settings import load_settings
 
 # Set up logging
 logging.basicConfig(
@@ -388,6 +389,7 @@ def main():
     parser.add_argument('--split', type=str, default='train', help='Data split to use')
     parser.add_argument('--chunk-size', type=int, default=2000, help='Max chars per chunk (creates more tree levels)')
     parser.add_argument('--output-dir', type=Path, default=None, help='Output directory')
+    parser.add_argument('--config', type=Path, default=None, help='Path to settings.yaml')
     args = parser.parse_args()
 
     # Create output directory
@@ -426,11 +428,16 @@ def main():
         auditor_model_id = None
 
     # Configure DSPy with task model - this will be used for ALL pipeline stages
+    settings = load_settings(args.config)
+    generation_cfg = settings.get("generation", {})
+    summarizer_cfg = generation_cfg.get("summarizer", {})
+    task_temperature = summarizer_cfg.get("temperature", 0.3)
+
     task_lm = dspy.LM(
         f"openai/{task_model_id}",
         api_base=f"http://localhost:{args.task_port}/v1",
         api_key="EMPTY",
-        temperature=0.3,
+        temperature=task_temperature,
         max_tokens=16000,  # Allow full thinking
     )
     dspy.configure(lm=task_lm)
