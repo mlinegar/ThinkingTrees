@@ -44,7 +44,9 @@ def build_tree(
     input_path: Path,
     rubric: str = "",
     output_path: Optional[Path] = None,
-    config: Optional[dict] = None
+    config: Optional[dict] = None,
+    teacher_guided: Optional[bool] = None,
+    student_only: Optional[bool] = None,
 ) -> BuildResult:
     """
     Build an OPS tree from a document.
@@ -60,13 +62,30 @@ def build_tree(
     """
     config = config or {}
     chunking_config = config.get('chunking', {})
+    tree_config = config.get('tree', {})
+
+    default_build_config = BuildConfig()
+
+    teacher_guided = (
+        teacher_guided
+        if teacher_guided is not None
+        else tree_config.get('teacher_guided', default_build_config.teacher_guided)
+    )
+
+    student_only = (
+        student_only
+        if student_only is not None
+        else tree_config.get('student_only', default_build_config.student_only)
+    )
 
     # Create build configuration
     build_config = BuildConfig(
         max_chunk_chars=chunking_config.get('max_chars', 2000),
         min_chunk_chars=chunking_config.get('min_chars', 100),
         chunk_strategy=chunking_config.get('strategy', 'sentence'),
-        verbose=config.get('tree', {}).get('verbose', False)
+        teacher_guided=teacher_guided,
+        student_only=student_only,
+        verbose=tree_config.get('verbose', False)
     )
 
     # For now, use a simple summarizer
@@ -146,7 +165,19 @@ def main():
     parser.add_argument(
         "--config", "-c",
         type=Path,
-        help="Configuration file path"
+        help="Configuration file path",
+    )
+    parser.add_argument(
+        "--teacher-guided",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable teacher-guided merges using a preference scorer",
+    )
+    parser.add_argument(
+        "--student-only",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Disable teacher guidance and rely solely on student summarization",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -178,7 +209,9 @@ def main():
             input_path=args.input,
             rubric=args.rubric,
             output_path=args.output,
-            config=config
+            config=config,
+            teacher_guided=args.teacher_guided,
+            student_only=args.student_only,
         )
         print_tree_info(result)
 
