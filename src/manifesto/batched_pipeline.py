@@ -23,7 +23,8 @@ Usage:
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field as dataclass_field
 from typing import List, Dict, Optional, Any, Callable, TYPE_CHECKING
 from pathlib import Path
 
@@ -54,6 +55,7 @@ from src.core.progress import (
     display_batch_summary,
     create_progress_callback,
 )
+from src.config.concurrency import ConcurrencyConfig, get_concurrency_config
 
 from .data_loader import ManifestoSample
 from .ops_pipeline import ManifestoResult, PipelineConfig
@@ -77,13 +79,17 @@ class BatchedPipelineConfig:
 
     # Batching settings
     max_concurrent_requests: int = 100    # Max concurrent HTTP requests AND batch size
-    max_concurrent_documents: int = 50    # Max documents in parallel
+    max_concurrent_documents: int = 20    # Max documents in parallel (reduced from 50)
     batch_timeout: float = 0.05           # Max wait to fill batch (50ms)
 
     # Tree building
-    max_chunk_chars: int = 2000
+    # Increased from 2000 to 4000 to reduce chunk count and tree depth
+    max_chunk_chars: int = 4000
     max_tokens_summary: int = 500
     max_tokens_score: int = 200
+
+    # Concurrency configuration (prevents thread explosion)
+    concurrency: ConcurrencyConfig = dataclass_field(default_factory=get_concurrency_config)
 
     # Auditing
     audit_budget: int = 10
@@ -142,7 +148,8 @@ def build_tree_with_dspy(
 
     # Chunk the text
     chunks = chunk_text(text, config.max_chunk_chars)
-    logger.debug(f"[{doc_id}] DSPy mode: Chunked into {len(chunks)} chunks")
+    if len(chunks) > 5:
+        logger.info(f"[{doc_id}] Processing {len(chunks)} chunks...")
 
     if len(chunks) == 0:
         return {"root": {"summary": ""}, "height": 0, "leaf_count": 0, "chunks": []}
@@ -159,12 +166,30 @@ def build_tree_with_dspy(
         }
 
     # Multi-chunk: build tree level by level
-    # Level 0: Summarize all chunks
+    # Level 0: Summarize all chunks (concurrent for better GPU utilization)
+    # IMPORTANT: Use ConcurrencyConfig to prevent thread explosion when called
+    # from parent ThreadPoolExecutor (e.g., process_batch_with_dspy)
     current_level = []
     leaf_summaries = []
 
-    for i, chunk in enumerate(chunks):
+    def summarize_chunk(args):
+        i, chunk = args
         summary = leaf_summarizer(content=chunk, rubric=config.rubric)
+        return i, chunk, summary
+
+    # Use config's concurrency settings instead of hardcoded values
+    # Timeout scales with chunk count to prevent failures on large documents
+    max_chunk_workers = config.concurrency.get_chunk_workers(len(chunks))
+    leaf_timeout = config.concurrency.get_leaf_timeout(len(chunks))
+    with ThreadPoolExecutor(max_workers=max_chunk_workers) as executor:
+        futures = [executor.submit(summarize_chunk, (i, chunk)) for i, chunk in enumerate(chunks)]
+        results = []
+        for future in as_completed(futures, timeout=leaf_timeout):
+            results.append(future.result())
+
+    # Sort by index to maintain order
+    results.sort(key=lambda x: x[0])
+    for i, chunk, summary in results:
         leaf_summaries.append(summary)
         current_level.append({
             "id": f"{doc_id}_leaf_{i}",
@@ -173,39 +198,50 @@ def build_tree_with_dspy(
             "level": 0,
         })
 
-    # Build up the tree by merging pairs
+    # Build up the tree by merging pairs (concurrent within each level)
     level_num = 0
     while len(current_level) > 1:
         level_num += 1
-        next_level = []
 
-        # Pair up nodes
+        # Collect pairs for this level
+        pairs = []
         for i in range(0, len(current_level), 2):
             if i + 1 < len(current_level):
-                left = current_level[i]
-                right = current_level[i + 1]
-
-                left_text = left.get("summary") or left.get("content", "")
-                right_text = right.get("summary") or right.get("content", "")
-
-                # Use DSPy merge module
-                merged_summary = merge_summarizer(
-                    left_summary=left_text,
-                    right_summary=right_text,
-                    rubric=config.rubric
-                )
-
-                next_level.append({
-                    "id": f"{doc_id}_merge_{level_num}_{len(next_level)}",
-                    "summary": merged_summary,
-                    "level": level_num,
-                    "children": [left, right],
-                })
+                pairs.append((i // 2, current_level[i], current_level[i + 1]))
             else:
-                # Odd node carries forward
-                next_level.append(current_level[i])
+                pairs.append((i // 2, current_level[i], None))  # Odd node
 
-        current_level = next_level
+        def merge_pair(args):
+            idx, left, right = args
+            if right is None:
+                return idx, left  # Odd node carries forward
+            left_text = left.get("summary") or left.get("content", "")
+            right_text = right.get("summary") or right.get("content", "")
+            merged_summary = merge_summarizer(
+                left_summary=left_text,
+                right_summary=right_text,
+                rubric=config.rubric
+            )
+            return idx, {
+                "id": f"{doc_id}_merge_{level_num}_{idx}",
+                "summary": merged_summary,
+                "level": level_num,
+                "children": [left, right],
+            }
+
+        # Use config's concurrency settings instead of hardcoded values
+        # Timeout scales with number of pairs to prevent failures
+        max_merge_workers = config.concurrency.get_merge_workers(len(pairs))
+        merge_timeout = config.concurrency.get_merge_timeout(len(pairs))
+        with ThreadPoolExecutor(max_workers=max_merge_workers) as executor:
+            futures = [executor.submit(merge_pair, pair) for pair in pairs]
+            merge_results = []
+            for future in as_completed(futures, timeout=merge_timeout):
+                merge_results.append(future.result())
+
+        # Sort by index to maintain order
+        merge_results.sort(key=lambda x: x[0])
+        current_level = [node for _, node in merge_results]
 
     root = current_level[0] if current_level else {"summary": ""}
     return {
@@ -572,6 +608,7 @@ class BatchedManifestoPipeline:
 
         doc_id = sample.manifesto_id
         start_time = time.time()
+        logger.debug(f"Starting {doc_id} ({len(sample.text)} chars)")
 
         result = ManifestoResult(
             manifesto_id=doc_id,
@@ -617,7 +654,10 @@ class BatchedManifestoPipeline:
         show_progress: bool = True,
     ) -> List[ManifestoResult]:
         """
-        Process multiple manifestos using DSPy modules (synchronous).
+        Process multiple manifestos using DSPy modules (concurrent).
+
+        Uses ThreadPoolExecutor to process multiple documents in parallel,
+        matching the concurrency of the async batch processing.
 
         Args:
             samples: List of manifesto samples
@@ -626,13 +666,43 @@ class BatchedManifestoPipeline:
         Returns:
             List of ManifestoResult
         """
-        results = []
-        for i, sample in enumerate(samples):
-            if show_progress:
-                logger.info(f"Processing {i+1}/{len(samples)}: {sample.manifesto_id}")
-            result = self.process_with_dspy(sample)
-            results.append(result)
-            self._results.append(result)
+        max_workers = self.config.max_concurrent_documents
+        results = [None] * len(samples)
+        completed = 0
+        failed = 0
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_idx = {
+                executor.submit(self.process_with_dspy, sample): i
+                for i, sample in enumerate(samples)
+            }
+
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                sample = samples[idx]
+                try:
+                    result = future.result(timeout=600)  # 10 min timeout per doc
+                    results[idx] = result
+                    self._results.append(result)
+                    completed += 1
+                    if show_progress:
+                        logger.info(f"Completed {completed}/{len(samples)}: {sample.manifesto_id}")
+                except TimeoutError:
+                    failed += 1
+                    logger.error(f"Timeout processing {sample.manifesto_id} (failed {failed}/{len(samples)})")
+                    # Create error result
+                    results[idx] = ManifestoResult(
+                        manifesto_id=sample.manifesto_id,
+                        error="Timeout after 600s"
+                    )
+                except Exception as e:
+                    failed += 1
+                    logger.error(f"Error processing {sample.manifesto_id}: {e} (failed {failed}/{len(samples)})")
+                    results[idx] = ManifestoResult(
+                        manifesto_id=sample.manifesto_id,
+                        error=str(e)
+                    )
+
         return results
 
     async def process_single_async(

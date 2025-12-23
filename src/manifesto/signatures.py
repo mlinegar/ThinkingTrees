@@ -37,6 +37,45 @@ class RILEScore(dspy.Signature):
     )
 
 
+class PairwiseSummaryComparison(dspy.Signature):
+    """
+    Compare two summaries and select the one that better preserves information.
+
+    Used by large oracle models to generate preference data for training.
+    """
+    rubric: str = dspy.InputField(
+        desc="Information preservation criteria (e.g., RILE political positioning)"
+    )
+    original_text: str = dspy.InputField(
+        desc="Original source text being summarized"
+    )
+    summary_a: str = dspy.InputField(
+        desc="First candidate summary"
+    )
+    summary_b: str = dspy.InputField(
+        desc="Second candidate summary"
+    )
+    ground_truth_score: float = dspy.InputField(
+        desc="Ground truth score for the original text (e.g., RILE score)"
+    )
+
+    preferred: str = dspy.OutputField(
+        desc="Which summary is better: 'A', 'B', or 'tie'"
+    )
+    reasoning: str = dspy.OutputField(
+        desc="Detailed explanation of why this summary better preserves the information"
+    )
+    confidence: float = dspy.OutputField(
+        desc="Confidence in the preference judgment (0.0 to 1.0)"
+    )
+    score_estimate_a: float = dspy.OutputField(
+        desc="Estimated score for summary A"
+    )
+    score_estimate_b: float = dspy.OutputField(
+        desc="Estimated score for summary B"
+    )
+
+
 class RILEComparison(dspy.Signature):
     """
     Compare RILE scores between two versions of text.

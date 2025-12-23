@@ -32,6 +32,7 @@ Example:
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Tuple
@@ -78,6 +79,231 @@ from .rubrics import RILE_TASK_CONTEXT
 from .signatures import RILEScorer
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Document Filtering and Sampling for Probabilistic Audit
+# =============================================================================
+
+def estimate_chunk_count(text: str, max_chunk_chars: int = 2000) -> int:
+    """
+    Estimate how many chunks a document will produce.
+
+    Args:
+        text: The document text
+        max_chunk_chars: Maximum characters per chunk (default 2000)
+
+    Returns:
+        Estimated number of chunks
+    """
+    if not text:
+        return 0
+    # Simple estimate based on character count
+    # Actual chunking may vary based on paragraph boundaries
+    return max(1, len(text) // max_chunk_chars + 1)
+
+
+def filter_short_documents(
+    samples: List[Any],
+    max_chunks: int = 10,
+    text_field: str = 'text',
+    max_chunk_chars: int = 2000,
+) -> List[Any]:
+    """
+    Filter to documents with ≤max_chunks for Phase 1 initialization.
+
+    Short documents provide stronger gradient signal because a higher
+    percentage of nodes are sampled during probabilistic audit training.
+
+    Args:
+        samples: List of sample objects (ManifestoSample or similar)
+        max_chunks: Maximum number of chunks to include (default 10)
+        text_field: Attribute name for text content
+        max_chunk_chars: Maximum characters per chunk for estimation
+
+    Returns:
+        List of samples that will produce ≤max_chunks when chunked
+
+    Example:
+        short_docs = filter_short_documents(train_samples, max_chunks=10)
+        # Train Phase 1 models on these for strong gradient signal
+    """
+    short_docs = []
+
+    for sample in samples:
+        # Get text from sample
+        text = getattr(sample, text_field, None)
+        if text is None:
+            text = sample.get(text_field, '') if isinstance(sample, dict) else ''
+
+        estimated_chunks = estimate_chunk_count(text, max_chunk_chars)
+
+        if estimated_chunks <= max_chunks:
+            short_docs.append(sample)
+
+    logger.info(
+        f"Filtered to {len(short_docs)}/{len(samples)} short documents "
+        f"(≤{max_chunks} chunks)"
+    )
+    return short_docs
+
+
+def get_sample_size(
+    num_items: int,
+    sample_rate: float = 0.10,
+    min_rate: float = 0.05,
+    min_absolute: int = 2,
+) -> int:
+    """
+    Calculate K for proportional sampling.
+
+    Used for probabilistic audit training where we sample a subset of
+    nodes rather than using all of them.
+
+    Args:
+        num_items: Total number of items (chunks, nodes, etc.)
+        sample_rate: Target sampling rate (default 10%)
+        min_rate: Minimum rate floor (default 5%)
+        min_absolute: Absolute minimum samples (default 2)
+
+    Returns:
+        K: Number of items to sample
+
+    Example:
+        k = get_sample_size(60)  # 60 chunks → sample 6 (10%)
+        k = get_sample_size(5)   # 5 chunks → sample 2 (40%, min_absolute)
+    """
+    from math import ceil
+
+    k = max(
+        ceil(num_items * sample_rate),
+        ceil(num_items * min_rate),
+        min_absolute
+    )
+    return min(k, num_items)  # Can't sample more than exist
+
+
+def sample_training_nodes(
+    tree,
+    sample_rate: float = 0.10,
+    min_rate: float = 0.05,
+) -> Tuple[List, List]:
+    """
+    Sample nodes for probabilistic audit training.
+
+    Samples both leaf nodes and internal (merge) nodes proportionally
+    to their counts in the tree.
+
+    Args:
+        tree: OPSTree object with .leaves and .internal_nodes properties
+        sample_rate: Target sampling rate (default 10%)
+        min_rate: Minimum sampling rate floor (default 5%)
+
+    Returns:
+        Tuple of (sampled_leaves, sampled_internal_nodes)
+
+    Example:
+        sampled_leaves, sampled_internal = sample_training_nodes(tree, 0.10)
+        # Process only these nodes during optimization
+    """
+    import random
+
+    leaves = tree.leaves if hasattr(tree, 'leaves') else []
+    internal = tree.internal_nodes if hasattr(tree, 'internal_nodes') else []
+
+    k_leaves = get_sample_size(len(leaves), sample_rate, min_rate)
+    k_internal = get_sample_size(len(internal), sample_rate, min_rate) if internal else 0
+
+    sampled_leaves = random.sample(leaves, k_leaves) if leaves else []
+    sampled_internal = random.sample(internal, k_internal) if internal else []
+
+    return sampled_leaves, sampled_internal
+
+
+def collect_sampled_training_data(
+    results: List['ManifestoResult'],
+    sample_rate: float = 0.10,
+    min_rate: float = 0.05,
+    rubric: str = None,
+) -> Tuple[List['SummarizationTrainingExample'], List['MergeTrainingExample']]:
+    """
+    Collect training data with proportional sampling for probabilistic audit.
+
+    Instead of using all chunks/merges, samples a proportion from each document.
+    This dramatically reduces training time while maintaining gradient signal.
+
+    Args:
+        results: Processed manifesto results (with chunks and trees populated)
+        sample_rate: Target sampling rate per document (default 10%)
+        min_rate: Minimum sampling rate floor (default 5%)
+        rubric: Optional rubric override
+
+    Returns:
+        Tuple of (leaf_examples, merge_examples)
+
+    Example:
+        leaf_ex, merge_ex = collect_sampled_training_data(results, sample_rate=0.10)
+        # ~10% of all nodes, distributed proportionally across documents
+    """
+    import random
+    from .rubrics import RILE_TASK_CONTEXT
+
+    rubric = rubric or RILE_TASK_CONTEXT
+    leaf_examples = []
+    merge_examples = []
+
+    for result in results:
+        if result.error is not None:
+            continue
+
+        # Sample leaf chunks
+        chunks = getattr(result, 'chunks', [])
+        if chunks:
+            k = get_sample_size(len(chunks), sample_rate, min_rate)
+            sampled_indices = random.sample(range(len(chunks)), k)
+
+            for i in sampled_indices:
+                example = SummarizationTrainingExample(
+                    example_id=f"{result.manifesto_id}_chunk_{i}",
+                    original_text=chunks[i],
+                    rubric=rubric,
+                    ground_truth_rile=result.ground_truth_rile,
+                    manifesto_id=result.manifesto_id,
+                    chunk_idx=i,
+                )
+                leaf_examples.append(example)
+
+        # Sample merge pairs
+        leaf_summaries = getattr(result, 'leaf_summaries', [])
+        if len(leaf_summaries) >= 2:
+            # Create all possible merge pairs
+            merge_pairs = []
+            for i in range(0, len(leaf_summaries) - 1, 2):
+                if i + 1 < len(leaf_summaries):
+                    merge_pairs.append((i, leaf_summaries[i], leaf_summaries[i + 1]))
+
+            if merge_pairs:
+                k = get_sample_size(len(merge_pairs), sample_rate, min_rate)
+                sampled_pairs = random.sample(merge_pairs, min(k, len(merge_pairs)))
+
+                for i, left, right in sampled_pairs:
+                    example = MergeTrainingExample(
+                        example_id=f"{result.manifesto_id}_merge_{i}",
+                        left_summary=left,
+                        right_summary=right,
+                        rubric=rubric,
+                        ground_truth_rile=result.ground_truth_rile,
+                        manifesto_id=result.manifesto_id,
+                        level=1,
+                    )
+                    merge_examples.append(example)
+
+    logger.info(
+        f"Sampled training data: {len(leaf_examples)} leaf examples, "
+        f"{len(merge_examples)} merge examples "
+        f"(~{sample_rate*100:.0f}% sample rate)"
+    )
+    return leaf_examples, merge_examples
 
 
 # =============================================================================
@@ -436,22 +662,32 @@ def train_rile_oracle(
     optimizer = OracleOptimizer(config.optimization)
     classifier = optimizer.optimize(classifier, trainset, metric=metric)
 
-    # Evaluate
+    # Evaluate (concurrent predictions for better GPU utilization)
     predictions = []
     ground_truth = []
-    for ex in trainset[:50]:
+
+    def predict_single(ex):
         try:
             pred = classifier(
                 original_content=ex.original_content,
                 summary=ex.summary,
                 rubric=ex.rubric,
             )
-            predictions.append(pred)
-            # Use discretized label from context if available
             label = ex.context.get('discretized_label', ex.label)
-            ground_truth.append(str(label))
+            return pred, str(label), None
         except Exception as e:
-            logger.debug(f"Evaluation error: {e}")
+            return None, None, e
+
+    eval_samples = trainset[:50]
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(predict_single, ex): ex for ex in eval_samples}
+        for future in as_completed(futures):
+            pred, label, error = future.result()
+            if pred is not None:
+                predictions.append(pred)
+                ground_truth.append(label)
+            elif error:
+                logger.debug(f"Evaluation error: {error}")
 
     result = None
     if predictions:
@@ -665,7 +901,7 @@ class SummarizationTrainingExample:
             ground_truth_rile=self.ground_truth_rile,
             human_score=self.human_score,
             manifesto_id=self.manifesto_id,
-        ).with_inputs('original_text', 'rubric', 'content')
+        ).with_inputs('content', 'rubric')
 
 
 @dataclass
