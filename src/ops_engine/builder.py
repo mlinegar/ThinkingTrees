@@ -36,6 +36,24 @@ class Summarizer(Protocol):
         ...
 
 
+class PreferenceScorer(Protocol):
+    """Protocol for ranking candidate summaries."""
+
+    def score(self, candidates: List[str], rubric: str = "", context: Optional[str] = None) -> List[float]:
+        """
+        Score candidate summaries.
+
+        Args:
+            candidates: Summaries to score
+            rubric: Information preservation criteria
+            context: Optional source text used to generate candidates
+
+        Returns:
+            A list of scores aligned with the candidates list.
+        """
+        ...
+
+
 class IdentitySummarizer:
     """
     Summarizer that returns content unchanged.
@@ -91,6 +109,8 @@ class BuildConfig:
 
     # Tree settings
     merge_strategy: str = "binary"  # "binary" for 2-way merge
+    teacher_guided: bool = False
+    student_only: bool = True
 
     # Debug settings
     verbose: bool = False
@@ -149,7 +169,8 @@ class OPSTreeBuilder:
     def __init__(
         self,
         summarizer: Summarizer,
-        config: Optional[BuildConfig] = None
+        config: Optional[BuildConfig] = None,
+        preference_scorer: Optional[PreferenceScorer] = None,
     ):
         """
         Initialize the builder.
@@ -157,13 +178,16 @@ class OPSTreeBuilder:
         Args:
             summarizer: Function to summarize text
             config: Build configuration
+            preference_scorer: Optional scorer used to select among candidate summaries
         """
         self.summarizer = summarizer
         self.config = config or BuildConfig()
+        self.preference_scorer = preference_scorer
         self._build_stats = {
             'summarizer_calls': 0,
             'total_input_chars': 0,
-            'total_output_chars': 0
+            'total_output_chars': 0,
+            'preference_calls': 0,
         }
 
     def build_from_text(self, text: str, rubric: str = "") -> BuildResult:
@@ -395,6 +419,46 @@ class OPSTreeBuilder:
 
         return OPSTree(root=root, rubric=rubric)
 
+    def _generate_candidate_summaries(self, combined: str, rubric: str) -> List[str]:
+        """Generate one or more candidate summaries from combined text."""
+        result = self.summarizer(combined, rubric)
+
+        if isinstance(result, list):
+            return [str(candidate) for candidate in result if candidate]
+
+        return [str(result)]
+
+    def _select_summary(
+        self,
+        candidates: List[str],
+        rubric: str,
+        context: str,
+    ) -> str:
+        """Select a summary using the preference scorer when configured."""
+        if not candidates:
+            raise ValueError("No candidate summaries provided for selection")
+
+        if (
+            self.preference_scorer is not None
+            and self.config.teacher_guided
+            and not self.config.student_only
+        ):
+            try:
+                scores = self.preference_scorer.score(
+                    candidates=candidates,
+                    rubric=rubric,
+                    context=context,
+                )
+            except TypeError:
+                # Backward compatibility for positional-only scorers
+                scores = self.preference_scorer.score(candidates, rubric, context)
+
+            if scores:
+                self._build_stats['preference_calls'] += 1
+                best_idx = max(range(len(candidates)), key=lambda i: scores[i])
+                return candidates[best_idx]
+
+        return candidates[0]
     @staticmethod
     def _node_text_for_fallback(node: OPSNode) -> str:
         """Return the best available text for a node."""
@@ -438,6 +502,8 @@ class OPSTreeBuilder:
         self._build_stats['summarizer_calls'] += 1
         self._build_stats['total_input_chars'] += len(combined)
 
+        candidates = self._generate_candidate_summaries(combined, rubric)
+        summary = self._select_summary(candidates, rubric, combined)
         try:
             summary = self.summarizer(combined, rubric)
         except Exception as e:
@@ -477,7 +543,8 @@ class OPSTreeBuilder:
         self._build_stats = {
             'summarizer_calls': 0,
             'total_input_chars': 0,
-            'total_output_chars': 0
+            'total_output_chars': 0,
+            'preference_calls': 0,
         }
 
 

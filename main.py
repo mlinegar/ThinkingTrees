@@ -63,6 +63,8 @@ def build_tree(
     rubric: str = "",
     output_path: Optional[Path] = None,
     config: Optional[dict] = None,
+    teacher_guided: Optional[bool] = None,
+    student_only: Optional[bool] = None,
 ) -> BuildResult:
     """
     Build an OPS tree from a document.
@@ -78,9 +80,31 @@ def build_tree(
     """
 
     config = config or {}
+    chunking_config = config.get('chunking', {})
+    tree_config = config.get('tree', {})
+
+    default_build_config = BuildConfig()
+
+    teacher_guided = (
+        teacher_guided
+        if teacher_guided is not None
+        else tree_config.get('teacher_guided', default_build_config.teacher_guided)
+    )
+
+    student_only = (
+        student_only
+        if student_only is not None
+        else tree_config.get('student_only', default_build_config.student_only)
+    )
     chunking_config = config.get("chunking", {})
 
     build_config = BuildConfig(
+        max_chunk_chars=chunking_config.get('max_chars', 2000),
+        min_chunk_chars=chunking_config.get('min_chars', 100),
+        chunk_strategy=chunking_config.get('strategy', 'sentence'),
+        teacher_guided=teacher_guided,
+        student_only=student_only,
+        verbose=tree_config.get('verbose', False)
         max_chunk_chars=chunking_config.get("max_chars", 2000),
         min_chunk_chars=chunking_config.get("min_chars", 100),
         chunk_strategy=chunking_config.get("strategy", "sentence"),
@@ -134,6 +158,50 @@ def print_tree_info(result: BuildResult) -> None:
         print("...")
     print(f"{'-' * 50}\n")
 
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description="ThinkingTrees: Build OPS summarization trees"
+    )
+    parser.add_argument(
+        "--input", "-i",
+        type=Path,
+        required=True,
+        help="Input document path"
+    )
+    parser.add_argument(
+        "--output", "-o",
+        type=Path,
+        help="Output path for tree"
+    )
+    parser.add_argument(
+        "--rubric", "-r",
+        type=str,
+        default="Preserve key information, entities, and conclusions.",
+        help="Information preservation rubric"
+    )
+    parser.add_argument(
+        "--config", "-c",
+        type=Path,
+        help="Configuration file path",
+    )
+    parser.add_argument(
+        "--teacher-guided",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable teacher-guided merges using a preference scorer",
+    )
+    parser.add_argument(
+        "--student-only",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Disable teacher guidance and rely solely on student summarization",
+    )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Enable verbose output"
+    )
 
 def run_training_mode(args: argparse.Namespace) -> None:
     """Handle training subcommand."""
@@ -203,6 +271,8 @@ def run_inference_mode(args: argparse.Namespace) -> None:
             rubric=args.rubric,
             output_path=args.output,
             config=config,
+            teacher_guided=args.teacher_guided,
+            student_only=args.student_only,
         )
         print_tree_info(result)
 
