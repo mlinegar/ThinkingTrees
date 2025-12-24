@@ -1,0 +1,21 @@
+# Audit configuration for checking OPS tree fidelity and safety
+seed: 2024
+
+audit:
+  sample_budget: 12
+  discrepancy_threshold: 0.12
+  prioritize_high_levels: true
+  rubric: "Preserve key information, entities, and conclusions."
+
+# Where to store audit outputs and flagged samples
+artifacts:
+  report_path: "experiments/audit/report.yaml"
+  flagged_nodes_dir: "experiments/audit/flagged"
+
+# Control evaluation when recomputing rubrics or spot-checking summaries
+evaluation:
+  run_eval: true
+  eval_split: "audit"
+  metrics:
+    - discrepancy_rate
+    - hallucination_count

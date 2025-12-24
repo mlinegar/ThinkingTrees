@@ -6,7 +6,7 @@ and recursively summarizing pairs of nodes until a single root remains.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Callable, Protocol, Any
+from typing import List, Optional, Callable, Protocol, Any, Dict
 from pathlib import Path
 import logging
 
@@ -119,11 +119,35 @@ class BuildConfig:
 @dataclass
 class BuildResult:
     """Result of tree building operation."""
-    tree: OPSTree
+    tree: Optional[OPSTree]
     chunks_created: int
     nodes_created: int
     levels_created: int
-    errors: List[str] = field(default_factory=list)
+    errors: List["BuildError"] = field(default_factory=list)
+
+    @property
+    def failed(self) -> bool:
+        """Return True if the build encountered fatal errors."""
+        return self.tree is None
+
+
+@dataclass
+class BuildError:
+    """Structured error information collected during tree building."""
+
+    stage: str
+    message: str
+    exception_type: Optional[str] = None
+    details: Optional[str] = None
+    context: Dict[str, Any] = field(default_factory=dict)
+
+
+class MergeError(Exception):
+    """Raised when a merge operation fails before fallback handling."""
+
+    def __init__(self, message: str, context: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.context = context or {}
 
 
 class OPSTreeBuilder:
@@ -210,7 +234,7 @@ class OPSTreeBuilder:
         if not chunks:
             raise ValueError("Cannot build tree from empty chunks list")
 
-        errors = []
+        errors: List[BuildError] = []
 
         # Create leaf nodes
         leaves = []
@@ -220,22 +244,45 @@ class OPSTreeBuilder:
                 leaf.audit_result.trace = {'chunk_index': i}
                 leaves.append(leaf)
             except Exception as e:
-                errors.append(f"Failed to create leaf {i}: {e}")
+                logger.exception("Failed to create leaf %s", i)
+                errors.append(
+                    BuildError(
+                        stage="leaf_creation",
+                        message="Failed to create leaf",
+                        exception_type=type(e).__name__,
+                        details=str(e),
+                        context={"chunk_index": i}
+                    )
+                )
 
         if not leaves:
             raise ValueError("No leaf nodes created")
 
         # Build tree bottom-up
-        tree = self._build_tree_from_leaves(leaves, rubric)
+        try:
+            tree = self._build_tree_from_leaves(leaves, rubric, errors)
+        except Exception as e:
+            logger.exception("Failed to build tree from leaves")
+            errors.append(
+                BuildError(
+                    stage="tree_build",
+                    message="Unhandled error during tree construction",
+                    exception_type=type(e).__name__,
+                    details=str(e),
+                    context={"leaves": len(leaves)}
+                )
+            )
+            tree = None
 
         # Calculate statistics
-        total_nodes = tree.node_count
+        total_nodes = tree.node_count if tree else len(leaves)
+        levels_created = tree.height + 1 if tree else 0
 
         return BuildResult(
             tree=tree,
             chunks_created=len(chunks),
             nodes_created=total_nodes,
-            levels_created=tree.height + 1,
+            levels_created=levels_created,
             errors=errors
         )
 
@@ -258,14 +305,18 @@ class OPSTreeBuilder:
         result = self.build_from_text(text, rubric)
 
         # Add file metadata
-        result.tree.metadata['source_file'] = str(filepath)
+        if result.tree is not None:
+            result.tree.metadata['source_file'] = str(filepath)
+        else:
+            logger.warning("Tree build failed for %s; returning partial result", filepath)
 
         return result
 
     def _build_tree_from_leaves(
         self,
         leaves: List[OPSNode],
-        rubric: str
+        rubric: str,
+        errors: Optional[List[BuildError]] = None
     ) -> OPSTree:
         """
         Build tree by recursively merging leaves.
@@ -322,14 +373,34 @@ class OPSTreeBuilder:
                         try:
                             results[idx] = future.result()
                         except Exception as e:
-                            logger.error(f"Merge failed for pair {idx}: {e}")
-                            # Create a fallback node with concatenated content
                             left, right = pairs[idx]
-                            fallback_content = f"{left.content}\n\n{right.content}"[:5000]
+                            logger.exception(
+                                "Merge failed for pair %s at level %s", idx, level_num
+                            )
+                            error_stage = "summarizer" if isinstance(e, MergeError) else "merge"
+                            error_entry = BuildError(
+                                stage=error_stage,
+                                message="Failed to merge node pair",
+                                exception_type=type(e).__name__,
+                                details=str(e),
+                                context={
+                                    "pair_index": idx,
+                                    "level": level_num,
+                                    "left_id": left.id,
+                                    "right_id": right.id,
+                                },
+                            )
+                            if isinstance(e, MergeError):
+                                error_entry.context.update(getattr(e, "context", {}))
+                            if errors is not None:
+                                errors.append(error_entry)
+
+                            fallback_content = self._fallback_summary(left, right)
                             results[idx] = create_internal_node(
+                                left=left,
+                                right=right,
                                 summary=fallback_content,
-                                children=[left, right],
-                                level=level_num
+                                node_id=f"fallback_L{level_num}_{idx}",
                             )
 
                     next_level = [r for r in results if r is not None]
@@ -388,6 +459,22 @@ class OPSTreeBuilder:
                 return candidates[best_idx]
 
         return candidates[0]
+    @staticmethod
+    def _node_text_for_fallback(node: OPSNode) -> str:
+        """Return the best available text for a node."""
+        if node.summary:
+            return node.summary
+        if node.raw_text_span:
+            return node.raw_text_span
+        return ""
+
+    def _fallback_summary(self, left: OPSNode, right: OPSNode) -> str:
+        """Construct a safe fallback summary from two child nodes."""
+        left_text = self._node_text_for_fallback(left)
+        right_text = self._node_text_for_fallback(right)
+        combined = f"{left_text}\n\n{right_text}".strip()
+        # Avoid overly long summaries if raw text is large
+        return combined[:5000] if combined else "[Fallback merge produced empty summary]"
 
     def _merge_nodes(
         self,
@@ -417,6 +504,23 @@ class OPSTreeBuilder:
 
         candidates = self._generate_candidate_summaries(combined, rubric)
         summary = self._select_summary(candidates, rubric, combined)
+        try:
+            summary = self.summarizer(combined, rubric)
+        except Exception as e:
+            logger.exception(
+                "Summarizer failed while merging nodes %s and %s at level %s",
+                left.id,
+                right.id,
+                level,
+            )
+            raise MergeError(
+                "Summarizer failed during merge",
+                context={
+                    "level": level,
+                    "left_id": left.id,
+                    "right_id": right.id,
+                },
+            ) from e
 
         self._build_stats['total_output_chars'] += len(summary)
 
