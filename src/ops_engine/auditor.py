@@ -21,8 +21,8 @@ import logging
 import json
 import warnings
 
-from src.core.data_models import OPSNode, OPSTree, AuditStatus, AuditResult
-from src.ops_engine.scoring import OracleScore, ScoringOracle, LegacyOracleAdapter
+from src.core.data_models import Node, Tree, AuditStatus, AuditResult
+from src.ops_engine.scoring import OracleScore, ScoringOracle
 from src.config.concurrency import ConcurrencyConfig, get_concurrency_config
 
 
@@ -136,8 +136,8 @@ def create_oracle_from_scorer(
         scorer = SimpleScorer()
         oracle = create_oracle_from_scorer(scorer, threshold=0.1)
 
-        # Now use with OPSAuditor
-        auditor = OPSAuditor(oracle=oracle, config=config)
+        # Now use with Auditor
+        auditor = Auditor(oracle=oracle, config=config)
     """
     def oracle_fn(input_a: str, input_b: str, rubric: str) -> Tuple[bool, float, str]:
         result = scorer.score(input_a, input_b, rubric)
@@ -392,7 +392,7 @@ class ReviewQueue:
 
     Example:
         >>> queue = ReviewQueue()
-        >>> auditor = OPSAuditor(oracle, config, review_queue=queue)
+        >>> auditor = Auditor(oracle, config, review_queue=queue)
         >>> auditor.audit_tree(tree)
         >>> batch = queue.get_batch(limit=10)
         >>> # Process batch with human reviewers or exact oracle
@@ -415,7 +415,7 @@ class ReviewQueue:
 
     def add(
         self,
-        node: OPSNode,
+        node: Node,
         tree_id: str,
         check_result: AuditCheckResult,
         rubric: str,
@@ -651,7 +651,7 @@ class ReviewQueue:
         return len(self._items)
 
 
-class OPSAuditor:
+class Auditor:
     """
     Auditor for OPS trees.
 
@@ -665,7 +665,7 @@ class OPSAuditor:
     Example:
         >>> oracle = create_oracle_from_scorer(SimpleScorer(), threshold=0.3)
         >>> queue = ReviewQueue()
-        >>> auditor = OPSAuditor(oracle, config=AuditConfig(sample_budget=5), review_queue=queue)
+        >>> auditor = Auditor(oracle, config=AuditConfig(sample_budget=5), review_queue=queue)
         >>> report = auditor.audit_tree(tree)
         >>> print(f"Passed: {report.passed}, Failures: {report.nodes_failed}")
         >>> # Get flagged items for human review
@@ -691,25 +691,7 @@ class OPSAuditor:
             summarizer: Optional summarizer function for idempotence/substitution checks.
                        Required if audit_idempotence or audit_substitution is True.
         """
-        # Normalize oracle interface: detect ScoringOracle vs legacy OracleJudge
-        # ScoringOracles have .score() method returning OracleScore
-        # Legacy OracleJudges have __call__ returning (bool, float, str)
-        def _has_call_method(obj) -> bool:
-            """Check if object has __call__ defined (excluding object base)."""
-            for cls in type(obj).__mro__:
-                if cls is object:
-                    continue
-                if '__call__' in cls.__dict__:
-                    return True
-            return False
-
-        if hasattr(oracle, 'score') and not _has_call_method(oracle):
-            # Pure ScoringOracle (has score but no __call__), wrap to legacy interface
-            threshold = config.discrepancy_threshold if config else 0.1
-            # LegacyOracleAdapter threshold is similarity (1.0=good), convert from discrepancy
-            self.oracle = LegacyOracleAdapter(oracle, threshold=1.0 - threshold)
-        else:
-            self.oracle = oracle
+        self._oracle = oracle
         self.config = config or AuditConfig()
         self.review_queue = review_queue
         self.summarizer = summarizer
@@ -717,7 +699,22 @@ class OPSAuditor:
         if self.config.random_seed is not None:
             random.seed(self.config.random_seed)
 
-    def audit_tree(self, tree: OPSTree) -> AuditReport:
+    def _call_oracle(self, input_a: str, input_b: str, rubric: str) -> Tuple[bool, float, str]:
+        """
+        Call the oracle and return (is_congruent, discrepancy, reasoning).
+
+        Handles both ScoringOracle and legacy OracleJudge interfaces.
+        """
+        from src.ops_engine.oracle_utils import call_oracle
+        return call_oracle(
+            self._oracle,
+            input_a,
+            input_b,
+            rubric,
+            threshold=self.config.discrepancy_threshold,
+        )
+
+    def audit_tree(self, tree: Tree) -> AuditReport:
         """
         Audit an OPS tree.
 
@@ -849,11 +846,11 @@ class OPSAuditor:
 
     def _batch_audit_nodes(
         self,
-        nodes: List[OPSNode],
+        nodes: List[Node],
         check_fn: Callable,
         rubric: str,
         max_workers: Optional[int] = None
-    ) -> List[Tuple["AuditCheckResult", str, str, OPSNode]]:
+    ) -> List[Tuple["AuditCheckResult", str, str, Node]]:
         """
         Run audit checks on nodes concurrently for better GPU utilization.
 
@@ -887,7 +884,7 @@ class OPSAuditor:
 
         return results
 
-    def _sample_nodes(self, nodes: List[OPSNode], budget: int) -> List[OPSNode]:
+    def _sample_nodes(self, nodes: List[Node], budget: int) -> List[Node]:
         """
         Sample nodes according to the configured strategy.
 
@@ -941,7 +938,7 @@ class OPSAuditor:
             # Default to random
             return random.sample(nodes, budget)
 
-    def _should_audit(self, node: OPSNode) -> bool:
+    def _should_audit(self, node: Node) -> bool:
         """
         Determine if a node should be audited based on probability.
 
@@ -956,7 +953,7 @@ class OPSAuditor:
         return random.random() < self.config.sampling_probability
 
     def _check_sufficiency(
-        self, node: OPSNode, rubric: str
+        self, node: Node, rubric: str
     ) -> Tuple[AuditCheckResult, str, str]:
         """
         Check if a leaf node's summary is sufficient.
@@ -976,7 +973,7 @@ class OPSAuditor:
         input_a = node.raw_text_span or ""
         input_b = node.summary
 
-        is_congruent, score, reasoning = self.oracle(input_a, input_b, rubric)
+        is_congruent, score, reasoning = self._call_oracle(input_a, input_b, rubric)
         passed = is_congruent and score <= self.config.discrepancy_threshold
 
         result = AuditCheckResult(
@@ -991,7 +988,7 @@ class OPSAuditor:
         return result, input_a, input_b
 
     def _check_merge_consistency(
-        self, node: OPSNode, rubric: str
+        self, node: Node, rubric: str
     ) -> Tuple[AuditCheckResult, str, str]:
         """
         Check if an internal node's summary is consistent with its children.
@@ -1018,7 +1015,7 @@ class OPSAuditor:
         input_a = "\n\n".join(child_summaries)
         input_b = node.summary
 
-        is_congruent, score, reasoning = self.oracle(input_a, input_b, rubric)
+        is_congruent, score, reasoning = self._call_oracle(input_a, input_b, rubric)
         passed = is_congruent and score <= self.config.discrepancy_threshold
 
         result = AuditCheckResult(
@@ -1033,7 +1030,7 @@ class OPSAuditor:
         return result, input_a, input_b
 
     def _check_idempotence(
-        self, node: OPSNode, rubric: str
+        self, node: Node, rubric: str
     ) -> AuditCheckResult:
         """
         Check if re-summarizing a summary preserves the oracle (Condition C2).
@@ -1078,7 +1075,7 @@ class OPSAuditor:
             )
 
         # Compare f*(s) vs f*(g(s))
-        is_congruent, score, reasoning = self.oracle(original_summary, re_summarized, rubric)
+        is_congruent, score, reasoning = self._call_oracle(original_summary, re_summarized, rubric)
         passed = is_congruent and score <= self.config.discrepancy_threshold
 
         return AuditCheckResult(
@@ -1092,7 +1089,7 @@ class OPSAuditor:
         )
 
     def _check_substitution(
-        self, left_node: OPSNode, right_node: OPSNode, rubric: str
+        self, left_node: Node, right_node: Node, rubric: str
     ) -> AuditCheckResult:
         """
         Check leaf boundary substitution consistency (Condition C3 Case A).
@@ -1161,7 +1158,7 @@ class OPSAuditor:
             )
 
         # Compare f*(joint_summary) vs f*(disjoint_summary)
-        is_congruent, score, reasoning = self.oracle(joint_summary, disjoint_summary, rubric)
+        is_congruent, score, reasoning = self._call_oracle(joint_summary, disjoint_summary, rubric)
         passed = is_congruent and score <= self.config.discrepancy_threshold
 
         return AuditCheckResult(
@@ -1175,8 +1172,8 @@ class OPSAuditor:
         )
 
     def _get_adjacent_leaf_pairs(
-        self, leaves: List[OPSNode]
-    ) -> List[Tuple[OPSNode, OPSNode]]:
+        self, leaves: List[Node]
+    ) -> List[Tuple[Node, Node]]:
         """
         Get pairs of adjacent leaf nodes for substitution checks.
 
@@ -1214,7 +1211,7 @@ class OPSAuditor:
 
     def _update_node_audit(
         self,
-        node: OPSNode,
+        node: Node,
         result: AuditCheckResult,
         tree_id: str,
         rubric: str,
@@ -1250,7 +1247,7 @@ class OPSAuditor:
 
 
 def audit_tree(
-    tree: OPSTree,
+    tree: Tree,
     oracle: Optional[Union[OracleJudge, Callable]] = None,
     scorer: Optional[ScoringOracle] = None,
     sample_budget: int = 10,
@@ -1289,7 +1286,7 @@ def audit_tree(
         discrepancy_threshold=threshold
     )
 
-    auditor = OPSAuditor(oracle, config)
+    auditor = Auditor(oracle, config)
     return auditor.audit_tree(tree)
 
 

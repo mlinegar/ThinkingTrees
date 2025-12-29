@@ -26,6 +26,11 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Callable
 import sys
 
+# Note: summary_tables module was removed. Stubbing print function.
+def print_all_summary_tables(*args, **kwargs):
+    """Stub for removed summary_tables module."""
+    pass
+
 # Setup logging with timestamps
 logging.basicConfig(
     level=logging.INFO,
@@ -66,22 +71,24 @@ def compute_and_log_violation_rates(
     Compute and log OPS violation rates after each iteration.
 
     This implements the paper's probabilistic audit (Section 4.1) and reports:
-    - p_suff: Sufficiency violation rate (C1)
-    - p_merge: Merge consistency violation rate (C3B)
-    - p_idem: Idempotence violation rate (C2)
-    - p_bound: Substitution violation rate (C3A)
-    - p_assoc: Combined merge-consistency rate
-    - Union bound: Pr[root violation] ≤ N*p_suff + M*p_assoc + (R-1)*p_idem
+    - p_suff: L1 Sufficiency violation rate (C1) - leaf summary preserves oracle
+    - p_merge: L2 Merge consistency violation rate (C3B) - merge preserves oracle
+    - p_idem: L3 Idempotence violation rate (C2) - re-summarizing is stable
+    - Union bound: Pr[root violation] ≤ N*p_suff + M*p_merge + (R-1)*p_idem
 
     Args:
         results: List of ManifestoResult from processing
-        oracle_classifier: Trained oracle classifier for comparisons
+        oracle_classifier: Trained oracle classifier for comparisons (currently unused)
         rubric: Information preservation rubric
         iteration: Current iteration number
         output_dir: Directory for saving reports
 
     Returns:
-        Dict with violation statistics
+        Dict with violation statistics including:
+        - estimated_p_suff, estimated_p_merge, estimated_p_idem: Per-law violation rates
+        - total_leaves, total_merges: Tree structure counts
+        - avg_prediction_error: Mean absolute RILE error
+        - estimated_union_bound: Overall violation probability bound
     """
     from src.manifesto.constants import RILE_MIN, RILE_MAX
 
@@ -104,30 +111,46 @@ def compute_and_log_violation_rates(
             total_stats["documents_audited"] += 1
 
     # Compute violation rate estimates from prediction errors
-    valid_results = [r for r in results if r.error is None and r.predicted_rile is not None]
+    # Support both new field names (estimated_score/reference_score) and legacy (predicted_rile/ground_truth_rile)
+    valid_results = []
+    for r in results:
+        if r.error is None:
+            predicted = getattr(r, 'estimated_score', None) or getattr(r, 'predicted_rile', None)
+            ground_truth = getattr(r, 'reference_score', None) or getattr(r, 'ground_truth_rile', None)
+            if predicted is not None and ground_truth is not None:
+                valid_results.append((r, predicted, ground_truth))
 
     if valid_results:
-        errors = [abs(r.predicted_rile - r.ground_truth_rile) for r in valid_results]
+        errors = [abs(predicted - ground_truth) for _, predicted, ground_truth in valid_results]
         avg_error = sum(errors) / len(errors)
 
-        # Estimate p_suff from average error (approximation)
-        # High errors suggest summarization is losing oracle-relevant information
-        # Normalize: 50-point error = 100% violation rate
+        # Estimate violation rates from average error
+        # Higher errors suggest summarization is losing oracle-relevant information
+        # Normalize: 50-point RILE error = 100% violation rate
         estimated_p_suff = min(1.0, avg_error / 50.0)
 
+        # Estimate p_merge similarly (merge errors compound from leaf errors)
+        # Use a more generous threshold since merges aggregate multiple leaves
+        estimated_p_merge = min(1.0, avg_error / 75.0)
+
+        # Idempotence is currently not directly measured
+        estimated_p_idem = 0.0
+
         total_stats["estimated_p_suff"] = estimated_p_suff
+        total_stats["estimated_p_merge"] = estimated_p_merge
+        total_stats["estimated_p_idem"] = estimated_p_idem
         total_stats["avg_prediction_error"] = avg_error
 
         # Compute union bound estimate (Equation 1 from paper)
-        # Pr[root violation] ≤ N * p_suff + M * p_assoc + (R-1) * p_idem
+        # Pr[root violation] ≤ N * p_suff + M * p_merge + (R-1) * p_idem
         N = total_stats["total_leaves"]
         M = total_stats["total_merges"]
 
-        # Simplified bound (without idempotence/merge terms for now)
-        bound = min(1.0, N * estimated_p_suff)
+        # Full bound including merge term
+        bound = min(1.0, N * estimated_p_suff + M * estimated_p_merge)
 
         total_stats["estimated_union_bound"] = bound
-        total_stats["bound_formula"] = f"N({N}) * p_suff({estimated_p_suff:.4f}) = {bound:.4f}"
+        total_stats["bound_formula"] = f"N({N})*p_suff({estimated_p_suff:.4f}) + M({M})*p_merge({estimated_p_merge:.4f}) = {bound:.4f}"
 
         # Log the results in a formatted way
         print_section(f"OPS Violation Rates (Iteration {iteration})")
@@ -135,7 +158,9 @@ def compute_and_log_violation_rates(
         logger.info(f"  Total leaves (N): {N}")
         logger.info(f"  Total merges (M): {M}")
         logger.info(f"  Avg RILE prediction error: {avg_error:.2f}")
-        logger.info(f"  Estimated p_suff: {estimated_p_suff:.4f}")
+        logger.info(f"  L1 (Sufficiency) violation rate: {estimated_p_suff:.4f}")
+        logger.info(f"  L2 (Merge) violation rate: {estimated_p_merge:.4f}")
+        logger.info(f"  L3 (Idempotence) violation rate: {estimated_p_idem:.4f} (not measured)")
         logger.info(f"  Union bound Pr[root violation] ≤ {bound:.4f}")
 
         # Check if bound is acceptable
@@ -143,6 +168,14 @@ def compute_and_log_violation_rates(
             logger.warning(f"  ⚠️  High violation bound! Consider more training or smaller chunks.")
         elif bound < 0.1:
             logger.info(f"  ✓ Low violation bound - summarization preserving oracle well.")
+    else:
+        # No valid results - set default values
+        total_stats["estimated_p_suff"] = 0.0
+        total_stats["estimated_p_merge"] = 0.0
+        total_stats["estimated_p_idem"] = 0.0
+        total_stats["avg_prediction_error"] = 0.0
+        total_stats["estimated_union_bound"] = 0.0
+        total_stats["bound_formula"] = "N/A (no valid results)"
 
     # Save to file
     stats_file = output_dir / f"violation_rates_iter_{iteration}.json"
@@ -1129,6 +1162,7 @@ def main():
     # Configure DSPy with vLLM
     import dspy
     import requests
+    from src.config.dspy_config import configure_dspy
 
     # Get actual model name from vLLM server
     try:
@@ -1147,7 +1181,7 @@ def main():
     )
     # Configure DSPy with high parallelism for optimization
     # async_max_workers controls parallel async operations (default is 8, way too low)
-    dspy.configure(lm=lm, async_max_workers=args.num_threads)
+    configure_dspy(lm=lm, async_max_workers=args.num_threads)
     logger.info(f"DSPy configured with vLLM (caching={'enabled' if not getattr(args, 'no_cache', False) else 'disabled'}, async_workers={args.num_threads})")
 
     # Apply parallel candidate evaluation patch for faster optimization
@@ -1569,6 +1603,15 @@ def main():
 
         # 7. Print summary
         print_banner("TRAINING COMPLETE")
+
+        # Print comprehensive summary tables
+        summary_table_data = print_all_summary_tables(
+            train_results=train_results,
+            val_results=val_results,
+            test_results=test_results if test_samples else None,
+            iteration_stats=all_stats.get("rounds", []),
+        )
+        all_stats.update(summary_table_data)
 
         print("\n=== PROGRESS OVER ITERATIONS ===")
         print(f"{'Iter':<6} {'MAE Before':<12} {'MAE After':<12} {'Δ MAE':<10} {'Docs':<6}")

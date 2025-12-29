@@ -1,24 +1,21 @@
 """
 DSPy Optimization for Oracle Approximation.
 
-This module implements staged optimization for OracleClassifier with
-swappable optimizer backends.
+This module provides OracleOptimizer, a high-level wrapper around DSPy optimizers
+that includes:
+- Swappable optimizers: GEPA, MIPROv2, BootstrapFewShot
+- Single-stage and staged optimization modes
+- Lightweight checkpointing using DSPy's native save format
+- Metric evaluation with parallel execution
 
-Key features:
-- Swappable optimizers: GEPA (default), MIPROv2, BootstrapFewShot
-- Single-stage optimization with configurable budget
-- Multi-stage optimization with module freezing
-- Lightweight checkpointing (DSPy-native save format only)
-- Stage-specific metric support
-- Feedback-rich metrics for GEPA reflection
-
-Note: For the new registry-based optimizer system, see the optimizers/
-submodule. This file is maintained for backward compatibility.
+For direct access to individual optimizers without the wrapper, use:
+    from src.ops_engine.training_framework.optimizers import get_optimizer
 """
 
 import json
 import logging
 import time
+import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -26,13 +23,14 @@ from typing import List, Dict, Optional, Callable, Any, Tuple
 
 import dspy
 
-from .core import LabelSpace, Prediction, UnifiedTrainingExample
+# Note: This module provides the OracleOptimizer class which is a high-level wrapper
+# around DSPy optimizers. For direct access to optimizers, use the optimizers/ submodule:
+#   from src.ops_engine.training_framework.optimizers import get_optimizer
+
+from .core import Prediction, UnifiedTrainingExample
 from .config import OptimizationConfig
 from .metrics import (
-    create_classification_metric,
     create_violation_metric,
-    evaluate_classifier,
-    EvaluationResult,
 )
 
 # Note: The new registry-based optimizer system is in the optimizers/ submodule.
@@ -48,57 +46,32 @@ logger = logging.getLogger(__name__)
 # Result Tracking
 # =============================================================================
 
-@dataclass
-class OptimizationResult:
-    """Result of a single optimization run or stage."""
+# Import canonical OptimizationResult from the new optimizer registry.
+# This module used to define its own OptimizationResult, but now re-exports
+# the canonical version for backward compatibility.
+from .optimizers.base import OptimizationResult
 
-    iteration: int
-    stage: str  # "full", "classify", "retrieve", etc.
-    timestamp: str
+# Legacy to_dict method was removed as the canonical class has it.
+# If you need to convert to dict, use: result.to_dict()
 
-    # Metrics
-    metric_before: float
-    metric_after: float
-    improvement: float
+# The following is kept for reference but the class is now imported from base.py:
+# @dataclass
+# class OptimizationResult:
+#     """Result of a single optimization run or stage."""
+#     iteration: int
+#     stage: str
+#     timestamp: str
+#     metric_before: float
+#     metric_after: float
+#     improvement: float
+#     examples_used: int
+#     trainset_size: int
+#     valset_size: int
+#     checkpoint_path: Optional[Path] = None
+#     config_snapshot: Optional[Dict] = None
+#     error_message: Optional[str] = None
 
-    # Data info
-    examples_used: int
-    trainset_size: int
-    valset_size: int
 
-    # Checkpoint
-    checkpoint_path: Optional[Path] = None
-
-    # Additional metadata
-    config_snapshot: Optional[Dict] = None
-    error_message: Optional[str] = None
-
-    @property
-    def success(self) -> bool:
-        return self.error_message is None
-
-    def to_dict(self) -> Dict:
-        return {
-            'iteration': self.iteration,
-            'stage': self.stage,
-            'timestamp': self.timestamp,
-            'metric_before': self.metric_before,
-            'metric_after': self.metric_after,
-            'improvement': self.improvement,
-            'examples_used': self.examples_used,
-            'trainset_size': self.trainset_size,
-            'valset_size': self.valset_size,
-            'checkpoint_path': str(self.checkpoint_path) if self.checkpoint_path else None,
-            'config_snapshot': self.config_snapshot,
-            'error_message': self.error_message,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict) -> 'OptimizationResult':
-        data = dict(data)
-        if data.get('checkpoint_path'):
-            data['checkpoint_path'] = Path(data['checkpoint_path'])
-        return cls(**data)
 
 
 # =============================================================================
@@ -107,11 +80,11 @@ class OptimizationResult:
 
 class OracleOptimizer:
     """
-    Stage-by-stage optimization for OracleClassifier.
+    Stage-by-stage optimization for score prediction modules.
 
     Supports two optimization modes:
-    1. Single-stage: Optimize entire classifier at once
-    2. Staged (left-to-right): Optimize retrieval, then classification
+    1. Single-stage: Optimize entire module at once
+    2. Staged (left-to-right): Optimize retrieval, then prediction
 
     Uses the _compiled flag pattern from xmc.dspy to freeze modules
     during staged optimization.
@@ -144,14 +117,14 @@ class OracleOptimizer:
         Single-stage optimization using BootstrapFewShot.
 
         Args:
-            classifier: The OracleClassifier module to optimize
+            classifier: The DSPy module to optimize (any score prediction module)
             trainset: Training examples
             valset: Optional validation examples (uses trainset if None)
             metric: DSPy metric function (auto-creates if None)
             teacher: Optional teacher module for bootstrap
 
         Returns:
-            Optimized classifier module
+            Optimized module
         """
         self._iteration_count += 1
         timestamp = datetime.now().isoformat()
@@ -163,26 +136,23 @@ class OracleOptimizer:
 
         valset = valset or trainset
 
-        # Get label space from classifier if available
-        label_space = getattr(classifier, 'label_space', None)
-
         # Create default metric if not provided
-        # Use feedback-rich metrics for GEPA optimizer
-        use_feedback = self.config.optimizer_type == "gepa"
         if metric is None:
-            if label_space:
-                metric = create_classification_metric(
-                    label_space,
-                    weighted=label_space.is_ordinal,
-                    with_feedback=use_feedback,
-                )
-            else:
-                metric = create_violation_metric()
+            metric = create_violation_metric()
 
         # Evaluate before optimization
         metric_before = self._evaluate_metric(classifier, valset, metric)
 
         try:
+            # Reset compiled state if needed (for iterative optimization)
+            if getattr(classifier, '_compiled', False):
+                logger.debug("Resetting compiled state for re-optimization")
+                classifier._compiled = False
+                # Also reset any demo attributes that might interfere
+                for predictor in classifier.predictors():
+                    if hasattr(predictor, 'demos'):
+                        predictor.demos = []
+
             # Create compiler
             compiler = self._create_compiler(metric)
 
@@ -273,25 +243,21 @@ class OracleOptimizer:
         to prevent interference with subsequent stages.
 
         Args:
-            classifier: The OracleClassifier module to optimize
+            classifier: The DSPy module to optimize
             trainset: Training examples
             valset: Optional validation examples
-            stages: List of stage names to optimize (default: ["retrieve", "classify"])
+            stages: List of stage names to optimize (default: ["retrieve", "predict"])
             stage_metrics: Dict mapping stage name to metric function
 
         Returns:
-            Optimized classifier module
+            Optimized module
         """
         valset = valset or trainset
         stages = stages or self._infer_stages(classifier)
         stage_metrics = stage_metrics or {}
 
-        label_space = getattr(classifier, 'label_space', None)
-
-        # Default metrics for each stage
-        default_metric = create_classification_metric(
-            label_space, weighted=label_space.is_ordinal
-        ) if label_space else create_violation_metric()
+        # Default metric for optimization
+        default_metric = create_violation_metric()
 
         logger.info(f"Starting staged optimization: {stages}")
 
@@ -475,14 +441,19 @@ class OracleOptimizer:
         examples: List[dspy.Example],
         metric: Callable,
     ) -> float:
-        """Evaluate classifier on examples using metric."""
+        """Evaluate classifier on examples using metric with parallel execution."""
         if not examples:
             return 0.0
 
-        scores = []
-        for example in examples[:min(20, len(examples))]:  # Limit for speed
+        # Use enough samples for stable metrics (50 balances speed vs signal)
+        eval_examples = examples[:min(50, len(examples))]
+
+        # Parallel evaluation using ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def evaluate_one(example: dspy.Example) -> float:
+            """Evaluate a single example."""
             try:
-                # Call classifier
                 prediction = classifier(
                     original_content=example.original_content,
                     summary=example.summary,
@@ -491,26 +462,31 @@ class OracleOptimizer:
                 result = metric(example, prediction)
                 # Handle feedback-rich metrics that return dict
                 if isinstance(result, dict):
-                    score = result.get('score', 0.0)
+                    return result.get('score', 0.0)
                 else:
-                    score = result
-                scores.append(score)
+                    return result
             except Exception as e:
                 logger.debug(f"Evaluation error: {e}")
-                scores.append(0.0)
+                return 0.0
+
+        # Use 8 workers for parallel evaluation
+        scores = []
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(evaluate_one, ex) for ex in eval_examples]
+            scores = [f.result() for f in as_completed(futures)]
 
         return sum(scores) / len(scores) if scores else 0.0
 
     def _infer_stages(self, classifier: dspy.Module) -> List[str]:
-        """Infer optimization stages from classifier structure."""
+        """Infer optimization stages from module structure."""
         stages = []
 
         # Check for retriever
         if hasattr(classifier, 'retriever') and classifier.retriever is not None:
             stages.append("retrieve")
 
-        # Classification is always a stage
-        stages.append("classify")
+        # Prediction is always a stage
+        stages.append("predict")
 
         return stages
 
@@ -524,7 +500,7 @@ class OracleOptimizer:
         # Map stage names to module attributes
         stage_modules = {
             "retrieve": ["retriever"],
-            "classify": ["classify", "detect_violation"],
+            "predict": ["predict", "detect_violation"],
         }
 
         for stage in all_stages:
@@ -544,7 +520,7 @@ class OracleOptimizer:
         """Mark a stage as compiled after optimization."""
         stage_modules = {
             "retrieve": ["retriever"],
-            "classify": ["classify", "detect_violation"],
+            "predict": ["predict", "detect_violation"],
         }
 
         modules = stage_modules.get(stage, [stage])

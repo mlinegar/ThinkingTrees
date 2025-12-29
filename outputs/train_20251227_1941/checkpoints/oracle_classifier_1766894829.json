@@ -1,0 +1,44 @@
+{
+  "score.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "markdown\n**Task Instruction**\n\nYou are given a `task_context` that defines a political‑scale rubric (RILE: Right‑Left scale from –100 to +100) and one or more `text` fields containing political statements to be evaluated. Your objective is to:\n\n1. **Extract the rubric** from `task_context` and list all LEFT and RIGHT indicator categories exactly as they appear.  \n   - **Typical LEFT indicators (negative score contributions):**  \n     `Decolonization`, `anti‑imperialism`, `Military (negative/peace emphasis)`, `Internationalism (positive)`, `Market regulation emphasis`, `Economic planning emphasis`, `Welfare‑state expansion`, `Education expansion`, `Labour‑group support`, `Environmental protection`, `State inspection`, `Cultural‑industry tax incentives`, `Bilingual education`, `Military‑justice reform`, `Women in armed forces`, `Defense‑spending percentages`, `NATO integration`, `Foreign aid targeting refugee‑hosting countries`, etc.  \n   - **Typical RIGHT indicators (positive score contributions):**  \n     `Foreign special relationships (positive)`, `Military (positive)`, `Freedom & human rights (traditional)`, `Free‑enterprise emphasis`, `Economic incentives`, `Protectionism (negative for free trade)`, `Welfare‑state limitation`, `National way of life`, `Traditional morality`, `Law‑and‑order emphasis`, `Civic mindedness`, etc.  \n   - **Niche cues to watch for:** `market‑free‑enterprise`, `welfare‑state limitation`, `national‑way‑of‑life`, `traditional morality`, `civic mindedness`, etc.\n\n2. **Parse each supplied `text`** for:  \n   - Concrete policy commitments (e.g., “increase overseas financial support”, “expand welfare benefits”, “allocate 2 % of GDP to defense”).  \n   - Intensity markers (e.g., “absolute priority”, “deep reform”, “marked increase”, “structured plans”, “explicit statement”).  \n   - Explicit party‑positioning statements (e.g., “our foreign policy is our absolute priority”).  \n   - Quantitative targets (numbers, percentages, budget figures).  \n   - Mentions of institutions, actors, or roles of government vs. market.\n\n3. **Classify each cue** as belonging to a LEFT or RIGHT indicator.  \n   - Add the exact wording from the text to `left_indicators` or `right_indicators` lists, preserving the original phrasing.  \n   - Neutral cues are ignored for scoring but may be mentioned in the summary.\n\n4. **Assign a numeric RILE score** using these weightings:  \n   - **Strong cue** (explicit, high‑intensity wording) → ±10 points.  \n   - **Moderate cue** (clear but less emphatic) → ±5 points.  \n   - **Weak cue** (qualifier or mild wording) → ±2 points.  \n   - Subtract the absolute value for LEFT cues, add for RIGHT cues.  \n   - Sum all contributions, round to one decimal place, and keep the sign.\n\n5. **Generate a concise summary** that **preserves every left‑right cue** (policy content, intensity, explicit statements, numbers).  \n   - Do **not** omit concrete proposals, numbers, or qualifying adjectives.  \n   - Keep intensity adjectives and explicit statements intact.  \n   - If multiple texts are supplied, produce a **merged_summary** that integrates all cues while still preserving each original nuance.  \n   - The summary must be a single paragraph (or bullet list) that mirrors the original wording of each tagged cue.\n\n6. **Produce output** in strict JSON format (no extra commentary). The JSON must contain the following keys:  \n   - `reasoning`: brief justification of the stance and scoring logic.  \n   - `riLE_score`: numeric score (‑100 → far left, +100 → far right).  \n   - `left_indicators`: ordered list of the LEFT cues that contributed to the score.  \n   - `right_indicators`: ordered list of the RIGHT cues that contributed to the score.  \n   - `summary`: concise merged summary that preserves left‑right information.  \n   - `merged_summary`: **only** if more than one `text` was provided; otherwise omit or repeat `summary`.\n\n7. **Special requirements / niche domain facts you must never violate:**  \n   - Recognized LEFT cues include: environmental protection, education expansion, welfare‑state expansion, state inspection, cultural‑industry tax incentives, bilingual education, military‑justice reform, women in armed forces, defense‑spending percentages, NATO integration, foreign aid targeting refugee‑hosting countries, etc.  \n   - Recognized RIGHT cues include: market‑free‑enterprise emphasis, protectionism (negative for free trade), welfare‑state limitation, national‑way‑of‑life, traditional morality, law‑and‑order, etc.  \n   - Intensity markers such as “absolute priority”, “core objective”, “deep reform”, “marked increase”, “structured plans”, “explicit statement” affect cue weight and must be retained in the summary.  \n   - When a cue appears in multiple texts, the merged summary must reflect the **combined emphasis** (e.g., “the party pledges both to expand welfare benefits and to increase defense spending”).  \n   - Do **not** introduce any information not present in the input; only re‑phrase and condense.  \n   - Do **not** convert qualitative cues into numbers unless the text itself supplies a figure (e.g., “2 % of GDP”).  \n   - Do **not** add external knowledge; rely solely on cues from the supplied text(s).\n\n8. **Generalizable strategy (embed in your reasoning):**  \n   - **Step 1**: Read `task_context` → extract LEFT/RIGHT indicator lists.  \n   - **Step 2**: Scan each `text` → tag every policy clause with a cue and note its intensity.  \n   - **Step 3**: Map each cue to its indicator list and assign a weight (±10, ±5, ±2).  \n   - **Step 4**: Compute `riLE_score` by summing contributions.  \n   - **Step 5**: Draft `summary` (and `merged_summary` if needed) preserving all tagged cues and their intensity.  \n   - **Step 6**: Populate the JSON fields (`reasoning`, `riLE_score`, `left_indicators`, `right_indicators`, `summary`, `merged_summary`).  \n\n**Input Format Example**\n```json\n{\n  \"task_context\": \"<free‑form description of the RILE rubric, including LEFT and RIGHT indicator lists and scoring range>\",\n  \"text\": \"<single political statement or a list of statements>\"\n}\n```\n*If multiple texts are supplied, the key may be `texts` (array) or additional fields; the rubric remains the same.*\n\n**Output Example**\n```json\n{\n  \"reasoning\": \"The text emphasizes environmental protection and fairness, which are left‑leaning cues; no right cues are present, yielding a negative score.\",\n  \"riLE_score\": -15.0,\n  \"left_indicators\": [\n    \"Environmental protection\",\n    \"Fairness/equality (welfare‑oriented)\"\n  ],\n  \"right_indicators\": [],\n  \"summary\": \"The speaker emphasizes environmental protection and a fairer society, suggesting support for greener policies and egalitarian welfare, without detailing specific economic measures.\",\n  \"merged_summary\": \"...\"   // only when multiple texts are provided\n}\n```\n\n**Key Points to Remember**  \n- Preserve *all* left‑right cues exactly as they appear in the source text.  \n- Retain any intensity adjectives and explicit statements.  \n- Keep quantitative data unchanged.  \n- The final JSON must be valid and match the structure above exactly.  \n- No additional commentary or explanation may be included outside the JSON object.  \n\nProceed to analyze the provided `task_context` and `text(s)` accordingly.",
+      "fields": [
+        {
+          "prefix": "Task Context:",
+          "description": "Explanation of the RILE scoring task and left/right indicators"
+        },
+        {
+          "prefix": "Text:",
+          "description": "Political manifesto text or summary to score"
+        },
+        {
+          "prefix": "Reasoning:",
+          "description": "Explanation of how the score was determined"
+        },
+        {
+          "prefix": "Rile Score:",
+          "description": "RILE score from -100 (far left) to +100 (far right)"
+        },
+        {
+          "prefix": "Left Indicators:",
+          "description": "Key left-leaning positions identified in the text"
+        },
+        {
+          "prefix": "Right Indicators:",
+          "description": "Key right-leaning positions identified in the text"
+        }
+      ]
+    },
+    "lm": null
+  },
+  "metadata": {
+    "dependency_versions": {
+      "python": "3.12",
+      "dspy": "3.0.4",
+      "cloudpickle": "3.1"
+    }
+  }
+}

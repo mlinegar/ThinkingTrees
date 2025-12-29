@@ -1,162 +1,168 @@
 # ThinkingTrees: Oracle-Preserving Summarization (OPS)
 
-An implementation of hierarchical summarization with audit capabilities, designed to preserve critical information through recursive compression while maintaining verifiability.
+Hierarchical summarization with verifiable information preservation guarantees. Build recursive summarization trees that maintain task-critical information through probabilistic auditing and DSPy-based optimization.
 
-## Project Overview
+## Quick Start
 
-ThinkingTrees builds **OPS (Oracle-Preserving Summarization)** trees that:
-1. Recursively summarize documents from leaves (chunks) to root
-2. Preserve task-critical information defined by a "rubric"
-3. Enable probabilistic auditing to detect information loss
-4. Support human-in-the-loop verification and optimization
+```bash
+# Activate environment
+source venv/bin/activate
+
+# Start inference servers
+./scripts/start_dual_servers.sh
+
+# Run training pipeline (default task + dataset: RILE scoring on manifestos)
+./scripts/run_training_pipeline.sh \
+  --output-dir outputs/train_$(date +%Y%m%d_%H%M) \
+  --train-samples 100 \
+  --optimizer bootstrap_random_search
+
+# Run with generic summarization task (still on manifestos by default)
+./scripts/run_training_pipeline.sh \
+  --task summarization \
+  --output-dir outputs/summarization_test
+```
 
 ## Architecture
 
 ```
 ThinkingTrees/
 ├── config/
-│   ├── settings.yaml          # Legacy vLLM + generation defaults
-│   ├── training.yaml          # Training hyperparameters, RNG seeds, artifacts
-│   ├── inference.yaml         # Runtime/generation settings for building trees
-│   └── audit.yaml             # Audit sampling policies and output paths
-├── data/
-│   ├── raw/                   # Input documents (PDF, text, etc.)
-│   ├── processed/             # Chunked document JSONs
-│   └── trees/                 # Serialized OPS trees
+│   └── settings.yaml              # Model configs, generation params
 ├── src/
 │   ├── core/
-│   │   ├── llm_client.py      # LLM wrapper (adapted from OmniThink)
-│   │   ├── signatures.py      # DSPy signatures for summarization/judging
-│   │   └── data_models.py     # OPSNode and OPSTree classes
-│   ├── preprocessing/
-│   │   └── chunker.py         # Text chunking (adapted from LangExtract)
+│   │   ├── data_models.py         # Node, Tree, AuditResult
+│   │   ├── documents.py           # DocumentSample, DocumentResult
+│   │   ├── llm_client.py          # LLMClient (vLLM/OpenAI)
+│   │   ├── signatures.py          # DSPy signatures
+│   │   ├── batch_processor.py     # Level-wise batch processing
+│   │   └── output_parser.py       # Case-insensitive LLM output parsing
+│   │
+│   ├── datasets/                  # Dataset plugins (where data comes from)
+│   │   ├── base.py                # DatasetPlugin protocol
+│   │   ├── manifesto.py           # Manifesto dataset
+│   │   └── jsonl.py               # Generic JSONL dataset
+│   │
 │   ├── ops_engine/
-│   │   ├── builder.py         # Tree construction (leaves → root)
-│   │   ├── auditor.py         # Probabilistic audit logic
-│   │   └── optimizer.py       # Bootstrap optimization from failures
-│   └── utils/
-│       └── visualization.py   # Tree visualization and debugging
-├── tests/
-│   ├── core/
-│   │   ├── test_data_models.py
-│   │   └── test_llm_client.py
-│   ├── preprocessing/
-│   │   └── test_chunker.py
-│   ├── ops_engine/
-│   │   ├── test_builder.py
-│   │   └── test_auditor.py
-│   └── conftest.py            # Shared pytest fixtures
-├── doc/
-│   ├── gemini_implementation_plan.txt  # Original implementation plan
-│   ├── architecture.md        # Detailed architecture documentation
-│   ├── test_plan.md           # Test-driven development plan
-│   └── api_reference.md       # API documentation
-├── main.py                    # Entry point
-└── requirements.txt           # Dependencies
+│   │   ├── builder.py             # TreeBuilder (bottom-up construction)
+│   │   ├── auditor.py             # Probabilistic verification
+│   │   ├── bootstrap_loop.py      # Multi-iteration training loop
+│   │   ├── scoring.py             # OracleScore, ScoringOracle
+│   │   ├── initialization.py      # Top-down demo seeding
+│   │   └── training_framework/
+│   │       ├── config.py          # Training configuration
+│   │       ├── preference.py      # Preference learning
+│   │       ├── genrm_preference.py # GenRM integration
+│   │       ├── optimizers/        # DSPy optimizer registry
+│   │       └── domains/           # Pluggable domain system
+│   │           ├── base.py        # DomainPlugin protocol
+│   │           ├── registry.py    # Domain discovery
+│   │           ├── manifesto.py   # RILE scoring (-100 to +100)
+│   │           └── summarization.py # Generic quality (0 to 1)
+│   │
+│   ├── pipelines/                 # Task/dataset-agnostic pipelines
+│   │   └── batched.py             # Batched inference pipeline
+│   │
+│   ├── manifesto/                 # Manifesto-specific components
+│   │   ├── data_loader.py         # ManifestoDataset
+│   │   ├── signatures.py          # RILEScorer, RILEComparator
+│   │   └── evaluation.py          # Domain metrics
+│   │
+│   └── training/
+│       └── run_pipeline.py        # Main training entry point
+│
+├── scripts/
+│   ├── start_dual_servers.sh      # Start inference servers
+│   ├── run_training_pipeline.sh   # Training wrapper
+│   └── stop_small_servers.sh      # Server shutdown
+│
+└── experiments/manifesto_rile/    # Experiment scripts
 ```
-
-## File Mapping: Source → ThinkingTrees
-
-| ThinkingTrees File | Source | Action |
-|-------------------|--------|--------|
-| `src/core/llm_client.py` | OmniThink `src/tools/lm.py` | ADAPT - Simplified DSPy/OpenAI wrapper |
-| `src/core/signatures.py` | OmniThink patterns | ADAPT - New DSPy signatures for OPS |
-| `src/core/data_models.py` | New | CREATE - OPSNode/OPSTree classes |
-| `src/preprocessing/chunker.py` | LangExtract `langextract/chunking.py` | ADAPT - Simplified chunking |
-| `src/ops_engine/builder.py` | New + OmniThink patterns | CREATE - Tree construction |
-| `src/ops_engine/auditor.py` | New | CREATE - Audit logic |
-| `src/ops_engine/optimizer.py` | OmniThink/DSPy | ADAPT - Bootstrap optimization |
-| `src/utils/visualization.py` | New | CREATE - Debug/visualization tools |
 
 ## Core Concepts
 
-### OPSNode
-The fundamental building block of the summarization tree:
+### Node
+The atomic unit of the summarization tree:
+
 ```python
 @dataclass
-class OPSNode:
+class Node:
     id: str                          # Unique identifier
     level: int                       # 0 = leaf, higher = more summarized
-    raw_text_span: Optional[str]     # Original text (for leaves)
-    summary: str                     # The summary at this node
-    left_child: Optional[OPSNode]    # Left child (binary tree)
-    right_child: Optional[OPSNode]   # Right child
-    audit_passed: bool               # Did this node pass audit?
-    discrepancy_score: float         # 0.0 = perfect, 1.0 = total loss
+    raw_text_span: Optional[str]     # Original text (leaves only)
+    summary: str                     # Summary at this node
+    left_child: Optional[Node]       # Left subtree
+    right_child: Optional[Node]      # Right subtree
+    audit_result: AuditResult        # Verification status
 ```
 
-### Key Operations
+### Task Plugins
+Tasks define what we do with documents (summarization, scoring, extraction):
 
-1. **RecursiveSummary**: Compress content while preserving rubric-defined information
-2. **OracleJudge**: Compare two inputs to detect information drift
-3. **Audit**: Sample nodes to verify information preservation
+```python
+from src.tasks import get_task
 
-## Development Phases
+# RILE score prediction
+task = get_task("manifesto_rile")  # Scale: -100 to +100
 
-### Phase 1: Foundation (Current)
-- [x] Project structure
-- [ ] Core data models (OPSNode, OPSTree)
-- [ ] Basic text chunking
-- [ ] Tree builder (bottom-up construction)
+# Generic summarization quality
+task = get_task("summarization")   # Scale: 0 to 1
 
-### Phase 2: LLM Integration
-- [ ] LLM client with DSPy
-- [ ] RecursiveSummary signature
-- [ ] Basic summarization pipeline
+# Use task-specific components
+rubric = task.create_rubric()
+predictor = task.create_predictor()
+metric = task.create_metric()
+```
 
-### Phase 3: Audit & Optimization
-- [ ] OracleJudge signature
-- [ ] Probabilistic auditor
-- [ ] Human review queue
-- [ ] Bootstrap optimizer
+### Dataset Plugins
+Datasets define where documents come from:
 
-### Phase 4: Production
-- [ ] Visualization tools
-- [ ] CLI interface
-- [ ] Documentation
+```python
+from src.datasets import get_dataset
 
-## Quick Start
+dataset = get_dataset("manifesto")
+samples = dataset.load_samples(limit=100)
+```
+
+### OPS Laws (Verified by Auditor)
+1. **Sufficiency (C1)**: `oracle(summary) ≈ oracle(original)`
+2. **Idempotence (C2)**: `oracle(summarize(S)) ≈ oracle(S)`
+3. **Merge Consistency (C3)**: `oracle(merge) ≈ aggregate(oracle(children))`
+
+## Key Pipeline Flags
+
+| Flag | Options | Description |
+|------|---------|-------------|
+| `--task` | manifesto_rile, summarization | Task plugin (default: manifesto_rile) |
+| `--dataset` | manifesto, jsonl | Dataset plugin (default: manifesto) |
+| `--domain` | legacy | Legacy alias for `--task` |
+| `--optimizer` | bootstrap_random_search, gepa, mipro | DSPy optimizer |
+| `--optimizer-budget` | light, medium, heavy | Optimization intensity |
+| `--enable-genrm` | - | Use GenRM for preference learning |
+| `--n-iterations` | 1, 2+, 0 | Training iterations (0=until convergence) |
+
+## Models
+
+| Model | Port | Use Case |
+|-------|------|----------|
+| Nemotron-30B-FP8 | 8000 | Default inference |
+| GenRM-NVFP4-235B | 8001 | Preference scoring |
+
+## Development
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
 # Run tests
 pytest tests/ -v
 
-# Train preference/distillation pipeline (produces checkpoints + metadata)
-python main.py train --config config/training.yaml
+# Check syntax
+python3 -m py_compile src/**/*.py
 
-# Build a tree from a document
-python main.py infer --input data/raw/document.txt --config config/inference.yaml --output data/trees/document.txt
-
-# Audit an existing tree and export a report
-python main.py audit --input data/trees/document.txt --config config/audit.yaml --output experiments/audit/report.yaml
+# View training logs
+tail -f outputs/*/training.log
 ```
-
-For a breakdown of expected inputs/outputs per mode and which configs control them, see [docs/ARTIFACTS.md](docs/ARTIFACTS.md).
-
-## Testing Philosophy
-
-We follow Test-Driven Development (TDD):
-1. Write tests first that define expected behavior
-2. Implement minimal code to pass tests
-3. Refactor while maintaining test coverage
-
-Key test categories:
-- **Unit tests**: Individual components (nodes, chunks, signatures)
-- **Integration tests**: Component interactions (builder + chunker)
-- **Property tests**: Invariants (tree structure, summarization properties)
-
-## Dependencies
-
-- `dspy-ai`: Structured LLM prompting
-- `pytest`: Testing framework
-- `more-itertools`: Iteration utilities (from LangExtract)
-- `pyyaml`: Configuration
 
 ## References
 
-- Original Implementation Plan: [doc/gemini_implementation_plan.txt](doc/gemini_implementation_plan.txt)
-- OmniThink: Hierarchical article generation patterns
-- LangExtract: Document chunking and extraction
+- **AGENTS.md**: Quick reference for AI agents
+- **doc/architecture.md**: Detailed system design
+- **config/settings.yaml**: All configuration options

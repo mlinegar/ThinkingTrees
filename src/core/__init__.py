@@ -1,13 +1,12 @@
 """Core data models and LLM integration."""
 
 from src.core.data_models import (
-    OPSNode,
-    OPSTree,
+    Node,
+    Tree,
     AuditStatus,
     AuditResult,
-    create_leaf_node,
-    create_internal_node,
-    build_tree_from_leaves,
+    leaf,
+    node,
 )
 
 from src.core.llm_client import (
@@ -36,15 +35,28 @@ from src.core.signatures import (
     OracleFuncReviewer,
 )
 
+from src.core.strategy import (
+    SummarizationStrategy,
+    DSPyStrategy,
+    BatchedStrategy,
+    dspy_strategy,
+    batched_strategy,
+)
+
+from src.core.checkpoints import (
+    CheckpointManager,
+    CheckpointMetadata,
+    CHECKPOINT_VERSION,
+)
+
 __all__ = [
     # Data models
-    "OPSNode",
-    "OPSTree",
+    "Node",
+    "Tree",
     "AuditStatus",
     "AuditResult",
-    "create_leaf_node",
-    "create_internal_node",
-    "build_tree_from_leaves",
+    "leaf",
+    "node",
     # LLM client
     "ServerType",
     "LLMConfig",
@@ -67,4 +79,14 @@ __all__ = [
     "MergeChecker",
     "OracleFuncApproximation",
     "OracleFuncReviewer",
+    # Strategy interface
+    "SummarizationStrategy",
+    "DSPyStrategy",
+    "BatchedStrategy",
+    "dspy_strategy",
+    "batched_strategy",
+    # Checkpoints
+    "CheckpointManager",
+    "CheckpointMetadata",
+    "CHECKPOINT_VERSION",
 ]

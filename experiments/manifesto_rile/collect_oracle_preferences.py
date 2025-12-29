@@ -91,6 +91,7 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     import dspy
+    from src.config.dspy_config import configure_dspy
     from src.config.settings import load_settings
     from src.ops_engine.training_framework.oracle_preference import (
         OraclePreferenceCollector,
@@ -131,7 +132,7 @@ def main():
     )
 
     def use_lm(lm):
-        dspy.configure(lm=lm)
+        configure_dspy(lm=lm)
 
     use_lm(oracle_lm)
     rile_scorer = create_rile_scorer()
@@ -143,7 +144,7 @@ def main():
             return float(rile_scorer.value_extractor(text))
         finally:
             if current_lm is not None:
-                dspy.configure(lm=current_lm)
+                configure_dspy(lm=current_lm)
 
     summarizer = LeafSummarizer(use_cot=True)
     generation_configs = [

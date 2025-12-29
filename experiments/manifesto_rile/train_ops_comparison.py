@@ -143,6 +143,7 @@ def main() -> None:
     random.seed(args.seed)
 
     import dspy
+    from src.config.dspy_config import configure_dspy
     from src.config.settings import load_settings
     from src.ops_engine.training_framework.ops_comparison_module import OPSComparisonModule
     from src.ops_engine.training_framework.preference import PreferenceDataset
@@ -178,7 +179,7 @@ def main() -> None:
         temperature=temperature,
         max_tokens=max_tokens,
     )
-    dspy.configure(lm=lm)
+    configure_dspy(lm=lm)
 
     train_set, val_set = dataset.split(train_ratio=args.train_ratio, shuffle=True)
     train_examples = train_set.to_dspy_examples()

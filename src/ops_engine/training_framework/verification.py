@@ -2,7 +2,7 @@
 OPS Law Verification at Tree Nodes.
 
 This module implements verification of OPS (Oracle-Preserving Summarization) laws
-at each node in the summarization tree. The verifier uses the OracleClassifier to
+at each node in the summarization tree. The verifier uses a score predictor to
 check that summaries preserve oracle-relevant information according to the laws:
 
 - C1 (Sufficiency): oracle(summary) ≈ oracle(original)
@@ -13,18 +13,37 @@ check that summaries preserve oracle-relevant information according to the laws:
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Callable, Tuple
+from typing import List, Dict, Optional, Callable, Tuple, Any, Protocol, runtime_checkable, Union, TYPE_CHECKING
 import uuid
 
+if TYPE_CHECKING:
+    from src.core.data_models import Node
+
 from .core import (
-    LabelSpace,
     Prediction,
     LawCheckResult,
     ViolationType,
     UnifiedTrainingExample,
     TrainingExampleLabel,
 )
-from .inference import OracleClassifier
+
+
+@runtime_checkable
+class ScorePredictor(Protocol):
+    """Protocol for score prediction modules used in verification."""
+
+    def __call__(
+        self,
+        original_content: str,
+        summary: str,
+        rubric: str,
+    ) -> Prediction:
+        """Predict a score for the given content.
+
+        Returns:
+            Prediction with label as string-encoded score (e.g., "45.2")
+        """
+        ...
 
 
 @dataclass
@@ -67,17 +86,30 @@ class NodeVerificationResult:
         return examples
 
 
+def _parse_score(label: str) -> float:
+    """Parse a score from a label string."""
+    try:
+        return float(label)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _score_distance(score_a: float, score_b: float) -> float:
+    """Compute distance between two scores."""
+    return abs(score_a - score_b)
+
+
 class OracleNodeVerifier:
     """
     Verifies OPS law compliance at tree nodes.
 
-    Uses an OracleClassifier to predict labels for original content and summaries,
+    Uses a score predictor to predict scores for original content and summaries,
     then compares predictions to check if OPS laws are satisfied.
     """
 
     def __init__(
         self,
-        classifier: OracleClassifier,
+        predictor: Any,  # ScorePredictor or any callable with compatible signature
         tolerance: float = 0.0,
         summarizer: Optional[Callable[[str], str]] = None,
     ):
@@ -85,18 +117,17 @@ class OracleNodeVerifier:
         Initialize the verifier.
 
         Args:
-            classifier: The oracle classifier to use for predictions
-            tolerance: Allowed discrepancy before marking as violation (useful for ordinal)
+            predictor: The score predictor to use for predictions
+            tolerance: Allowed discrepancy before marking as violation
             summarizer: Optional function to re-summarize for idempotence checks
         """
-        self.classifier = classifier
+        self.predictor = predictor
         self.tolerance = tolerance
         self.summarizer = summarizer
 
-    def _labels_equivalent(self, label_a: str, label_b: str) -> bool:
-        """Check if two labels are equivalent within tolerance."""
-        distance = self.classifier.label_space.distance(label_a, label_b)
-        return distance <= self.tolerance
+    def _scores_equivalent(self, score_a: float, score_b: float) -> bool:
+        """Check if two scores are equivalent within tolerance."""
+        return _score_distance(score_a, score_b) <= self.tolerance
 
     def check_sufficiency(
         self,
@@ -121,19 +152,21 @@ class OracleNodeVerifier:
             LawCheckResult with pass/fail and discrepancy
         """
         # Get predictions for both
-        orig_pred = self.classifier(
+        orig_pred = self.predictor(
             original_content=original_content,
-            summary=original_content,  # Classify original directly
+            summary=original_content,  # Predict from original directly
             rubric=rubric,
         )
-        summ_pred = self.classifier(
+        summ_pred = self.predictor(
             original_content=original_content,
             summary=summary,
             rubric=rubric,
         )
 
-        # Compare predictions
-        discrepancy = self.classifier.label_space.distance(orig_pred.label, summ_pred.label)
+        # Compare predictions (scores stored as strings in label field)
+        orig_score = _parse_score(orig_pred.label)
+        summ_score = _parse_score(summ_pred.label)
+        discrepancy = _score_distance(orig_score, summ_score)
         passed = discrepancy <= self.tolerance
 
         reasoning = None
@@ -192,19 +225,21 @@ class OracleNodeVerifier:
             re_summary = self.summarizer(summary)
 
         # Get predictions
-        summ_pred = self.classifier(
+        summ_pred = self.predictor(
             original_content=summary,
             summary=summary,
             rubric=rubric,
         )
-        re_pred = self.classifier(
+        re_pred = self.predictor(
             original_content=summary,
             summary=re_summary,
             rubric=rubric,
         )
 
         # Compare predictions
-        discrepancy = self.classifier.label_space.distance(summ_pred.label, re_pred.label)
+        summ_score = _parse_score(summ_pred.label)
+        re_score = _parse_score(re_pred.label)
+        discrepancy = _score_distance(summ_score, re_score)
         passed = discrepancy <= self.tolerance
 
         reasoning = None
@@ -251,7 +286,7 @@ class OracleNodeVerifier:
             LawCheckResult with pass/fail and discrepancy
         """
         # Get prediction for merged summary
-        merged_pred = self.classifier(
+        merged_pred = self.predictor(
             original_content=merged_summary,
             summary=merged_summary,
             rubric=rubric,
@@ -259,7 +294,7 @@ class OracleNodeVerifier:
 
         # Get predictions for each child (concurrent for better GPU utilization)
         def predict_child(child):
-            return self.classifier(
+            return self.predictor(
                 original_content=child,
                 summary=child,
                 rubric=rubric,
@@ -268,14 +303,15 @@ class OracleNodeVerifier:
         with ThreadPoolExecutor(max_workers=len(child_summaries)) as executor:
             child_preds = list(executor.map(predict_child, child_summaries))
 
-        # Aggregate child predictions
-        expected_label = self._aggregate_predictions(
+        # Aggregate child predictions (weighted average of scores)
+        expected_score = self._aggregate_scores(
             child_preds,
             weights=child_weights,
         )
 
         # Compare
-        discrepancy = self.classifier.label_space.distance(merged_pred.label, expected_label)
+        merged_score = _parse_score(merged_pred.label)
+        discrepancy = _score_distance(merged_score, expected_score)
         passed = discrepancy <= self.tolerance
 
         reasoning = None
@@ -283,7 +319,7 @@ class OracleNodeVerifier:
             child_labels = [p.label for p in child_preds]
             reasoning = (
                 f"Merge consistency violation: Children predicted {child_labels} "
-                f"(aggregated to '{expected_label}') but merged summary predicted "
+                f"(aggregated to '{expected_score:.2f}') but merged summary predicted "
                 f"'{merged_pred.label}' (discrepancy={discrepancy:.2f})."
             )
 
@@ -293,25 +329,23 @@ class OracleNodeVerifier:
             discrepancy=discrepancy,
             original_prediction=None,  # Not applicable for merge
             summary_prediction=merged_pred,
-            expected_label=expected_label,
+            expected_label=str(expected_score),
             node_id=node_id,
             reasoning=reasoning,
         )
 
-    def _aggregate_predictions(
+    def _aggregate_scores(
         self,
         child_preds: List[Prediction],
         weights: Optional[List[float]] = None,
-    ) -> str:
+    ) -> float:
         """
         Aggregate child predictions for merge consistency check.
 
-        Strategy depends on label space type:
-        - Ordinal: Weighted average of label values
-        - Categorical: Most "severe" label (any non-none → that violation)
+        Uses weighted average of scores.
         """
         if not child_preds:
-            return self.classifier.label_space.labels[0]
+            return 0.0
 
         if weights is None:
             weights = [p.confidence for p in child_preds]
@@ -322,28 +356,10 @@ class OracleNodeVerifier:
             weights = [1.0] * len(child_preds)
             total_weight = len(child_preds)
 
-        if self.classifier.label_space.is_ordinal:
-            # Weighted average for ordinal
-            try:
-                values = [float(p.label) for p in child_preds]
-                weighted_sum = sum(v * w for v, w in zip(values, weights))
-                avg_value = weighted_sum / total_weight
-
-                # Return nearest label
-                from .core import OrdinalLabelSpace
-                if isinstance(self.classifier.label_space, OrdinalLabelSpace):
-                    return self.classifier.label_space.nearest_label(avg_value)
-                else:
-                    return str(int(round(avg_value)))
-            except ValueError:
-                return child_preds[0].label
-        else:
-            # Categorical: return most severe (non-none if any)
-            non_none = [p for p in child_preds if p.label.lower() != "none"]
-            if non_none:
-                # Return highest confidence non-none
-                return max(non_none, key=lambda p: p.confidence).label
-            return "none"
+        # Weighted average of scores
+        scores = [_parse_score(p.label) for p in child_preds]
+        weighted_sum = sum(s * w for s, w in zip(scores, weights))
+        return weighted_sum / total_weight
 
     def check_substitution(
         self,
@@ -369,19 +385,21 @@ class OracleNodeVerifier:
             LawCheckResult with pass/fail and discrepancy
         """
         # Get predictions for both
-        pred_a = self.classifier(
+        pred_a = self.predictor(
             original_content=summary_a,
             summary=summary_a,
             rubric=rubric,
         )
-        pred_b = self.classifier(
+        pred_b = self.predictor(
             original_content=summary_b,
             summary=summary_b,
             rubric=rubric,
         )
 
         # Compare predictions
-        discrepancy = self.classifier.label_space.distance(pred_a.label, pred_b.label)
+        score_a = _parse_score(pred_a.label)
+        score_b = _parse_score(pred_b.label)
+        discrepancy = _score_distance(score_a, score_b)
         passed = discrepancy <= self.tolerance
 
         reasoning = None
@@ -469,27 +487,25 @@ class TreeVerifier:
 
     def __init__(
         self,
-        classifier: OracleClassifier,
+        predictor: Any,  # ScorePredictor or any callable with compatible signature
         tolerance: float = 0.0,
         summarizer: Optional[Callable[[str], str]] = None,
     ):
-        self.node_verifier = OracleNodeVerifier(classifier, tolerance, summarizer)
+        self.node_verifier = OracleNodeVerifier(predictor, tolerance, summarizer)
         self.results: List[NodeVerificationResult] = []
 
     def verify_tree(
         self,
-        tree_data: Dict,
+        tree_data: Union['Node', Dict],
         rubric: str,
     ) -> Dict[str, NodeVerificationResult]:
         """
         Verify all nodes in a tree.
 
         Args:
-            tree_data: Tree structure with nodes containing:
-                - 'id': Node identifier
-                - 'original': Original content (for leaves)
-                - 'summary': Summary at this node
-                - 'children': List of child node dicts (for internal nodes)
+            tree_data: Tree root as either:
+                - Node object from src.core.data_models
+                - Dict with 'id', 'summary', 'children' keys (legacy)
             rubric: Description of what to preserve
 
         Returns:
@@ -501,23 +517,34 @@ class TreeVerifier:
 
     def _verify_node_recursive(
         self,
-        node: Dict,
+        node: Union['Node', Dict],
         rubric: str,
         results: Dict[str, NodeVerificationResult],
     ):
-        """Recursively verify nodes."""
-        node_id = node.get('id', f"node_{uuid.uuid4().hex[:8]}")
-        summary = node.get('summary', '')
-        children = node.get('children', [])
+        """Recursively verify nodes. Supports both Node objects and dicts."""
+        # Handle both Node objects and dicts
+        if isinstance(node, dict):
+            node_id = node.get('id', f"node_{uuid.uuid4().hex[:8]}")
+            summary = node.get('summary', '')
+            children = node.get('children', [])
+            original = node.get('original', node.get('raw_text_span', summary))
+        else:
+            # Node object
+            node_id = node.id
+            summary = node.summary or ''
+            children = node.children
+            original = node.raw_text_span or summary
 
         # Recursively verify children first
         child_summaries = []
         for child in children:
             self._verify_node_recursive(child, rubric, results)
-            child_summaries.append(child.get('summary', ''))
+            if isinstance(child, dict):
+                child_summaries.append(child.get('summary', ''))
+            else:
+                child_summaries.append(child.summary or '')
 
-        # Verify this node
-        original = node.get('original', summary)  # Use summary if no original
+        # Verify this node (original already set based on node type)
         result = self.node_verifier.verify_node(
             original_content=original,
             summary=summary,
@@ -531,7 +558,7 @@ class TreeVerifier:
 
     def get_training_data(
         self,
-        tree_data: Dict,
+        tree_data: Union['Node', Dict],
         rubric: str,
     ) -> List[UnifiedTrainingExample]:
         """
@@ -548,20 +575,33 @@ class TreeVerifier:
             # Get node data
             node = self._find_node(tree_data, node_id)
             if node:
-                original = node.get('original', node.get('summary', ''))
-                summary = node.get('summary', '')
+                if isinstance(node, dict):
+                    original = node.get('original', node.get('raw_text_span', node.get('summary', '')))
+                    summary = node.get('summary', '')
+                else:
+                    original = node.raw_text_span or node.summary or ''
+                    summary = node.summary or ''
                 examples.extend(result.to_training_examples(original, summary, rubric))
 
         return examples
 
-    def _find_node(self, tree: Dict, node_id: str) -> Optional[Dict]:
-        """Find a node by ID in the tree."""
-        if tree.get('id') == node_id:
-            return tree
-        for child in tree.get('children', []):
-            found = self._find_node(child, node_id)
-            if found:
-                return found
+    def _find_node(self, tree: Union['Node', Dict], node_id: str) -> Optional[Union['Node', Dict]]:
+        """Find a node by ID in the tree. Supports both Node objects and dicts."""
+        if isinstance(tree, dict):
+            if tree.get('id') == node_id:
+                return tree
+            for child in tree.get('children', []):
+                found = self._find_node(child, node_id)
+                if found:
+                    return found
+        else:
+            # Node object
+            if tree.id == node_id:
+                return tree
+            for child in tree.children:
+                found = self._find_node(child, node_id)
+                if found:
+                    return found
         return None
 
     def get_statistics(self) -> Dict:

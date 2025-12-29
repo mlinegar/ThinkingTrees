@@ -1,0 +1,52 @@
+version: "3.8"
+
+services:
+  inference:
+    image: vllm/vllm-openai:nightly
+    container_name: inference
+    ports:
+      - "0.0.0.0:8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: -1          # use all GPUs
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - NCCL_IB_DISABLE=1
+      - NCCL_NVLS_ENABLE=0
+      - NCCL_P2P_DISABLE=0
+      - NCCL_SHM_DISABLE=0
+      - VLLM_USE_V1=1
+      - VLLM_USE_FLASHINFER_MOE_FP4=1
+      - OMP_NUM_THREADS=8
+    volumes:
+      - /mnt/data/models:/models:ro
+    # Default to GLM model, can override with MODEL_PATH env var
+    command:
+      - /models/GLM-4.6-NVFP4
+      - --enable-expert-parallel
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      - --served-model-name
+      - "glm-4.6"
+      - --tensor-parallel-size
+      - "4"
+      - --gpu-memory-utilization
+      - "0.95"
+      - --max-num-batched-tokens
+      - "16384"
+      - --dtype
+      - "auto"
+      - --max-num-seqs
+      - "8"
+      - --kv-cache-dtype
+      - fp8
+      - --trust-remote-code
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"

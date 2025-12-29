@@ -2,7 +2,7 @@
 Unified OPS Law Checking Utilities.
 
 This module provides the core logic for checking OPS (Oracle-Preserving Summarization)
-laws, designed to be used by both OPSAuditor and OracleNodeVerifier to prevent
+laws, designed to be used by both Auditor and OracleNodeVerifier to prevent
 implementation drift.
 
 Laws implemented:
@@ -12,10 +12,10 @@ Laws implemented:
 - C3B (Merge Consistency): u ⊕ v ∼ g(u ⊕ v) ∼ g(g(u) ⊕ g(v))
 
 Usage:
-    from src.ops_engine.checks import OPSCheckRunner, CheckConfig, CheckResult
+    from src.ops_engine.checks import CheckRunner, CheckConfig, CheckResult
 
     config = CheckConfig(discrepancy_threshold=0.1)
-    runner = OPSCheckRunner(oracle_fn=my_oracle, config=config)
+    runner = CheckRunner(oracle_fn=my_oracle, config=config)
 
     result = runner.check_sufficiency(original_text, summary, rubric)
     if not result.passed:
@@ -23,9 +23,11 @@ Usage:
 """
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Tuple, List, Dict, Any, Protocol
+from typing import Callable, Optional, Tuple, List, Dict, Any, Protocol, Union
 from enum import Enum
 import logging
+
+from src.ops_engine.scoring import ScoringOracle, OracleScore
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +57,7 @@ class CheckResult:
     Result of an OPS law check.
 
     This unified format is used by all check types and can be converted
-    to both AuditCheckResult (for OPSAuditor) and LawCheckResult (for OracleNodeVerifier).
+    to both AuditCheckResult (for Auditor) and LawCheckResult (for OracleNodeVerifier).
     """
     check_type: CheckType
     passed: bool
@@ -113,17 +115,19 @@ class OracleProtocol(Protocol):
         ...
 
 
-class OPSCheckRunner:
+class CheckRunner:
     """
     Runs OPS law checks using a provided oracle function.
 
     This class provides the core check logic that can be used by both
-    OPSAuditor and OracleNodeVerifier, ensuring consistent behavior.
+    Auditor and OracleNodeVerifier, ensuring consistent behavior.
+
+    Accepts both ScoringOracle (preferred) and legacy OracleProtocol.
     """
 
     def __init__(
         self,
-        oracle_fn: OracleProtocol,
+        oracle_fn: Union[ScoringOracle, OracleProtocol],
         config: Optional[CheckConfig] = None,
         summarizer_fn: Optional[Callable[[str, str], str]] = None,
     ):
@@ -131,14 +135,29 @@ class OPSCheckRunner:
         Initialize the check runner.
 
         Args:
-            oracle_fn: Oracle function matching OracleProtocol
+            oracle_fn: Oracle implementing ScoringOracle (preferred) or OracleProtocol
             config: Check configuration (uses defaults if None)
             summarizer_fn: Optional summarizer for idempotence checks
                           Signature: (content, rubric) -> summary
         """
-        self.oracle = oracle_fn
+        self._oracle = oracle_fn
         self.config = config or CheckConfig()
         self.summarizer = summarizer_fn
+
+    def _call_oracle(self, input_a: str, input_b: str, rubric: str) -> Tuple[bool, float, str]:
+        """
+        Call the oracle and return (is_congruent, discrepancy, reasoning).
+
+        Handles both ScoringOracle and legacy OracleProtocol interfaces.
+        """
+        from src.ops_engine.oracle_utils import call_oracle
+        return call_oracle(
+            self._oracle,
+            input_a,
+            input_b,
+            rubric,
+            threshold=self.config.discrepancy_threshold,
+        )
 
     def check_sufficiency(
         self,
@@ -166,7 +185,7 @@ class OPSCheckRunner:
         Returns:
             CheckResult with pass/fail and discrepancy
         """
-        is_congruent, discrepancy, reasoning = self.oracle(
+        is_congruent, discrepancy, reasoning = self._call_oracle(
             original_content,
             summary,
             rubric,
@@ -228,7 +247,7 @@ class OPSCheckRunner:
                 )
             re_summary = self.summarizer(summary, rubric)
 
-        is_congruent, discrepancy, reasoning = self.oracle(
+        is_congruent, discrepancy, reasoning = self._call_oracle(
             summary,
             re_summary,
             rubric,
@@ -301,7 +320,7 @@ class OPSCheckRunner:
         summary_of_summaries = self.summarizer(joint_summaries, rubric)
 
         # Compare oracle predictions
-        is_congruent, discrepancy, reasoning = self.oracle(
+        is_congruent, discrepancy, reasoning = self._call_oracle(
             summary_of_raw,
             summary_of_summaries,
             rubric,
@@ -354,7 +373,7 @@ class OPSCheckRunner:
         # Concatenate child summaries
         children_concat = "\n\n".join(child_summaries)
 
-        is_congruent, discrepancy, reasoning = self.oracle(
+        is_congruent, discrepancy, reasoning = self._call_oracle(
             children_concat,
             parent_summary,
             rubric,
@@ -384,7 +403,7 @@ class OPSCheckRunner:
 # =============================================================================
 
 def run_all_checks(
-    runner: OPSCheckRunner,
+    runner: CheckRunner,
     original_content: str,
     summary: str,
     rubric: str,
@@ -396,7 +415,7 @@ def run_all_checks(
     Run all applicable OPS checks for a node.
 
     Args:
-        runner: The OPSCheckRunner to use
+        runner: The CheckRunner to use
         original_content: Original text (for leaf) or None
         summary: The node's summary
         rubric: Preservation rubric

@@ -1,18 +1,27 @@
 """OPS tree building, auditing, and optimization."""
 
 from src.ops_engine.builder import (
-    OPSTreeBuilder,
+    TreeBuilder,
+    AsyncTreeBuilder,
     BuildConfig,
     BuildResult,
     IdentitySummarizer,
     TruncatingSummarizer,
     ConcatenatingSummarizer,
-    build_ops_tree,
+    build,
+    async_build,
     build_test_tree,
 )
 
+# Helper functions for tournament selection
+from src.ops_engine.ops_tree import (
+    candidates,
+    tournament,
+    chunk_binary,
+)
+
 from src.ops_engine.auditor import (
-    OPSAuditor,
+    Auditor,
     AuditConfig,
     AuditReport,
     AuditCheckResult,
@@ -28,16 +37,8 @@ from src.ops_engine.auditor import (
     create_oracle_from_scorer,
 )
 
-from src.ops_engine.optimizer import (
-    OPSOptimizer,
-    OptimizationConfig,
-    OptimizationResult,
-    TrainingExample,
-    TrainingDataCollector,
-    SummaryMetric,
-    create_optimizer,
-    optimize_from_reviews,
-)
+# For optimization, use the registry-based system:
+# from src.ops_engine.training_framework.optimizers import get_optimizer
 
 from src.ops_engine.oracle_func_approximation import (
     LearnedOracleFunc,
@@ -54,7 +55,7 @@ from src.ops_engine.oracle_func_approximation import (
 
 # Bootstrap training loop (Paper Section 3.11)
 from src.ops_engine.bootstrap_loop import (
-    OPSBootstrapTrainer,
+    BootstrapTrainer,
     BootstrapConfig,
     BootstrapResult,
     BootstrapIteration,
@@ -63,7 +64,7 @@ from src.ops_engine.bootstrap_loop import (
 
 # Unified OPS checks
 from src.ops_engine.checks import (
-    OPSCheckRunner,
+    CheckRunner,
     CheckConfig,
     CheckResult,
     CheckType,
@@ -76,8 +77,6 @@ from src.ops_engine.scoring import (
     OracleScore,
     ScoringOracle,
     SimilarityScorer,
-    LegacyOracleAdapter,
-    as_scoring_oracle,
     oracle_as_metric,
     oracle_as_metric_with_feedback,
     normalize_error_to_score,
@@ -94,25 +93,31 @@ from src.ops_engine.initialization import (
     TopDownInitializer,
     OracleAlignedDemo,
     MergeAlignedDemo,
-    create_oracle_aligned_demos,
-    initialize_summarizer_with_demos,
-    create_quick_init_demos,
+    oracle_demos,
+    initialize_summarizer,
+    quick_demos,
     run_top_down_initialization,
     train_on_short_docs,
 )
 
 __all__ = [
     # Builder
-    "OPSTreeBuilder",
+    "TreeBuilder",
+    "AsyncTreeBuilder",
     "BuildConfig",
     "BuildResult",
     "IdentitySummarizer",
     "TruncatingSummarizer",
     "ConcatenatingSummarizer",
-    "build_ops_tree",
+    "build",
+    "async_build",
     "build_test_tree",
+    # Tournament selection helpers
+    "candidates",
+    "tournament",
+    "chunk_binary",
     # Auditor
-    "OPSAuditor",
+    "Auditor",
     "AuditConfig",
     "AuditReport",
     "AuditCheckResult",
@@ -126,15 +131,6 @@ __all__ = [
     "ReviewPriority",
     "audit_tree",
     "create_oracle_from_scorer",
-    # Optimizer
-    "OPSOptimizer",
-    "OptimizationConfig",
-    "OptimizationResult",
-    "TrainingExample",
-    "TrainingDataCollector",
-    "SummaryMetric",
-    "create_optimizer",
-    "optimize_from_reviews",
     # Oracle Function Approximation
     "LearnedOracleFunc",
     "OracleFuncReviewEngine",
@@ -147,24 +143,22 @@ __all__ = [
     "create_oracle_func_reviewer",
     "train_oracle_func_from_reviews",
     # Bootstrap training loop (Paper Section 3.11)
-    "OPSBootstrapTrainer",
+    "BootstrapTrainer",
     "BootstrapConfig",
     "BootstrapResult",
     "BootstrapIteration",
     "run_bootstrap_training",
     # Unified OPS checks
-    "OPSCheckRunner",
+    "CheckRunner",
     "CheckConfig",
     "CheckResult",
     "CheckType",
     "run_all_checks",
     "aggregate_check_stats",
-    # Score-centric oracle types (new, preferred API)
+    # Score-centric oracle types
     "OracleScore",
     "ScoringOracle",
     "SimilarityScorer",
-    "LegacyOracleAdapter",
-    "as_scoring_oracle",
     "oracle_as_metric",
     "oracle_as_metric_with_feedback",
     "normalize_error_to_score",
@@ -178,9 +172,9 @@ __all__ = [
     "TopDownInitializer",
     "OracleAlignedDemo",
     "MergeAlignedDemo",
-    "create_oracle_aligned_demos",
-    "initialize_summarizer_with_demos",
-    "create_quick_init_demos",
+    "oracle_demos",
+    "initialize_summarizer",
+    "quick_demos",
     "run_top_down_initialization",
     "train_on_short_docs",
 ]

@@ -26,7 +26,12 @@ from typing import List, Optional, Dict, Any, Literal, Tuple
 
 import dspy
 
-from src.manifesto.signatures import PairwiseSummaryComparison
+# Import generic signature from core; domain-specific version available in manifesto
+from src.core.signatures import PairwiseComparison
+from src.core.output_parser import NormalizedOutputAccessor
+
+# Backward compatibility alias
+PairwiseSummaryComparison = PairwiseComparison
 
 logger = logging.getLogger(__name__)
 
@@ -172,8 +177,11 @@ class PairwiseJudge(dspy.Module):
             ground_truth_score=ground_truth_score,
         )
 
+        # Use normalized accessor to handle key casing variations
+        accessor = NormalizedOutputAccessor(result)
+
         # Normalize preferred to uppercase
-        preferred = str(result.preferred).upper().strip()
+        preferred = str(accessor.get('preferred', 'tie')).upper().strip()
         if preferred not in ["A", "B", "TIE"]:
             # Try to extract from reasoning
             if "A" in preferred and "B" not in preferred:
@@ -185,16 +193,16 @@ class PairwiseJudge(dspy.Module):
         elif preferred == "TIE":
             preferred = "tie"
 
-        # Parse confidence
+        # Parse confidence (using normalized accessor)
         try:
-            confidence = float(result.confidence)
+            confidence = float(accessor.get('confidence', 0.5))
             confidence = max(0.0, min(1.0, confidence))
         except (ValueError, TypeError):
             confidence = 0.5
 
-        # Parse score estimates
+        # Parse score estimates (using normalized accessor for case-insensitive field access)
         score_a = None
-        raw_score_a = getattr(result, "score_estimate_a", None)
+        raw_score_a = accessor.get('score_estimate_a')
         if raw_score_a is not None:
             try:
                 score_a = float(raw_score_a)
@@ -202,7 +210,7 @@ class PairwiseJudge(dspy.Module):
                 score_a = None
 
         score_b = None
-        raw_score_b = getattr(result, "score_estimate_b", None)
+        raw_score_b = accessor.get('score_estimate_b')
         if raw_score_b is not None:
             try:
                 score_b = float(raw_score_b)
@@ -211,7 +219,7 @@ class PairwiseJudge(dspy.Module):
 
         return {
             "preferred": preferred,
-            "reasoning": str(result.reasoning),
+            "reasoning": str(accessor.get('reasoning', '')),
             "confidence": confidence,
             "score_estimate_a": score_a,
             "score_estimate_b": score_b,
@@ -223,7 +231,7 @@ class GenerationConfig:
     """Configuration for generating candidate summaries."""
     temperature: float = 0.7
     top_p: float = 0.95
-    max_tokens: int = 2000
+    max_tokens: int = 8192
     prompt_variant: str = "default"
 
     def to_dict(self) -> Dict[str, Any]:
@@ -250,7 +258,7 @@ class PreferenceCollector:
         self,
         summarizer: dspy.Module,
         judge: PairwiseJudge,
-        k_candidates: int = 4,
+        k: int = 4,
         generation_configs: Optional[List[GenerationConfig]] = None,
     ):
         """
@@ -259,12 +267,12 @@ class PreferenceCollector:
         Args:
             summarizer: DSPy module for generating summaries
             judge: PairwiseJudge for comparing summaries
-            k_candidates: Number of candidate summaries to generate per input
+            k: Number of candidate summaries to generate per input
             generation_configs: Configurations for generating diverse outputs
         """
         self.summarizer = summarizer
         self.judge = judge
-        self.k_candidates = k_candidates
+        self.k = k
 
         # Default configs with varying temperatures
         if generation_configs is None:
@@ -300,7 +308,7 @@ class PreferenceCollector:
         lm = getattr(dspy, "settings", None)
         lm = getattr(lm, "lm", None)
 
-        for config in self.generation_configs[:self.k_candidates]:
+        for config in self.generation_configs[:self.k]:
             prev_temp = None
             prev_top_p = None
             prev_max_tokens = None
@@ -335,7 +343,7 @@ class PreferenceCollector:
 
         return candidates
 
-    def collect_pairs_for_example(
+    def pairs(
         self,
         example_id: str,
         original_text: str,

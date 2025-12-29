@@ -54,8 +54,16 @@ vllm:
     # NVIDIA Nemotron-3-Nano-30B: MoE model with FP8 quantization
     # Architecture: NemotronForCausalLM | Similar to Qwen3-30B in size
     nemotron-30b-fp8:
-      path: "/mnt/data/models/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8"
-      tensor_parallel: 4
+      path: "/mnt/data/models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8"
+      tensor_parallel: 2
+      max_model_len: 32768
+
+    # NVIDIA Qwen3-Nemotron-235B GenRM NVFP4: 4-bit quantized reward model
+    # Architecture: Qwen3MoE | Memory: ~65 GiB (2 GPUs with TP=2)
+    # Use for: Preference scoring, comparison tasks
+    genrm-nvfp4:
+      path: "/mnt/data/models/nvidia/Qwen3-Nemotron-235B-A22B-GenRM-NVFP4"
+      tensor_parallel: 2
       max_model_len: 32768
 
     # NVIDIA Qwen3-Nemotron-235B GenRM: Generative Reward Model for preference learning
@@ -82,41 +90,75 @@ vllm:
   gpu_memory_utilization: 0.90
 
   # Default model to use
-  default: "qwen-30b-thinking"
+  default: "nemotron-30b-fp8"
+
+# Server URLs
+# Can be overridden via environment variables: TASK_MODEL_URL, GENRM_URL
+servers:
+  task_model_url: "http://localhost:8000/v1"
+  genrm_url: "http://localhost:8001/v1"
+
+# Task Configuration
+# Tasks define what we do with documents (e.g., scoring, summarization)
+tasks:
+  default: "manifesto_rile"
+
+# Dataset Configuration
+# Datasets define where documents come from (e.g., manifesto corpus, JSONL)
+datasets:
+  default: "manifesto"
+  manifesto:
+    data_dir: null
+    require_text: true
+  jsonl:
+    path: null
+
+# Domain Configuration (legacy alias for tasks)
+# Domains define the scoring/prediction task (e.g., manifesto RILE scoring)
+domains:
+  default: "manifesto_rile"
+
+  # Manifesto/RILE domain for political text analysis
+  manifesto_rile:
+    scale_min: -100
+    scale_max: 100
+    score_field: "rile_score"
+    error_threshold_high: 20.0
+    error_threshold_low: 10.0
 
 # LLM Configuration
 llm:
   # Provider: vllm, openai, anthropic
   provider: "vllm"
-  base_url: "http://localhost:8000/v1"
+  base_url: "http://localhost:8000/v1"  # Legacy: use servers.task_model_url instead
 
-  # Generation parameters
-  max_tokens: 2000
+  # Generation parameters (models support 32768+ context, use 16384 for output to leave room for input)
+  max_tokens: 16384
   temperature: 0.3
 
 # Generation settings by pipeline stage
 generation:
   summarizer:
     temperature: 0.5
-    max_tokens: 2048
+    max_tokens: 16384
     candidate_temperatures: [0.3, 0.5, 0.7, 0.9]
   oracle:
     temperature: 0.3
-    max_tokens: 2048
+    max_tokens: 16384
   genrm_judge:
     temperature: 0.6
     top_p: 0.95
-    max_tokens: 2048
+    max_tokens: 16384
   comparison_judge:
     temperature: 0.3
-    max_tokens: 2048
+    max_tokens: 16384
   synthetic_data:
     temperature: 0.6
     top_p: 0.95
-    max_tokens: 4096
+    max_tokens: 16384
   ground_truth:
     temperature: 0.3
-    max_tokens: 2048
+    max_tokens: 16384
 
 # Document Chunking
 chunking:
@@ -150,11 +192,20 @@ optimization:
   # Save intermediate results
   save_checkpoints: true
 
+  # Progress checking (before/after evaluation)
+  enable_progress_check: true
+  progress_check_samples: null  # null = use all training samples, or specify a number
+
+  # Joint optimization settings (oracle + GenRM)
+  optimization_mode: "joint"  # "oracle_only", "genrm_only", "sequential", "joint"
+  oracle_weight: 0.7  # Weight for oracle accuracy (only for joint mode)
+  genrm_weight: 0.3   # Weight for GenRM consistency (only for joint mode)
+
 # Oracle Function Approximation (Learned Oracle for Reviewing Flagged Nodes)
 oracle_func:
   # Training configuration
-  max_bootstrapped_demos: 4
-  max_labeled_demos: 8
+  max_bootstrapped_demos: 8
+  max_labeled_demos: 16
   balance_ratio: 1.0          # Ratio of negative to positive examples
   min_training_examples: 4     # Minimum examples required before training
 

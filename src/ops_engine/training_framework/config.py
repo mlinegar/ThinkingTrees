@@ -58,10 +58,10 @@ class OptimizationConfig:
     optimizer_type: str = "gepa"
 
     # DSPy Bootstrap settings (for 'bootstrap' optimizer_type)
-    max_bootstrapped_demos: int = 2
-    max_labeled_demos: int = 4
-    max_rounds: int = 1
-    num_candidate_programs: int = 10
+    max_bootstrapped_demos: int = 4  # Reduced from 8 to leave room in 8K context
+    max_labeled_demos: int = 8  # Reduced from 16 to leave room in 8K context
+    max_rounds: int = 4  # More iterations for bootstrap convergence
+    num_candidate_programs: int = 20
     num_threads: int = DEFAULT_NUM_THREADS  # Parallel metric evaluations
 
     # GEPA-specific settings

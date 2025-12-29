@@ -2,18 +2,18 @@
 
 ## System Overview
 
-ThinkingTrees implements Oracle-Preserving Summarization (OPS), a hierarchical approach to document summarization that maintains verifiable information preservation guarantees.
+ThinkingTrees implements Oracle-Preserving Summarization (OPS), a hierarchical approach to document summarization that maintains verifiable information preservation guarantees through probabilistic auditing and DSPy-based optimization.
 
 ## Core Components
 
 ### 1. Data Models (`src/core/data_models.py`)
 
-#### OPSNode
+#### Node
 The atomic unit of the summarization tree.
 
 ```python
 @dataclass
-class OPSNode:
+class Node:
     # Identity
     id: str                              # UUID for tracking
     level: int                           # Tree depth (0 = leaf)
@@ -23,14 +23,18 @@ class OPSNode:
     summary: str                         # Summary at this node
 
     # Structure
-    left_child: Optional['OPSNode']      # Left subtree
-    right_child: Optional['OPSNode']     # Right subtree
-    parent: Optional['OPSNode']          # Parent reference
+    left_child: Optional['Node']         # Left subtree
+    right_child: Optional['Node']        # Right subtree
+    parent: Optional['Node']             # Parent reference
 
     # Audit State
-    audit_passed: bool                   # Verification status
-    discrepancy_score: float             # Information loss metric [0,1]
-    audit_trace: Optional[dict]          # Debug information
+    audit_result: AuditResult            # Verification status
+
+    # Properties
+    @property
+    def is_leaf(self) -> bool            # True if no children
+    @property
+    def children(self) -> List[Node]     # [left_child, right_child] if present
 ```
 
 **Invariants:**
@@ -39,56 +43,96 @@ class OPSNode:
 - `left_child is None` iff `right_child is None` (both or neither)
 - Parent references form a valid tree (no cycles)
 
-#### OPSTree
+#### Tree
 Container for the complete summarization structure.
 
 ```python
 @dataclass
-class OPSTree:
-    root: OPSNode                        # Tree root (final summary)
-    leaves: List[OPSNode]                # Ordered leaf nodes
+class Tree:
+    root: Node                           # Tree root (final summary)
     rubric: str                          # Information preservation criteria
     metadata: dict                       # Source doc info, timestamps
+
+    # Properties
+    @property
+    def height(self) -> int              # Maximum depth
+    @property
+    def node_count(self) -> int          # Total nodes
+    @property
+    def leaves(self) -> List[Node]       # All leaf nodes
 ```
 
-**Properties:**
-- `height`: Maximum depth of tree
-- `node_count`: Total nodes in tree
-- `leaf_count`: Number of leaves
-- `audit_failure_rate`: Proportion of failed audits
+### 2. Domain Plugin System (`src/ops_engine/training_framework/domains/`)
 
-### 2. Preprocessing (`src/preprocessing/`)
+The framework uses pluggable domains to support different evaluation tasks.
 
-#### Chunker (`chunker.py`)
-Splits documents into manageable pieces for leaf node creation.
+#### DomainPlugin Protocol (`base.py`)
 
-**Interface:**
 ```python
-class DocumentChunker:
-    def __init__(self,
-                 max_chunk_chars: int = 2000,
-                 overlap_chars: int = 100):
-        pass
+class DomainPlugin(Protocol):
+    """Protocol that all domain implementations must follow."""
 
-    def chunk_text(self, text: str) -> List[TextChunk]:
-        """Split text into chunks respecting sentence boundaries."""
-        pass
+    @property
+    def name(self) -> str: ...
+    @property
+    def config(self) -> DomainConfig: ...
 
-    def chunk_file(self, filepath: Path) -> List[TextChunk]:
-        """Load and chunk a file."""
-        pass
+    def create_training_source(self, results, **kwargs) -> TrainingDataSource: ...
+    def create_metric(self, **kwargs) -> Callable: ...
+    def create_rubric(self, **kwargs) -> str: ...
+    def create_predictor(self, **kwargs) -> dspy.Module: ...
 ```
 
-**Chunking Strategy (adapted from LangExtract):**
-1. Tokenize text into sentences
-2. Greedily combine sentences up to `max_chunk_chars`
-3. Break at newlines when exceeding limit
-4. Never break mid-word
+#### Available Domains
+
+| Domain | Scale | Output Type | Use Case |
+|--------|-------|-------------|----------|
+| `manifesto_rile` | -100 to +100 | Continuous | Political manifesto RILE scoring |
+| `summarization` | 0 to 1 | Continuous | Generic summarization quality |
+
+#### Adding a New Domain
+
+```python
+from src.ops_engine.training_framework.domains import (
+    AbstractDomain, register_domain, ScaleDefinition
+)
+
+MY_SCALE = ScaleDefinition(
+    name="sentiment",
+    min_value=-1.0,
+    max_value=1.0,
+    description="Sentiment score",
+)
+
+@register_domain("sentiment")
+class SentimentDomain(AbstractDomain):
+    def create_rubric(self, **kwargs) -> str:
+        return "Preserve the emotional tone and sentiment..."
+
+    def create_predictor(self, **kwargs) -> dspy.Module:
+        return SentimentScorer()
+```
 
 ### 3. OPS Engine (`src/ops_engine/`)
 
 #### Builder (`builder.py`)
-Constructs the tree bottom-up through recursive summarization.
+Constructs trees bottom-up through recursive summarization.
+
+```python
+class TreeBuilder:
+    def __init__(self, summarizer: Summarizer, judge: GenRMJudge = None):
+        """
+        Args:
+            summarizer: Function (content, rubric) -> summary
+            judge: Optional judge for tournament selection
+        """
+
+    def build_from_text(self, text: str, rubric: str) -> BuildResult:
+        """Build tree from raw text."""
+
+    def build_from_chunks(self, chunks: List[TextChunk], rubric: str) -> BuildResult:
+        """Build tree from pre-chunked text."""
+```
 
 **Algorithm:**
 ```
@@ -104,80 +148,98 @@ BUILD_TREE(chunks, rubric):
     4. RETURN root node
 ```
 
-**Parallelization:**
-- All nodes at the same level can be summarized concurrently
-- Use `asyncio` or thread pool for LLM calls
-
 #### Auditor (`auditor.py`)
-Samples nodes to verify information preservation.
+Probabilistic verification of information preservation.
 
-**Audit Types:**
-1. **Sufficiency Check (Leaves)**: Does summary preserve rubric info from raw text?
-2. **Merge Consistency (Internal)**: Does parent summary preserve info from children?
+**OPS Laws:**
+1. **Sufficiency (C1)**: `oracle(summary) ≈ oracle(original)` for leaves
+2. **Idempotence (C2)**: `oracle(summarize(S)) ≈ oracle(S)`
+3. **Merge Consistency (C3)**: `oracle(parent) ≈ aggregate(oracle(children))`
 
-**Sampling Strategy:**
 ```python
-def audit_tree(root: OPSNode, budget: int = 10):
-    """
-    Sample 'budget' nodes for verification.
-    Prioritize:
-    - Higher levels (more compression, more risk)
-    - Previously failed nodes
-    - Random sample for coverage
-    """
+class Auditor:
+    def audit_tree(self, tree: Tree, sample_rate: float = 0.1) -> AuditReport:
+        """Sample nodes and verify OPS laws."""
 ```
 
-#### Optimizer (`optimizer.py`)
-Improves summarization quality based on audit failures.
-
-**Bootstrap Loop:**
-1. Collect failed audit examples
-2. Human provides corrections → "Golden Examples"
-3. Use DSPy BootstrapFewShot to learn from examples
-4. Re-compile summarization module
-5. Optionally rebuild affected subtrees
-
-### 4. LLM Integration (`src/core/`)
-
-#### LLM Client (`llm_client.py`)
-Unified interface for LLM providers.
+#### Bootstrap Loop (`bootstrap_loop.py`)
+Multi-iteration training cycle.
 
 ```python
-class LLMClient:
-    def __init__(self, provider: str, model: str, **kwargs):
-        """Initialize with provider-specific config."""
-
-    def complete(self, prompt: str) -> str:
-        """Basic completion."""
-
-    def get_usage(self) -> dict:
-        """Token usage statistics."""
+class BootstrapTrainer:
+    def train(self, documents, rubric, dspy_module=None) -> BootstrapResult:
+        """
+        1. Build trees from documents
+        2. Run probabilistic audit
+        3. Collect training examples from failures
+        4. Optimize with DSPy
+        5. Repeat until convergence
+        """
 ```
 
-**Supported Providers:**
-- OpenAI (GPT-4, GPT-3.5)
-- Anthropic (Claude)
-- DeepSeek
-- Local models via Ollama
+### 4. Training Framework (`src/ops_engine/training_framework/`)
 
-#### Signatures (`signatures.py`)
-DSPy signature definitions for structured LLM interactions.
+#### Optimizer Registry (`optimizers/`)
 
 ```python
-class RecursiveSummary(dspy.Signature):
-    """Summarize while preserving rubric-defined information."""
-    rubric: str = dspy.InputField()
-    content: str = dspy.InputField()
-    summary: str = dspy.OutputField()
+from src.ops_engine.training_framework.optimizers import get_optimizer
 
-class OracleJudge(dspy.Signature):
-    """Compare two inputs for task-equivalence."""
-    rubric: str = dspy.InputField()
-    input_a: str = dspy.InputField()
-    input_b: str = dspy.InputField()
-    is_congruent: bool = dspy.OutputField()
-    discrepancy_score: float = dspy.OutputField()
-    reasoning: str = dspy.OutputField()
+optimizer = get_optimizer("bootstrap_random_search", config)
+compiled = optimizer.compile(student, trainset, metric=metric)
+```
+
+**Available Optimizers:**
+- `bootstrap_random_search` (default): BootstrapFewShotWithRandomSearch
+- `gepa`: GEPA with reflection-based optimization
+- `mipro`: MIPROv2 for instruction optimization
+- `labeled_fewshot`: Simple labeled few-shot
+
+#### Preference Learning (`preference.py`, `genrm_preference.py`)
+
+```python
+class GenRMJudge:
+    """Uses GenRM model for pairwise preference judgments."""
+
+    def judge(self, summary_a: str, summary_b: str, context: str) -> PreferencePair:
+        """Return which summary better preserves information."""
+```
+
+### 5. Batch Processing (`src/core/batch_processor.py`)
+
+Level-wise batch processing for efficient tree construction.
+
+```python
+class LevelWiseBatchProcessor:
+    """Process all nodes at a level in batches."""
+
+    def process_level(self, nodes: List[Node], rubric: str) -> List[Node]:
+        """Summarize all nodes at current level."""
+```
+
+**Telemetry:**
+```python
+@dataclass
+class BatchTelemetry:
+    total_items: int
+    successful: int
+    failed: int
+    wall_clock_seconds: float
+    tokens_used: int
+```
+
+### 6. Output Parsing (`src/core/output_parser.py`)
+
+Case-insensitive parsing of LLM outputs.
+
+```python
+class NormalizedOutputAccessor:
+    """Handle LLM output field casing variations."""
+
+    def get(self, name: str, default: Any = None) -> Any:
+        """
+        Case-insensitive field access.
+        Handles: rile_score, RILE_score, riLE_score, etc.
+        """
 ```
 
 ## Data Flow
@@ -190,66 +252,81 @@ class OracleJudge(dspy.Signature):
                     ┌───────────────────────┘
                     ▼
             ┌───────────────┐
-            │   Builder     │◀──── Rubric
+            │   Builder     │◀──── Rubric + Domain
             │ (Summarize)   │
             └───────┬───────┘
                     │
                     ▼
             ┌───────────────┐
-            │   OPS Tree    │
-            │  (Root Node)  │
+            │     Tree      │
+            │  (Node root)  │
             └───────┬───────┘
                     │
         ┌───────────┴───────────┐
         ▼                       ▼
 ┌───────────────┐       ┌───────────────┐
 │   Auditor     │       │ Final Summary │
-│  (Sample &    │       │   (Output)    │
-│   Verify)     │       └───────────────┘
+│  (Verify OPS  │       │   (Output)    │
+│   Laws)       │       └───────────────┘
 └───────┬───────┘
         │
         ▼ (failures)
 ┌───────────────┐
-│  Optimizer    │
-│ (Bootstrap)   │
+│  Bootstrap    │
+│   Trainer     │
+│ (DSPy Optim)  │
 └───────────────┘
 ```
 
 ## Configuration (`config/settings.yaml`)
 
 ```yaml
-llm:
-  provider: "openai"
-  model: "gpt-4"
+models:
+  task_model:
+    base_url: "http://localhost:8000/v1"
+    model_name: "nvidia/Llama-3.1-Nemotron-Nano-8B-v1"
+  genrm_model:
+    base_url: "http://localhost:8001/v1"
+    model_name: "nvidia/Llama-3.1-Nemotron-70B-Instruct"
+
+generation:
   max_tokens: 2000
-  temperature: 0.3
+  temperature: 0.7
 
-chunking:
-  max_chars: 2000
-  overlap: 100
-
-tree:
-  max_children: 2  # Binary tree
-
-audit:
-  sample_budget: 10
-  discrepancy_threshold: 0.1
-
-optimization:
-  bootstrap_examples: 5
-  max_iterations: 3
+training:
+  optimizer: "bootstrap_random_search"
+  budget: "medium"
+  n_iterations: 2
 ```
+
+## Server Architecture
+
+| Server | Port | Model | GPUs | Purpose |
+|--------|------|-------|------|---------|
+| Task Model | 8000 | Nemotron-30B-FP8 | 0,1 | Summarization, scoring |
+| GenRM | 8001 | GenRM-NVFP4-235B | 2,3 | Preference judgments |
 
 ## Error Handling
 
-1. **LLM Failures**: Retry with exponential backoff, fallback to alternative provider
-2. **Chunking Failures**: Log warning, use simple character split as fallback
-3. **Audit Failures**: Flag for human review, don't block pipeline
-4. **Tree Invariant Violations**: Raise exception, these indicate bugs
+1. **LLM Output Parsing**: Case-insensitive key matching via `NormalizedOutputAccessor`
+2. **LLM Failures**: Retry with exponential backoff
+3. **Audit Failures**: Collected as training examples, don't block pipeline
+4. **Tree Invariant Violations**: Raise exception (indicates bugs)
 
 ## Extension Points
 
-- **Custom Chunkers**: Implement `BaseChunker` interface
-- **Custom LLM Providers**: Add to `llm_client.py` provider registry
-- **Custom Audit Strategies**: Subclass `BaseAuditor`
-- **Visualization Plugins**: Register with `visualization.py`
+- **Custom Domains**: Implement `DomainPlugin` protocol, register with `@register_domain`
+- **Custom Optimizers**: Add to `optimizers/` registry
+- **Custom Chunkers**: Implement `chunk_for_ops()` interface
+- **Custom Oracles**: Implement `ScoringOracle` protocol
+
+## Deprecated Code
+
+The following modules are deprecated but maintained for backward compatibility:
+
+| Module | Replacement | Notes |
+|--------|-------------|-------|
+| `src/ops_engine/optimizer.py` | `training_framework/optimizers/` | Use registry-based system |
+| `src/ops_engine/training_framework/optimization.py` | `training_framework/optimizers/` | Legacy OracleOptimizer |
+
+Import warnings are emitted when these modules are used.

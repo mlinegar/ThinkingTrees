@@ -8,7 +8,7 @@ throughout the training framework.
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Protocol, List, Optional, Dict, Any, runtime_checkable
+from typing import List, Optional, Dict, Any, Protocol, runtime_checkable
 
 import dspy
 
@@ -130,6 +130,122 @@ class UnifiedTrainingExample:
         data['violation_type'] = ViolationType(data.get('violation_type', 'sufficiency'))
         return cls(**data)
 
+    @classmethod
+    def from_legacy_training_example(
+        cls,
+        legacy: Any,  # TrainingExample from optimizer.py
+        example_id: Optional[str] = None,
+    ) -> 'UnifiedTrainingExample':
+        """
+        Convert from legacy TrainingExample (optimizer.py).
+
+        Legacy format has: content, rubric, summary, source, node_id, tree_id, discrepancy_score
+        """
+        return cls(
+            example_id=example_id or f"legacy_{legacy.node_id or 'unknown'}",
+            source_type=f"legacy_{legacy.source}",
+            original_content=legacy.content,
+            summary=legacy.summary,
+            rubric=legacy.rubric,
+            context={
+                'node_id': legacy.node_id,
+                'tree_id': legacy.tree_id,
+                'discrepancy_score': legacy.discrepancy_score,
+            },
+            label=TrainingExampleLabel.POSITIVE,  # Legacy examples are positive examples
+            violation_type=ViolationType.SUFFICIENCY,
+            corrected_summary=legacy.summary,  # Legacy format uses summary as the corrected version
+            confidence=0.8 if legacy.source == "oracle" else 1.0,
+        )
+
+    @classmethod
+    def from_audit_training_example(
+        cls,
+        audit: Any,  # AuditTrainingExample from bootstrap_loop.py (deprecated)
+    ) -> 'UnifiedTrainingExample':
+        """
+        Convert from AuditTrainingExample (bootstrap_loop.py).
+
+        DEPRECATED: Use create_audit_example() directly instead.
+
+        Audit format has: example_id, check_type, is_violation, original_content,
+        current_summary, rubric, oracle_original, oracle_summary, discrepancy,
+        node_id, document_id
+        """
+        return cls(
+            example_id=audit.example_id,
+            source_type="audit_bootstrap",
+            original_content=audit.original_content,
+            summary=audit.current_summary,
+            rubric=audit.rubric,
+            context={
+                'oracle_original': audit.oracle_original,
+                'oracle_summary': audit.oracle_summary,
+                'discrepancy': audit.discrepancy,
+                'node_id': audit.node_id,
+                'document_id': audit.document_id,
+            },
+            label=TrainingExampleLabel.POSITIVE if audit.is_violation else TrainingExampleLabel.NEGATIVE,
+            violation_type=ViolationType.from_check_type(audit.check_type),
+            confidence=min(1.0, 0.5 + abs(audit.discrepancy) / 100),  # Higher discrepancy = higher confidence
+        )
+
+    @classmethod
+    def create_audit_example(
+        cls,
+        example_id: str,
+        check_type: str,
+        is_violation: bool,
+        original_content: str,
+        current_summary: str,
+        rubric: str,
+        discrepancy: float = 0.0,
+        oracle_original: Optional[float] = None,
+        oracle_summary: Optional[float] = None,
+        node_id: Optional[str] = None,
+        document_id: Optional[str] = None,
+    ) -> 'UnifiedTrainingExample':
+        """
+        Create an audit training example directly.
+
+        This is the preferred way to create training examples from audit results,
+        replacing the deprecated AuditTrainingExample class.
+
+        Args:
+            example_id: Unique identifier for this example
+            check_type: Type of check ("sufficiency", "merge", "idempotence", "substitution")
+            is_violation: Whether this is a true violation
+            original_content: The original text being summarized
+            current_summary: The summary that was checked
+            rubric: The rubric/criteria for summarization
+            discrepancy: How different the oracle values are (0 = same)
+            oracle_original: Oracle score on original (optional)
+            oracle_summary: Oracle score on summary (optional)
+            node_id: Node identifier (optional)
+            document_id: Document identifier (optional)
+
+        Returns:
+            UnifiedTrainingExample configured for audit use
+        """
+        return cls(
+            example_id=example_id,
+            source_type="audit_bootstrap",
+            original_content=original_content,
+            summary=current_summary,
+            rubric=rubric,
+            context={
+                'oracle_original': oracle_original,
+                'oracle_summary': oracle_summary,
+                'discrepancy': discrepancy,
+                'node_id': node_id,
+                'document_id': document_id,
+                'check_type': check_type,
+            },
+            label=TrainingExampleLabel.POSITIVE if is_violation else TrainingExampleLabel.NEGATIVE,
+            violation_type=ViolationType.from_check_type(check_type),
+            confidence=min(1.0, 0.5 + abs(discrepancy) / 100),  # Higher discrepancy = higher confidence
+        )
+
 
 @runtime_checkable
 class TrainingDataSource(Protocol):
@@ -175,223 +291,8 @@ class OracleReviewResult:
         return self.confidence >= 0.8
 
 
-# =============================================================================
-# Label Space Abstraction
-# =============================================================================
-
-@runtime_checkable
-class LabelSpace(Protocol):
-    """
-    Protocol for label spaces used in classification.
-
-    Supports both categorical (unordered) and ordinal (ordered with distance)
-    label spaces. This abstraction enables the same classifier to work with
-    violation types (5 labels) and discretized RILE scores (41 labels).
-    """
-
-    @property
-    def labels(self) -> List[str]:
-        """Return all possible labels in this space."""
-        ...
-
-    @property
-    def is_ordinal(self) -> bool:
-        """Whether labels have a meaningful distance metric."""
-        ...
-
-    def distance(self, a: str, b: str) -> float:
-        """
-        Compute distance between two labels.
-
-        For categorical: 0 if equal, 1 otherwise
-        For ordinal: absolute difference between label values
-        """
-        ...
-
-    def fits_in_context(self, max_labels: int = 10) -> bool:
-        """Whether all labels can be enumerated in a prompt."""
-        ...
-
-    def get_description(self, label: str) -> str:
-        """Get a text description of a label for embedding/retrieval."""
-        ...
-
-
-class CategoricalLabelSpace:
-    """
-    Label space for categorical (unordered) labels.
-
-    Examples: ViolationType enum, binary classification, etc.
-    """
-
-    def __init__(
-        self,
-        labels: List[str],
-        descriptions: Optional[Dict[str, str]] = None,
-    ):
-        """
-        Initialize categorical label space.
-
-        Args:
-            labels: List of label strings
-            descriptions: Optional mapping of label -> description for retrieval
-        """
-        self._labels = labels
-        self._descriptions = descriptions or {}
-
-    @classmethod
-    def from_enum(cls, enum_class: type, descriptions: Optional[Dict[str, str]] = None) -> 'CategoricalLabelSpace':
-        """Create from an Enum class."""
-        labels = [e.value for e in enum_class]
-        return cls(labels, descriptions)
-
-    @classmethod
-    def from_violation_types(cls) -> 'CategoricalLabelSpace':
-        """Create label space for OPS violation types with descriptions."""
-        descriptions = {
-            ViolationType.SUFFICIENCY.value: (
-                "Sufficiency violation (C1): The leaf summary does not preserve "
-                "enough information from the original content to compute the oracle. "
-                "Key details relevant to the rubric are lost in summarization."
-            ),
-            ViolationType.MERGE_CONSISTENCY.value: (
-                "Merge consistency violation (C3B): When merging child summaries, "
-                "information relevant to the oracle was lost. The merged summary "
-                "is not consistent with what the children summaries would predict."
-            ),
-            ViolationType.IDEMPOTENCE.value: (
-                "Idempotence violation (C2): Re-summarizing the summary changes "
-                "the oracle prediction. The summary is not stable under further "
-                "summarization, indicating it contains extraneous detail."
-            ),
-            ViolationType.SUBSTITUTION.value: (
-                "Substitution violation (C3A): Equivalent summaries at a boundary "
-                "do not produce the same oracle prediction. The oracle is sensitive "
-                "to surface-level differences that should not matter."
-            ),
-            ViolationType.NONE.value: (
-                "No violation: The summarization is acceptable. The oracle prediction "
-                "from the summary matches the prediction from the original content."
-            ),
-        }
-        return cls.from_enum(ViolationType, descriptions)
-
-    @property
-    def labels(self) -> List[str]:
-        return self._labels
-
-    @property
-    def is_ordinal(self) -> bool:
-        return False
-
-    def distance(self, a: str, b: str) -> float:
-        """Categorical distance: 0 if equal, 1 otherwise."""
-        return 0.0 if a == b else 1.0
-
-    def fits_in_context(self, max_labels: int = 10) -> bool:
-        return len(self._labels) <= max_labels
-
-    def get_description(self, label: str) -> str:
-        return self._descriptions.get(label, label)
-
-
-class OrdinalLabelSpace:
-    """
-    Label space for ordinal (ordered) labels with a distance metric.
-
-    Examples: Discretized RILE scores (-100 to +100 in bins of 5),
-    Likert scales, confidence levels, etc.
-    """
-
-    def __init__(
-        self,
-        min_value: float,
-        max_value: float,
-        bin_size: float = 1.0,
-        description_fn: Optional[callable] = None,
-    ):
-        """
-        Initialize ordinal label space.
-
-        Args:
-            min_value: Minimum value in the range
-            max_value: Maximum value in the range
-            bin_size: Size of each bin (e.g., 5 for bins of 5)
-            description_fn: Optional function(value) -> description string
-        """
-        self.min_value = min_value
-        self.max_value = max_value
-        self.bin_size = bin_size
-        self._description_fn = description_fn
-
-        # Generate bin centers as labels
-        self._labels = []
-        current = min_value
-        while current <= max_value + 0.001:  # Small epsilon for float comparison
-            self._labels.append(str(int(current) if bin_size >= 1 else current))
-            current += bin_size
-
-    @classmethod
-    def for_rile(cls, bin_size: float = 5.0) -> 'OrdinalLabelSpace':
-        """Create label space for RILE scores (-100 to +100)."""
-        def rile_description(value: float) -> str:
-            v = float(value)
-            if v < -60:
-                position = "Far left"
-                emphasis = "strong welfare state, nationalization, internationalism"
-            elif v < -20:
-                position = "Left"
-                emphasis = "welfare expansion, market regulation, social spending"
-            elif v < 20:
-                position = "Center"
-                emphasis = "balanced policies, pragmatic approach"
-            elif v < 60:
-                position = "Right"
-                emphasis = "free enterprise, limited government, traditional values"
-            else:
-                position = "Far right"
-                emphasis = "strong free market, minimal state, nationalism"
-
-            return f"RILE score {value}: {position} position. Policy emphasis: {emphasis}."
-
-        return cls(
-            min_value=-100,
-            max_value=100,
-            bin_size=bin_size,
-            description_fn=rile_description,
-        )
-
-    @property
-    def labels(self) -> List[str]:
-        return self._labels
-
-    @property
-    def is_ordinal(self) -> bool:
-        return True
-
-    def distance(self, a: str, b: str) -> float:
-        """Ordinal distance: absolute difference between values."""
-        try:
-            return abs(float(a) - float(b))
-        except ValueError:
-            return float('inf')
-
-    def fits_in_context(self, max_labels: int = 10) -> bool:
-        return len(self._labels) <= max_labels
-
-    def get_description(self, label: str) -> str:
-        if self._description_fn:
-            return self._description_fn(float(label))
-        return f"Value: {label}"
-
-    def nearest_label(self, value: float) -> str:
-        """Find the nearest label to a given value."""
-        # Clamp to range
-        value = max(self.min_value, min(self.max_value, value))
-        # Find nearest bin
-        bin_index = round((value - self.min_value) / self.bin_size)
-        bin_value = self.min_value + bin_index * self.bin_size
-        return str(int(bin_value) if self.bin_size >= 1 else bin_value)
+# Note: LabelSpace, CategoricalLabelSpace, and OrdinalLabelSpace have been removed.
+# Use continuous score prediction instead of classification with discretized labels.
 
 
 # =============================================================================

@@ -109,6 +109,7 @@ def main():
 
     # Import dependencies
     import dspy
+    from src.config.dspy_config import configure_dspy
     from src.config.settings import load_settings
     from src.ops_engine.training_framework.genrm_preference import (
         GenRMJudge,
@@ -154,7 +155,7 @@ def main():
         temperature=summarizer_temperature,  # Will be overridden per candidate
         max_tokens=summarizer_max_tokens,
     )
-    dspy.configure(lm=summarizer_lm)
+    configure_dspy(lm=summarizer_lm)
 
     # Create summarizer module
     summarizer = LeafSummarizer(use_cot=True)

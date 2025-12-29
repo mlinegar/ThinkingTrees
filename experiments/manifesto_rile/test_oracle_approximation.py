@@ -18,6 +18,7 @@ sys.path.insert(0, str(project_root))
 import dspy
 from openai import OpenAI
 
+from src.config.dspy_config import configure_dspy
 from src.ops_engine.oracle_func_approximation import (
     OracleFuncTrainingCollector,
     OracleFuncTrainingExample,
@@ -104,7 +105,7 @@ def setup_dspy_lm(port: int = 8000):
         api_key="EMPTY",
         max_tokens=4000,
     )
-    dspy.configure(lm=lm)
+    configure_dspy(lm=lm)
     logger.info(f"Configured DSPy with model: {model_id}")
     return lm
 

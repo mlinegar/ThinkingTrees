@@ -28,6 +28,7 @@ sys.path.insert(0, str(project_root))
 import dspy
 from openai import OpenAI
 
+from src.config.dspy_config import configure_dspy
 from src.manifesto.data_loader import create_pilot_dataset
 from src.manifesto.rubrics import RILE_PRESERVATION_RUBRIC, RILE_TASK_CONTEXT
 from src.manifesto.evaluation import ManifestoEvaluator, save_results
@@ -440,7 +441,7 @@ def main():
         temperature=task_temperature,
         max_tokens=16000,  # Allow full thinking
     )
-    dspy.configure(lm=task_lm)
+    configure_dspy(lm=task_lm)
 
     # Create the full DSPy pipeline - ALL stages are optimizable
     pipeline = ManifestoPipeline(chunk_size=args.chunk_size)

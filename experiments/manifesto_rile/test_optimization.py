@@ -26,6 +26,7 @@ def setup_dspy(port: int):
     """Configure DSPy with vLLM."""
     import dspy
     import requests
+    from src.config.dspy_config import configure_dspy
 
     try:
         resp = requests.get(f"http://localhost:{port}/v1/models")
@@ -40,7 +41,7 @@ def setup_dspy(port: int):
         api_base=f"http://localhost:{port}/v1",
         api_key="EMPTY",
     )
-    dspy.configure(lm=lm)
+    configure_dspy(lm=lm)
     logger.info("DSPy configured")
     return True
 

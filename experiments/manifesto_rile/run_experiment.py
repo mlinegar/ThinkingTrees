@@ -24,8 +24,11 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.manifesto.data_loader import create_pilot_dataset, ManifestoDataset
-from src.manifesto.ops_pipeline import ManifestoOPSPipeline, SimplePipeline, PipelineConfig
-from src.manifesto.evaluation import ManifestoEvaluator, save_results
+# Pipeline classes are now in src.manifesto compatibility shim (originally from src.pipelines.batched)
+from src.manifesto import ManifestoOPSPipeline, SimplePipeline, PipelineConfig
+
+# Note: ManifestoEvaluator and save_results have been removed.
+# This script needs updating to use the new evaluation framework.
 
 # Set up logging
 logging.basicConfig(
@@ -157,27 +160,59 @@ def main():
         except Exception as e:
             logger.error(f"  Failed: {e}")
 
-    # Evaluate results
+    # Evaluate results - compute metrics inline (ManifestoEvaluator was removed)
     logger.info("Evaluating results...")
-    evaluator = ManifestoEvaluator()
-    metrics = evaluator.evaluate(results, split_name=args.split)
+    import json
+    import math
 
-    # Generate report
-    report = evaluator.generate_report(
-        results,
-        split_name=args.split,
-        output_path=output_dir / 'report.txt'
-    )
-    print("\n" + report)
+    valid_results = [r for r in results if r.predicted_rile is not None and not r.error]
+    errors = [abs(r.predicted_rile - r.ground_truth_rile) for r in valid_results]
 
-    # Save results
-    save_results(results, output_dir / 'results.json')
+    if errors:
+        mae = sum(errors) / len(errors)
+        rmse = math.sqrt(sum(e**2 for e in errors) / len(errors))
+        within_10 = sum(1 for e in errors if e <= 10) / len(errors) * 100
+
+        # Simple correlation (Pearson)
+        pred = [r.predicted_rile for r in valid_results]
+        actual = [r.ground_truth_rile for r in valid_results]
+        n = len(pred)
+        mean_pred = sum(pred) / n
+        mean_actual = sum(actual) / n
+        num = sum((p - mean_pred) * (a - mean_actual) for p, a in zip(pred, actual))
+        denom_pred = math.sqrt(sum((p - mean_pred)**2 for p in pred))
+        denom_actual = math.sqrt(sum((a - mean_actual)**2 for a in actual))
+        correlation = num / (denom_pred * denom_actual) if denom_pred and denom_actual else 0.0
+    else:
+        mae = rmse = correlation = 0.0
+        within_10 = 0.0
+
+    metrics = {
+        "mae": mae,
+        "rmse": rmse,
+        "correlation": correlation,
+        "within_10_points": within_10,
+        "n_samples": len(valid_results),
+        "n_failed": len(results) - len(valid_results),
+        "split": args.split,
+    }
+
+    # Save results as JSON
+    results_data = []
+    for r in results:
+        results_data.append({
+            "manifesto_id": getattr(r, 'manifesto_id', None),
+            "predicted_rile": r.predicted_rile,
+            "ground_truth_rile": r.ground_truth_rile,
+            "error": str(r.error) if r.error else None,
+        })
+    with open(output_dir / 'results.json', 'w') as f:
+        json.dump(results_data, f, indent=2)
     logger.info(f"Results saved to {output_dir}")
 
     # Save metrics
-    import json
     with open(output_dir / 'metrics.json', 'w') as f:
-        json.dump(metrics.to_dict(), f, indent=2)
+        json.dump(metrics, f, indent=2)
 
     logger.info("Experiment complete!")
 
@@ -185,11 +220,11 @@ def main():
     print("\n" + "=" * 50)
     print("SUMMARY")
     print("=" * 50)
-    print(f"Samples processed: {len(results)}")
-    print(f"MAE:  {metrics.mae:.2f} RILE points")
-    print(f"RMSE: {metrics.rmse:.2f} RILE points")
-    print(f"Correlation: {metrics.correlation:.3f}")
-    print(f"Within 10 points: {metrics.within_10_points:.1f}%")
+    print(f"Samples processed: {len(valid_results)}")
+    print(f"MAE:  {mae:.2f} RILE points")
+    print(f"RMSE: {rmse:.2f} RILE points")
+    print(f"Correlation: {correlation:.3f}")
+    print(f"Within 10 points: {within_10:.1f}%")
 
     return 0
 

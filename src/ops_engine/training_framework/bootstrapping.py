@@ -3,14 +3,14 @@ Hierarchical bootstrapping for generating training examples.
 
 This module provides utilities for generating summary-level training examples
 from document-level labels. It uses a combined approach:
-1. Oracle-based labeling: Use the oracle classifier to label intermediate summaries
+1. Oracle-based labeling: Use a score predictor to label intermediate summaries
 2. Document-level error: Use prediction error to identify good/bad summaries
 3. Weighted combination: Combine both signals with configurable weights
 """
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import dspy
 
@@ -19,9 +19,6 @@ from .core import (
     UnifiedTrainingExample,
     ViolationType,
 )
-
-if TYPE_CHECKING:
-    from .inference import OracleClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -57,20 +54,23 @@ class BootstrappedExample:
     def to_unified_example(self) -> UnifiedTrainingExample:
         """Convert to UnifiedTrainingExample format."""
         return UnifiedTrainingExample(
+            example_id=f"{self.document_id}:{self.node_id}",
+            source_type="bootstrapped",
             original_content=self.original_content,
             summary=self.summary,
             rubric=self.rubric,
-            violation_type=ViolationType.SUFFICIENCY if self.label == TrainingExampleLabel.POSITIVE else ViolationType.NONE,
-            label=self.label,
-            confidence=self.confidence,
-            source_type="bootstrapped",
-            source_id=f"{self.document_id}:{self.node_id}",
-            metadata={
+            context={
+                'document_id': self.document_id,
+                'node_id': self.node_id,
                 'node_type': self.node_type,
                 'oracle_score': self.oracle_score,
                 'document_error': self.document_error,
                 'expected_score': self.expected_score,
+                'parent_context': self.parent_context,
             },
+            label=self.label,
+            violation_type=ViolationType.SUFFICIENCY if self.label == TrainingExampleLabel.POSITIVE else ViolationType.NONE,
+            confidence=self.confidence,
         )
 
     def to_dspy_example(self) -> dspy.Example:
@@ -176,14 +176,14 @@ class HierarchicalBootstrapper:
     def bootstrap_examples(
         self,
         documents: List[ProcessedDocument],
-        oracle: Optional['OracleClassifier'] = None,
+        oracle: Optional[Any] = None,
     ) -> List[BootstrappedExample]:
         """
         Bootstrap training examples from processed documents.
 
         Args:
             documents: List of processed documents with tree structures
-            oracle: Optional oracle classifier for labeling
+            oracle: Optional score predictor for labeling (any callable)
 
         Returns:
             List of bootstrapped examples
@@ -207,7 +207,7 @@ class HierarchicalBootstrapper:
     def _process_document(
         self,
         doc: ProcessedDocument,
-        oracle: Optional['OracleClassifier'],
+        oracle: Optional[Any],
     ) -> List[BootstrappedExample]:
         """Process a single document to extract training examples."""
         examples = []
@@ -289,7 +289,7 @@ class HierarchicalBootstrapper:
         self,
         node: Dict[str, Any],
         doc: ProcessedDocument,
-        oracle: 'OracleClassifier',
+        oracle: Any,
     ) -> Tuple[Optional[Tuple[TrainingExampleLabel, float]], Optional[float]]:
         """
         Compute label signal from oracle assessment.

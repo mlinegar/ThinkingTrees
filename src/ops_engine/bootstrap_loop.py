@@ -14,9 +14,9 @@ The key insight from the paper is that we can train on summaries (not full docs)
 when OPS conditions hold, which is Theorem 3.1's DPO equivalence.
 
 Usage:
-    from src.ops_engine.bootstrap_loop import OPSBootstrapTrainer, BootstrapConfig
+    from src.ops_engine.bootstrap_loop import BootstrapTrainer, BootstrapConfig
 
-    trainer = OPSBootstrapTrainer(
+    trainer = BootstrapTrainer(
         oracle=my_oracle,
         summarizer=my_summarizer,
         config=BootstrapConfig(target_p_suff=0.05),
@@ -30,10 +30,78 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor
 
+if TYPE_CHECKING:
+    from src.core.data_models import Node
+
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Tree Normalization Helpers
+# =============================================================================
+
+def _normalize_to_node(obj: Any) -> 'Node':
+    """
+    Normalize any tree representation to a Node object.
+
+    Handles:
+    - Node objects (passthrough)
+    - Tree objects (extracts root)
+    - BuildResult objects (extracts tree.root)
+    - Dict trees (converts to Node)
+
+    Args:
+        obj: Any tree-like object
+
+    Returns:
+        Node object
+    """
+    from src.core.data_models import Node, leaf, node as make_node
+
+    # Already a Node - passthrough
+    if isinstance(obj, Node):
+        return obj
+
+    # Handle BuildResult from builder.py
+    if hasattr(obj, 'tree'):
+        return _normalize_to_node(obj.tree)
+
+    # Handle Tree (has .root attribute)
+    if hasattr(obj, 'root'):
+        return _normalize_to_node(obj.root)
+
+    # Handle dict representation - convert to Node
+    if isinstance(obj, dict):
+        node_id = obj.get('id', 'unknown')
+        text = obj.get('text', obj.get('raw_text_span', ''))
+        summary = obj.get('summary', '')
+        is_leaf = obj.get('is_leaf', True)
+        children = obj.get('children', [])
+
+        if is_leaf or not children:
+            # Create leaf node
+            result = leaf(text, node_id=node_id)
+            result.summary = summary
+            return result
+        else:
+            # Create internal node with children
+            child_nodes = [_normalize_to_node(c) for c in children]
+            # For binary trees, assign left/right
+            left = child_nodes[0] if len(child_nodes) > 0 else None
+            right = child_nodes[1] if len(child_nodes) > 1 else None
+            result = make_node(left, right, summary=summary, node_id=node_id)
+            return result
+
+    # Fallback - create a leaf node from object attributes
+    text = getattr(obj, 'text', getattr(obj, 'raw_text_span', ''))
+    node_id = getattr(obj, 'id', 'unknown')
+    summary = getattr(obj, 'summary', '')
+    result = leaf(text, node_id=node_id)
+    result.summary = summary
+    return result
 
 
 @dataclass
@@ -95,39 +163,26 @@ class BootstrapResult:
     total_training_examples: int
     total_duration_seconds: float
 
+    # Target thresholds (defaults match BootstrapConfig defaults)
+    target_p_suff: float = 0.05
+    target_p_merge: float = 0.05
+    target_p_idem: float = 0.10
+
     @property
     def meets_targets(self) -> bool:
-        """Whether all violation rates meet targets."""
+        """Whether all violation rates meet configured targets."""
         return (
-            self.final_violation_rates.get("p_suff", 1.0) <= 0.05 and
-            self.final_violation_rates.get("p_merge", 1.0) <= 0.05 and
-            self.final_violation_rates.get("p_idem", 1.0) <= 0.10
+            self.final_violation_rates.get("p_suff", 1.0) <= self.target_p_suff and
+            self.final_violation_rates.get("p_merge", 1.0) <= self.target_p_merge and
+            self.final_violation_rates.get("p_idem", 1.0) <= self.target_p_idem
         )
 
 
-@dataclass
-class AuditTrainingExample:
-    """Training example generated from audit failure."""
-    example_id: str
-    check_type: str  # "sufficiency", "merge", "idempotence", "substitution"
-    is_violation: bool
-
-    # Input for summarizer training
-    original_content: str
-    current_summary: str
-    rubric: str
-
-    # Oracle predictions (for understanding the failure)
-    oracle_original: Optional[float] = None
-    oracle_summary: Optional[float] = None
-    discrepancy: float = 0.0
-
-    # Context
-    node_id: Optional[str] = None
-    document_id: Optional[str] = None
+# Import UnifiedTrainingExample for audit examples (replaces AuditTrainingExample)
+from src.ops_engine.training_framework.core import UnifiedTrainingExample
 
 
-class OPSBootstrapTrainer:
+class BootstrapTrainer:
     """
     Implements the full OPS bootstrap training loop from paper Section 3.11.
 
@@ -140,7 +195,7 @@ class OPSBootstrapTrainer:
 
     def __init__(
         self,
-        oracle_fn: Callable[[str, str, str], Tuple[bool, float, str]],
+        oracle_fn: Union[Callable[[str, str, str], Tuple[bool, float, str]], Any],
         summarizer_fn: Callable[[str, str], str],
         config: Optional[BootstrapConfig] = None,
         tree_builder_fn: Optional[Callable] = None,
@@ -149,19 +204,40 @@ class OPSBootstrapTrainer:
         Initialize the bootstrap trainer.
 
         Args:
-            oracle_fn: Oracle function (input_a, input_b, rubric) -> (congruent, discrepancy, reasoning)
+            oracle_fn: Oracle function - either ScoringOracle (preferred) or legacy
+                      (input_a, input_b, rubric) -> (congruent, discrepancy, reasoning)
             summarizer_fn: Summarizer function (content, rubric) -> summary
             config: Bootstrap configuration
             tree_builder_fn: Optional function to build trees from documents
         """
-        self.oracle = oracle_fn
+        self._oracle = oracle_fn
         self.summarizer = summarizer_fn
         self.config = config or BootstrapConfig()
         self.tree_builder = tree_builder_fn
 
         # Track training data across iterations
-        self._all_training_examples: List[AuditTrainingExample] = []
+        self._all_training_examples: List[UnifiedTrainingExample] = []
         self._iteration_history: List[BootstrapIteration] = []
+
+    @property
+    def oracle(self):
+        """Access the oracle function."""
+        return self._oracle
+
+    def _call_oracle(self, input_a: str, input_b: str, rubric: str) -> Tuple[bool, float, str]:
+        """
+        Call the oracle and return (is_congruent, discrepancy, reasoning).
+
+        Handles both ScoringOracle and legacy OracleProtocol interfaces.
+        """
+        from src.ops_engine.oracle_utils import call_oracle
+        return call_oracle(
+            self._oracle,
+            input_a,
+            input_b,
+            rubric,
+            threshold=self.config.target_p_suff,  # Use target threshold
+        )
 
     def train(
         self,
@@ -241,7 +317,11 @@ class OPSBootstrapTrainer:
                     training_examples,
                     rubric,
                 )
-                logger.info(f"  Optimization score: {score_before:.3f} → {score_after:.3f}")
+                if score_after < 0:
+                    logger.warning(f"  Optimization failed (score={score_after}), using previous model")
+                    score_after = score_before  # Keep previous score on failure
+                else:
+                    logger.info(f"  Optimization score: {score_before:.3f} → {score_after:.3f}")
             else:
                 score_after = score_before
                 if not training_examples:
@@ -293,6 +373,10 @@ class OPSBootstrapTrainer:
             iteration_history=self._iteration_history,
             total_training_examples=len(self._all_training_examples),
             total_duration_seconds=time.time() - start_time,
+            # Pass targets from config so meets_targets() uses correct values
+            target_p_suff=self.config.target_p_suff,
+            target_p_merge=self.config.target_p_merge,
+            target_p_idem=self.config.target_p_idem,
         )
 
         logger.info(f"\n{'='*60}")
@@ -310,41 +394,50 @@ class OPSBootstrapTrainer:
         self,
         documents: List[Dict[str, Any]],
         rubric: str,
-    ) -> List[Dict[str, Any]]:
-        """Build summarization trees for all documents."""
-        if self.tree_builder is not None:
-            return [self.tree_builder(doc, rubric) for doc in documents]
+    ) -> List['Node']:
+        """
+        Build summarization trees for all documents.
 
-        # Simple fallback: create single-node trees
+        Returns list of Node objects (root nodes of each tree).
+        Works with any tree_builder that returns Node, Tree, BuildResult, or dict.
+        """
+        from src.core.data_models import leaf
+
+        if self.tree_builder is not None:
+            # Build trees using provided builder and normalize to Node
+            raw_trees = [self.tree_builder(doc, rubric) for doc in documents]
+            return [_normalize_to_node(tree) for tree in raw_trees]
+
+        # Simple fallback: create single-node trees as Node objects
         trees = []
         for i, doc in enumerate(documents):
             text = doc.get('text', str(doc))
             doc_id = doc.get('id', f'doc_{i}')
             summary = self.summarizer(text, rubric)
-            trees.append({
-                'id': doc_id,
-                'text': text,
-                'summary': summary,
-                'is_leaf': True,
-                'children': [],
-            })
+            node = leaf(text, node_id=doc_id)
+            node.summary = summary
+            trees.append(node)
         return trees
 
     def _run_audit(
         self,
-        trees: List[Dict[str, Any]],
+        trees: List['Node'],
         rubric: str,
-    ) -> Tuple[Dict[str, float], List[AuditTrainingExample]]:
+    ) -> Tuple[Dict[str, float], List[UnifiedTrainingExample]]:
         """
         Run probabilistic audit and collect violation examples.
+
+        Args:
+            trees: List of Node objects (root nodes of each tree)
+            rubric: The information preservation rubric
 
         Returns:
             Tuple of (violation_rates dict, list of examples)
         """
-        from src.ops_engine.checks import OPSCheckRunner, CheckConfig, CheckType
+        from src.ops_engine.checks import CheckRunner, CheckConfig, CheckType
 
         check_config = CheckConfig(discrepancy_threshold=0.1)
-        runner = OPSCheckRunner(
+        runner = CheckRunner(
             oracle_fn=self.oracle,
             config=check_config,
             summarizer_fn=self.summarizer,
@@ -360,14 +453,14 @@ class OPSBootstrapTrainer:
         total_merges = 0
 
         for tree in trees:
-            tree_id = tree.get('id', 'unknown')
+            tree_id = tree.id
 
             # Count structure
-            if tree.get('is_leaf', True):
+            if tree.is_leaf:
                 total_leaves += 1
             else:
                 total_merges += 1
-                total_leaves += len(tree.get('children', []))
+                total_leaves += len(tree.children)
 
             # Sample for audit based on sample_rate
             import random
@@ -375,22 +468,22 @@ class OPSBootstrapTrainer:
                 continue
 
             # Check sufficiency for leaves
-            if tree.get('is_leaf', True) and tree.get('text'):
+            if tree.is_leaf and tree.raw_text_span:
                 result = runner.check_sufficiency(
-                    original_content=tree['text'],
-                    summary=tree.get('summary', ''),
+                    original_content=tree.raw_text_span,
+                    summary=tree.summary or '',
                     rubric=rubric,
                     node_id=tree_id,
                 )
                 counts['sufficiency_total'] += 1
                 if not result.passed:
                     counts['sufficiency_violations'] += 1
-                    examples.append(AuditTrainingExample(
+                    examples.append(UnifiedTrainingExample.create_audit_example(
                         example_id=f"{tree_id}_suff",
                         check_type="sufficiency",
                         is_violation=True,
-                        original_content=tree['text'],
-                        current_summary=tree.get('summary', ''),
+                        original_content=tree.raw_text_span,
+                        current_summary=tree.summary or '',
                         rubric=rubric,
                         discrepancy=result.discrepancy,
                         node_id=tree_id,
@@ -398,9 +491,9 @@ class OPSBootstrapTrainer:
                     ))
 
             # Check idempotence
-            if tree.get('summary'):
+            if tree.summary:
                 result = runner.check_idempotence(
-                    summary=tree['summary'],
+                    summary=tree.summary,
                     rubric=rubric,
                     node_id=tree_id,
                 )
@@ -409,13 +502,13 @@ class OPSBootstrapTrainer:
                     counts['idempotence_violations'] += 1
 
             # Check merge consistency for internal nodes
-            children = tree.get('children', [])
+            children = tree.children
             if children and len(children) >= 2:
-                child_summaries = [c.get('summary', '') for c in children if c.get('summary')]
+                child_summaries = [c.summary for c in children if c.summary]
                 if child_summaries:
                     result = runner.check_merge_consistency(
                         child_summaries=child_summaries,
-                        parent_summary=tree.get('summary', ''),
+                        parent_summary=tree.summary or '',
                         rubric=rubric,
                         node_id=tree_id,
                     )
@@ -458,8 +551,8 @@ class OPSBootstrapTrainer:
 
     def _collect_training_examples(
         self,
-        audit_examples: List[AuditTrainingExample],
-    ) -> List[AuditTrainingExample]:
+        audit_examples: List[UnifiedTrainingExample],
+    ) -> List[UnifiedTrainingExample]:
         """
         Filter and balance training examples from audit.
 
@@ -467,12 +560,14 @@ class OPSBootstrapTrainer:
         - Max examples limit
         - Positive/negative balancing if configured
         """
+        from src.ops_engine.training_framework.core import TrainingExampleLabel
+
         if not audit_examples:
             return []
 
         # Separate violations and good examples
-        violations = [ex for ex in audit_examples if ex.is_violation]
-        good = [ex for ex in audit_examples if not ex.is_violation]
+        violations = [ex for ex in audit_examples if ex.label == TrainingExampleLabel.POSITIVE]
+        good = [ex for ex in audit_examples if ex.label == TrainingExampleLabel.NEGATIVE]
 
         if self.config.balance_positive_negative and violations and good:
             # Balance to smaller class
@@ -493,7 +588,7 @@ class OPSBootstrapTrainer:
     def _optimize_summarizer(
         self,
         dspy_module: Any,
-        training_examples: List[AuditTrainingExample],
+        training_examples: List[UnifiedTrainingExample],
         rubric: str,
     ) -> float:
         """
@@ -527,7 +622,7 @@ class OPSBootstrapTrainer:
                 orig_content = getattr(gold, 'content', '')
 
                 # Use oracle to score
-                is_congruent, discrepancy, _ = self.oracle(
+                is_congruent, discrepancy, _ = self._call_oracle(
                     orig_content, pred_summary, rubric
                 )
 
@@ -573,10 +668,10 @@ class OPSBootstrapTrainer:
 
         except ImportError:
             logger.warning("DSPy not available, skipping optimization")
-            return 0.0
+            return -1.0  # Negative score indicates failure
         except Exception as e:
             logger.error(f"Optimization failed: {e}")
-            return 0.0
+            return -1.0  # Negative score indicates failure
 
     def _save_checkpoint(self, iteration: int, violation_rates: Dict[str, float]):
         """Save iteration checkpoint."""
@@ -632,7 +727,7 @@ def run_bootstrap_training(
         checkpoint_dir=checkpoint_dir,
     )
 
-    trainer = OPSBootstrapTrainer(
+    trainer = BootstrapTrainer(
         oracle_fn=oracle_fn,
         summarizer_fn=summarizer_fn,
         config=config,

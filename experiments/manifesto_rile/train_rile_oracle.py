@@ -25,6 +25,8 @@ from datetime import datetime
 
 import dspy
 
+from src.config.dspy_config import configure_dspy
+
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
@@ -58,7 +60,7 @@ def setup_dspy(port: int):
         api_base=f"http://localhost:{port}/v1",
         api_key="EMPTY"
     )
-    dspy.configure(lm=lm)
+    configure_dspy(lm=lm)
     logger.info(f"DSPy configured with vLLM on port {port}")
 
 

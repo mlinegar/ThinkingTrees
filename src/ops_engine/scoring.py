@@ -49,12 +49,11 @@ def normalize_error_to_score(error: float, max_error: float) -> float:
         ValueError: If max_error <= 0
 
     Examples:
-        # RILE similarity using RILE_RANGE constant (200-point scale, -100 to +100)
-        from src.manifesto.constants import RILE_RANGE  # = 200.0
-        score = normalize_error_to_score(abs(rile_a - rile_b), RILE_RANGE)
-        # rile_a=-50, rile_b=+50 → error=100 → score=0.5
+        # Bounded scale similarity (e.g., scale from -100 to +100, range=200)
+        score = normalize_error_to_score(abs(value_a - value_b), max_error=200.0)
+        # value_a=-50, value_b=+50 → error=100 → score=0.5
 
-        # Configurable scale (e.g., more lenient 100-point scale)
+        # Configurable scale (e.g., 100-point scale)
         score = normalize_error_to_score(abs(pred - gt), max_error=100.0)
         # pred=45, gt=50 → error=5 → score=0.95
 
@@ -80,7 +79,7 @@ def score_to_error(score: float, max_error: float) -> float:
         Error value: max_error * (1 - score)
 
     Examples:
-        # Convert score back to RILE error
+        # Convert score back to error
         error = score_to_error(0.5, max_error=200.0)  # → 100.0 points
 
         # Perfect score
@@ -101,12 +100,16 @@ class BoundedScale:
     """
     A bounded linear scale for score normalization.
 
+    DEPRECATED: Use ScaleDefinition from src.ops_engine.training_framework.domains.base instead.
+    ScaleDefinition provides the same functionality with additional metadata like description,
+    higher_is_better, and neutral_value.
+
     Represents any continuous range with defined bounds.
     Handles the math of converting distances to normalized scores.
 
-    This is the generic foundation for domain-specific scales like RILE.
+    This is the generic foundation for domain-specific scales.
     Domain modules should create their own BoundedScale instances with
-    appropriate bounds (e.g., RILE_SCALE = BoundedScale(-100.0, 100.0)).
+    appropriate bounds for their use case.
 
     Examples:
         # Political positioning (-100 to +100)
@@ -126,7 +129,13 @@ class BoundedScale:
     max_value: float
 
     def __post_init__(self):
-        """Validate that min < max."""
+        """Validate that min < max and emit deprecation warning."""
+        warnings.warn(
+            "BoundedScale is deprecated, use ScaleDefinition from "
+            "src.ops_engine.training_framework.domains.base instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if self.min_value >= self.max_value:
             raise ValueError(
                 f"min_value ({self.min_value}) must be less than "
@@ -208,11 +217,11 @@ class OraclePrediction:
         reasoning: Human-readable explanation
 
     Example:
-        # RILE oracle predicting political position
-        pred = oracle.predict("This manifesto supports...")
-        print(pred.value)       # 45.2 (on -100 to +100 scale)
+        # Oracle predicting a value
+        pred = oracle.predict("Some text to analyze...")
+        print(pred.value)       # 45.2 (on the oracle's scale)
         print(pred.confidence)  # 0.85
-        print(pred.reasoning)   # "Strong left-wing economic policy..."
+        print(pred.reasoning)   # "Explanation of prediction..."
     """
     value: float
     confidence: float
@@ -228,7 +237,7 @@ class Oracle(ABC):
     Abstract base class for single-text prediction oracles.
 
     An Oracle takes text and predicts a numeric value on a bounded scale.
-    This is the generic foundation for domain-specific oracles (e.g., RILE).
+    This is the generic foundation for domain-specific oracles.
 
     Unlike ScoringOracle (which compares two texts), Oracle predicts
     a value from a single text - useful for classification and regression.
@@ -337,17 +346,17 @@ class SimilarityScorer:
     3. Returns an OracleScore
 
     Example:
-        # RILE similarity scorer
-        def extract_rile(text: str) -> float:
-            # Call LLM to get RILE score
-            return rile_scorer(text=text)['rile_score']
+        # Domain-specific similarity scorer
+        def extract_value(text: str) -> float:
+            # Call LLM or model to extract a numeric value
+            return model.predict(text=text)['score']
 
-        rile_scale = BoundedScale(-100.0, 100.0)
-        scorer = SimilarityScorer(extract_rile, rile_scale)
+        scale = BoundedScale(-100.0, 100.0)
+        scorer = SimilarityScorer(extract_value, scale, name="metric")
         result = scorer.score(original, summary, rubric)
         print(result.score)  # 0.95 (similarity)
 
-        # Sentiment similarity
+        # Sentiment similarity example
         scorer = SimilarityScorer(sentiment_fn, SYMMETRIC_SCALE)
     """
 
@@ -425,7 +434,7 @@ class OracleScore:
     Attributes:
         score: Primary output, 0.0-1.0 where higher = better match
         reasoning: Human-readable explanation of the score
-        metadata: Optional domain-specific details (e.g., {'rile_a': 45, 'rile_b': 52})
+        metadata: Optional domain-specific details (e.g., {'value_a': 45, 'value_b': 52})
     """
 
     score: float
@@ -539,12 +548,11 @@ class OracleScore:
             OracleScore with normalized score (1.0 = no error, 0.0 = max error)
 
         Example:
-            # From RILE prediction error (using RILE_RANGE = 200.0 for full scale)
-            from src.manifesto.constants import RILE_RANGE
+            # From prediction error (using scale range)
             score = OracleScore.from_error(
                 error=abs(predicted - ground_truth),
-                max_error=RILE_RANGE,  # 200.0, or use a smaller value for more lenient scoring
-                reasoning=f"RILE error: {abs(predicted - ground_truth):.0f}"
+                max_error=200.0,  # Use scale.range for your domain
+                reasoning=f"Prediction error: {abs(predicted - ground_truth):.0f}"
             )
         """
         score = normalize_error_to_score(error, max_error)
@@ -565,16 +573,15 @@ class ScoringOracle(Protocol):
     - metadata: Optional domain-specific details
 
     Example:
-        class RILEScorer:
+        class MyScorer:
             def score(self, input_a: str, input_b: str, rubric: str) -> OracleScore:
-                from src.manifesto.constants import RILE_RANGE
-                rile_a = self._compute_rile(input_a)
-                rile_b = self._compute_rile(input_b)
-                similarity = normalize_error_to_score(abs(rile_a - rile_b), RILE_RANGE)
+                value_a = self._compute_value(input_a)
+                value_b = self._compute_value(input_b)
+                similarity = normalize_error_to_score(abs(value_a - value_b), self.scale.range)
                 return OracleScore(
                     score=similarity,
-                    reasoning=f"RILE: {rile_a} vs {rile_b}",
-                    metadata={'rile_a': rile_a, 'rile_b': rile_b}
+                    reasoning=f"Values: {value_a} vs {value_b}",
+                    metadata={'value_a': value_a, 'value_b': value_b}
                 )
     """
 
@@ -596,92 +603,6 @@ class ScoringOracle(Protocol):
             OracleScore with score (1.0 = perfect match, 0.0 = no match)
         """
         ...
-
-
-# =============================================================================
-# Backward Compatibility Adapters
-# =============================================================================
-
-class LegacyOracleAdapter:
-    """
-    Adapts a new ScoringOracle to the legacy OracleJudge interface.
-
-    Use this when you have a new-style scorer but need to pass it to
-    code that expects the old (bool, float, str) return format.
-
-    Example:
-        scorer = RILEScorer()
-        legacy_oracle = LegacyOracleAdapter(scorer, threshold=0.95)
-        auditor = OPSAuditor(oracle=legacy_oracle)  # Old code works
-    """
-
-    def __init__(self, scoring_oracle: ScoringOracle, threshold: float = 0.9):
-        """
-        Initialize adapter.
-
-        Args:
-            scoring_oracle: New-style scorer implementing ScoringOracle
-            threshold: Classification threshold for passes_threshold()
-        """
-        self._oracle = scoring_oracle
-        self._threshold = threshold
-        self._warned = False
-
-    def __call__(
-        self,
-        input_a: str,
-        input_b: str,
-        rubric: str,
-    ) -> Tuple[bool, float, str]:
-        """
-        Legacy interface: returns (is_congruent, discrepancy, reasoning).
-
-        Emits deprecation warning on first use.
-        """
-        if not self._warned:
-            warnings.warn(
-                "OracleJudge tuple interface is deprecated. "
-                "Use ScoringOracle.score() returning OracleScore instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            self._warned = True
-
-        result = self._oracle.score(input_a, input_b, rubric)
-        return result.to_legacy_tuple(self._threshold)
-
-
-def as_scoring_oracle(legacy_oracle: Callable) -> ScoringOracle:
-    """
-    Wrap a legacy OracleJudge to behave as a ScoringOracle.
-
-    Use this when you have old-style oracle code that returns
-    (bool, float, str) tuples and want to use it with new-style APIs.
-
-    Args:
-        legacy_oracle: Callable with signature (input_a, input_b, rubric) -> (bool, float, str)
-
-    Returns:
-        Object implementing ScoringOracle protocol
-
-    Example:
-        # Wrap a legacy oracle that returns (bool, float, str)
-        def my_legacy_oracle(a, b, rubric):
-            return True, 0.15, "some reasoning"
-
-        new_oracle = as_scoring_oracle(my_legacy_oracle)
-        result = new_oracle.score(text_a, text_b, rubric)
-        print(result.score)  # 0.85
-    """
-
-    class WrappedLegacyOracle:
-        """Wrapper that adapts legacy oracle to ScoringOracle."""
-
-        def score(self, input_a: str, input_b: str, rubric: str) -> OracleScore:
-            is_congruent, discrepancy, reasoning = legacy_oracle(input_a, input_b, rubric)
-            return OracleScore.from_discrepancy(discrepancy, reasoning)
-
-    return WrappedLegacyOracle()
 
 
 # =============================================================================
@@ -710,7 +631,7 @@ def oracle_as_metric(
         DSPy metric function: (gold, pred, trace?) -> float
 
     Example:
-        scorer = RILEScorer()
+        scorer = MyScorer()
         metric = oracle_as_metric(scorer)
 
         # Use in optimization

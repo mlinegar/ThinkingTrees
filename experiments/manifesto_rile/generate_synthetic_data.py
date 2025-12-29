@@ -137,6 +137,7 @@ def main():
 
     # Import dependencies after path setup
     import dspy
+    from src.config.dspy_config import configure_dspy
     from src.config.settings import load_settings
     from src.ops_engine.training_framework.synthetic_data import (
         SyntheticDataGenerator,
@@ -173,7 +174,7 @@ def main():
         max_tokens=max_tokens,
         system_prompt=system_prompt,
     )
-    dspy.configure(lm=oracle_lm)
+    configure_dspy(lm=oracle_lm)
 
     logger.info("DSPy configured successfully")
 

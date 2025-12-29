@@ -18,9 +18,10 @@ Usage:
         GenRMJudge,
         GenRMPreferenceCollector,
     )
+    from src.config import get_genrm_url
 
-    # Create judge connected to GenRM server
-    judge = GenRMJudge(base_url="http://localhost:8001/v1")
+    # Create judge connected to GenRM server (auto-detects URL from config)
+    judge = GenRMJudge(base_url=get_genrm_url())
 
     # Compare two summaries
     result = judge.compare(
@@ -70,27 +71,62 @@ class GenRMJudge:
 
     def __init__(
         self,
-        base_url: str = "http://localhost:8001/v1",
-        model_name: str = "nvidia/Qwen3-Nemotron-235B-A22B-GenRM",
+        base_url: Optional[str] = None,
+        model_name: Optional[str] = None,
         temperature: float = 0.6,
         top_p: float = 0.95,
-        max_tokens: int = 2048,
+        max_tokens: int = 16384,
     ):
         """
         Initialize the GenRM judge.
 
         Args:
-            base_url: vLLM server base URL
-            model_name: Model name for API requests
+            base_url: vLLM server base URL (None = auto-detect from config)
+            model_name: Model name for API requests (None = auto-detect from server)
             temperature: Generation temperature
             top_p: Top-p sampling
             max_tokens: Maximum tokens for response
         """
+        # Auto-detect base URL from config if not provided
+        if base_url is None:
+            from src.config import get_genrm_url
+            base_url = get_genrm_url()
         self.base_url = base_url.rstrip("/")
-        self.model_name = model_name
         self.temperature = temperature
         self.top_p = top_p
         self.max_tokens = max_tokens
+
+        # Auto-detect model name from server if not provided
+        if model_name is None:
+            self.model_name = self._detect_model_name()
+        else:
+            self.model_name = model_name
+
+    def _detect_model_name(self) -> Optional[str]:
+        """Auto-detect the model name from the vLLM server."""
+        try:
+            response = requests.get(f"{self.base_url}/models", timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("data") and len(data["data"]) > 0:
+                model_id = data["data"][0]["id"]
+                logger.info(f"Auto-detected GenRM model: {model_id}")
+                return model_id
+        except Exception as e:
+            logger.warning(f"Failed to auto-detect model name: {e}")
+
+        # Return None to indicate detection failed - will retry on first request
+        return None
+
+    def _ensure_model_name(self) -> str:
+        """Ensure model name is detected, retrying if needed."""
+        if self.model_name is None:
+            self.model_name = self._detect_model_name()
+        if self.model_name is None:
+            raise RuntimeError(
+                f"Could not detect GenRM model name from {self.base_url}/models. "
+                "Is the GenRM server running?"
+            )
 
     def _build_messages(
         self,
@@ -153,6 +189,104 @@ class GenRMJudge:
             {"role": "response_2", "content": summary_b},
         ]
 
+    def _build_completion_prompt(
+        self,
+        context: str,
+        original_text: str,
+        summary_a: str,
+        summary_b: str,
+        law_type: str = "sufficiency",
+        extra_context: Optional[str] = None,
+    ) -> str:
+        """
+        Build a formatted prompt for the /completions endpoint.
+
+        Uses NVIDIA's official GenRM chat template format.
+        """
+        law_instructions = {
+            "sufficiency": (
+                "Compare which summary better preserves the oracle-relevant "
+                "information from the original text."
+            ),
+            "idempotence": (
+                "Compare which summary is more stable under re-summarization. "
+                "Use the provided resummaries to judge drift."
+            ),
+            "merge": (
+                "Compare which merged summary better preserves the information "
+                "from its child summaries."
+            ),
+        }
+        instruction = law_instructions.get(law_type, law_instructions["sufficiency"])
+
+        original_section = ""
+        if original_text.strip():
+            original_section = f"\n\nOriginal text being summarized:\n{original_text[:4000]}"
+
+        extra_section = ""
+        if extra_context:
+            extra_section = f"\n\n{extra_context}"
+
+        # Build conversation context (the user's summarization task)
+        user_task = (
+            f"Summarize the following text while preserving: {context}\n"
+            f"OPS Law: {law_type} - {instruction}"
+            f"{original_section}{extra_section}"
+        )
+
+        # NVIDIA's official GenRM template format
+        prompt = f"""<|im_start|>user
+You are an expert evaluation judge specializing in comparative assessment of LLM responses. You are impartial, rigorous, and consistent. Given the conversation context and two assistant responses to the user's latest query, you will follow the evaluation plan and scoring guidelines exactly as written below.
+
+#### Conversation Context ####
+User: {user_task}
+
+#### Responses to be Scored ####
+[The Begin of Response 1]
+{summary_a}
+[The End of Response 1]
+
+[The Begin of Response 2]
+{summary_b}
+[The End of Response 2]
+
+#### Evaluation Plan ####
+Please act as an impartial judge and evaluate the quality of the responses provided by two AI assistants to the user prompt. Begin your evaluation by generating your own answer to the prompt. You must provide your answer before judging any answers. When evaluating the assistants' answers, compare both assistants' answers with your answer. You must identify and correct any mistakes or inaccurate information. Then consider if the assistant's answers are helpful, relevant, and concise. Helpful means the answer correctly responds to the prompt or follows the instructions. Note when user prompt has any ambiguity or more than one interpretation, it is more helpful and appropriate to ask for clarifications or more information from the user than providing an answer based on assumptions. Relevant means all parts of the response closely connect or are appropriate to what is being asked. Concise means the response is clear and not verbose or excessive. Then consider the creativity and novelty of the assistant's answers when needed. Finally, identify any missing important information in the assistants' answers that would be beneficial to include when responding to the user prompt.
+
+#### Scoring Guidelines ####
+Based on the evaluation plan above, assign scores using these scales:
+
+**Individual Helpfulness Scores (1-5):**
+- 5: Extremely Helpful - Completely aligned with what the user was asking for
+- 4: Mostly Helpful - Generally useful with minor room for improvement
+- 3: Partially Helpful - Misses the overall goal in some way
+- 2: Borderline Unhelpful - Mostly doesn't capture what the user wanted
+- 1: Not Helpful - Completely missed the essence of the request
+
+**Comparative Ranking (1-6):**
+- 1: Response 1 is much better than Response 2
+- 2: Response 1 is better than Response 2
+- 3: Response 1 is slightly better than Response 2
+- 4: Response 2 is slightly better than Response 1
+- 5: Response 2 is better than Response 1
+- 6: Response 2 is much better than Response 1
+
+#### Output Format ####
+Analyze step by step following the evaluation plan, then provide your judgment as JSON:
+```json
+{{
+    "response_1_analysis": "Your detailed analysis of Response 1 based on the evaluation plan",
+    "response_2_analysis": "Your detailed analysis of Response 2 based on the evaluation plan",
+    "score_1": <1-5>,
+    "score_2": <1-5>,
+    "ranking": <1-6>
+}}
+```
+<|im_end|>
+<|im_start|>assistant
+"""
+        return prompt
+
     def compare(
         self,
         context: str,
@@ -174,6 +308,9 @@ class GenRMJudge:
         Returns:
             GenRMResult with preference and scores
         """
+        # Ensure model name is detected (lazy detection if server wasn't ready at init)
+        self._ensure_model_name()
+
         messages = self._build_messages(
             context=context,
             original_text=original_text,
@@ -183,6 +320,7 @@ class GenRMJudge:
             extra_context=extra_context,
         )
 
+        # Try chat completions first
         try:
             response = requests.post(
                 f"{self.base_url}/chat/completions",
@@ -193,7 +331,7 @@ class GenRMJudge:
                     "top_p": self.top_p,
                     "max_tokens": self.max_tokens,
                 },
-                timeout=120,
+                timeout=600,  # 10 min for large GenRM models (235B)
             )
             response.raise_for_status()
             data = response.json()
@@ -201,57 +339,125 @@ class GenRMJudge:
             content = data["choices"][0]["message"]["content"]
             return self._parse_genrm_response(content)
 
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                # Chat completions not available, try completions endpoint
+                logger.debug("Chat completions not available, trying completions endpoint")
+                return self._compare_via_completions(
+                    context, original_text, summary_a, summary_b, law_type, extra_context
+                )
+            else:
+                logger.error(f"GenRM request failed: {e}")
+                return self._error_result(str(e))
+
         except Exception as e:
             logger.error(f"GenRM request failed: {e}")
-            # Return tie with low confidence on error
-            return GenRMResult(
-                preferred="tie",
-                ranking_score=3,
-                helpfulness_a=3.0,
-                helpfulness_b=3.0,
-                reasoning=f"Error during comparison: {e}",
-                confidence=0.0,
-                raw_response="",
+            return self._error_result(str(e))
+
+    def _compare_via_completions(
+        self,
+        context: str,
+        original_text: str,
+        summary_a: str,
+        summary_b: str,
+        law_type: str = "sufficiency",
+        extra_context: Optional[str] = None,
+    ) -> GenRMResult:
+        """
+        Compare using the /completions endpoint as fallback.
+        """
+        prompt = self._build_completion_prompt(
+            context, original_text, summary_a, summary_b, law_type, extra_context
+        )
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/completions",
+                json={
+                    "model": self.model_name,
+                    "prompt": prompt,
+                    "temperature": self.temperature,
+                    "top_p": self.top_p,
+                    "max_tokens": self.max_tokens,
+                    "stop": ["<|im_end|>", "<|im_start|>"],
+                },
+                timeout=600,  # 10 min for large GenRM models (235B)
             )
+            response.raise_for_status()
+            data = response.json()
+
+            content = data["choices"][0]["text"]
+            return self._parse_genrm_response(content)
+
+        except Exception as e:
+            logger.error(f"GenRM completions request failed: {e}")
+            return self._error_result(str(e))
+
+    def _error_result(self, error_msg: str) -> GenRMResult:
+        """Return a tie result with low confidence for errors."""
+        return GenRMResult(
+            preferred="tie",
+            ranking_score=3,
+            helpfulness_a=3.0,
+            helpfulness_b=3.0,
+            reasoning=f"Error during comparison: {error_msg}",
+            confidence=0.0,
+            raw_response="",
+        )
 
     def _parse_genrm_response(self, content: str) -> GenRMResult:
         """
         Parse GenRM response to extract scores and preference.
 
-        GenRM typically produces structured output with:
-        - Helpfulness scores for each response (1-5)
-        - Ranking score (1-6) indicating preference strength
+        First tries to parse the official JSON output format, then falls back
+        to regex-based extraction for other response formats.
         """
-        # Try to extract helpfulness scores
         helpfulness_a = 3.0
         helpfulness_b = 3.0
         ranking_score = 3
+        reasoning = ""
 
-        # Look for patterns like "Helpfulness: X/5" or "Score: X"
-        help_pattern = r"(?:helpfulness|score|rating)[^\d]*(\d(?:\.\d)?)"
+        # Try to parse JSON output format first (official template)
+        json_match = re.search(r'```json\s*({.*?})\s*```', content, re.DOTALL)
+        if not json_match:
+            # Try without code block markers
+            json_match = re.search(r'(\{[^{}]*"score_1"[^{}]*\})', content, re.DOTALL)
 
-        # Extract numbers from response
-        numbers = re.findall(r"\b([1-5](?:\.[0-9])?)\b", content)
-        if len(numbers) >= 2:
+        if json_match:
             try:
-                helpfulness_a = float(numbers[0])
-                helpfulness_b = float(numbers[1])
-            except ValueError:
-                pass
+                json_str = json_match.group(1)
+                result = json.loads(json_str)
+                helpfulness_a = float(result.get('score_1', 3))
+                helpfulness_b = float(result.get('score_2', 3))
+                ranking_score = int(result.get('ranking', 3))
+                reasoning = result.get('response_1_analysis', '') + '\n' + result.get('response_2_analysis', '')
+            except (json.JSONDecodeError, ValueError, KeyError) as e:
+                logger.debug(f"JSON parsing failed, falling back to regex: {e}")
 
-        # Look for ranking score (1-6)
-        ranking_pattern = r"(?:ranking|overall|preference)[^\d]*([1-6])"
-        ranking_match = re.search(ranking_pattern, content, re.IGNORECASE)
-        if ranking_match:
-            ranking_score = int(ranking_match.group(1))
-        else:
-            # Infer from helpfulness
-            if helpfulness_a > helpfulness_b + 0.5:
-                ranking_score = 2  # A is better
-            elif helpfulness_b > helpfulness_a + 0.5:
-                ranking_score = 5  # B is better
+        # Fallback: regex-based extraction
+        if helpfulness_a == 3.0 and helpfulness_b == 3.0 and ranking_score == 3:
+            # Extract numbers from response
+            numbers = re.findall(r"\b([1-5](?:\.[0-9])?)\b", content)
+            if len(numbers) >= 2:
+                try:
+                    helpfulness_a = float(numbers[0])
+                    helpfulness_b = float(numbers[1])
+                except ValueError:
+                    pass
+
+            # Look for ranking score (1-6)
+            ranking_pattern = r"(?:ranking|overall|preference)[^\d]*([1-6])"
+            ranking_match = re.search(ranking_pattern, content, re.IGNORECASE)
+            if ranking_match:
+                ranking_score = int(ranking_match.group(1))
             else:
-                ranking_score = 3  # Roughly equal
+                # Infer from helpfulness
+                if helpfulness_a > helpfulness_b + 0.5:
+                    ranking_score = 2  # A is better
+                elif helpfulness_b > helpfulness_a + 0.5:
+                    ranking_score = 5  # B is better
+                else:
+                    ranking_score = 3  # Roughly equal
 
         # Determine preference from ranking score
         if ranking_score <= 2:
@@ -272,7 +478,7 @@ class GenRMJudge:
             ranking_score=ranking_score,
             helpfulness_a=helpfulness_a,
             helpfulness_b=helpfulness_b,
-            reasoning=content[:500],  # First 500 chars as reasoning
+            reasoning=reasoning if reasoning else content[:500],
             confidence=confidence,
             raw_response=content,
         )

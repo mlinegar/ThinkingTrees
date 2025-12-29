@@ -2,14 +2,16 @@
 Core data models for OPS (Oracle-Preserving Summarization) trees.
 
 This module defines the fundamental data structures:
-- OPSNode: Individual nodes in the summarization tree
-- OPSTree: Container for the complete tree structure
+- Node: Individual nodes in the summarization tree
+- Tree: Container for the complete tree structure
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, List, Iterator, Callable, Any
+from typing import Optional, List, Iterator, Callable, Any, Dict
 from enum import Enum
+from pathlib import Path
 import uuid
+import json
 
 
 class AuditStatus(Enum):
@@ -28,9 +30,28 @@ class AuditResult:
     reasoning: Optional[str] = None
     trace: Optional[dict] = None
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize audit result to dictionary."""
+        return {
+            'status': self.status.value,
+            'discrepancy_score': self.discrepancy_score,
+            'reasoning': self.reasoning,
+            'trace': self.trace,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'AuditResult':
+        """Deserialize audit result from dictionary."""
+        return cls(
+            status=AuditStatus(data['status']),
+            discrepancy_score=data.get('discrepancy_score', 0.0),
+            reasoning=data.get('reasoning'),
+            trace=data.get('trace'),
+        )
+
 
 @dataclass
-class OPSNode:
+class Node:
     """
     A node in the OPS (Oracle-Preserving Summarization) tree.
 
@@ -55,9 +76,9 @@ class OPSNode:
     summary: str = ""
 
     # Structure
-    left_child: Optional['OPSNode'] = None
-    right_child: Optional['OPSNode'] = None
-    parent: Optional['OPSNode'] = None
+    left_child: Optional['Node'] = None
+    right_child: Optional['Node'] = None
+    parent: Optional['Node'] = None
 
     # Audit state
     audit_result: AuditResult = field(
@@ -80,7 +101,7 @@ class OPSNode:
         return self.left_child is not None and self.right_child is not None
 
     @property
-    def children(self) -> List['OPSNode']:
+    def children(self) -> List['Node']:
         """Get list of children (0, 1, or 2 nodes)."""
         result = []
         if self.left_child is not None:
@@ -148,14 +169,52 @@ class OPSNode:
 
         return violations
 
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Serialize node to dictionary.
+
+        Uses child IDs instead of full child objects to avoid circular references.
+        Parent reference is excluded (will be reconstructed during from_dict).
+        """
+        return {
+            'id': self.id,
+            'level': self.level,
+            'raw_text_span': self.raw_text_span,
+            'summary': self.summary,
+            'left_child_id': self.left_child.id if self.left_child else None,
+            'right_child_id': self.right_child.id if self.right_child else None,
+            'audit_result': self.audit_result.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'Node':
+        """
+        Deserialize node from dictionary.
+
+        Note: Child and parent references must be rebuilt separately
+        after all nodes are created. Use Tree.from_dict() for full
+        tree reconstruction.
+        """
+        node = cls(
+            id=data['id'],
+            level=data['level'],
+            raw_text_span=data.get('raw_text_span'),
+            summary=data.get('summary', ''),
+            audit_result=AuditResult.from_dict(data['audit_result']),
+        )
+        # Store child IDs for later linking (not actual references yet)
+        node._left_child_id = data.get('left_child_id')
+        node._right_child_id = data.get('right_child_id')
+        return node
+
     def __repr__(self) -> str:
         node_type = "Leaf" if self.is_leaf else "Internal"
         summary_preview = self.summary[:30] + "..." if len(self.summary) > 30 else self.summary
-        return f"OPSNode({node_type}, id={self.id}, level={self.level}, summary='{summary_preview}')"
+        return f"Node({node_type}, id={self.id}, level={self.level}, summary='{summary_preview}')"
 
 
 @dataclass
-class OPSTree:
+class Tree:
     """
     Container for an OPS (Oracle-Preserving Summarization) tree.
 
@@ -167,7 +226,7 @@ class OPSTree:
         rubric: Information preservation criteria for summarization
         metadata: Additional information about source document
     """
-    root: OPSNode
+    root: Node
     rubric: str = ""
     metadata: dict = field(default_factory=dict)
 
@@ -178,7 +237,7 @@ class OPSTree:
             return 0
         return self._calculate_height(self.root)
 
-    def _calculate_height(self, node: OPSNode) -> int:
+    def _calculate_height(self, node: Node) -> int:
         """Recursively calculate height from a node."""
         if node.is_leaf:
             return 0
@@ -197,12 +256,12 @@ class OPSTree:
         return len(self.leaves)
 
     @property
-    def leaves(self) -> List[OPSNode]:
+    def leaves(self) -> List[Node]:
         """Get all leaf nodes in left-to-right order."""
         return [node for node in self.traverse_inorder() if node.is_leaf]
 
     @property
-    def internal_nodes(self) -> List[OPSNode]:
+    def internal_nodes(self) -> List[Node]:
         """Get all internal (non-leaf) nodes."""
         return [node for node in self.traverse_preorder() if not node.is_leaf]
 
@@ -220,13 +279,13 @@ class OPSTree:
         failed = sum(1 for n in all_nodes if n.audit_result.status == AuditStatus.FAILED)
         return failed / len(all_nodes)
 
-    def traverse_preorder(self) -> Iterator[OPSNode]:
+    def traverse_preorder(self) -> Iterator[Node]:
         """Traverse tree in preorder (root, left, right)."""
         if self.root is None:
             return
         yield from self._preorder(self.root)
 
-    def _preorder(self, node: OPSNode) -> Iterator[OPSNode]:
+    def _preorder(self, node: Node) -> Iterator[Node]:
         """Helper for preorder traversal."""
         yield node
         if node.left_child:
@@ -234,13 +293,13 @@ class OPSTree:
         if node.right_child:
             yield from self._preorder(node.right_child)
 
-    def traverse_postorder(self) -> Iterator[OPSNode]:
+    def traverse_postorder(self) -> Iterator[Node]:
         """Traverse tree in postorder (left, right, root)."""
         if self.root is None:
             return
         yield from self._postorder(self.root)
 
-    def _postorder(self, node: OPSNode) -> Iterator[OPSNode]:
+    def _postorder(self, node: Node) -> Iterator[Node]:
         """Helper for postorder traversal."""
         if node.left_child:
             yield from self._postorder(node.left_child)
@@ -248,13 +307,13 @@ class OPSTree:
             yield from self._postorder(node.right_child)
         yield node
 
-    def traverse_inorder(self) -> Iterator[OPSNode]:
+    def traverse_inorder(self) -> Iterator[Node]:
         """Traverse tree in inorder (left, root, right)."""
         if self.root is None:
             return
         yield from self._inorder(self.root)
 
-    def _inorder(self, node: OPSNode) -> Iterator[OPSNode]:
+    def _inorder(self, node: Node) -> Iterator[Node]:
         """Helper for inorder traversal."""
         if node.left_child:
             yield from self._inorder(node.left_child)
@@ -262,7 +321,7 @@ class OPSTree:
         if node.right_child:
             yield from self._inorder(node.right_child)
 
-    def traverse_level_order(self) -> Iterator[OPSNode]:
+    def traverse_level_order(self) -> Iterator[Node]:
         """Traverse tree in level order (BFS)."""
         if self.root is None:
             return
@@ -276,14 +335,14 @@ class OPSTree:
             if node.right_child:
                 queue.append(node.right_child)
 
-    def find_node(self, node_id: str) -> Optional[OPSNode]:
+    def find_node(self, node_id: str) -> Optional[Node]:
         """Find a node by its ID."""
         for node in self.traverse_preorder():
             if node.id == node_id:
                 return node
         return None
 
-    def get_path_to_root(self, node: OPSNode) -> List[OPSNode]:
+    def get_path_to_root(self, node: Node) -> List[Node]:
         """Get path from a node to the root."""
         path = []
         current = node
@@ -292,7 +351,7 @@ class OPSTree:
             current = current.parent
         return path
 
-    def get_failed_audits(self) -> List[OPSNode]:
+    def get_failed_audits(self) -> List[Node]:
         """Get all nodes that failed audit."""
         return [
             node for node in self.traverse_preorder()
@@ -336,44 +395,173 @@ class OPSTree:
 
         return violations
 
-    def apply_to_all(self, func: Callable[[OPSNode], Any]) -> List[Any]:
+    def apply_to_all(self, func: Callable[[Node], Any]) -> List[Any]:
         """Apply a function to all nodes and return results."""
         return [func(node) for node in self.traverse_preorder()]
 
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Serialize tree to dictionary.
+
+        Returns a flat list of nodes plus tree metadata. Node references
+        are stored as IDs rather than nested objects.
+        """
+        nodes = [node.to_dict() for node in self.traverse_preorder()]
+        return {
+            'version': 1,
+            'root_id': self.root.id if self.root else None,
+            'rubric': self.rubric,
+            'metadata': self.metadata,
+            'nodes': nodes,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'Tree':
+        """
+        Deserialize tree from dictionary.
+
+        Reconstructs all node references (children and parents).
+        """
+        # Create all nodes first (without links)
+        nodes_by_id: Dict[str, Node] = {}
+        for node_data in data['nodes']:
+            node = Node.from_dict(node_data)
+            nodes_by_id[node.id] = node
+
+        # Rebuild child and parent references
+        for node in nodes_by_id.values():
+            left_id = getattr(node, '_left_child_id', None)
+            right_id = getattr(node, '_right_child_id', None)
+
+            if left_id and left_id in nodes_by_id:
+                node.left_child = nodes_by_id[left_id]
+                node.left_child.parent = node
+
+            if right_id and right_id in nodes_by_id:
+                node.right_child = nodes_by_id[right_id]
+                node.right_child.parent = node
+
+            # Clean up temporary attributes
+            if hasattr(node, '_left_child_id'):
+                delattr(node, '_left_child_id')
+            if hasattr(node, '_right_child_id'):
+                delattr(node, '_right_child_id')
+
+        # Get root
+        root_id = data.get('root_id')
+        root = nodes_by_id.get(root_id) if root_id else None
+
+        if root is None and nodes_by_id:
+            # Fallback: find node with no parent
+            for node in nodes_by_id.values():
+                if node.parent is None:
+                    root = node
+                    break
+
+        return cls(
+            root=root,
+            rubric=data.get('rubric', ''),
+            metadata=data.get('metadata', {}),
+        )
+
+    def save(self, path: Path) -> None:
+        """
+        Save tree to JSON file.
+
+        Args:
+            path: File path (will be created/overwritten)
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(self.to_dict(), f, indent=2, ensure_ascii=False)
+
+    @classmethod
+    def load(cls, path: Path) -> 'Tree':
+        """
+        Load tree from JSON file.
+
+        Args:
+            path: File path to load from
+
+        Returns:
+            Reconstructed Tree
+        """
+        path = Path(path)
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return cls.from_dict(data)
+
     def __repr__(self) -> str:
         return (
-            f"OPSTree(height={self.height}, nodes={self.node_count}, "
+            f"Tree(height={self.height}, nodes={self.node_count}, "
             f"leaves={self.leaf_count}, rubric='{self.rubric[:30]}...')"
         )
 
 
-def create_leaf_node(text: str, node_id: Optional[str] = None) -> OPSNode:
+def leaf(
+    text: str,
+    node_id: Optional[str] = None,
+    summary: Optional[str] = None,
+    require_summarization: bool = False,
+) -> Node:
     """
     Factory function to create a leaf node.
+
+    Per the OPS paper, leaf nodes should have their raw_text_span summarized
+    through the summarizer g() before being used in the tree. This function
+    allows two modes:
+
+    1. summary=None, require_summarization=False: Uses raw text as placeholder
+       summary (legacy behavior, but logs warning)
+    2. summary=<text>: Uses provided summary (correct behavior per paper)
+    3. summary=None, require_summarization=True: Raises error (strict mode)
 
     Args:
         text: The raw text for this leaf
         node_id: Optional custom ID
+        summary: The summarized version of the text (should come from g())
+        require_summarization: If True, raises error when summary is None
 
     Returns:
         A properly configured leaf node
+
+    Raises:
+        ValueError: If require_summarization=True and summary is None
     """
-    node = OPSNode(
+    import logging
+    logger = logging.getLogger(__name__)
+
+    if summary is None:
+        if require_summarization:
+            raise ValueError(
+                "Leaf nodes must have a summary from the summarizer g(). "
+                "Pass summary=<summarized_text> or set require_summarization=False."
+            )
+        # Legacy behavior: use raw text as summary (with warning)
+        # This is inconsistent with the paper but allows backward compatibility
+        logger.debug(
+            f"Creating leaf node with raw text as summary. "
+            f"Per OPS paper, leaves should be summarized through g()."
+        )
+        summary = text
+
+    node = Node(
         level=0,
         raw_text_span=text,
-        summary=text  # Initial summary is the raw text
+        summary=summary,
     )
     if node_id:
         node.id = node_id
     return node
 
 
-def create_internal_node(
-    left: OPSNode,
-    right: OPSNode,
+def node(
+    left: Node,
+    right: Node,
     summary: str,
     node_id: Optional[str] = None
-) -> OPSNode:
+) -> Node:
     """
     Factory function to create an internal node.
 
@@ -387,7 +575,7 @@ def create_internal_node(
         A properly configured internal node with parent refs set
     """
     level = max(left.level, right.level) + 1
-    node = OPSNode(
+    node = Node(
         level=level,
         summary=summary,
         left_child=left,
@@ -403,59 +591,3 @@ def create_internal_node(
     return node
 
 
-def build_tree_from_leaves(
-    leaves: List[OPSNode],
-    summarize_fn: Callable[[str, str], str],
-    rubric: str = ""
-) -> OPSTree:
-    """
-    Build a complete OPS tree from leaf nodes.
-
-    This implements bottom-up tree construction by recursively
-    pairing nodes and summarizing until a single root remains.
-
-    Args:
-        leaves: List of leaf nodes (chunks)
-        summarize_fn: Function that takes (content, rubric) and returns summary
-        rubric: Information preservation criteria
-
-    Returns:
-        Complete OPSTree with root
-
-    Raises:
-        ValueError: If leaves list is empty
-    """
-    if not leaves:
-        raise ValueError("Cannot build tree from empty list of leaves")
-
-    if len(leaves) == 1:
-        # Single leaf is also the root
-        return OPSTree(root=leaves[0], rubric=rubric)
-
-    # Build tree bottom-up
-    current_level = list(leaves)
-
-    while len(current_level) > 1:
-        next_level = []
-
-        # Pair nodes
-        for i in range(0, len(current_level), 2):
-            left = current_level[i]
-
-            if i + 1 < len(current_level):
-                # Pair exists - merge
-                right = current_level[i + 1]
-                combined_content = f"{left.summary}\n\n{right.summary}"
-                summary = summarize_fn(combined_content, rubric)
-                parent = create_internal_node(left, right, summary)
-                next_level.append(parent)
-            else:
-                # Odd node - promote to next level
-                # Create a "pass-through" parent
-                # This maintains binary tree structure
-                # Alternative: just promote the node directly
-                next_level.append(left)
-
-        current_level = next_level
-
-    return OPSTree(root=current_level[0], rubric=rubric)

@@ -15,6 +15,9 @@ import time
 import random
 import threading
 import logging
+import hashlib
+import json
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Dict, List, Any
 from enum import Enum
@@ -48,7 +51,7 @@ class LLMConfig:
     base_url: str = "http://localhost:8000/v1"
     model: str = "default"
     api_key: str = "EMPTY"  # vLLM/SGLang don't need real keys
-    max_tokens: int = 2000
+    max_tokens: int = 8192  # Fixed typo (was 8196)
     temperature: float = 0.7
     max_retries: int = 3
     retry_delay: float = 1.0
@@ -63,9 +66,26 @@ class LLMConfig:
         port: int = 8000,
         **kwargs
     ) -> 'LLMConfig':
-        """Create config for vLLM server."""
+        """Create config for vLLM server.
+
+        If model is "default", auto-detect from the vLLM /v1/models endpoint.
+        """
+        base_url = f"http://{host}:{port}/v1"
+
+        # Auto-detect model name if using "default"
+        if model == "default":
+            try:
+                import requests
+                resp = requests.get(f"{base_url}/models", timeout=5)
+                if resp.ok:
+                    data = resp.json()
+                    if data.get("data") and len(data["data"]) > 0:
+                        model = data["data"][0]["id"]
+            except Exception:
+                pass  # Fall back to "default" if detection fails
+
         return cls(
-            base_url=f"http://{host}:{port}/v1",
+            base_url=base_url,
             model=model,
             api_key="EMPTY",
             server_type=ServerType.VLLM,
@@ -148,13 +168,20 @@ class LLMClient:
         client = LLMClient(LLMConfig.openai(model="gpt-4o"))
     """
 
-    def __init__(self, config: Optional[LLMConfig] = None):
+    def __init__(self, config: Optional[LLMConfig] = None, enable_cache: bool = True, cache_size: int = 10000):
         self.config = config or LLMConfig()
         self._client = None
         self._usage_lock = threading.Lock()
         self._prompt_tokens = 0
         self._completion_tokens = 0
         self._call_count = 0
+
+        # LRU cache for responses (using OrderedDict for O(1) LRU operations)
+        self._enable_cache = enable_cache
+        self._cache: OrderedDict[str, LLMResponse] = OrderedDict()
+        self._cache_size = cache_size
+        self._cache_hits = 0
+        self._cache_misses = 0
 
     def _get_client(self):
         """Lazy initialization of OpenAI client."""
@@ -200,6 +227,58 @@ class LLMClient:
 
         return self.chat(messages, **kwargs)
 
+    def _get_cache_key(self, messages: List[Dict[str, str]], **kwargs) -> str:
+        """Generate cache key from messages and parameters."""
+        # Create deterministic key from messages + params
+        cache_data = {
+            'messages': messages,
+            'model': kwargs.get('model', self.config.model),
+            'max_tokens': kwargs.get('max_tokens', self.config.max_tokens),
+            'temperature': kwargs.get('temperature', self.config.temperature),
+        }
+        # Only include other kwargs that affect output determinism
+        for key in ['top_p', 'presence_penalty', 'frequency_penalty']:
+            if key in kwargs:
+                cache_data[key] = kwargs[key]
+
+        cache_str = json.dumps(cache_data, sort_keys=True)
+        return hashlib.sha256(cache_str.encode()).hexdigest()
+
+    def _get_from_cache(self, cache_key: str) -> Optional[LLMResponse]:
+        """Get response from cache if available (O(1) LRU operation)."""
+        if not self._enable_cache:
+            return None
+
+        with self._usage_lock:
+            if cache_key in self._cache:
+                # Move to end (most recently used) - O(1) with OrderedDict
+                self._cache.move_to_end(cache_key)
+                self._cache_hits += 1
+                logger.debug(f"Cache hit (hits={self._cache_hits}, misses={self._cache_misses})")
+                return self._cache[cache_key]
+
+            self._cache_misses += 1
+            return None
+
+    def _add_to_cache(self, cache_key: str, response: LLMResponse) -> None:
+        """Add response to cache with LRU eviction (O(1) operations)."""
+        if not self._enable_cache:
+            return
+
+        with self._usage_lock:
+            # If key exists, update and move to end
+            if cache_key in self._cache:
+                self._cache[cache_key] = response
+                self._cache.move_to_end(cache_key)
+                return
+
+            # Evict oldest if at capacity - O(1) with OrderedDict.popitem
+            while len(self._cache) >= self._cache_size:
+                self._cache.popitem(last=False)  # Remove oldest (first) item
+
+            # Add new entry at end (most recently used)
+            self._cache[cache_key] = response
+
     def chat(
         self,
         messages: List[Dict[str, str]],
@@ -215,6 +294,12 @@ class LLMClient:
         Returns:
             LLMResponse with content and usage info
         """
+        # Check cache first
+        cache_key = self._get_cache_key(messages, **kwargs)
+        cached_response = self._get_from_cache(cache_key)
+        if cached_response is not None:
+            return cached_response
+
         client = self._get_client()
         last_error = None
 
@@ -235,13 +320,18 @@ class LLMClient:
                         self._prompt_tokens += response.usage.prompt_tokens
                         self._completion_tokens += response.usage.completion_tokens
 
-                return LLMResponse(
+                llm_response = LLMResponse(
                     content=response.choices[0].message.content or "",
                     model=response.model,
                     prompt_tokens=response.usage.prompt_tokens if response.usage else 0,
                     completion_tokens=response.usage.completion_tokens if response.usage else 0,
                     raw_response=response
                 )
+
+                # Add to cache
+                self._add_to_cache(cache_key, llm_response)
+
+                return llm_response
 
             except Exception as e:
                 last_error = e
@@ -252,13 +342,19 @@ class LLMClient:
         raise RuntimeError(f"LLM call failed after {self.config.max_retries} attempts: {last_error}")
 
     def get_usage(self) -> Dict[str, int]:
-        """Get current token usage."""
+        """Get current token usage and cache statistics."""
         with self._usage_lock:
+            total_requests = self._cache_hits + self._cache_misses
+            cache_hit_rate = self._cache_hits / total_requests if total_requests > 0 else 0.0
             return {
                 'prompt_tokens': self._prompt_tokens,
                 'completion_tokens': self._completion_tokens,
                 'total_tokens': self._prompt_tokens + self._completion_tokens,
-                'call_count': self._call_count
+                'call_count': self._call_count,
+                'cache_hits': self._cache_hits,
+                'cache_misses': self._cache_misses,
+                'cache_hit_rate': cache_hit_rate,
+                'cache_size': len(self._cache)
             }
 
     def reset_usage(self) -> Dict[str, int]:
@@ -347,7 +443,7 @@ def create_summarizer(
     system_prompt: Optional[str] = None
 ) -> Callable[[str, str], str]:
     """
-    Create a summarizer function compatible with OPSTreeBuilder.
+    Create a summarizer function compatible with TreeBuilder.
 
     Args:
         client: LLM client (creates mock if None)

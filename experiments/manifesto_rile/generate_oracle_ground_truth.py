@@ -251,6 +251,7 @@ def _run_generation(args):
     """Run the actual generation logic."""
     # Import dependencies (avoid circular imports)
     import dspy
+    from src.config.dspy_config import configure_dspy
     from src.config.settings import load_settings
 
     # Import oracle_ground_truth directly to avoid circular import
@@ -284,7 +285,7 @@ def _run_generation(args):
         temperature=oracle_temperature,
         max_tokens=oracle_max_tokens,
     )
-    dspy.configure(lm=oracle_lm)
+    configure_dspy(lm=oracle_lm)
 
     # Create oracle scorer
     rile_scorer = create_rile_scorer()

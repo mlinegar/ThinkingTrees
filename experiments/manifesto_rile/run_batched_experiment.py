@@ -86,7 +86,7 @@ def main():
 
     # Load dataset
     logger.info("Loading dataset...")
-    from src.manifesto.data_loader import ManifestoDataset
+    from src.manifesto import ManifestoDataset
 
     dataset = ManifestoDataset(
         countries=args.countries,
@@ -108,8 +108,8 @@ def main():
         json.dump(sample_meta, f, indent=2)
 
     # Configure batched pipeline
-    from src.manifesto.batched_pipeline import (
-        BatchedManifestoPipeline,
+    from src.pipelines.batched import (
+        BatchedDocPipeline,
         BatchedPipelineConfig,
     )
 
@@ -137,7 +137,7 @@ def main():
     logger.info(f"Config: {args.concurrent_docs} concurrent docs, "
                f"{args.concurrent_requests} concurrent requests")
 
-    pipeline = BatchedManifestoPipeline(config)
+    pipeline = BatchedDocPipeline(config)
 
     start_time = time.time()
     results = pipeline.process_batch(samples, progress_callback=progress)
@@ -169,9 +169,17 @@ def main():
     logger.info(f"  MAE: {mae:.2f} RILE points")
     logger.info(f"  Success rate: {len(valid_results)}/{len(samples)}")
 
-    # Save batched results
-    from src.manifesto.evaluation import save_results as save_manifesto_results
-    save_manifesto_results(results, output_dir / "batched_results.json")
+    # Save batched results as JSON
+    results_data = []
+    for r in results:
+        results_data.append({
+            "doc_id": getattr(r, 'doc_id', None),
+            "predicted_rile": r.predicted_rile,
+            "ground_truth_rile": r.ground_truth_rile,
+            "error": str(r.error) if r.error else None,
+        })
+    with open(output_dir / "batched_results.json", 'w') as f:
+        json.dump(results_data, f, indent=2)
 
     # Optional: Compare with sequential
     if args.compare_sequential:
@@ -184,7 +192,7 @@ def main():
         seq_samples = samples[:min(10, len(samples))]
         logger.info(f"Running sequential on {len(seq_samples)} samples...")
 
-        from src.manifesto.ops_pipeline import ManifestoOPSPipeline, PipelineConfig as SeqConfig
+        from src.manifesto import ManifestoOPSPipeline, PipelineConfig as SeqConfig
 
         seq_config = SeqConfig(
             task_model_port=args.port,
@@ -243,10 +251,20 @@ def main():
     logger.info("")
     logger.info(f"Results saved to: {output_dir}")
 
-    # Generate evaluation report
-    from src.manifesto.evaluation import ManifestoEvaluator
-    evaluator = ManifestoEvaluator()
-    report = evaluator.generate_report(results, output_path=output_dir / "report.txt")
+    # Generate simple evaluation report (ManifestoEvaluator was removed)
+    report_lines = [
+        "=" * 60,
+        "EVALUATION REPORT",
+        "=" * 60,
+        f"Samples processed: {len(valid_results)}",
+        f"Failed: {len(results) - len(valid_results)}",
+        f"MAE: {mae:.2f} RILE points",
+        f"Throughput: {batched_stats['samples_per_sec']:.2f} samples/sec",
+        "=" * 60,
+    ]
+    report = "\n".join(report_lines)
+    with open(output_dir / "report.txt", 'w') as f:
+        f.write(report)
     print("\n" + report)
 
 

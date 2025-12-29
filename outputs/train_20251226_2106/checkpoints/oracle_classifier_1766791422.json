@@ -1,0 +1,52 @@
+{
+  "classify.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Classify text into a label from the given candidates.\n\nGiven original content, its summary, and a rubric describing what to preserve,\ndetermine which label best describes the content/summary pair.",
+      "fields": [
+        {
+          "prefix": "Original Content:",
+          "description": "The original text content before summarization"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "The summary of the original content"
+        },
+        {
+          "prefix": "Rubric:",
+          "description": "Description of what information should be preserved in the summary"
+        },
+        {
+          "prefix": "Candidate Labels:",
+          "description": "Candidate labels to choose from, with descriptions"
+        },
+        {
+          "prefix": "Few Shot Examples:",
+          "description": "Similar examples for reference (may be empty)"
+        },
+        {
+          "prefix": "Reasoning:",
+          "description": "Step-by-step reasoning about why this label applies"
+        },
+        {
+          "prefix": "Label:",
+          "description": "The predicted label (must be one of the candidates)"
+        },
+        {
+          "prefix": "Confidence:",
+          "description": "Confidence score from 0.0 to 1.0 (as a number)"
+        }
+      ]
+    },
+    "lm": null
+  },
+  "metadata": {
+    "dependency_versions": {
+      "python": "3.12",
+      "dspy": "3.0.4",
+      "cloudpickle": "3.1"
+    }
+  }
+}

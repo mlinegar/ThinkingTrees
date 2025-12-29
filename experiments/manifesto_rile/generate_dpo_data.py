@@ -127,6 +127,7 @@ def main() -> None:
         raise ValueError("DPO generation is only supported for law_type='sufficiency'.")
 
     import dspy
+    from src.config.dspy_config import configure_dspy
     from src.config.settings import load_settings
     from src.ops_engine.training_framework.ops_comparison_module import OPSComparisonModule
     from src.ops_engine.training_framework.preference import PreferenceDataset, PreferencePair
@@ -164,7 +165,7 @@ def main() -> None:
     )
 
     def use_lm(lm):
-        dspy.configure(lm=lm)
+        configure_dspy(lm=lm)
 
     summarizer = LeafSummarizer(use_cot=True)
 

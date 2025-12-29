@@ -43,6 +43,8 @@ from collections import defaultdict
 import aiohttp
 from concurrent.futures import ThreadPoolExecutor
 
+from src.preprocessing.chunker import chunk_for_ops
+
 logger = logging.getLogger(__name__)
 
 
@@ -55,7 +57,7 @@ class BatchRequest:
     """A single LLM request in the batch pool."""
     request_id: str
     messages: List[Dict[str, str]]
-    max_tokens: int = 2048
+    max_tokens: int = 8192
     temperature: float = 0.7
 
     # Tracking
@@ -106,9 +108,12 @@ class BatchStats:
 
     @property
     def wall_clock_seconds(self) -> float:
-        if self.wall_clock_end == 0:
+        """Wall clock time in seconds. Uses current time if not yet stopped."""
+        if self.wall_clock_start == 0:
             return 0.0
-        return self.wall_clock_end - self.wall_clock_start
+        # If not stopped yet, use current time for live updates
+        end_time = self.wall_clock_end if self.wall_clock_end > 0 else time.time()
+        return end_time - self.wall_clock_start
 
     @property
     def tokens_per_second(self) -> float:
@@ -155,10 +160,11 @@ class AsyncBatchLLMClient:
     def __init__(
         self,
         base_url: str = "http://localhost:8000/v1",
-        max_concurrent: int = 100,  # Max concurrent requests to vLLM
+        max_concurrent: int = 200,  # Max concurrent requests to vLLM
         batch_size: int = 50,       # Requests per batch
         batch_timeout: float = 0.1,  # Max wait to fill batch (seconds)
         model: str = None,  # Auto-detect from server if None
+        request_timeout: float = 300.0,  # Per-request timeout (5 minutes)
     ):
         """
         Initialize async batch client.
@@ -169,12 +175,14 @@ class AsyncBatchLLMClient:
             batch_size: Target batch size before sending
             batch_timeout: Max time to wait for batch to fill
             model: Model name for vLLM (auto-detected if None)
+            request_timeout: Per-request HTTP timeout in seconds
         """
         self.base_url = base_url
         self.max_concurrent = max_concurrent
         self.batch_size = batch_size
         self.batch_timeout = batch_timeout
         self._model = model  # Will be set during start() if None
+        self.request_timeout = request_timeout
 
         # Request pool
         self._request_queue: asyncio.Queue[BatchRequest] = None
@@ -224,7 +232,9 @@ class AsyncBatchLLMClient:
         self._semaphore = asyncio.Semaphore(self.max_concurrent)
         # Set connector limit to match max_concurrent (default aiohttp limit is 100)
         connector = aiohttp.TCPConnector(limit=self.max_concurrent)
-        self._session = aiohttp.ClientSession(connector=connector)
+        # Set timeout for all requests
+        timeout = aiohttp.ClientTimeout(total=self.request_timeout)
+        self._session = aiohttp.ClientSession(connector=connector, timeout=timeout)
         self._running = True
 
         # Track start time
@@ -232,7 +242,7 @@ class AsyncBatchLLMClient:
 
         # Start batch worker
         self._worker_task = asyncio.create_task(self._batch_worker())
-        logger.info(f"Batch client started (max_concurrent={self.max_concurrent}, model={self._model})")
+        logger.debug(f"Batch client started (max_concurrent={self.max_concurrent}, model={self._model})")
 
     async def stop(self):
         """Stop the batch processor."""
@@ -398,14 +408,36 @@ class AsyncBatchLLMClient:
                     if request.future and not request.future.done():
                         request.future.set_result(response)
 
-            except Exception as e:
-                logger.error(f"Request {request.request_id} failed: {e}")
+            except aiohttp.ClientError as e:
+                # Connection errors, timeouts, etc.
+                error_msg = f"{type(e).__name__}: {str(e) or 'Connection failed'}"
+                logger.error(f"Request {request.request_id} failed: {error_msg}")
                 self.stats.failed_requests += 1
                 if request.future and not request.future.done():
                     request.future.set_result(BatchResponse(
                         request_id=request.request_id,
                         content="",
-                        error=str(e),
+                        error=error_msg,
+                    ))
+            except asyncio.TimeoutError:
+                error_msg = "Request timed out"
+                logger.error(f"Request {request.request_id} failed: {error_msg}")
+                self.stats.failed_requests += 1
+                if request.future and not request.future.done():
+                    request.future.set_result(BatchResponse(
+                        request_id=request.request_id,
+                        content="",
+                        error=error_msg,
+                    ))
+            except Exception as e:
+                error_msg = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
+                logger.error(f"Request {request.request_id} failed: {error_msg}")
+                self.stats.failed_requests += 1
+                if request.future and not request.future.done():
+                    request.future.set_result(BatchResponse(
+                        request_id=request.request_id,
+                        content="",
+                        error=error_msg,
                     ))
 
 
@@ -424,7 +456,7 @@ class MultiServerBatchClient:
     def __init__(
         self,
         servers: List[str],  # List of base URLs, e.g., ["http://localhost:8000/v1", "http://localhost:8002/v1"]
-        max_concurrent_per_server: int = 100,
+        max_concurrent_per_server: int = 200,
         batch_size: int = 50,
         batch_timeout: float = 0.1,
     ):
@@ -441,6 +473,7 @@ class MultiServerBatchClient:
         self.clients: List[AsyncBatchLLMClient] = []
         self._counter = 0  # Round-robin counter
         self._lock = asyncio.Lock() if asyncio else None
+        self._request_client_map: Dict[str, AsyncBatchLLMClient] = {}  # request_id -> client (O(1) lookup)
 
         # Create a client for each server
         for server_url in servers:
@@ -499,20 +532,27 @@ class MultiServerBatchClient:
     async def submit(self, request: BatchRequest) -> str:
         """Submit request to next available server (round-robin)."""
         client = self._get_next_client()
-        return await client.submit(request)
+        request_id = await client.submit(request)
+        # Store mapping for O(1) lookup in await_response
+        self._request_client_map[request_id] = client
+        return request_id
 
     async def await_response(self, request_id: str) -> BatchResponse:
-        """Wait for response - check all clients."""
-        # The request_id contains info about which client has it
-        # For simplicity, check all clients
-        for client in self.clients:
-            if request_id in client._pending_futures:
-                return await client.await_response(request_id)
-        raise KeyError(f"Unknown request_id: {request_id}")
+        """Wait for response using O(1) client lookup."""
+        # Direct lookup using stored mapping
+        client = self._request_client_map.get(request_id)
+        if client is None:
+            raise KeyError(f"Unknown request_id: {request_id}")
+
+        response = await client.await_response(request_id)
+        # Clean up mapping after response received
+        del self._request_client_map[request_id]
+        return response
 
     async def call(self, request: BatchRequest) -> BatchResponse:
-        """Submit and await in one call."""
+        """Submit and await in one call (no mapping needed, direct to client)."""
         client = self._get_next_client()
+        # call() handles submit+await internally on the same client
         return await client.call(request)
 
 
@@ -605,15 +645,18 @@ class BatchOrchestrator:
                     results[idx] = None
                 else:
                     results[idx] = result
-                    # Show per-doc status for small batches
-                    if show_per_doc and hasattr(result, 'manifesto_id'):
-                        pred = getattr(result, 'predicted_rile', None)
-                        truth = getattr(result, 'ground_truth_rile', None)
-                        leaves = getattr(result, 'tree_leaves', 0)
-                        pred_str = f"{pred:.1f}" if pred is not None else "?"
-                        truth_str = f"{truth:.1f}" if truth is not None else "?"
-                        logger.info(f"  ✓ {result.manifesto_id}: "
-                                   f"pred={pred_str}, truth={truth_str}, leaves={leaves}")
+                    # Show per-doc status for small batches (domain-agnostic)
+                    if show_per_doc:
+                        # Use generic doc_id or fall back to manifesto_id for backwards compat
+                        doc_id = getattr(result, 'doc_id', None) or getattr(result, 'manifesto_id', None)
+                        if doc_id:
+                            # Get predicted/truth scores (try generic then domain-specific)
+                            pred = getattr(result, 'predicted_score', None) or getattr(result, 'predicted_rile', None)
+                            truth = getattr(result, 'ground_truth_score', None) or getattr(result, 'ground_truth_rile', None)
+                            leaves = getattr(result, 'tree_leaves', 0)
+                            pred_str = f"{pred:.1f}" if pred is not None else "?"
+                            truth_str = f"{truth:.1f}" if truth is not None else "?"
+                            logger.info(f"  ✓ {doc_id}: pred={pred_str}, truth={truth_str}, leaves={leaves}")
 
                 completed += 1
                 if progress_callback:
@@ -804,6 +847,10 @@ class DocumentTreeState:
     level_num: int = 0
     error: Optional[str] = None
 
+    # Level history for merge law support
+    # Each entry is a list of nodes at that level (level 0 = leaves, level N = root)
+    level_history: List[List[Dict[str, Any]]] = field(default_factory=list)
+
     # Results
     root_summary: str = ""
     tree_height: int = 0
@@ -843,35 +890,9 @@ class LevelWiseBatchProcessor:
         self.merge_prompt_fn = merge_prompt_fn
 
     def _chunk_text(self, text: str) -> List[str]:
-        """Split text into chunks."""
-        if len(text) <= self.max_chunk_chars:
-            return [text]
-
-        chunks = []
-        paragraphs = text.split('\n\n')
-        current_chunk = ""
-
-        for para in paragraphs:
-            if len(current_chunk) + len(para) + 2 <= self.max_chunk_chars:
-                current_chunk += para + "\n\n"
-            else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                current_chunk = para + "\n\n"
-
-        if current_chunk:
-            chunks.append(current_chunk.strip())
-
-        # Handle very long paragraphs
-        final_chunks = []
-        for chunk in chunks:
-            if len(chunk) <= self.max_chunk_chars:
-                final_chunks.append(chunk)
-            else:
-                for i in range(0, len(chunk), self.max_chunk_chars):
-                    final_chunks.append(chunk[i:i+self.max_chunk_chars])
-
-        return final_chunks
+        """Split text into chunks using langextract-based chunker."""
+        text_chunks = chunk_for_ops(text, max_chars=self.max_chunk_chars)
+        return [c.text for c in text_chunks]
 
     async def process_all_documents(
         self,
@@ -899,17 +920,52 @@ class LevelWiseBatchProcessor:
 
         for doc in documents:
             doc_id = get_id_fn(doc)
-            text = get_text_fn(doc)
-            chunks = self._chunk_text(text)
+            try:
+                text = get_text_fn(doc)
+                if not text or len(text.strip()) == 0:
+                    logger.warning(f"Document {doc_id} has no text content, skipping")
+                    state = DocumentTreeState(
+                        doc_id=doc_id,
+                        sample=doc,
+                        chunks=[],
+                        leaf_count=0,
+                        error="No text content",
+                    )
+                    states.append(state)
+                    continue
 
-            state = DocumentTreeState(
-                doc_id=doc_id,
-                sample=doc,
-                chunks=chunks,
-                leaf_count=len(chunks),
-            )
-            states.append(state)
-            total_chunks += len(chunks)
+                chunks = self._chunk_text(text)
+
+                if not chunks or len(chunks) == 0:
+                    logger.warning(f"Document {doc_id} produced no chunks, skipping")
+                    state = DocumentTreeState(
+                        doc_id=doc_id,
+                        sample=doc,
+                        chunks=[],
+                        leaf_count=0,
+                        error="Chunking failed",
+                    )
+                    states.append(state)
+                    continue
+
+                state = DocumentTreeState(
+                    doc_id=doc_id,
+                    sample=doc,
+                    chunks=chunks,
+                    leaf_count=len(chunks),
+                )
+                states.append(state)
+                total_chunks += len(chunks)
+            except Exception as e:
+                logger.error(f"Failed to process document {doc_id}: {e}")
+                state = DocumentTreeState(
+                    doc_id=doc_id,
+                    sample=doc,
+                    chunks=[],
+                    leaf_count=0,
+                    error=str(e),
+                )
+                states.append(state)
 
         logger.info(f"  Total chunks across all docs: {total_chunks}")
         if progress_callback:
@@ -961,6 +1017,11 @@ class LevelWiseBatchProcessor:
         logger.info(f"  Completed {completed} leaf summaries")
         if progress_callback:
             progress_callback("leaf", completed, len(leaf_requests))
+
+        # Save leaf level (level 0) to history for merge law support
+        for state in states:
+            if state.current_level and state.error is None:
+                state.level_history.append([node.copy() for node in state.current_level])
 
         # Phase 3: Build trees level by level
         level_num = 0
@@ -1032,6 +1093,10 @@ class LevelWiseBatchProcessor:
                 state.current_level = next_levels[state_idx]
                 state.tree_height = level_num
 
+                # Save this level to history for merge law support
+                if state.current_level:
+                    state.level_history.append([node.copy() for node in state.current_level])
+
             logger.info(f"  Completed {completed} merges")
             if progress_callback:
                 progress_callback(f"merge_L{level_num}", completed, len(merge_requests))
@@ -1062,7 +1127,7 @@ async def process_samples_batched(
     samples: List[Any],
     process_fn: Callable[[Any, AsyncBatchLLMClient], Awaitable[Any]],
     base_url: str = "http://localhost:8000/v1",
-    max_concurrent: int = 100,
+    max_concurrent: int = 200,
     max_concurrent_documents: int = 50,
     progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> List[Any]:

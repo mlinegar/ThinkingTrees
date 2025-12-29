@@ -282,13 +282,13 @@ Property-based tests using hypothesis.
 
 **Test Classes**:
 
-##### `TestSimpleOracleJudge`
+##### `TestSimpleScorer`
 | Test | Description |
 |------|-------------|
-| `test_judge_passing_summary` | Good summaries pass |
-| `test_judge_failing_summary` | Poor summaries fail |
-| `test_judge_returns_score` | Judge returns discrepancy score |
-| `test_judge_with_rubric` | Rubric influences judgment |
+| `test_scorer_passing_summary` | Good summaries get high scores |
+| `test_scorer_failing_summary` | Poor summaries get low scores |
+| `test_scorer_returns_oracle_score` | Scorer returns OracleScore object |
+| `test_scorer_with_rubric` | Rubric is accepted (used by LLM-based scorers) |
 
 ##### `TestAlwaysPassOracle`
 | Test | Description |

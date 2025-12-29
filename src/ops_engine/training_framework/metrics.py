@@ -2,8 +2,7 @@
 Evaluation Metrics for Oracle Approximation.
 
 This module provides metrics for evaluating:
-- Classification accuracy (standard and distance-weighted)
-- Calibration error (confidence vs actual accuracy)
+- Continuous score prediction (using BoundedScale)
 - OPS law compliance rates
 - DSPy-compatible metric functions
 
@@ -14,11 +13,11 @@ New API (Preferred):
     metric = oracle_as_metric(my_scorer)
     optimizer.compile(student, trainset, metric=metric)
 
-Legacy API (for specialized cases):
-    from src.ops_engine.training_framework.metrics import create_summarization_metric
+Summarization metrics:
+    from src.ops_engine.training_framework.metrics import summarization
 
     # When you need specialized summarization metrics with quality checks
-    metric = create_summarization_metric(oracle_classifier, ...)
+    metric = summarization(oracle_classifier, ...)
 """
 
 from dataclasses import dataclass
@@ -26,7 +25,7 @@ from typing import List, Dict, Optional, Tuple, Callable
 import math
 import warnings
 
-from .core import LabelSpace, Prediction, LawCheckResult
+from .core import Prediction, LawCheckResult
 
 # Re-export score-centric metric converters for convenience
 from src.ops_engine.scoring import (
@@ -46,7 +45,7 @@ from src.ops_engine.scoring import (
 # Generic Metric Factory (Scale-Based)
 # =============================================================================
 
-def create_metric(
+def metric(
     oracle_fn: Callable,
     scale: BoundedScale,
     ground_truth_field: str = 'ground_truth',
@@ -131,448 +130,12 @@ def create_metric(
     return metric
 
 
-# =============================================================================
-# Cached Oracle Metrics (for Optimization Efficiency)
-# =============================================================================
-
-def create_cached_oracle_metric(
-    oracle_classifier,
-    scale: BoundedScale,
-    ground_truth_field: str = 'ground_truth_rile',
-    summary_field: str = 'summary',
-    cache_size: int = 4096,
-    with_feedback: bool = False,
-):
-    """
-    Create a DSPy metric with thread-safe oracle prediction caching.
-
-    During optimization (e.g., BootstrapRandomSearch with 6 candidates × 750 examples),
-    the same summary texts are evaluated multiple times across candidates.
-    This cache eliminates ~80% of redundant oracle LLM calls.
-
-    Args:
-        oracle_classifier: Classifier with predict_rile(text) method
-            that returns (score, confidence, reasoning)
-        scale: BoundedScale for normalizing error to 0-1 score
-        ground_truth_field: Field name for ground truth on gold example
-        summary_field: Field name for summary text on prediction
-        cache_size: Maximum cache entries (LRU eviction when exceeded)
-        with_feedback: Return dict with feedback for GEPA
-
-    Returns:
-        Tuple of (metric_function, cache_dict) where:
-            - metric_function: DSPy-compatible metric
-            - cache_dict: The cache (for inspection/logging)
-
-    Example:
-        from src.ops_engine.scoring import BoundedScale
-
-        RILE_SCALE = BoundedScale(-100.0, 100.0)
-        metric, cache = create_cached_oracle_metric(
-            oracle_classifier=oracle,
-            scale=RILE_SCALE,
-        )
-
-        # Use in optimization
-        optimizer.compile(student, trainset, metric=metric)
-
-        # After optimization, log cache stats
-        logger.info(f"Oracle cache: {len(cache)} unique predictions cached")
-    """
-    import threading
-    from collections import OrderedDict
-
-    # Thread-safe LRU cache
-    _cache: OrderedDict = OrderedDict()
-    _lock = threading.Lock()
-    _stats = {'hits': 0, 'misses': 0}
-
-    def cached_predict(text: str) -> tuple:
-        """Thread-safe cached oracle prediction."""
-        with _lock:
-            if text in _cache:
-                # Move to end (LRU update) and return
-                _cache.move_to_end(text)
-                _stats['hits'] += 1
-                return _cache[text]
-
-        # Cache miss - call oracle (outside lock to allow parallelism)
-        try:
-            result = oracle_classifier.predict_rile(text)
-        except Exception as e:
-            result = (0.0, 0.0, f"Error: {str(e)[:50]}")
-
-        with _lock:
-            _stats['misses'] += 1
-            _cache[text] = result
-            # LRU eviction if over size
-            while len(_cache) > cache_size:
-                _cache.popitem(last=False)
-
-        return result
-
-    def metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
-        """Cached oracle metric compatible with DSPy optimizers."""
-        # Get ground truth
-        ground_truth = getattr(gold, ground_truth_field, None)
-        if ground_truth is None:
-            ground_truth = getattr(gold, 'label', 0.0)
-        try:
-            ground_truth = float(ground_truth)
-        except (ValueError, TypeError):
-            ground_truth = 0.0
-
-        # Get summary from prediction
-        if isinstance(pred, str):
-            summary = pred
-        else:
-            summary = getattr(pred, summary_field, None)
-            if summary is None:
-                summary = getattr(pred, 'merged_summary', None)
-            if summary is None:
-                summary = str(pred)
-
-        # Get cached prediction
-        predicted, confidence, reasoning = cached_predict(summary)
-
-        # Compute score using scale
-        score = scale.values_to_score(predicted, ground_truth)
-
-        if with_feedback:
-            feedback = f"Predicted {predicted:.1f}, expected {ground_truth:.1f}"
-            if abs(predicted - ground_truth) > 20:
-                feedback += f" (large error: {abs(predicted - ground_truth):.0f} points)"
-            return {'score': score, 'feedback': feedback}
-
-        return score
-
-    # Attach stats to cache for inspection
-    _cache.stats = _stats  # type: ignore
-
-    return metric, _cache
-
-
-def get_cache_stats(cache) -> dict:
-    """Get cache hit/miss statistics from a cached oracle metric."""
-    stats = getattr(cache, 'stats', {'hits': 0, 'misses': 0})
-    total = stats['hits'] + stats['misses']
-    hit_rate = stats['hits'] / total if total > 0 else 0.0
-    return {
-        'hits': stats['hits'],
-        'misses': stats['misses'],
-        'total': total,
-        'hit_rate': hit_rate,
-        'cache_size': len(cache),
-    }
-
-
-# =============================================================================
-# Path-Based Scoring for Probabilistic Audit
-# =============================================================================
-
-def path_aggregate_score(
-    node,
-    oracle: Oracle,
-    tree,
-    weight_by_level: bool = True,
-) -> float:
-    """
-    Aggregate oracle scores along the path from a node to root.
-
-    This enables training signals to flow through the tree structure
-    during probabilistic audit optimization.
-
-    Args:
-        node: The starting node (OPSNode with summary attribute)
-        oracle: Oracle instance for scoring summaries
-        tree: The tree containing the node (OPSTree with get_path_to_root)
-        weight_by_level: If True, weight higher nodes (closer to root) more heavily
-                        since errors compound upward
-
-    Returns:
-        Weighted average of oracle predictions along the path
-
-    Example:
-        score = path_aggregate_score(leaf_node, rile_oracle, tree)
-        # Returns weighted average of RILE scores from leaf to root
-    """
-    path = tree.get_path_to_root(node)
-
-    if not path:
-        # Node is root or path not available
-        pred = oracle.predict(node.summary)
-        return pred.value
-
-    scores = []
-    weights = []
-
-    for i, path_node in enumerate(path):
-        summary = getattr(path_node, 'summary', None)
-        if summary is None:
-            continue
-
-        pred = oracle.predict(summary)
-        scores.append(pred.value)
-
-        if weight_by_level:
-            # Weight increases toward root (higher index = closer to root)
-            weights.append(i + 1)
-        else:
-            weights.append(1.0)
-
-    if not scores:
-        return 0.0
-
-    total_weight = sum(weights)
-    return sum(s * w for s, w in zip(scores, weights)) / total_weight
-
-
-def create_probabilistic_audit_metric(
-    oracle: Oracle,
-    ground_truth_field: str = 'ground_truth',
-    local_weight: float = 0.7,
-    path_weight: float = 0.3,
-    with_feedback: bool = True,
-) -> Callable:
-    """
-    Create a metric for probabilistic audit training.
-
-    Combines:
-    - Local score: oracle(node.summary) - strong signal for the sampled node
-    - Path score: weighted aggregate along path to root - propagation signal
-    - Global score: oracle(root.summary) vs ground_truth - correctness (at root only)
-
-    This enables training with sampled nodes while maintaining whole-tree scoring.
-
-    Args:
-        oracle: Oracle instance with predict() and score_accuracy() methods
-        ground_truth_field: Field name for ground truth on gold example
-        local_weight: Weight for local (node-level) score (default 0.7)
-        path_weight: Weight for path-based score (default 0.3)
-        with_feedback: Return dict with feedback for GEPA compatibility
-
-    Returns:
-        DSPy-compatible metric function
-
-    Example:
-        from src.ops_engine.scoring import Oracle, BoundedScale
-
-        class RILEOracle(Oracle):
-            def predict(self, text): ...
-
-        oracle = RILEOracle(BoundedScale(-100, 100))
-        metric = create_probabilistic_audit_metric(oracle)
-
-        # Training example includes tree context
-        example = dspy.Example(
-            ground_truth=45.0,
-            _tree=tree,
-            _node=sampled_leaf,
-        )
-        score = metric(example, prediction)
-    """
-    def metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
-        # Get ground truth
-        ground_truth = getattr(gold, ground_truth_field, 0.0)
-
-        # Get summary from prediction
-        if isinstance(pred, str):
-            summary = pred
-        else:
-            summary = getattr(pred, 'summary', None)
-            if summary is None:
-                summary = getattr(pred, 'merged_summary', None)
-            if summary is None:
-                summary = str(pred)
-
-        feedback_parts = []
-
-        # Local score: oracle prediction on this node's summary
-        try:
-            local_pred = oracle.predict(summary)
-            local_score = oracle.score_accuracy(local_pred.value, ground_truth)
-        except Exception as e:
-            local_score = 0.0
-            feedback_parts.append(f"Oracle error: {str(e)[:50]}")
-
-        # Check for tree context
-        tree = getattr(gold, '_tree', None)
-        node = getattr(gold, '_node', None)
-
-        if tree is None or node is None:
-            # No tree context - use local score only
-            final_score = local_score
-            if with_feedback:
-                feedback = ' '.join(feedback_parts) if feedback_parts else "Local score only (no tree context)"
-                return {'score': final_score, 'feedback': feedback}
-            return final_score
-
-        # Check if we're at the root
-        is_root = (node == tree.root) if hasattr(tree, 'root') else False
-
-        if is_root:
-            # At root: local score IS the global score
-            # Use equal weighting of local and ground truth comparison
-            global_score = local_score  # Already comparing to ground_truth
-            final_score = 0.5 * local_score + 0.5 * global_score
-
-            if local_score < 0.8:
-                feedback_parts.append(
-                    f"Root summary: predicted {local_pred.value:.1f}, "
-                    f"expected {ground_truth:.1f}"
-                )
-        else:
-            # Not at root: combine local with path-based score
-            try:
-                path_value = path_aggregate_score(node, oracle, tree)
-                path_score = oracle.score_accuracy(path_value, ground_truth)
-            except Exception as e:
-                path_score = local_score  # Fallback to local
-                feedback_parts.append(f"Path scoring error: {str(e)[:30]}")
-
-            final_score = local_weight * local_score + path_weight * path_score
-
-            if final_score < 0.8:
-                feedback_parts.append(
-                    f"Node score: {local_score:.2f}, path score: {path_score:.2f}"
-                )
-
-        if not with_feedback:
-            return final_score
-
-        feedback = ' '.join(feedback_parts) if feedback_parts else "Good score preservation"
-        return {
-            'score': final_score,
-            'feedback': feedback,
-            'local_score': local_score,
-            'path_score': path_score if 'path_score' in dir() else None,
-        }
-
-    return metric
-
-
-# =============================================================================
-# Classification Metrics
-# =============================================================================
-
-def classification_accuracy(
-    predictions: List[str],
-    ground_truth: List[str],
-) -> float:
-    """
-    Standard classification accuracy.
-
-    Args:
-        predictions: List of predicted labels
-        ground_truth: List of true labels
-
-    Returns:
-        Accuracy as fraction [0, 1]
-    """
-    if not predictions or len(predictions) != len(ground_truth):
-        return 0.0
-
-    correct = sum(p == g for p, g in zip(predictions, ground_truth))
-    return correct / len(predictions)
-
-
-def distance_weighted_accuracy(
-    predictions: List[str],
-    ground_truth: List[str],
-    label_space: LabelSpace,
-    max_distance: Optional[float] = None,
-) -> float:
-    """
-    Distance-weighted accuracy for ordinal label spaces.
-
-    Gives partial credit based on how close the prediction is to ground truth.
-    For categorical spaces, falls back to standard accuracy.
-
-    Args:
-        predictions: List of predicted labels
-        ground_truth: List of true labels
-        label_space: The label space (for distance computation)
-        max_distance: Maximum possible distance (auto-computed if None)
-
-    Returns:
-        Weighted accuracy as fraction [0, 1]
-    """
-    if not predictions or len(predictions) != len(ground_truth):
-        return 0.0
-
-    if not label_space.is_ordinal:
-        # Fall back to standard accuracy for categorical
-        return classification_accuracy(predictions, ground_truth)
-
-    # Compute max distance if not provided
-    if max_distance is None:
-        labels = label_space.labels
-        if labels:
-            max_distance = label_space.distance(labels[0], labels[-1])
-        if max_distance == 0:
-            max_distance = 1.0
-
-    # Compute weighted scores
-    scores = []
-    for pred, true in zip(predictions, ground_truth):
-        distance = label_space.distance(pred, true)
-        # Score: 1 for exact match, decreasing to 0 at max distance
-        score = normalize_error_to_score(distance, max_error=max_distance)
-        scores.append(score)
-
-    return sum(scores) / len(scores)
-
-
-def mean_absolute_error(
-    predictions: List[str],
-    ground_truth: List[str],
-    label_space: LabelSpace,
-) -> float:
-    """
-    Mean absolute error for ordinal predictions.
-
-    Args:
-        predictions: List of predicted labels
-        ground_truth: List of true labels
-        label_space: The label space (for distance computation)
-
-    Returns:
-        Mean absolute error
-    """
-    if not predictions or len(predictions) != len(ground_truth):
-        return float('inf')
-
-    errors = [label_space.distance(p, g) for p, g in zip(predictions, ground_truth)]
-    return sum(errors) / len(errors)
-
-
-def within_threshold_accuracy(
-    predictions: List[str],
-    ground_truth: List[str],
-    label_space: LabelSpace,
-    threshold: float,
-) -> float:
-    """
-    Fraction of predictions within a threshold distance of ground truth.
-
-    Args:
-        predictions: List of predicted labels
-        ground_truth: List of true labels
-        label_space: The label space
-        threshold: Distance threshold
-
-    Returns:
-        Fraction within threshold [0, 1]
-    """
-    if not predictions or len(predictions) != len(ground_truth):
-        return 0.0
-
-    within = sum(
-        label_space.distance(p, g) <= threshold
-        for p, g in zip(predictions, ground_truth)
-    )
-    return within / len(predictions)
-
+# Note: cached_oracle has been removed.
+# Use @functools.lru_cache decorator directly on oracle prediction functions instead.
+
+# Note: path_aggregate_score and probabilistic_audit have been removed.
+# These were complex tree-path-based metrics that are no longer used.
+# Use oracle_score_prediction for simpler oracle-based scoring.
 
 # =============================================================================
 # Calibration Metrics
@@ -752,154 +315,12 @@ def average_discrepancy(
 # DSPy Metric Functions
 # =============================================================================
 
-def create_classification_metric(
-    label_space: LabelSpace,
-    weighted: bool = True,
-    with_feedback: bool = False,
-) -> Callable:
-    """
-    Create a DSPy-compatible metric function for classification.
-
-    Args:
-        label_space: The label space for the task
-        weighted: Whether to use distance-weighted accuracy (for ordinal)
-        with_feedback: If True, returns {'score': float, 'feedback': str} for GEPA
-
-    Returns:
-        Metric function compatible with DSPy optimizers
-    """
-    # Compute max distance once for ordinal spaces
-    max_dist = 1.0
-    if label_space.is_ordinal and label_space.labels:
-        max_dist = label_space.distance(
-            label_space.labels[0],
-            label_space.labels[-1]
-        )
-        if max_dist == 0:
-            max_dist = 1.0
-
-    def metric(example, prediction, trace=None, pred_name=None, pred_trace=None):
-        """DSPy metric function with optional GEPA feedback."""
-        # Get ground truth from example
-        true_label = getattr(example, 'label', None)
-        if true_label is None:
-            true_label = getattr(example, 'violation_type', None)
-        if true_label is None:
-            if with_feedback:
-                return {'score': 0.0, 'feedback': 'No ground truth label found in example.'}
-            return 0.0
-
-        # Get predicted label
-        pred_label = getattr(prediction, 'label', None)
-        if pred_label is None:
-            if with_feedback:
-                return {'score': 0.0, 'feedback': 'No prediction label found.'}
-            return 0.0
-
-        # Get optional prediction metadata
-        pred_confidence = getattr(prediction, 'confidence', 0.5)
-        pred_reasoning = getattr(prediction, 'reasoning', '')
-
-        # Compute score
-        distance = 0.0
-        if weighted and label_space.is_ordinal:
-            distance = label_space.distance(pred_label, true_label)
-            score = max(0.0, 1.0 - (distance / max_dist))
-        else:
-            score = 1.0 if pred_label == true_label else 0.0
-
-        if not with_feedback:
-            return score
-
-        # Generate diagnostic feedback for GEPA
-        feedback_parts = []
-
-        if score < 1.0:
-            feedback_parts.append(f"Predicted '{pred_label}' but true label was '{true_label}'.")
-
-            if weighted and label_space.is_ordinal:
-                feedback_parts.append(f"RILE distance: {distance:.0f} points.")
-
-                # Check for direction errors (left vs right)
-                try:
-                    pred_val = float(pred_label)
-                    true_val = float(true_label)
-                    if (pred_val < 0 and true_val > 0) or (pred_val > 0 and true_val < 0):
-                        feedback_parts.append(
-                            "Misidentified political direction (left vs right) - "
-                            "review ideological indicators more carefully."
-                        )
-                    elif abs(distance) > 40:
-                        feedback_parts.append(
-                            "Large error - the text may contain mixed signals or "
-                            "domain-specific terminology requiring careful interpretation."
-                        )
-                except (ValueError, TypeError):
-                    pass
-
-            # High confidence but wrong
-            if pred_confidence > 0.8 and score < 0.5:
-                feedback_parts.append(
-                    "High confidence but incorrect - the model is overconfident. "
-                    "Consider expressing more uncertainty in ambiguous cases."
-                )
-
-            # Low confidence and wrong
-            if pred_confidence < 0.3 and score < 0.5:
-                feedback_parts.append(
-                    "Low confidence and incorrect - more analysis or examples may help."
-                )
-
-        feedback = ' '.join(feedback_parts) if feedback_parts else "Correct prediction."
-
-        return {'score': score, 'feedback': feedback}
-
-    return metric
+# Note: classification() and violation() have been removed.
+# Use continuous score prediction with oracle_as_metric() or metric() instead.
+# Use compliance() for law compliance metrics.
 
 
-def create_violation_metric() -> Callable:
-    """
-    Create a DSPy metric for violation detection.
-
-    Scores based on:
-    - Correct is_violation prediction
-    - Correct violation_type (if is_violation)
-    """
-    def metric(example, prediction, trace=None, pred_name=None, pred_trace=None) -> float:
-        """DSPy metric for violation detection. Compatible with GEPA's 5-argument signature."""
-        # Get ground truth
-        true_is_violation = getattr(example, 'is_true_violation', None)
-        true_type = getattr(example, 'violation_type', 'none')
-
-        # Get prediction
-        pred_is_violation = getattr(prediction, 'is_violation', None)
-        pred_type = getattr(prediction, 'violation_type', 'none')
-
-        if true_is_violation is None or pred_is_violation is None:
-            return 0.0
-
-        # Score components
-        score = 0.0
-
-        # Is violation correct? (50% weight)
-        if pred_is_violation == true_is_violation:
-            score += 0.5
-
-        # Violation type correct? (50% weight, only if is_violation)
-        if true_is_violation:
-            if str(pred_type).lower() == str(true_type).lower():
-                score += 0.5
-        else:
-            # For non-violations, full credit if we correctly said "no violation"
-            if not pred_is_violation:
-                score += 0.5
-
-        return score
-
-    return metric
-
-
-def create_law_compliance_metric(
+def compliance(
     tolerance: float = 0.0,
 ) -> Callable:
     """
@@ -931,158 +352,14 @@ def create_law_compliance_metric(
 
 
 # =============================================================================
-# Advanced DSPy Metrics (Trace-based, LLM Judge, Composite)
+# Advanced DSPy Metrics (LLM Judge)
 # =============================================================================
 
-def create_classification_metric_with_trace(
-    label_space: LabelSpace,
-    weighted: bool = True,
-    with_feedback: bool = True,
-) -> Callable:
-    """
-    Create a metric that uses the DSPy trace for deeper validation.
-
-    The trace parameter provides access to intermediate DSPy module calls,
-    allowing validation of reasoning quality, not just final answers.
-
-    This follows DSPy metrics best practices from dspy.ai/learn/evaluation/metrics/
-
-    Args:
-        label_space: The label space for the task
-        weighted: Whether to use distance-weighted accuracy (for ordinal)
-        with_feedback: If True, returns {'score': float, 'feedback': str} for GEPA
-
-    Returns:
-        Metric function compatible with DSPy optimizers (including GEPA)
-    """
-    # Compute max distance once for ordinal spaces
-    max_dist = 1.0
-    if label_space.is_ordinal and label_space.labels:
-        max_dist = label_space.distance(
-            label_space.labels[0],
-            label_space.labels[-1]
-        )
-        if max_dist == 0:
-            max_dist = 1.0
-
-    def metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
-        """
-        DSPy metric with trace-based reasoning validation.
-
-        Compatible with GEPA's 5-argument signature.
-
-        Args:
-            gold: Ground truth example
-            pred: Prediction
-            trace: Optional list of (module, inputs, outputs) tuples from DSPy
-            pred_name: Optional predictor name (for GEPA)
-            pred_trace: Optional predictor trace (for GEPA)
-
-        Returns:
-            Score (float) or {'score': float, 'feedback': str} if with_feedback
-        """
-        # Get ground truth from example
-        true_label = getattr(gold, 'label', None)
-        if true_label is None:
-            true_label = getattr(gold, 'violation_type', None)
-        if true_label is None:
-            if with_feedback:
-                return {'score': 0.0, 'feedback': 'No ground truth label found.'}
-            return 0.0
-
-        # Get predicted label
-        pred_label = getattr(pred, 'label', None)
-        if pred_label is None:
-            if with_feedback:
-                return {'score': 0.0, 'feedback': 'No prediction label found.'}
-            return 0.0
-
-        # Compute base score
-        distance = 0.0
-        if weighted and label_space.is_ordinal:
-            distance = label_space.distance(pred_label, true_label)
-            base_score = max(0.0, 1.0 - (distance / max_dist))
-        else:
-            base_score = 1.0 if pred_label == true_label else 0.0
-
-        # Use trace for reasoning validation (when available during optimization)
-        reasoning_penalty = 0.0
-        feedback_parts = []
-
-        if trace is not None:
-            # Trace contains intermediate module calls
-            for module_call in trace:
-                # Handle different trace formats
-                if isinstance(module_call, tuple) and len(module_call) >= 3:
-                    module_name, inputs, outputs = module_call[:3]
-                elif hasattr(module_call, 'outputs'):
-                    outputs = module_call.outputs
-                else:
-                    continue
-
-                # Check for reasoning quality issues
-                reasoning = getattr(outputs, 'reasoning', '')
-                if not reasoning and isinstance(outputs, dict):
-                    reasoning = outputs.get('reasoning', '')
-
-                if reasoning:
-                    # Too brief
-                    if len(reasoning) < 50:
-                        reasoning_penalty += 0.05
-                        feedback_parts.append("Reasoning too brief - elaborate on evidence.")
-
-                    # Missing causal connectors
-                    reasoning_lower = reasoning.lower()
-                    has_causal = any(word in reasoning_lower for word in
-                                    ['therefore', 'because', 'since', 'thus', 'hence'])
-                    if not has_causal:
-                        reasoning_penalty += 0.02
-                        feedback_parts.append("Missing causal connectors in reasoning.")
-
-                    # Check for political direction consistency (RILE-specific)
-                    if label_space.is_ordinal:
-                        try:
-                            pred_val = float(pred_label)
-                            pred_direction = 'left' if pred_val < 0 else 'right'
-
-                            mentions_left = any(w in reasoning_lower for w in
-                                              ['left', 'progressive', 'socialist', 'liberal'])
-                            mentions_right = any(w in reasoning_lower for w in
-                                               ['right', 'conservative', 'traditional', 'market'])
-
-                            # Inconsistency check
-                            if pred_direction == 'left' and mentions_right and not mentions_left:
-                                reasoning_penalty += 0.1
-                                feedback_parts.append(
-                                    "Reasoning mentions right-wing concepts but predicts left - inconsistent."
-                                )
-                            elif pred_direction == 'right' and mentions_left and not mentions_right:
-                                reasoning_penalty += 0.1
-                                feedback_parts.append(
-                                    "Reasoning mentions left-wing concepts but predicts right - inconsistent."
-                                )
-                        except (ValueError, TypeError):
-                            pass
-
-        final_score = max(0.0, base_score - reasoning_penalty)
-
-        if not with_feedback:
-            return final_score
-
-        # Add base error feedback
-        if base_score < 1.0:
-            feedback_parts.insert(0, f"Predicted '{pred_label}' but true was '{true_label}'.")
-            if weighted and label_space.is_ordinal:
-                feedback_parts.insert(1, f"Distance: {distance:.0f} points.")
-
-        feedback = ' '.join(feedback_parts) if feedback_parts else "Correct with good reasoning."
-
-        return {'score': final_score, 'feedback': feedback}
-
-    return metric
+# Note: classification_trace() has been removed. Use continuous score prediction
+# with oracle_as_metric() or metric() instead.
 
 
-def create_llm_judge_metric(judge_lm=None) -> Callable:
+def llm_judge(judge_lm=None) -> Callable:
     """
     Create a metric that uses an LLM as judge for nuanced evaluation.
 
@@ -1187,97 +464,15 @@ def create_llm_judge_metric(judge_lm=None) -> Callable:
     return metric
 
 
-def create_composite_metric(
-    label_space: LabelSpace,
-    use_trace: bool = True,
-    use_llm_judge: bool = False,
-    judge_weight: float = 0.3,
-    judge_lm=None,
-) -> Callable:
-    """
-    Create a composite metric combining multiple evaluation strategies.
-
-    Combines:
-    - Distance-based scoring (always used)
-    - Trace-based reasoning validation (optional)
-    - LLM judge for nuanced evaluation (optional, expensive)
-
-    Args:
-        label_space: Label space for distance calculations
-        use_trace: Whether to validate reasoning via trace
-        use_llm_judge: Whether to use LLM as judge (expensive but nuanced)
-        judge_weight: Weight for LLM judge score when used (0.0-1.0)
-        judge_lm: Optional LM for judge (uses default if None)
-
-    Returns:
-        Composite metric function
-    """
-    # Create component metrics
-    distance_metric = create_classification_metric_with_trace(
-        label_space, weighted=True, with_feedback=True
-    ) if use_trace else create_classification_metric(
-        label_space, weighted=True, with_feedback=True
-    )
-
-    llm_judge = create_llm_judge_metric(judge_lm) if use_llm_judge else None
-
-    def metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
-        """
-        Composite metric combining multiple evaluation approaches.
-
-        Compatible with GEPA's 5-argument signature.
-
-        Args:
-            gold: Ground truth example
-            pred: Prediction
-            trace: Optional DSPy trace
-            pred_name: Optional predictor name (for GEPA)
-            pred_trace: Optional predictor trace (for GEPA)
-
-        Returns:
-            {'score': float, 'feedback': str}
-        """
-        # Always compute distance-based score
-        dist_result = distance_metric(gold, pred, trace=trace if use_trace else None)
-
-        if isinstance(dist_result, dict):
-            dist_score = dist_result.get('score', 0.0)
-            feedback_parts = [dist_result.get('feedback', '')]
-        else:
-            dist_score = dist_result
-            feedback_parts = []
-
-        # Optionally add LLM judge
-        if llm_judge and use_llm_judge:
-            try:
-                judge_result = llm_judge(gold, pred, trace=trace)
-                judge_score = judge_result.get('score', 0.5)
-                judge_feedback = judge_result.get('feedback', '')
-
-                if judge_feedback:
-                    feedback_parts.append(f"Judge: {judge_feedback}")
-
-                # Weighted combination
-                final_score = (1 - judge_weight) * dist_score + judge_weight * judge_score
-            except Exception:
-                # Fall back to distance-only on judge failure
-                final_score = dist_score
-        else:
-            final_score = dist_score
-
-        return {
-            'score': final_score,
-            'feedback': ' | '.join(filter(None, feedback_parts)),
-        }
-
-    return metric
+# Note: composite() has been removed. Use combine_metrics() or combine_feedback()
+# with oracle_as_metric() for composing metrics.
 
 
 # =============================================================================
 # Summarization Metrics (for Two-Step Iterative Optimization)
 # =============================================================================
 
-def create_summarization_metric(
+def summarization(
     oracle_classifier,
     human_weight: float = 0.3,
     oracle_weight: float = 0.7,
@@ -1457,7 +652,7 @@ def create_summarization_metric(
     return metric
 
 
-def create_merge_metric(
+def merge(
     oracle_classifier,
     threshold: float = 10.0,
     max_error: float = None,
@@ -1469,7 +664,7 @@ def create_merge_metric(
     where two summaries are combined.
 
     Args:
-        oracle_classifier: Trained RILEOracleClassifier
+        oracle_classifier: Score predictor with predict_rile() method
         threshold: Maximum acceptable RILE drift
         max_error: Maximum error scale for scoring. Defaults to RILE_RANGE (200.0).
 
@@ -1540,7 +735,7 @@ def create_merge_metric(
 # Simple Metric Factories (DSPy-style)
 # =============================================================================
 
-def create_exact_match_metric(
+def exact_match(
     gold_field: str = "answer",
     pred_field: str = "answer",
 ) -> Callable:
@@ -1568,7 +763,7 @@ def create_exact_match_metric(
     return metric
 
 
-def create_numeric_match_metric(
+def numeric_match(
     gold_field: str,
     pred_field: str,
     tolerance: float = 0.0,
@@ -1601,7 +796,7 @@ def create_numeric_match_metric(
     return metric
 
 
-def create_oracle_metric(
+def oracle(
     oracle_fn: Callable,
     comparison_fn: Callable = None,
     input_field: str = "output",
@@ -1745,7 +940,7 @@ def combine_metrics(
     return combined_metric
 
 
-def combine_metrics_with_feedback(
+def combine_feedback(
     metrics: List[Tuple[Callable, float, str]],
     normalize_weights: bool = True,
 ) -> Callable:
@@ -1817,93 +1012,204 @@ def combine_metrics_with_feedback(
     return combined_metric
 
 
+# Note: EvaluationResult dataclass has been removed.
+# Use continuous score evaluation with oracle_as_metric() or metric() instead.
+
+
 # =============================================================================
-# Aggregate Metrics
+# General Oracle Score Prediction (Scale-Agnostic)
 # =============================================================================
 
-@dataclass
-class EvaluationResult:
-    """Comprehensive evaluation results."""
-    accuracy: float
-    weighted_accuracy: float
-    mae: float
-    calibration_ece: float
-    calibration_mce: float
-    law_compliance: Dict[str, float]
-    overall_compliance: float
-
-    # Threshold accuracies (for ordinal)
-    within_5: Optional[float] = None
-    within_10: Optional[float] = None
-    within_20: Optional[float] = None
-
-    def to_dict(self) -> Dict:
-        return {
-            'accuracy': self.accuracy,
-            'weighted_accuracy': self.weighted_accuracy,
-            'mae': self.mae,
-            'calibration_ece': self.calibration_ece,
-            'calibration_mce': self.calibration_mce,
-            'law_compliance': self.law_compliance,
-            'overall_compliance': self.overall_compliance,
-            'within_5': self.within_5,
-            'within_10': self.within_10,
-            'within_20': self.within_20,
-        }
-
-
-def evaluate_classifier(
-    predictions: List[Prediction],
-    ground_truth: List[str],
-    label_space: LabelSpace,
-    law_checks: Optional[List[LawCheckResult]] = None,
-) -> EvaluationResult:
+def oracle_score_prediction(
+    oracle_fn: Callable,
+    scale: "ScaleDefinition",
+    ground_truth_field: str = 'reference_score',
+    summary_field: str = 'summary',
+    with_feedback: bool = True,
+) -> Callable:
     """
-    Comprehensive evaluation of classifier performance.
+    Create a DSPy metric that compares oracle predictions to ground truth.
+
+    This is a general-purpose metric that works with any bounded scale.
+    It uses the scale's `values_to_score()` method to convert prediction
+    errors to normalized 0-1 scores.
 
     Args:
-        predictions: List of Prediction objects
-        ground_truth: List of true labels
-        label_space: The label space
-        law_checks: Optional law check results
+        oracle_fn: Oracle with `predict_score(text)` returning (score, confidence, reasoning).
+                   Also supports legacy `predict_rile()` interface for backwards compatibility.
+        scale: ScaleDefinition defining the value range for normalization.
+               Uses `scale.values_to_score(predicted, ground_truth)` for scoring.
+        ground_truth_field: Field name for ground truth on gold example
+        summary_field: Field name for summary text on prediction
+        with_feedback: Return dict with feedback for GEPA compatibility
 
     Returns:
-        EvaluationResult with all metrics
+        DSPy-compatible metric function (5-arg signature)
+
+    Example:
+        from src.ops_engine.training_framework.domains.base import ScaleDefinition
+
+        # Any bounded scale works
+        my_scale = ScaleDefinition("sentiment", -1.0, 1.0)
+        metric = oracle_score_prediction(
+            oracle_fn=sentiment_oracle,
+            scale=my_scale,
+        )
     """
-    pred_labels = [p.label for p in predictions]
+    # Lazy import to avoid circular dependency
+    from src.ops_engine.training_framework.domains.base import ScaleDefinition
 
-    # Basic metrics
-    acc = classification_accuracy(pred_labels, ground_truth)
-    weighted_acc = distance_weighted_accuracy(pred_labels, ground_truth, label_space)
-    mae = mean_absolute_error(pred_labels, ground_truth, label_space)
+    def metric_fn(gold, pred, trace=None, pred_name=None, pred_trace=None):
+        # Get ground truth
+        ground_truth = getattr(gold, ground_truth_field, None)
+        if ground_truth is None:
+            ground_truth = getattr(gold, 'label', 0.0)
+        try:
+            ground_truth = float(ground_truth)
+        except (ValueError, TypeError):
+            ground_truth = scale.neutral_value or ((scale.min_value + scale.max_value) / 2)
 
-    # Calibration
-    cal = calibration_error(predictions, ground_truth)
+        # Get summary from prediction
+        if isinstance(pred, str):
+            summary = pred
+        else:
+            summary = getattr(pred, summary_field, None)
+            if summary is None:
+                summary = getattr(pred, 'merged_summary', None)
+            if summary is None:
+                summary = str(pred)
 
-    # Law compliance
-    if law_checks:
-        law_comp = law_compliance_rate(law_checks)
-        overall_comp = overall_compliance_rate(law_checks)
-    else:
-        law_comp = {}
-        overall_comp = 1.0
+        # Call oracle - support multiple interfaces
+        try:
+            # Try new general interface first
+            if hasattr(oracle_fn, 'predict_score'):
+                result = oracle_fn.predict_score(summary)
+            # Fall back to legacy RILE interface
+            elif hasattr(oracle_fn, 'predict_rile'):
+                result = oracle_fn.predict_rile(summary)
+            # Direct callable
+            else:
+                result = oracle_fn(summary)
 
-    # Threshold accuracies (for ordinal)
-    within_5 = within_10 = within_20 = None
-    if label_space.is_ordinal:
-        within_5 = within_threshold_accuracy(pred_labels, ground_truth, label_space, 5.0)
-        within_10 = within_threshold_accuracy(pred_labels, ground_truth, label_space, 10.0)
-        within_20 = within_threshold_accuracy(pred_labels, ground_truth, label_space, 20.0)
+            # Handle return types
+            if isinstance(result, tuple):
+                predicted_value = result[0]
+                confidence = result[1] if len(result) > 1 else 1.0
+                reasoning = result[2] if len(result) > 2 else ""
+            else:
+                predicted_value = float(result)
+                confidence = 1.0
+                reasoning = ""
 
-    return EvaluationResult(
-        accuracy=acc,
-        weighted_accuracy=weighted_acc,
-        mae=mae,
-        calibration_ece=cal['ece'],
-        calibration_mce=cal['mce'],
-        law_compliance=law_comp,
-        overall_compliance=overall_comp,
-        within_5=within_5,
-        within_10=within_10,
-        within_20=within_20,
-    )
+        except Exception as e:
+            if with_feedback:
+                return {'score': 0.0, 'feedback': f"Oracle error: {str(e)[:50]}"}
+            return 0.0
+
+        # Compute score using scale's built-in method
+        score = scale.values_to_score(predicted_value, ground_truth)
+
+        if with_feedback:
+            error = abs(predicted_value - ground_truth)
+            feedback = f"Predicted {predicted_value:.1f}, expected {ground_truth:.1f} (error: {error:.1f})"
+            if reasoning:
+                feedback += f" - {reasoning}"
+            return {'score': score, 'feedback': feedback}
+
+        return score
+
+    return metric_fn
+
+
+def pairwise_consistency_metric(
+    oracle_fn: Callable,
+    with_feedback: bool = True,
+) -> Callable:
+    """
+    Create a metric measuring pairwise preference consistency.
+
+    This metric evaluates whether predictions are consistent with oracle
+    pairwise comparisons. Useful for GenRM-style preference learning.
+
+    Args:
+        oracle_fn: Oracle that can score text. Used to compare two summaries.
+        with_feedback: Return dict with feedback for GEPA compatibility
+
+    Returns:
+        DSPy-compatible metric function (5-arg signature)
+
+    Example:
+        metric = pairwise_consistency_metric(oracle)
+        # gold has 'summary_a', 'summary_b', 'preference' (1 or -1)
+        score = metric(gold, pred)
+    """
+    def metric_fn(gold, pred, trace=None, pred_name=None, pred_trace=None):
+        # Get the two summaries to compare
+        summary_a = getattr(gold, 'summary_a', None)
+        summary_b = getattr(gold, 'summary_b', None)
+        preference = getattr(gold, 'preference', None)  # 1 if A better, -1 if B better, 0 if equal
+
+        if summary_a is None or summary_b is None:
+            if with_feedback:
+                return {'score': 0.0, 'feedback': 'Missing summary_a or summary_b'}
+            return 0.0
+
+        try:
+            # Get oracle scores for both summaries
+            if hasattr(oracle_fn, 'predict_score'):
+                result_a = oracle_fn.predict_score(summary_a)
+                result_b = oracle_fn.predict_score(summary_b)
+            elif hasattr(oracle_fn, 'predict_rile'):
+                result_a = oracle_fn.predict_rile(summary_a)
+                result_b = oracle_fn.predict_rile(summary_b)
+            else:
+                result_a = oracle_fn(summary_a)
+                result_b = oracle_fn(summary_b)
+
+            # Extract scores
+            score_a = result_a[0] if isinstance(result_a, tuple) else float(result_a)
+            score_b = result_b[0] if isinstance(result_b, tuple) else float(result_b)
+
+            # Determine oracle's preference
+            oracle_preference = 1 if score_a > score_b else (-1 if score_b > score_a else 0)
+
+            # Compare with expected preference
+            if preference is None:
+                # No ground truth preference - return neutral
+                score = 0.5
+            elif preference == 0 or oracle_preference == 0:
+                # Either is neutral - partial credit
+                score = 0.75
+            elif preference == oracle_preference:
+                # Preferences match
+                score = 1.0
+            else:
+                # Preferences conflict
+                score = 0.0
+
+            if with_feedback:
+                feedback = f"Oracle scores: A={score_a:.1f}, B={score_b:.1f}"
+                return {'score': score, 'feedback': feedback}
+            return score
+
+        except Exception as e:
+            if with_feedback:
+                return {'score': 0.0, 'feedback': f"Comparison error: {str(e)[:50]}"}
+            return 0.0
+
+    return metric_fn
+
+
+# =============================================================================
+# Domain-Specific Metrics
+# =============================================================================
+# RILE-specific metrics have been moved to src/manifesto/metrics.py
+# Import them directly from there:
+#     from src.manifesto.metrics import oracle_rile_prediction
+
+# =============================================================================
+# Legacy Aliases
+# =============================================================================
+
+# Note: create_classification_metric, evaluate_classifier, and create_violation_metric
+# have been removed. Use oracle_as_metric() or metric() for continuous score evaluation.

@@ -264,3 +264,145 @@ class OracleFuncReviewer(dspy.Module):
             'corrected_summary': result.corrected_summary,
             'reasoning': result.reasoning
         }
+
+
+# =============================================================================
+# Generic Metric Scoring Signatures
+# =============================================================================
+
+class MetricScore(dspy.Signature):
+    """
+    Score text on a bounded numeric scale based on specified criteria.
+
+    This is the generic foundation for domain-specific scorers. Domain modules
+    (e.g., manifesto/RILE, sentiment analysis) should extend this pattern with
+    their own field names while maintaining the same structure.
+
+    The task_context should describe:
+    - What dimension/criteria to evaluate
+    - The scale bounds (e.g., -100 to +100, 0 to 1)
+    - What indicators suggest higher vs lower scores
+    """
+
+    task_context: str = dspy.InputField(
+        desc="Explanation of the scoring task and evaluation criteria"
+    )
+    text: str = dspy.InputField(
+        desc="Text to analyze and score"
+    )
+    score: float = dspy.OutputField(
+        desc="Score on the specified scale. Output a single number."
+    )
+    high_indicators: str = dspy.OutputField(
+        desc="Key indicators supporting a higher score"
+    )
+    low_indicators: str = dspy.OutputField(
+        desc="Key indicators supporting a lower score"
+    )
+    reasoning: str = dspy.OutputField(
+        desc="Explanation of how the score was determined"
+    )
+
+
+class MetricScorer(dspy.Module):
+    """DSPy module for generic metric scoring."""
+
+    def __init__(self):
+        super().__init__()
+        self.score = dspy.ChainOfThought(MetricScore)
+
+    def forward(self, text: str, task_context: str) -> dict:
+        """
+        Score text according to the task context.
+
+        Args:
+            text: Text to score
+            task_context: Scoring criteria and scale description
+
+        Returns:
+            Dictionary with score, indicators, and reasoning
+        """
+        result = self.score(task_context=task_context, text=text)
+        return {
+            'score': result.score,
+            'high_indicators': result.high_indicators,
+            'low_indicators': result.low_indicators,
+            'reasoning': result.reasoning
+        }
+
+
+class PairwiseComparison(dspy.Signature):
+    """
+    Compare two summaries for information preservation quality.
+
+    This signature is used to generate preference pairs for training.
+    It compares which summary better preserves the information specified
+    in the rubric, given the original text and its ground truth score.
+    """
+
+    rubric: str = dspy.InputField(
+        desc="Criteria for what information must be preserved"
+    )
+    original_text: str = dspy.InputField(
+        desc="Original source text"
+    )
+    summary_a: str = dspy.InputField(
+        desc="First candidate summary"
+    )
+    summary_b: str = dspy.InputField(
+        desc="Second candidate summary"
+    )
+    ground_truth_score: float = dspy.InputField(
+        desc="Ground truth score for the original text"
+    )
+    preferred: str = dspy.OutputField(
+        desc="Which summary better preserves information: 'A', 'B', or 'tie'"
+    )
+    reasoning: str = dspy.OutputField(
+        desc="Why this summary better preserves the target information"
+    )
+    confidence: float = dspy.OutputField(
+        desc="Confidence in judgment (0.0 to 1.0)"
+    )
+
+
+class PairwiseComparer(dspy.Module):
+    """DSPy module for pairwise summary comparison."""
+
+    def __init__(self):
+        super().__init__()
+        self.compare = dspy.ChainOfThought(PairwiseComparison)
+
+    def forward(
+        self,
+        original_text: str,
+        summary_a: str,
+        summary_b: str,
+        rubric: str,
+        ground_truth_score: float = 0.0
+    ) -> dict:
+        """
+        Compare two summaries for information preservation.
+
+        Args:
+            original_text: Original source text
+            summary_a: First candidate summary
+            summary_b: Second candidate summary
+            rubric: Preservation criteria
+            ground_truth_score: Ground truth score for original
+
+        Returns:
+            Dictionary with preference, reasoning, and confidence
+        """
+        result = self.compare(
+            rubric=rubric,
+            original_text=original_text,
+            summary_a=summary_a,
+            summary_b=summary_b,
+            ground_truth_score=ground_truth_score
+        )
+        return {
+            'preferred': result.preferred,
+            'reasoning': result.reasoning,
+            'confidence': result.confidence
+        }

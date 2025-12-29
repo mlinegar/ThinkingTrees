@@ -23,6 +23,7 @@ print()
 print("Test 1: Importing modules...")
 try:
     import dspy
+    from src.config.dspy_config import configure_dspy
     # Import directly to avoid circular import
     import importlib.util
     spec = importlib.util.spec_from_file_location(
@@ -188,7 +189,7 @@ try:
             return self.history[-n:] if self.history else []
 
     dummy_lm = SimpleDummyLM()
-    dspy.configure(lm=dummy_lm)
+    configure_dspy(lm=dummy_lm)
 
     # Test that we can call it
     result = dummy_lm("What is the RILE score?")

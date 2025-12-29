@@ -24,7 +24,6 @@ from .core import (
     TrainingExampleLabel,
     ViolationType,
     Prediction,
-    LabelSpace,
 )
 from .config import OptimizationConfig, OnlineLearningConfig
 from .data_sources import UnifiedTrainingCollector, NodeLevelHumanSource
@@ -87,7 +86,7 @@ class OnlineLearningManager:
         Initialize online learning manager.
 
         Args:
-            classifier: The OracleClassifier to manage
+            classifier: The score predictor module to manage
             config: Online learning configuration
             review_queue: Optional ReviewQueue for human feedback
         """
@@ -347,7 +346,7 @@ class OnlineLearningManager:
             item_id: Optional item identifier
 
         Returns:
-            OracleReviewResult with classification and confidence
+            OracleReviewResult with prediction and confidence
         """
         item_id = item_id or f"item_{int(datetime.now().timestamp())}"
 
@@ -579,7 +578,7 @@ def create_online_manager(
     Create an online learning manager.
 
     Args:
-        classifier: The OracleClassifier to manage
+        classifier: The score predictor module to manage
         review_queue: Optional ReviewQueue for feedback
         config: Configuration
 

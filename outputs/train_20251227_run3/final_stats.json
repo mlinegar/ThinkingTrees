@@ -1,0 +1,66 @@
+{
+  "started_at": "2025-12-27T09:25:51.578820",
+  "config": {
+    "port": 8000,
+    "opt_model_port": null,
+    "train_samples": 100,
+    "val_samples": 30,
+    "test_samples": 30,
+    "rounds": 3,
+    "concurrent_docs": 20,
+    "concurrent_requests": 200,
+    "num_threads": 64,
+    "optimizer": "bootstrap_random_search",
+    "optimizer_budget": "heavy",
+    "max_metric_calls": null,
+    "n_iterations": 2,
+    "convergence_threshold": 0.01,
+    "convergence_patience": 3,
+    "skip_summarizer_opt": false,
+    "skip_oracle_opt": false,
+    "use_top_down_init": false,
+    "n_init_demos": 8,
+    "max_init_doc_chars": 20000,
+    "enable_genrm": true,
+    "genrm_port": 8001,
+    "genrm_init_samples": 8,
+    "genrm_init_candidates": 4,
+    "use_mini_trees": true,
+    "train_comparison_module": false,
+    "resume": false,
+    "output_dir": "outputs/train_20251227_run3"
+  },
+  "genrm_trees": {
+    "n_trees": 8,
+    "n_preferences": 44,
+    "n_demos": 28,
+    "n_samples": 8,
+    "n_candidates": 4
+  },
+  "preference_collection": {
+    "total_pairs": 44,
+    "non_tie_pairs": 44,
+    "tie_pairs": 0,
+    "prefer_a": 25,
+    "prefer_b": 19,
+    "avg_confidence": 0.696590909090909,
+    "high_confidence_pairs": 0
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "metric_before": 0.0,
+      "metric_after": 0.0
+    },
+    {
+      "round": 2,
+      "metric_before": 0.0,
+      "metric_after": 0.0
+    }
+  ],
+  "test": {
+    "processed": 30
+  },
+  "completed_at": "2025-12-27T13:48:08.275250",
+  "success": true
+}

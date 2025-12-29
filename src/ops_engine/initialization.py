@@ -134,7 +134,7 @@ class TopDownInitializer:
             max_doc_tokens: Optional token limit (if provided, used instead of chars)
             label_extractor: Function to extract ground truth label from sample
             oracle_fn: Optional oracle function for verification
-            oracle_classifier: Optional OracleClassifier instance
+            oracle_classifier: Optional oracle instance with predict_rile() method
             max_workers: Parallel workers for processing
         """
         self.max_doc_chars = max_doc_chars
@@ -279,7 +279,7 @@ class TopDownInitializer:
 # Convenience Functions
 # =============================================================================
 
-def create_oracle_aligned_demos(
+def oracle_demos(
     samples: List[Any],
     rubric: str,
     n_demos: int = 8,
@@ -328,7 +328,7 @@ def create_oracle_aligned_demos(
     )
 
 
-def initialize_summarizer_with_demos(
+def initialize_summarizer(
     summarizer: dspy.Module,
     demos: List[OracleAlignedDemo],
 ) -> dspy.Module:
@@ -357,7 +357,7 @@ def initialize_summarizer_with_demos(
     return initializer.initialize_module(summarizer, demos)
 
 
-def create_quick_init_demos(
+def quick_demos(
     samples: List[Any],
     rubric: str,
     n_demos: int = 4,
@@ -562,7 +562,7 @@ def train_on_short_docs(
         leaf, merge = train_on_short_docs(
             train_samples=samples,
             leaf_summarizer=LeafSummarizer(),
-            oracle_classifier=RILEOracleClassifier(),
+            oracle_classifier=rile_scorer,  # Any oracle with predict_rile() method
             rubric=RILE_RUBRIC,
             optimizer_type='gepa',  # Actual prompt optimization
         )

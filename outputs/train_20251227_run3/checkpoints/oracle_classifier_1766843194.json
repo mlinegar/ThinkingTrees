@@ -1,0 +1,44 @@
+{
+  "score.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Score political text on the left-right (RILE) scale.\n\nThe RILE scale ranges from -100 (far left) to +100 (far right).\nThe score is based on emphasis on left vs right policy positions.",
+      "fields": [
+        {
+          "prefix": "Task Context:",
+          "description": "Explanation of the RILE scoring task and left/right indicators"
+        },
+        {
+          "prefix": "Text:",
+          "description": "Political manifesto text or summary to score"
+        },
+        {
+          "prefix": "Reasoning:",
+          "description": "Explanation of how the score was determined"
+        },
+        {
+          "prefix": "Rile Score:",
+          "description": "RILE score from -100 (far left) to +100 (far right)"
+        },
+        {
+          "prefix": "Left Indicators:",
+          "description": "Key left-leaning positions identified in the text"
+        },
+        {
+          "prefix": "Right Indicators:",
+          "description": "Key right-leaning positions identified in the text"
+        }
+      ]
+    },
+    "lm": null
+  },
+  "metadata": {
+    "dependency_versions": {
+      "python": "3.12",
+      "dspy": "3.0.4",
+      "cloudpickle": "3.1"
+    }
+  }
+}
