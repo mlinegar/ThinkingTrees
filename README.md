@@ -45,13 +45,16 @@ ThinkingTrees/
 ├── config/
 │   └── settings.yaml              # Model configs, generation params
 ├── src/
-│   ├── core/
+│   ├── core/                      # Generic building blocks
 │   │   ├── data_models.py         # Node, Tree, AuditResult
 │   │   ├── documents.py           # DocumentSample, DocumentResult
 │   │   ├── llm_client.py          # LLMClient (vLLM/OpenAI)
-│   │   ├── signatures.py          # DSPy signatures
+│   │   ├── signatures.py          # DSPy signatures (generic)
+│   │   ├── scorers.py             # ScaleScorer, PairwiseScorer
+│   │   ├── summarization.py       # GenericSummarizer, GenericMerger
 │   │   ├── batch_processor.py     # Level-wise batch processing
-│   │   └── output_parser.py       # Case-insensitive LLM output parsing
+│   │   ├── output_parser.py       # Case-insensitive LLM output parsing
+│   │   └── strategy.py            # SummarizationStrategy protocol + registry
 │   │
 │   ├── datasets/                  # Dataset plugins (where data comes from)
 │   │   ├── base.py                # DatasetPlugin protocol
@@ -62,25 +65,37 @@ ThinkingTrees/
 │   │   ├── builder.py             # TreeBuilder (bottom-up construction)
 │   │   ├── auditor.py             # Probabilistic verification
 │   │   ├── bootstrap_loop.py      # Multi-iteration training loop
-│   │   ├── scoring.py             # OracleScore, ScoringOracle
+│   │   ├── scoring.py             # OracleScore, ScoringOracle, create_oracle_scorer
 │   │   ├── initialization.py      # Top-down demo seeding
 │   │   └── training_framework/
 │   │       ├── config.py          # Training configuration
 │   │       ├── preference.py      # Preference learning
+│   │       ├── preference_types.py # PreferenceDeriver protocol + registry
 │   │       ├── genrm_preference.py # GenRM integration
+│   │       ├── metrics.py         # MetricBuilder + metric factories
+│   │       ├── labeling.py        # LabelingStrategy protocol + registry
 │   │       ├── optimizers/        # DSPy optimizer registry
+│   │       ├── judges/            # Pairwise comparison judges
+│   │       │   ├── base.py        # BaseJudge protocol, JudgeResult
+│   │       │   ├── dspy.py        # DSPyJudge (optimizable)
+│   │       │   ├── genrm.py       # GenRMJudgeWrapper
+│   │       │   └── oracle.py      # OracleJudge
 │   │       └── tasks/             # Pluggable task system
-│   │           ├── base.py        # TaskPlugin protocol
+│   │           ├── base.py        # AbstractTask, ScaleDefinition
 │   │           ├── registry.py    # Task discovery
+│   │           ├── scoring.py     # Generic ScoringTask
 │   │           └── document_analysis.py # Content preservation (0 to 1)
 │   │
 │   ├── pipelines/                 # Task/dataset-agnostic pipelines
 │   │   └── batched.py             # Batched inference pipeline
 │   │
-│   ├── manifesto/                 # Manifesto-specific components
-│   │   ├── data_loader.py         # ManifestoDataset
-│   │   ├── signatures.py          # RILEScorer, RILEComparator
-│   │   └── evaluation.py          # Domain metrics
+│   ├── tasks/                     # Domain-specific building blocks
+│   │   └── manifesto/             # RILE scoring example
+│   │       ├── constants.py       # RILE scale bounds
+│   │       ├── rubrics.py         # RILE preservation rubric
+│   │       ├── data_loader.py     # ManifestoDataset
+│   │       ├── dspy_signatures.py # RILEScorer, RILEComparator
+│   │       └── summarizer.py      # RILE-specific summarizers
 │   │
 │   └── training/
 │       └── run_pipeline.py        # Main training entry point
@@ -90,7 +105,7 @@ ThinkingTrees/
 │   ├── run_training_pipeline.sh   # Training wrapper
 │   └── stop_small_servers.sh      # Server shutdown
 │
-└── experiments/manifesto_rile/    # Experiment scripts
+└── experiments/                   # Experiment scripts
 ```
 
 ## Core Concepts
@@ -110,23 +125,55 @@ class Node:
     audit_result: AuditResult        # Verification status
 ```
 
-### Task Plugins
-Tasks define what we do with documents (summarization, scoring, extraction):
+### Building Blocks Pattern
+Tasks are composed from generic building blocks, not hardcoded:
 
 ```python
-from src.tasks import get_task
+from src.ops_engine.training_framework.tasks import ScoringTask, ScaleDefinition
+from src.core import ScaleScorer, GenericSummarizer
 
-# RILE score prediction
-task = get_task("manifesto_rile")  # Scale: -100 to +100
+# Define your scale
+MY_SCALE = ScaleDefinition(
+    name="sentiment",
+    min_value=-1.0,
+    max_value=1.0,
+    description="Sentiment score",
+)
 
-# Generic content preservation
-task = get_task("document_analysis")   # Scale: 0 to 1
-
-# Use task-specific components
-rubric = task.create_rubric()
-predictor = task.create_predictor()
-metric = task.create_metric()
+# Compose a task from building blocks
+task = ScoringTask(
+    name="sentiment",
+    scale=MY_SCALE,
+    rubric="Preserve sentiment indicators...",
+    predictor_factory=lambda: ScaleScorer(MySentimentSignature),
+)
 ```
+
+Example using RILE building blocks from `src/tasks/manifesto/`:
+
+```python
+from src.ops_engine.training_framework.tasks import ScoringTask
+from src.tasks.manifesto import (
+    RILE_SCALE,                  # ScaleDefinition(-100, +100)
+    RILE_PRESERVATION_RUBRIC,   # Domain rubric
+    ManifestoDataLoader,        # Data loading
+    RILEScorer,                 # Domain scorer
+)
+
+rile_task = ScoringTask(
+    name="rile",
+    scale=RILE_SCALE,
+    rubric=RILE_PRESERVATION_RUBRIC,
+    data_loader_factory=lambda: ManifestoDataLoader(),
+    predictor_factory=lambda: RILEScorer(),
+)
+```
+
+Available building blocks in `src/core/`:
+- `ScaleScorer` - Generic DSPy scorer for any bounded scale
+- `PairwiseScorer` - Generic pairwise comparison scorer
+- `GenericSummarizer` - Configurable summarization module
+- `GenericMerger` - Configurable merge module
 
 ### Normalization and Metrics
 Internal optimization uses normalized 0-1 units even when tasks have a real-world scale:

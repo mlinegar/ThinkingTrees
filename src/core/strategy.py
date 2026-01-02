@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     from src.ops_engine.training_framework.genrm_dspy import GenRMComparisonModule
     from src.ops_engine.training_framework.preference import PreferencePair
 
-from src.tasks.prompting import default_merge_prompt, default_summarize_prompt
+from src.core.prompting import default_merge_prompt, default_summarize_prompt
 logger = logging.getLogger(__name__)
 
 # Context for routing tournament preferences (e.g., batch doc IDs).
@@ -789,9 +789,85 @@ class TournamentStrategy:
 
 
 # =============================================================================
-# Factory Functions
+# Strategy Registry
 # =============================================================================
-# NOTE: Factory functions (dspy_strategy, batched_strategy, tournament_strategy)
-# were removed as they were trivial constructor wrappers with no additional logic.
-# Use the class constructors directly: DSPyStrategy(), BatchedStrategy(), TournamentStrategy()
+
+_STRATEGY_REGISTRY: Dict[str, type] = {}
+
+
+def register_strategy(name: str):
+    """
+    Decorator to register a strategy class.
+
+    Args:
+        name: Name to register the strategy under
+
+    Example:
+        @register_strategy("custom")
+        class CustomStrategy:
+            ...
+    """
+    def decorator(cls):
+        _STRATEGY_REGISTRY[name.lower()] = cls
+        return cls
+    return decorator
+
+
+def get_strategy(name: str, **kwargs) -> SummarizationStrategy:
+    """
+    Get a strategy by name from the registry.
+
+    Args:
+        name: Strategy name ("batched", "dspy", "callable", "tournament")
+        **kwargs: Arguments passed to strategy constructor
+
+    Returns:
+        Configured strategy instance
+
+    Raises:
+        ValueError: If strategy name is not registered
+
+    Example:
+        strategy = get_strategy("batched", client=my_client)
+        strategy = get_strategy("tournament", base=base_strategy, judge=my_judge)
+    """
+    name_lower = name.lower()
+    if name_lower not in _STRATEGY_REGISTRY:
+        available = list(_STRATEGY_REGISTRY.keys())
+        raise ValueError(f"Unknown strategy: '{name}'. Available: {available}")
+
+    return _STRATEGY_REGISTRY[name_lower](**kwargs)
+
+
+def list_strategies() -> List[str]:
+    """Return list of registered strategy names."""
+    return list(_STRATEGY_REGISTRY.keys())
+
+
+# Register built-in strategies
+register_strategy("batched")(BatchedStrategy)
+register_strategy("dspy")(DSPyStrategy)
+register_strategy("callable")(CallableStrategy)
+register_strategy("tournament")(TournamentStrategy)
+
+
 # =============================================================================
+# Public API
+# =============================================================================
+
+__all__ = [
+    # Protocol
+    "SummarizationStrategy",
+    # Registry
+    "get_strategy",
+    "list_strategies",
+    "register_strategy",
+    # Implementations
+    "BatchedStrategy",
+    "DSPyStrategy",
+    "CallableStrategy",
+    "TournamentStrategy",
+    "TournamentConfig",
+    # Context
+    "tournament_doc_id",
+]

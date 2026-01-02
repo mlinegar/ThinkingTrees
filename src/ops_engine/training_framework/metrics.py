@@ -38,7 +38,6 @@ from src.ops_engine.scoring import (
     normalize_error_to_score,
     BoundedScale,
     PERCENT_SCALE,
-    Oracle,
     OraclePrediction,
 )
 
@@ -72,6 +71,49 @@ def _extract_text_from_pred(pred, *attr_names: str, default: str = "") -> str:
     return str(pred) if pred else default
 
 
+def _resolve_single_text_predictor(predictor: Any) -> Callable[[str], Any]:
+    """Normalize predictor interfaces into a callable (text) -> prediction."""
+    if hasattr(predictor, "predict_score"):
+        return predictor.predict_score
+    if hasattr(predictor, "predict"):
+        return predictor.predict
+    if callable(predictor):
+        return predictor
+    raise ValueError("predictor must be callable or implement predict_score/predict")
+
+
+def _coerce_prediction_result(result: Any) -> Tuple[float, float, str]:
+    """Coerce prediction results into (value, confidence, reasoning)."""
+    if isinstance(result, OraclePrediction):
+        return float(result.value), float(result.confidence), str(result.reasoning)
+    if isinstance(result, tuple):
+        value = result[0] if len(result) > 0 else 0.0
+        confidence = result[1] if len(result) > 1 else 1.0
+        reasoning = result[2] if len(result) > 2 else ""
+        return float(value), float(confidence), str(reasoning)
+    if isinstance(result, dict):
+        if "value" in result:
+            value = result.get("value", 0.0)
+        else:
+            value = result.get("score", result.get("prediction", 0.0))
+        confidence = result.get("confidence", 1.0)
+        reasoning = result.get("reasoning", "")
+        return float(value), float(confidence), str(reasoning)
+    if hasattr(result, "value"):
+        return (
+            float(getattr(result, "value")),
+            float(getattr(result, "confidence", 1.0)),
+            str(getattr(result, "reasoning", "")),
+        )
+    if hasattr(result, "score"):
+        return (
+            float(getattr(result, "score")),
+            float(getattr(result, "confidence", 1.0)),
+            str(getattr(result, "reasoning", "")),
+        )
+    return float(result), 1.0, ""
+
+
 # =============================================================================
 # Generic Metric Factory (Scale-Based)
 # =============================================================================
@@ -88,9 +130,6 @@ def metric(
 
     Score computation (euclidean distance normalized by scale range):
         score = 1 - abs(predicted - ground_truth) / scale.range
-
-    For RILE (-100 to 100, range=200):
-        score = 1 - abs(pred - gt) / 200
 
     Examples:
         - pred=50, gt=50   → score = 1.0 (perfect match)
@@ -111,12 +150,8 @@ def metric(
         Use create_combined_metric() to combine multiple metrics with weights.
 
     Example:
-        # RILE political positioning metric
-        rile_scale = BoundedScale(-100.0, 100.0)
-        metric = create_metric(
-            oracle_fn=rile_oracle.predict,
-            scale=rile_scale,
-        )
+        scale = BoundedScale(-1.0, 1.0)
+        metric = create_metric(oracle_fn=my_oracle.predict, scale=scale)
     """
     def metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
         # Get ground truth
@@ -411,11 +446,11 @@ def llm_judge(judge_lm=None) -> Callable:
 
     # Define the judge signature
     class MetricJudge(dspy.Signature):
-        """Evaluate the quality of a political classification prediction."""
+        """Evaluate the quality of a classification prediction."""
 
-        original_text: str = dspy.InputField(desc="The original manifesto text")
+        original_text: str = dspy.InputField(desc="The original text")
         summary: str = dspy.InputField(desc="The summary being classified")
-        predicted_label: str = dspy.InputField(desc="The predicted RILE label")
+        predicted_label: str = dspy.InputField(desc="The predicted label")
         predicted_reasoning: str = dspy.InputField(desc="The model's reasoning for the prediction")
         true_label: str = dspy.InputField(desc="The ground truth label")
 
@@ -501,9 +536,11 @@ def summarization(
     oracle_classifier,
     human_weight: float = 0.3,
     oracle_weight: float = 0.7,
-    threshold: float = 10.0,
+    threshold: Optional[float] = None,
     min_summary_length: int = 50,
-    max_error: float = 100.0,
+    max_error: Optional[float] = None,
+    scale: Optional["BoundedScale"] = None,
+    label_name: str = "score",
 ) -> Callable:
     """
     Create a metric for evaluating summary quality against score preservation.
@@ -519,43 +556,42 @@ def summarization(
     - Quality checks: Summary length, compression, clarity
 
     Args:
-        oracle_classifier: Trained classifier with predict_rile(text) method
-            that returns (score, confidence, reasoning)
+        oracle_classifier: Score predictor with predict_score(text), predict(text),
+            or any callable returning a numeric score
         human_weight: Weight for human feedback score (0.0-1.0)
         oracle_weight: Weight for oracle-based score (should sum to 1.0 with human_weight)
-        threshold: Maximum acceptable score drift
+        threshold: Maximum acceptable score drift (defaults to 5% of max_error)
         min_summary_length: Minimum acceptable summary length
-        max_error: Scale for error normalization (default 100.0).
-            Use task.scale.range for task-specific scales (e.g., 200.0 for RILE).
+        max_error: Scale range for error normalization. If None, uses scale.range
+            when provided, otherwise defaults to 1.0.
+        scale: Optional BoundedScale for deriving max_error
+        label_name: Label used in feedback messages (e.g., "score")
 
     Returns:
         Metric function compatible with DSPy optimizers (including GEPA)
 
     Example:
-        # Generic usage with 100-point scale
-        metric = create_summarization_metric(
-            oracle_classifier=oracle,
-            max_error=100.0,
-        )
-
-        # Task-specific usage (e.g., RILE with 200-point range)
-        from src.tasks.manifesto import RILE_SCALE
-        metric = create_summarization_metric(
-            oracle_classifier=oracle,
-            max_error=RILE_SCALE.range,  # 200.0 for RILE
-        )
+        scale = BoundedScale(-1.0, 1.0)
+        metric = summarization(oracle_classifier=oracle, scale=scale)
     """
+
+    if max_error is None:
+        max_error = scale.range if scale is not None else 1.0
+    if threshold is None:
+        threshold = max_error * 0.05
+
+    predict_fn = _resolve_single_text_predictor(oracle_classifier)
 
     def metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
         """
-        Evaluate summary quality for RILE preservation.
+        Evaluate summary quality for score preservation.
 
         Compatible with GEPA's 5-argument signature.
 
         Args:
             gold: Training example with:
                 - original_text: The original chunk/text being summarized
-                - reference_score: The true RILE score for the full document
+                - reference_score: The true score for the full document
                 - rubric: The preservation rubric
                 - human_score: Optional human feedback score (0.0-1.0)
             pred: Prediction with:
@@ -582,24 +618,26 @@ def summarization(
         feedback_parts = []
         scores = {}
 
-        # 1. Oracle score: Does summary preserve RILE positioning?
+        # 1. Oracle score: Does summary preserve the target score?
         try:
-            oracle_pred_rile, confidence, _ = oracle_classifier.predict_rile(summary)
-            rile_diff = abs(oracle_pred_rile - reference_score)
+            predicted_value, confidence, _ = _coerce_prediction_result(
+                predict_fn(summary)
+            )
+            score_diff = abs(predicted_value - reference_score)
 
             # Normalize to 0-1: perfect preservation = 1.0, max_error points off = 0.0
-            oracle_score = normalize_error_to_score(rile_diff, max_error=max_error)
+            oracle_score = normalize_error_to_score(score_diff, max_error=max_error)
             scores['oracle'] = oracle_score
 
-            if rile_diff > threshold:
+            if score_diff > threshold:
                 feedback_parts.append(
-                    f"RILE drift detected: oracle predicted {oracle_pred_rile:.1f}, "
-                    f"expected ~{reference_score:.1f} (diff={rile_diff:.1f}). "
-                    f"Preserve more politically relevant content."
+                    f"{label_name} drift detected: oracle predicted {predicted_value:.3f}, "
+                    f"expected ~{reference_score:.3f} (diff={score_diff:.3f}). "
+                    "Preserve more task-relevant content."
                 )
             if confidence < 0.5:
                 feedback_parts.append(
-                    "Oracle uncertain about political positioning - "
+                    "Oracle uncertain about score prediction - "
                     "summary may be too vague or miss key indicators."
                 )
         except Exception as e:
@@ -657,7 +695,7 @@ def summarization(
 
         # Generate feedback
         if not feedback_parts:
-            feedback = "Good RILE preservation and summary quality."
+            feedback = "Good score preservation and summary quality."
         else:
             feedback = ' '.join(feedback_parts)
 
@@ -684,7 +722,7 @@ def create_merge_metric(
     This is the preferred API - it requires an explicit scale parameter.
 
     Args:
-        oracle_classifier: Score predictor with predict_score() or predict_rile() method
+        oracle_classifier: Score predictor with predict_score(), predict(), or callable
         scale: BoundedScale defining the value range for normalization
         threshold: Maximum acceptable score drift
 
@@ -692,15 +730,11 @@ def create_merge_metric(
         Metric function for merge evaluation
 
     Example:
-        from src.tasks.manifesto import RILE_SCALE
-
-        metric = create_merge_metric(
-            oracle_classifier=oracle,
-            scale=RILE_SCALE,
-            threshold=10.0,
-        )
+        scale = BoundedScale(-1.0, 1.0)
+        metric = create_merge_metric(oracle_classifier=oracle, scale=scale, threshold=0.1)
     """
     max_error = scale.range if hasattr(scale, 'range') else (scale.max_value - scale.min_value)
+    predict_fn = _resolve_single_text_predictor(oracle_classifier)
 
     def metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
         """Evaluate merge quality for score preservation."""
@@ -716,14 +750,7 @@ def create_merge_metric(
 
         # Check merged preserves score
         try:
-            if hasattr(oracle_classifier, 'predict_score'):
-                merged_score, confidence, _ = oracle_classifier.predict_score(merged)
-            elif hasattr(oracle_classifier, 'predict_rile'):
-                merged_score, confidence, _ = oracle_classifier.predict_rile(merged)
-            else:
-                merged_score = float(oracle_classifier(merged))
-                confidence = 1.0
-
+            merged_score, _, _ = _coerce_prediction_result(predict_fn(merged))
             score_diff = abs(merged_score - ground_truth)
             oracle_score = normalize_error_to_score(score_diff, max_error=max_error)
 
@@ -838,7 +865,6 @@ def create_oracle_metric(
                    Signature: oracle_fn(text) -> float OR
                    Signature: oracle_fn(text) -> Tuple[float, float, str]
         scale: BoundedScale defining the value range for normalization.
-               Example: BoundedScale(-100.0, 100.0) for RILE scores
         input_field: Field name to extract from prediction for oracle input
         gold_field: Field name for ground truth score
         with_feedback: Return dict with feedback for GEPA compatibility
@@ -847,14 +873,8 @@ def create_oracle_metric(
         DSPy-compatible metric function (supports both 3-arg and 5-arg signatures)
 
     Example:
-        from src.tasks.manifesto import RILE_SCALE
-
-        metric = create_oracle_metric(
-            oracle_fn=rile_oracle.predict,
-            scale=RILE_SCALE,
-            input_field="summary",
-            gold_field="reference_score",
-        )
+        scale = BoundedScale(-1.0, 1.0)
+        metric = create_oracle_metric(oracle_fn=my_oracle.predict, scale=scale)
     """
     def metric_fn(gold, pred, trace=None, pred_name=None, pred_trace=None):
         # Get ground truth
@@ -963,13 +983,7 @@ class OraclePredictionCache:
 
 def _resolve_oracle_fn(oracle_classifier: Callable) -> Callable:
     """Normalize oracle interfaces into a callable (text) -> score/tuple."""
-    if hasattr(oracle_classifier, "predict_score"):
-        return oracle_classifier.predict_score
-    if hasattr(oracle_classifier, "predict_rile"):
-        return oracle_classifier.predict_rile
-    if callable(oracle_classifier):
-        return oracle_classifier
-    raise ValueError("oracle_classifier must be callable or implement predict_score/predict_rile")
+    return _resolve_single_text_predictor(oracle_classifier)
 
 
 def create_cached_oracle_metric(
@@ -1181,8 +1195,7 @@ def oracle_score_prediction(
     errors to normalized 0-1 scores.
 
     Args:
-        oracle_fn: Oracle with `predict_score(text)` returning (score, confidence, reasoning).
-                   Also supports legacy `predict_rile()` interface for backwards compatibility.
+        oracle_fn: Oracle with predict_score(text), predict(text), or any callable returning a score.
         scale: ScaleDefinition defining the value range for normalization.
                Uses `scale.values_to_score(predicted, ground_truth)` for scoring.
         ground_truth_field: Field name for ground truth on gold example
@@ -1193,7 +1206,7 @@ def oracle_score_prediction(
         DSPy-compatible metric function (5-arg signature)
 
     Example:
-        from src.ops_engine.training_framework.domains.base import ScaleDefinition
+        from src.ops_engine.training_framework.tasks.base import ScaleDefinition
 
         # Any bounded scale works
         my_scale = ScaleDefinition("sentiment", -1.0, 1.0)
@@ -1203,7 +1216,7 @@ def oracle_score_prediction(
         )
     """
     # Lazy import to avoid circular dependency
-    from src.ops_engine.training_framework.domains.base import ScaleDefinition
+    from src.ops_engine.training_framework.tasks.base import ScaleDefinition
 
     def metric_fn(gold, pred, trace=None, pred_name=None, pred_trace=None):
         # Get ground truth
@@ -1227,26 +1240,10 @@ def oracle_score_prediction(
 
         # Call oracle - support multiple interfaces
         try:
-            # Try new general interface first
-            if hasattr(oracle_fn, 'predict_score'):
-                result = oracle_fn.predict_score(summary)
-            # Fall back to legacy RILE interface
-            elif hasattr(oracle_fn, 'predict_rile'):
-                result = oracle_fn.predict_rile(summary)
-            # Direct callable
-            else:
-                result = oracle_fn(summary)
-
-            # Handle return types
-            if isinstance(result, tuple):
-                predicted_value = result[0]
-                confidence = result[1] if len(result) > 1 else 1.0
-                reasoning = result[2] if len(result) > 2 else ""
-            else:
-                predicted_value = float(result)
-                confidence = 1.0
-                reasoning = ""
-
+            predict_fn = _resolve_single_text_predictor(oracle_fn)
+            predicted_value, confidence, reasoning = _coerce_prediction_result(
+                predict_fn(summary)
+            )
         except Exception as e:
             if with_feedback:
                 return {'score': 0.0, 'feedback': f"Oracle error: {str(e)}"}
@@ -1301,20 +1298,9 @@ def pairwise_consistency_metric(
             return 0.0
 
         try:
-            # Get oracle scores for both summaries
-            if hasattr(oracle_fn, 'predict_score'):
-                result_a = oracle_fn.predict_score(summary_a)
-                result_b = oracle_fn.predict_score(summary_b)
-            elif hasattr(oracle_fn, 'predict_rile'):
-                result_a = oracle_fn.predict_rile(summary_a)
-                result_b = oracle_fn.predict_rile(summary_b)
-            else:
-                result_a = oracle_fn(summary_a)
-                result_b = oracle_fn(summary_b)
-
-            # Extract scores
-            score_a = result_a[0] if isinstance(result_a, tuple) else float(result_a)
-            score_b = result_b[0] if isinstance(result_b, tuple) else float(result_b)
+            predict_fn = _resolve_single_text_predictor(oracle_fn)
+            score_a, _, _ = _coerce_prediction_result(predict_fn(summary_a))
+            score_b, _, _ = _coerce_prediction_result(predict_fn(summary_b))
 
             # Determine oracle's preference
             oracle_preference = 1 if score_a > score_b else (-1 if score_b > score_a else 0)
@@ -1349,9 +1335,242 @@ def pairwise_consistency_metric(
 # =============================================================================
 # Domain-Specific Metrics
 # =============================================================================
-# RILE-specific metrics have been moved to src/manifesto/metrics.py
-# Import them directly from there:
-#     from src.manifesto.metrics import oracle_rile_prediction
+# Task-specific metrics live alongside their task modules.
+# Import them directly from the task package (e.g., src.tasks.manifesto.metrics).
+
+# =============================================================================
+# MetricBuilder (Fluent API)
+# =============================================================================
+
+class MetricBuilder:
+    """
+    Fluent builder for composing DSPy metrics.
+
+    Provides a clean, chainable interface for creating metrics with
+    optional caching, feedback, thresholds, and multi-metric composition.
+
+    Example:
+        # Simple oracle metric
+        metric = (MetricBuilder()
+            .with_oracle(my_oracle.predict)
+            .with_scale(RILE_SCALE)
+            .build())
+
+        # With caching and feedback for GEPA
+        metric = (MetricBuilder()
+            .with_oracle(oracle_fn)
+            .with_scale(scale)
+            .with_caching(max_entries=5000)
+            .with_feedback()
+            .build())
+
+        # Composed metrics
+        metric = (MetricBuilder()
+            .add_component("oracle", oracle_metric, weight=0.7)
+            .add_component("quality", quality_metric, weight=0.3)
+            .build())
+
+    Configuration via constructor:
+        builder = MetricBuilder(
+            ground_truth_field="reference_score",
+            summary_field="summary",
+        )
+    """
+
+    def __init__(
+        self,
+        ground_truth_field: str = "reference_score",
+        summary_field: str = "summary",
+    ):
+        """
+        Initialize the metric builder.
+
+        Args:
+            ground_truth_field: Default field name for ground truth
+            summary_field: Default field name for summary text
+        """
+        self._ground_truth_field = ground_truth_field
+        self._summary_field = summary_field
+        self._oracle_fn: Optional[Callable] = None
+        self._scale: Optional["BoundedScale"] = None
+        self._cache_size: Optional[int] = None
+        self._with_feedback: bool = False
+        self._thresholds: Dict[str, float] = {}
+        self._components: List[Tuple[str, Callable, float]] = []
+        self._cache: Optional[OraclePredictionCache] = None
+
+    def with_oracle(self, oracle_fn: Callable) -> "MetricBuilder":
+        """
+        Set the oracle function for scoring.
+
+        Args:
+            oracle_fn: Function (text) -> float or (text) -> (float, float, str)
+
+        Returns:
+            Self for chaining
+        """
+        self._oracle_fn = oracle_fn
+        return self
+
+    def with_scale(self, scale: "BoundedScale") -> "MetricBuilder":
+        """
+        Set the scale for normalization.
+
+        Args:
+            scale: BoundedScale or ScaleDefinition defining value range
+
+        Returns:
+            Self for chaining
+        """
+        self._scale = scale
+        return self
+
+    def with_caching(self, max_entries: int = 10000) -> "MetricBuilder":
+        """
+        Enable oracle prediction caching.
+
+        Args:
+            max_entries: Maximum cache size (0 to disable)
+
+        Returns:
+            Self for chaining
+        """
+        self._cache_size = max_entries
+        return self
+
+    def with_feedback(self) -> "MetricBuilder":
+        """
+        Return dict with feedback for GEPA compatibility.
+
+        When enabled, metric returns {'score': float, 'feedback': str}
+        instead of just float.
+
+        Returns:
+            Self for chaining
+        """
+        self._with_feedback = True
+        return self
+
+    def with_thresholds(
+        self,
+        good: float = 0.05,
+        acceptable: float = 0.10,
+        bad: float = 0.20,
+    ) -> "MetricBuilder":
+        """
+        Set error thresholds for feedback messages.
+
+        Args:
+            good: Normalized error threshold for "good" (default 5%)
+            acceptable: Normalized error threshold for "acceptable" (default 10%)
+            bad: Normalized error threshold for "bad" (default 20%)
+
+        Returns:
+            Self for chaining
+        """
+        self._thresholds = {
+            "good": good,
+            "acceptable": acceptable,
+            "bad": bad,
+        }
+        return self
+
+    def add_component(
+        self,
+        name: str,
+        metric_fn: Callable,
+        weight: float = 1.0,
+    ) -> "MetricBuilder":
+        """
+        Add a metric component for composition.
+
+        Args:
+            name: Component name (for feedback)
+            metric_fn: Metric function
+            weight: Weight for this component
+
+        Returns:
+            Self for chaining
+        """
+        self._components.append((name, metric_fn, weight))
+        return self
+
+    def build(self) -> Tuple[Callable, Optional[OraclePredictionCache]]:
+        """
+        Build the final metric function.
+
+        Returns:
+            Tuple of (metric_fn, cache) where cache is None if caching disabled
+
+        Raises:
+            ValueError: If required configuration is missing
+        """
+        # If components are set, build composed metric
+        if self._components:
+            return self._build_composed(), None
+
+        # Otherwise build oracle metric
+        return self._build_oracle()
+
+    def build_metric(self) -> Callable:
+        """
+        Build and return just the metric function.
+
+        Convenience method when you don't need the cache reference.
+
+        Returns:
+            Metric function
+        """
+        metric_fn, _ = self.build()
+        return metric_fn
+
+    def _build_oracle(self) -> Tuple[Callable, Optional[OraclePredictionCache]]:
+        """Build oracle-based metric."""
+        if self._oracle_fn is None:
+            raise ValueError("Oracle function required. Call with_oracle() first.")
+        if self._scale is None:
+            raise ValueError("Scale required. Call with_scale() first.")
+
+        # Use cached version if caching enabled
+        if self._cache_size is not None and self._cache_size > 0:
+            metric_fn, cache = create_cached_oracle_metric(
+                oracle_classifier=self._oracle_fn,
+                scale=self._scale,
+                ground_truth_field=self._ground_truth_field,
+                summary_field=self._summary_field,
+                cache_size=self._cache_size,
+                with_feedback=self._with_feedback,
+            )
+            self._cache = cache
+            return metric_fn, cache
+
+        # Non-cached version
+        metric_fn = create_oracle_metric(
+            oracle_fn=self._oracle_fn,
+            scale=self._scale,
+            input_field=self._summary_field,
+            gold_field=self._ground_truth_field,
+            with_feedback=self._with_feedback,
+        )
+        return metric_fn, None
+
+    def _build_composed(self) -> Callable:
+        """Build composed metric from components."""
+        if self._with_feedback:
+            return combine_feedback(
+                [(fn, w, name) for name, fn, w in self._components],
+                normalize_weights=True,
+            )
+        else:
+            return combine_metrics(
+                [(fn, w) for _, fn, w in self._components],
+                normalize_weights=True,
+            )
+
+    def get_cache(self) -> Optional[OraclePredictionCache]:
+        """Get the cache after building (if caching was enabled)."""
+        return self._cache
+
 
 # =============================================================================
 # Legacy Aliases

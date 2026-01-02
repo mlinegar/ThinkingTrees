@@ -3,7 +3,10 @@
 ## Overview
 Successfully migrated ThinkingTrees from domain-specific (RILE/manifesto) to truly generic task-based architecture.
 
-**Update (January 2025)**: All backward compatibility aliases have been removed. The codebase now uses only the new terminology (Task, not Domain).
+**Update (January 2025)**:
+- All backward compatibility aliases have been removed
+- `ManifestoTask` replaced with generic `ScoringTask` + building blocks
+- New generic components in `src/core/`: `ScaleScorer`, `GenericSummarizer`, etc.
 
 ## Completed Phases
 
@@ -116,33 +119,44 @@ src/tasks/manifesto/
 
 ## Architecture After Migration
 
-### Task Plugin System
+### Core Building Blocks
 ```
-src/ops_engine/training_framework/tasks/
-├── base.py          # TaskPlugin protocol, AbstractTask ABC
-├── registry.py      # TaskRegistry for plugin discovery
-├── manifesto.py     # ManifestoTask (moved from here to src/tasks/manifesto/)
-└── document_analysis.py  # DocumentAnalysisTask (generic default)
+src/core/
+├── scorers.py         # ScaleScorer, PairwiseScorer (NEW)
+├── summarization.py   # GenericSummarizer, GenericMerger (NEW)
+├── signatures.py      # Generic DSPy signatures
+└── ...
 ```
 
-### Task Implementations
+### Task System
+```
+src/ops_engine/training_framework/tasks/
+├── base.py              # TaskPlugin protocol, AbstractTask, ScaleDefinition
+├── registry.py          # TaskRegistry for plugin discovery
+├── scoring.py           # Generic ScoringTask (fully configurable)
+└── document_analysis.py # DocumentAnalysisTask (generic default)
+```
+
+### Domain-Specific Building Blocks
 ```
 src/tasks/
 ├── __init__.py      # Exports TaskPlugin, get_task, etc.
 ├── prompting.py     # Generic prompt builders
-└── manifesto/       # RILE-specific task implementation
-    ├── __init__.py
-    ├── task.py      # ManifestoTask implementation
-    ├── constants.py # RILE scale constants
+└── manifesto/       # RILE-specific BUILDING BLOCKS (not a Task class)
+    ├── __init__.py  # Exports: RILE_SCALE, RILE_RUBRIC, RILEScorer, etc.
+    ├── constants.py # RILE scale bounds
     ├── rubrics.py   # RILE preservation rubrics
-    └── pipeline.py  # Manifesto-specific pipeline
+    ├── dspy_signatures.py  # RILEScorer, RILEComparator
+    ├── summarizer.py       # RILE-specific summarizers
+    └── data_loader.py      # ManifestoDataset
 ```
 
 ### Current API
-Only new names are supported (backward compat aliases removed):
-- `TaskPlugin` (not DomainPlugin)
-- `get_task()` (not get_domain)
-- `ManifestoTask` (not ManifestoDomain)
+Building blocks approach:
+- `ScoringTask` - Configure via constructor (scale, rubric, factories)
+- `ScaleDefinition` - Define score bounds
+- `ScaleScorer` - Generic DSPy scorer
+- Domain modules export building blocks, not Task classes
 
 ---
 
@@ -156,16 +170,34 @@ from src.manifesto.rubrics import RILE_PRESERVATION_RUBRIC
 pipeline = BatchedManifestoPipeline(config, rubric=RILE_PRESERVATION_RUBRIC)
 ```
 
-### After (generic + task plugin):
+### After (building blocks approach):
 ```python
-from src.pipelines.batched import BatchedDocPipeline
-from src.tasks import get_task
+from src.ops_engine.training_framework.tasks import ScoringTask, ScaleDefinition
+from src.tasks.manifesto import (
+    RILE_SCALE,                  # ScaleDefinition(-100, +100)
+    RILE_PRESERVATION_RUBRIC,   # Domain rubric
+    ManifestoDataLoader,        # Data loading
+    RILEScorer,                 # Domain scorer
+)
 
-task = get_task("manifesto_rile")
-pipeline = BatchedDocPipeline(
-    config,
-    task=task,
-    rubric=task.create_rubric()
+# Compose building blocks into a task
+rile_task = ScoringTask(
+    name="rile",
+    scale=RILE_SCALE,
+    rubric=RILE_PRESERVATION_RUBRIC,
+    data_loader_factory=lambda: ManifestoDataLoader(),
+    predictor_factory=lambda: RILEScorer(),
+)
+
+# Or create a completely new task with generic components
+from src.core import ScaleScorer
+
+MY_SCALE = ScaleDefinition(name="sentiment", min_value=-1, max_value=1)
+my_task = ScoringTask(
+    name="sentiment",
+    scale=MY_SCALE,
+    rubric="Preserve sentiment indicators...",
+    predictor_factory=lambda: ScaleScorer(MySentimentSignature),
 )
 ```
 
@@ -217,16 +249,83 @@ pipeline = BatchedDocPipeline(
 Backward compatibility aliases were removed in January 2025:
 - `from src.ops_engine.training_framework.domains import get_domain` ✗ No longer works
 - `DomainPlugin`, `AbstractDomain`, etc. ✗ No longer exist
-- `ManifestoDomain` ✗ Use `ManifestoTask` instead
+- `ManifestoTask` ✗ Replaced with `ScoringTask` + building blocks
 
 ### What Was Removed
 - All `Domain*` → `Task*` aliases in task modules
+- `ManifestoTask` class (use `ScoringTask` with RILE building blocks)
 - `get_domain()`, `list_domains()` convenience functions
 - `BoundedScale` class (use `ScaleDefinition`)
 - `build_tree_batched()`, `build_tree_with_dspy()`, `build_tree_for_document()`
 - `PairwiseSummaryComparison` (use `PairwiseComparison`)
 - Legacy oracle interface adapters (`oracle_utils.py` deleted)
 - Old field name fallbacks in `from_dict()` methods (e.g., `manifesto_id` → `doc_id`)
+
+### New Building Blocks Added
+- `src/core/scorers.py` - `ScaleScorer`, `PairwiseScorer`
+- `src/core/summarization.py` - `GenericSummarizer`, `GenericMerger`, `SummarizationResult`
+- `src/ops_engine/scoring.py` - `create_oracle_scorer()` factory
+- `src/ops_engine/training_framework/tasks/scoring.py` - Generic `ScoringTask`
+
+---
+
+## Training Pipeline Building Blocks (January 2025)
+
+Extended the building blocks pattern to the training pipeline with registry-based components:
+
+### New Components
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| `JudgeRegistry` | `training_framework/judges/` | Pluggable pairwise comparison judges |
+| `MetricBuilder` | `training_framework/metrics.py` | Fluent API for composing DSPy metrics |
+| `LabelingStrategy` | `training_framework/labeling.py` | Error-to-label conversion strategies |
+| `StrategyRegistry` | `src/core/strategy.py` | Summarization strategy registry |
+| `PreferenceDeriver` | `training_framework/preference_types.py` | Preference derivation strategies |
+
+### Available Implementations
+
+**Judges** (`get_judge(name)`):
+- `dspy` - DSPy-based judge (optimizable via compile)
+- `genrm` - NVIDIA GenRM model wrapper
+- `oracle` - Oracle scoring function based
+
+**Labelers** (`get_labeler(name)`):
+- `threshold` - Fixed high/low thresholds (default)
+- `binary` - Simple above/below single threshold
+- `percentile` - Data-driven percentile thresholds
+- `adaptive` - Scale-aware adaptive thresholds
+
+**Strategies** (`get_strategy(name)`):
+- `batched` - AsyncBatchLLMClient based
+- `dspy` - DSPy module wrapper
+- `callable` - Sync callable wrapper
+- `tournament` - Tournament selection wrapper
+
+**Derivers** (`get_deriver(name)`):
+- `judge` - LLM judge (PairwiseJudge)
+- `genrm` - GenRM model
+- `oracle` - Oracle score comparison
+
+### Usage Examples
+
+```python
+# JudgeRegistry
+from src.ops_engine.training_framework.judges import get_judge, JudgeConfig
+judge = get_judge("genrm", config=JudgeConfig(base_url="http://localhost:8001/v1"))
+
+# MetricBuilder
+from src.ops_engine.training_framework.metrics import MetricBuilder
+metric = MetricBuilder().with_oracle(fn).with_scale(scale).with_caching().build_metric()
+
+# LabelingStrategy
+from src.ops_engine.training_framework.labeling import get_labeler
+labeler = get_labeler("threshold", threshold_high=0.3, threshold_low=0.1)
+
+# StrategyRegistry
+from src.core.strategy import get_strategy
+strategy = get_strategy("tournament", base=base_strategy, judge=my_judge)
+```
 
 ---
 
@@ -239,8 +338,10 @@ Backward compatibility aliases were removed in January 2025:
 
 ---
 
-## Migration Date
-December 29, 2024
+## Migration Dates
+- **December 29, 2024**: Initial domain → task migration
+- **January 2, 2025**: Building blocks refactor (ManifestoTask → ScoringTask + components)
+- **January 2, 2025**: Training pipeline building blocks (JudgeRegistry, MetricBuilder, LabelingStrategy, StrategyRegistry, PreferenceDeriver)
 
 ## Contributors
 - Refactoring assistance: Claude (Anthropic)
