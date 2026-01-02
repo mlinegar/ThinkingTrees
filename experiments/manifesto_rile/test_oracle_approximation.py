@@ -57,10 +57,10 @@ def create_oracle_training_examples(
     collector = OracleFuncTrainingCollector()
 
     for r in rile_results:
-        if r.get('predicted_rile') is None:
+        if r.get('estimated_score') is None:
             continue
 
-        error = abs(r['predicted_rile'] - r['ground_truth_rile'])
+        error = abs(r['estimated_score'] - r['reference_score'])
 
         # Create example
         if error > error_threshold_high:
@@ -72,8 +72,8 @@ def create_oracle_training_examples(
                 check_type="rile_prediction",
                 approx_discrepancy=error / 100.0,  # Normalize to 0-1
                 label=ExampleLabel.POSITIVE,
-                corrected_summary=f"Ground truth RILE: {r['ground_truth_rile']:.1f}",
-                human_reasoning=f"Predicted {r['predicted_rile']:.1f}, actual {r['ground_truth_rile']:.1f}, error {error:.1f}"
+                corrected_summary=f"Ground truth RILE: {r['reference_score']:.1f}",
+                human_reasoning=f"Predicted {r['estimated_score']:.1f}, actual {r['reference_score']:.1f}, error {error:.1f}"
             )
             collector.add_example(example)
 
@@ -86,7 +86,7 @@ def create_oracle_training_examples(
                 check_type="rile_prediction",
                 approx_discrepancy=error / 100.0,
                 label=ExampleLabel.NEGATIVE,
-                human_reasoning=f"Predicted {r['predicted_rile']:.1f}, actual {r['ground_truth_rile']:.1f}, error {error:.1f} - acceptable"
+                human_reasoning=f"Predicted {r['estimated_score']:.1f}, actual {r['reference_score']:.1f}, error {error:.1f} - acceptable"
             )
             collector.add_example(example)
 

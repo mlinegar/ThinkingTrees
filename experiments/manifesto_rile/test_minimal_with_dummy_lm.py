@@ -37,7 +37,7 @@ try:
     ManifestoGroundTruthTree = oracle_gt_module.ManifestoGroundTruthTree
     GroundTruthDataset = oracle_gt_module.GroundTruthDataset
 
-    from src.manifesto.batched_pipeline import chunk_text
+    from src.pipelines.batched import chunk_text
     print("✓ Imports successful")
 except Exception as e:
     print(f"✗ Import failed: {e}")

@@ -89,7 +89,7 @@ class PairwiseSummaryComparison(dspy.Signature):
     summary_b: str = dspy.InputField(
         desc="Second candidate summary"
     )
-    ground_truth_score: float = dspy.InputField(
+    reference_score: float = dspy.InputField(
         desc="Ground truth score for the original text"
     )
 

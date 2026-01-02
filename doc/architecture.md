@@ -62,20 +62,20 @@ class Tree:
     def leaves(self) -> List[Node]       # All leaf nodes
 ```
 
-### 2. Domain Plugin System (`src/ops_engine/training_framework/domains/`)
+### 2. Task Plugin System (`src/ops_engine/training_framework/tasks/`)
 
-The framework uses pluggable domains to support different evaluation tasks.
+The framework uses pluggable tasks to support different evaluation objectives.
 
-#### DomainPlugin Protocol (`base.py`)
+#### TaskPlugin Protocol (`base.py`)
 
 ```python
-class DomainPlugin(Protocol):
-    """Protocol that all domain implementations must follow."""
+class TaskPlugin(Protocol):
+    """Protocol that all task implementations must follow."""
 
     @property
     def name(self) -> str: ...
     @property
-    def config(self) -> DomainConfig: ...
+    def config(self) -> TaskConfig: ...
 
     def create_training_source(self, results, **kwargs) -> TrainingDataSource: ...
     def create_metric(self, **kwargs) -> Callable: ...
@@ -83,18 +83,18 @@ class DomainPlugin(Protocol):
     def create_predictor(self, **kwargs) -> dspy.Module: ...
 ```
 
-#### Available Domains
+#### Available Tasks
 
-| Domain | Scale | Output Type | Use Case |
-|--------|-------|-------------|----------|
+| Task | Scale | Output Type | Use Case |
+|------|-------|-------------|----------|
 | `manifesto_rile` | -100 to +100 | Continuous | Political manifesto RILE scoring |
-| `summarization` | 0 to 1 | Continuous | Generic summarization quality |
+| `document_analysis` | 0 to 1 | Continuous | Generic content preservation |
 
-#### Adding a New Domain
+#### Adding a New Task
 
 ```python
-from src.ops_engine.training_framework.domains import (
-    AbstractDomain, register_domain, ScaleDefinition
+from src.ops_engine.training_framework.tasks import (
+    AbstractTask, register_task, ScaleDefinition
 )
 
 MY_SCALE = ScaleDefinition(
@@ -104,8 +104,8 @@ MY_SCALE = ScaleDefinition(
     description="Sentiment score",
 )
 
-@register_domain("sentiment")
-class SentimentDomain(AbstractDomain):
+@register_task("sentiment")
+class SentimentTask(AbstractTask):
     def create_rubric(self, **kwargs) -> str:
         return "Preserve the emotional tone and sentiment..."
 
@@ -120,17 +120,17 @@ Constructs trees bottom-up through recursive summarization.
 
 ```python
 class TreeBuilder:
-    def __init__(self, summarizer: Summarizer, judge: GenRMJudge = None):
+    def __init__(self, strategy: SummarizationStrategy, config: BuildConfig = None):
         """
         Args:
-            summarizer: Function (content, rubric) -> summary
-            judge: Optional judge for tournament selection
+            strategy: SummarizationStrategy (batched, DSPy, or tournament-wrapped)
+            config: BuildConfig (chunking and merge options)
         """
 
-    def build_from_text(self, text: str, rubric: str) -> BuildResult:
+    async def build(self, text: str, rubric: str) -> BuildResult:
         """Build tree from raw text."""
 
-    def build_from_chunks(self, chunks: List[TextChunk], rubric: str) -> BuildResult:
+    async def build_from_chunks(self, chunks: List[TextChunk], rubric: str) -> BuildResult:
         """Build tree from pre-chunked text."""
 ```
 
@@ -146,6 +146,10 @@ BUILD_TREE(chunks, rubric):
            - level = level + 1
         c. nodes = parent nodes
     4. RETURN root node
+
+Note: Tournament selection is implemented via TournamentStrategy, which wraps a base strategy
+and performs candidate generation + pairwise elimination internally. TreeBuilder remains
+agnostic to tournament logic.
 ```
 
 #### Auditor (`auditor.py`)
@@ -204,16 +208,25 @@ class GenRMJudge:
         """Return which summary better preserves information."""
 ```
 
-### 5. Batch Processing (`src/core/batch_processor.py`)
+Tournament-of-tournaments optimization uses normalized error (0-1) for preference labels,
+while raw task scores are retained for reporting.
+
+### 5. Batch Processing (`src/core/batch_processor.py`, `src/core/batch_orchestrator.py`)
 
 Level-wise batch processing for efficient tree construction.
 
 ```python
-class LevelWiseBatchProcessor:
-    """Process all nodes at a level in batches."""
+class BatchTreeOrchestrator:
+    """Orchestrate tree building across multiple documents with level-wise batching."""
 
-    def process_level(self, nodes: List[Node], rubric: str) -> List[Node]:
-        """Summarize all nodes at current level."""
+    async def process_documents(
+        self,
+        documents: List[Any],
+        rubric: str,
+        get_text_fn: Callable,
+        get_id_fn: Callable,
+    ) -> List[BuildResult]:
+        """Process all documents with optimal batching, returning BuildResult objects."""
 ```
 
 **Telemetry:**
@@ -315,18 +328,7 @@ training:
 
 ## Extension Points
 
-- **Custom Domains**: Implement `DomainPlugin` protocol, register with `@register_domain`
+- **Custom Tasks**: Implement `TaskPlugin` protocol, register with `@register_task`
 - **Custom Optimizers**: Add to `optimizers/` registry
 - **Custom Chunkers**: Implement `chunk_for_ops()` interface
 - **Custom Oracles**: Implement `ScoringOracle` protocol
-
-## Deprecated Code
-
-The following modules are deprecated but maintained for backward compatibility:
-
-| Module | Replacement | Notes |
-|--------|-------------|-------|
-| `src/ops_engine/optimizer.py` | `training_framework/optimizers/` | Use registry-based system |
-| `src/ops_engine/training_framework/optimization.py` | `training_framework/optimizers/` | Legacy OracleOptimizer |
-
-Import warnings are emitted when these modules are used.

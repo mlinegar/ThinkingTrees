@@ -29,6 +29,7 @@ The core idea is to distill oracle-relevant judgments into pairwise preferences 
 5. Use the trained comparison module to generate DPO data for the summarizer.
 
 GenRM is the default judge for all comparisons. Numeric-oracle preference collection is available for ground-truth anchoring and sanity checks.
+When a task defines a scale, numeric-oracle errors are normalized to 0-1 for optimization; raw task scores are preserved for reporting.
 
 ---
 
@@ -43,8 +44,8 @@ Goal: a summary should preserve the oracle-relevant information of the original.
 Numeric oracle criterion:
 
 ```
-error_a = |oracle(summary_a) - oracle(original)|
-error_b = |oracle(summary_b) - oracle(original)|
+error_a = |oracle(summary_a) - oracle(original)| / scale.range
+error_b = |oracle(summary_b) - oracle(original)| / scale.range
 preferred = A if error_a < error_b - tie_margin
 preferred = B if error_b < error_a - tie_margin
 preferred = tie otherwise
@@ -59,8 +60,8 @@ Numeric oracle criterion:
 ```
 re_a = summarize(summary_a)
 re_b = summarize(summary_b)
-drift_a = |oracle(re_a) - oracle(summary_a)|
-drift_b = |oracle(re_b) - oracle(summary_b)|
+drift_a = |oracle(re_a) - oracle(summary_a)| / scale.range
+drift_b = |oracle(re_b) - oracle(summary_b)| / scale.range
 preferred = A if drift_a < drift_b - tie_margin
 preferred = B if drift_b < drift_a - tie_margin
 preferred = tie otherwise
@@ -81,8 +82,8 @@ left = summarize(first_half)
 right = summarize(second_half)
 merge_a = summarize(left + right)  # candidate A
 merge_b = summarize(left' + right') # candidate B
-error_a = |oracle(merge_a) - oracle(original)|
-error_b = |oracle(merge_b) - oracle(original)|
+error_a = |oracle(merge_a) - oracle(original)| / scale.range
+error_b = |oracle(merge_b) - oracle(original)| / scale.range
 preferred = A if error_a < error_b - tie_margin
 preferred = B if error_b < error_a - tie_margin
 preferred = tie otherwise
@@ -95,7 +96,7 @@ GenRM criterion:
 
 ### Tie policy
 
-- Numeric oracle: tie if `abs(error_a - error_b) < tie_margin` (default tie margin is 5.0 RILE points).
+- Numeric oracle: tie if `abs(error_a - error_b) < tie_margin` (default tie margin is 0.05 normalized; raw margin is `tie_margin * scale.range`).
 - GenRM: treat ranking score `3` as a tie on the 1-6 scale.
 
 ---
@@ -107,13 +108,13 @@ Preferences are stored as `PreferencePair` objects in `src/ops_engine/training_f
 Fields:
 - `pair_id`, `source_example_id`
 - `law_type` (`sufficiency`, `idempotence`, or `merge`)
-- `original_text`, `rubric`, `ground_truth_score`
+- `original_text`, `rubric`, `reference_score`
 - `summary_a`, `summary_b`
 - `preferred` (`A`, `B`, or `tie`)
 - `confidence` (0.0 to 1.0)
 - `reasoning` (debug)
 - `score_estimate_a`, `score_estimate_b` (judge or oracle scores)
-- `oracle_error_a`, `oracle_error_b` (numeric oracle only)
+- `oracle_error_a`, `oracle_error_b` (numeric oracle, normalized to 0-1 when scale is known)
 - `generation_config_a`, `generation_config_b`
 - `judge_model`, `timestamp`
 
@@ -126,7 +127,7 @@ Example:
   "law_type": "sufficiency",
   "original_text": " ... ",
   "rubric": "Preserve the political positioning ...",
-  "ground_truth_score": -35.0,
+  "reference_score": -35.0,
   "summary_a": " ... ",
   "summary_b": " ... ",
   "preferred": "A",
@@ -231,12 +232,12 @@ pairs = collector.collect_pairs_for_example(
     example_id="doc_1",
     original_text=doc_text,
     rubric=rubric,
-    ground_truth_score=ground_truth_score,
+    reference_score=reference_score,
     law_type="sufficiency",
 )
 ```
 
-Script entry point: `experiments/manifesto_rile/collect_preferences.py`
+The GenRM preference collection is now integrated into the unified training pipeline.
 
 ### Oracle-labeled preference collection (optional)
 
@@ -261,11 +262,7 @@ collector = OraclePreferenceCollector(
 )
 ```
 
-Script entry point: `experiments/manifesto_rile/collect_oracle_preferences.py`
-
-### Ground-truth tree preferences (optional)
-
-If you have oracle-labeled trees, `experiments/manifesto_rile/collect_preferences_with_ground_truth.py` can generate preferences from tree nodes using GenRM while preserving the tree context.
+The oracle preference collection is integrated into `src/training/collect_preferences.py`.
 
 ---
 
@@ -280,20 +277,11 @@ result = comparison_module(
     original_text=doc_text,
     summary_a=summary_a,
     summary_b=summary_b,
-    ground_truth_score=ground_truth_score,
+    reference_score=reference_score,
 )
 ```
 
-Training script: `experiments/manifesto_rile/train_ops_comparison.py`
-
-Example command:
-
-```bash
-python experiments/manifesto_rile/train_ops_comparison.py \
-  --preference-data data/preferences/oracle_preferences_YYYYMMDD_HHMMSS.json \
-  --law-type sufficiency \
-  --output-dir models/ops_comparison
-```
+Training is integrated into the unified training pipeline via `src/training/run_pipeline.py`.
 
 Notes:
 - Ties are excluded from DSPy training examples.
@@ -304,7 +292,7 @@ Notes:
 
 ## DPO data generation (sufficiency only)
 
-DPO data is currently generated only for sufficiency. This is enforced in `experiments/manifesto_rile/generate_dpo_data.py`.
+DPO data is currently generated only for sufficiency.
 
 Mechanics:
 - Generate candidate summaries.
@@ -312,13 +300,7 @@ Mechanics:
 - Drop ties.
 - Export in DPO format via `PreferenceDataset.to_dpo_format(law_type="sufficiency")`.
 
-Example command:
-
-```bash
-python experiments/manifesto_rile/generate_dpo_data.py \
-  --comparison-module models/ops_comparison/ops_comparison_YYYYMMDD_HHMMSS.json \
-  --output-dir data/dpo
-```
+DPO data generation is integrated into the unified training pipeline.
 
 ---
 
@@ -366,37 +348,30 @@ Start model servers:
 ./scripts/start_oracle_server.sh --model qwen3-nemotron-genrm-gguf --port 8001
 ```
 
-Collect GenRM preferences:
+Run the unified training pipeline:
 
 ```bash
-python experiments/manifesto_rile/collect_preferences.py \
-  --law-type sufficiency \
-  --output-dir data/preferences
+# Full training pipeline with all phases
+python -m src.training.run_pipeline \
+  --task manifesto_rile \
+  --phase all \
+  --samples 100 \
+  --output-dir outputs/training_run
+
+# Or use the shell script wrapper
+./scripts/run_training_pipeline.sh \
+  --task manifesto_rile \
+  --train-samples 100 \
+  --val-samples 30 \
+  --test-samples 30
 ```
 
-Optional: collect oracle-labeled preferences:
+Optimize the judge specifically:
 
 ```bash
-python experiments/manifesto_rile/collect_oracle_preferences.py \
-  --law-type sufficiency \
-  --output-dir data/preferences
-```
-
-Train comparison module:
-
-```bash
-python experiments/manifesto_rile/train_ops_comparison.py \
-  --preference-data data/preferences/preferences_YYYYMMDD_HHMMSS.json \
-  --law-type sufficiency \
-  --output-dir models/ops_comparison
-```
-
-Generate DPO data:
-
-```bash
-python experiments/manifesto_rile/generate_dpo_data.py \
-  --comparison-module models/ops_comparison/ops_comparison_YYYYMMDD_HHMMSS.json \
-  --output-dir data/dpo
+python experiments/manifesto_rile/optimize_judge.py \
+  --preference-data data/preferences/preferences.json \
+  --output-dir models/optimized_judge
 ```
 
 ---
@@ -432,13 +407,17 @@ Core preference infrastructure:
 - `src/ops_engine/training_framework/genrm_preference.py` - GenRM judging and preference collection
 - `src/ops_engine/training_framework/oracle_preference.py` - numeric-oracle preference collection
 - `src/ops_engine/training_framework/ops_comparison_module.py` - law-aware comparison module
+- `src/ops_engine/training_framework/preference_engine.py` - unified preference derivation
 
-Scripts:
-- `experiments/manifesto_rile/collect_preferences.py` - GenRM preference data
-- `experiments/manifesto_rile/collect_oracle_preferences.py` - numeric oracle preference data
-- `experiments/manifesto_rile/collect_preferences_with_ground_truth.py` - tree-based preference collection
-- `experiments/manifesto_rile/train_ops_comparison.py` - GEPA training
-- `experiments/manifesto_rile/generate_dpo_data.py` - DPO data generation
+Training pipeline:
+- `src/training/run_pipeline.py` - main training entry point
+- `src/training/collect_preferences.py` - preference collection
+- `src/training/judge_optimization.py` - judge training/optimization
+- `src/training/tournament_loop.py` - tournament-based training
+
+Experiment scripts:
+- `experiments/manifesto_rile/optimize_judge.py` - judge optimization script
+- `experiments/manifesto_rile/run_training_pipeline.py` - full pipeline script
 
 Configuration:
 - `config/settings.yaml` - model profiles and generation settings

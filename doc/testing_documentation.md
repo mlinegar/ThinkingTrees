@@ -232,9 +232,9 @@ Tests for the factory function that constructs trees from leaf nodes.
 ##### `TestTruncatingSummarizer`
 | Test | Description |
 |------|-------------|
-| `test_truncates_long_text` | Text exceeding limit is truncated |
-| `test_preserves_short_text` | Text under limit unchanged |
-| `test_configurable_limit` | Truncation limit is configurable |
+| `test_returns_full_text` | Returns full text (truncation disabled) |
+| `test_ignores_max_length` | Max length parameter is ignored |
+| `test_ignores_suffix` | Suffix parameter is ignored |
 
 ##### `TestConcatenatingSummarizer`
 | Test | Description |

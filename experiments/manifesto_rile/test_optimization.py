@@ -48,7 +48,7 @@ def setup_dspy(port: int):
 
 def load_results(results_dir: Path):
     """Load saved manifesto results."""
-    from src.manifesto.evaluation import load_results as load_manifesto_results
+    # Deprecated: evaluation moved to generic framework load_results as load_manifesto_results
 
     train_file = results_dir / "train_results.json"
     val_file = results_dir / "val_results.json"
@@ -61,7 +61,7 @@ def load_results(results_dir: Path):
 
 def create_training_examples(results, bin_size=10.0, error_high=20.0, error_low=10.0):
     """Create training examples from results."""
-    from src.manifesto.training_integration import create_rile_training_collector
+    # Deprecated: use task.create_training_source() instead create_rile_training_collector
 
     collector = create_rile_training_collector(
         results,
@@ -83,7 +83,7 @@ def create_training_examples(results, bin_size=10.0, error_high=20.0, error_low=
 
 def test_classifier_forward(trainset, port):
     """Test that classifier forward() works."""
-    from src.manifesto.training_integration import RILEOracleClassifier
+    # Deprecated: use task.create_training_source() instead RILEOracleClassifier
 
     logger.info("Testing classifier forward()...")
 
@@ -113,7 +113,7 @@ def test_classifier_forward(trainset, port):
 def test_metric(trainset):
     """Test that the metric function works."""
     from src.ops_engine.training_framework import create_classification_metric
-    from src.manifesto.training_integration import create_rile_label_space
+    # Deprecated: use task.create_training_source() instead create_rile_label_space
 
     logger.info("Testing metric function...")
 
@@ -153,7 +153,7 @@ def test_metric(trainset):
 
 def test_optimization(trainset, port):
     """Test DSPy optimization."""
-    from src.manifesto.training_integration import RILEOracleClassifier, create_rile_label_space
+    # Deprecated: use task.create_training_source() instead RILEOracleClassifier, create_rile_label_space
     from src.ops_engine.training_framework import OracleOptimizer, create_classification_metric, OptimizationConfig
 
     logger.info("Testing optimization...")

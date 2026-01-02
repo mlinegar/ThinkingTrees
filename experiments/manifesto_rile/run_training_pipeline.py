@@ -111,12 +111,11 @@ def compute_and_log_violation_rates(
             total_stats["documents_audited"] += 1
 
     # Compute violation rate estimates from prediction errors
-    # Support both new field names (estimated_score/reference_score) and legacy (predicted_rile/ground_truth_rile)
     valid_results = []
     for r in results:
         if r.error is None:
-            predicted = getattr(r, 'estimated_score', None) or getattr(r, 'predicted_rile', None)
-            ground_truth = getattr(r, 'reference_score', None) or getattr(r, 'ground_truth_rile', None)
+            predicted = getattr(r, 'estimated_score', None)
+            ground_truth = getattr(r, 'reference_score', None)
             if predicted is not None and ground_truth is not None:
                 valid_results.append((r, predicted, ground_truth))
 
@@ -335,7 +334,7 @@ def precache_oracle_predictions(
         max_workers: Number of parallel workers for caching
 
     Returns:
-        Dict mapping text -> (predicted_rile, confidence, reasoning)
+        Dict mapping text -> (estimated_score, confidence, reasoning)
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -730,8 +729,8 @@ def process_samples_batched(
         leaf_summarizer: Optional pre-initialized leaf summarizer
         merge_summarizer: Optional pre-initialized merge summarizer
     """
-    from src.manifesto.batched_pipeline import (
-        BatchedManifestoPipeline,
+    from src.pipelines.batched import (
+        BatchedDocPipeline,
         BatchedPipelineConfig,
     )
 
@@ -752,7 +751,7 @@ def process_samples_batched(
         run_baseline=False,  # Skip baseline for speed
     )
 
-    pipeline = BatchedManifestoPipeline(
+    pipeline = BatchedDocPipeline(
         config,
         leaf_summarizer=leaf_summarizer,
         merge_summarizer=merge_summarizer,
@@ -769,7 +768,7 @@ def process_samples_batched(
     results = pipeline.process_batch(samples, progress_callback=progress)
 
     elapsed = time.time() - start_time
-    valid = [r for r in results if r.error is None and r.predicted_rile is not None]
+    valid = [r for r in results if r.error is None and r.estimated_score is not None]
 
     logger.info(f"  Completed in {elapsed:.1f}s ({len(valid)}/{len(samples)} successful)")
 
@@ -780,18 +779,18 @@ def compute_metrics(results: List, name: str, show_worst: int = 5) -> Dict[str, 
     """Compute metrics for a set of results.
 
     Args:
-        results: List of result objects with predicted_rile and ground_truth_rile
+        results: List of result objects with estimated_score and reference_score
         name: Name for logging (e.g., "Train", "Val")
         show_worst: Number of worst predictions to display (0 to disable)
     """
-    valid = [r for r in results if r.error is None and r.predicted_rile is not None]
+    valid = [r for r in results if r.error is None and r.estimated_score is not None]
 
     if not valid:
         return {"mae": float("inf"), "within_10": 0, "within_20": 0, "n": 0}
 
     # Compute errors with result references for worst-case display
     results_with_errors = [
-        (r, abs(r.predicted_rile - r.ground_truth_rile))
+        (r, abs(r.estimated_score - r.reference_score))
         for r in valid
     ]
     errors = [e for _, e in results_with_errors]
@@ -821,8 +820,8 @@ def compute_metrics(results: List, name: str, show_worst: int = 5) -> Dict[str, 
             label = f"{party[:20]}"
             if country:
                 label = f"{country} {year}"
-            gt = r.ground_truth_rile
-            pred = r.predicted_rile
+            gt = r.reference_score
+            pred = r.estimated_score
             logger.info(f"    {label:20s}  GT={gt:+6.1f}  Pred={pred:+6.1f}  Err={err:5.1f}")
 
     return metrics
@@ -959,7 +958,7 @@ def evaluate_classifier_on_results(
             try:
                 rile, conf, _ = classifier.predict_rile(r.final_summary)
                 predictions.append(rile)
-                ground_truth.append(r.ground_truth_rile)
+                ground_truth.append(r.reference_score)
             except Exception as e:
                 logger.debug(f"Prediction error: {e}")
 
@@ -1292,7 +1291,7 @@ def main():
                     logger.info(f"  Only {short_in_train} short docs in train set, loading more from full dataset...")
                     # Get all samples from dataset for training pool
                     all_ids = dataset.get_all_ids()  # Use filtered_df, not unfiltered metadata_df
-                    all_samples = [dataset.get_sample(sid) for sid in all_ids[:500]]  # Cap at 500 for speed
+                    all_samples = [dataset.get_sample(sid) for sid in all_ids]
                     all_samples = [s for s in all_samples if s is not None]
                     # Filter to short docs with valid labels
                     short_samples = [
@@ -1524,7 +1523,7 @@ def main():
                 if short_in_train < n_init_demos:
                     logger.info(f"  Only {short_in_train} short docs in train set, loading more from full dataset...")
                     all_ids = iter_dataset.get_all_ids()  # Use filtered_df, not unfiltered metadata_df
-                    all_samples = [iter_dataset.get_sample(sid) for sid in all_ids[:500]]
+                    all_samples = [iter_dataset.get_sample(sid) for sid in all_ids]
                     all_samples = [s for s in all_samples if s is not None]
                     short_samples = [
                         s for s in all_samples
@@ -1695,7 +1694,7 @@ def run_iterative_optimization(
     import dspy
     import requests
     from src.manifesto.dspy_summarizer import LeafSummarizer, MergeSummarizer
-    from src.manifesto.batched_pipeline import BatchedManifestoPipeline, BatchedPipelineConfig
+    from src.pipelines.batched import BatchedDocPipeline, BatchedPipelineConfig
     from src.manifesto.training_integration import (
         RILEOracleClassifier,
         collect_summarization_training_data,
@@ -1888,7 +1887,7 @@ def run_iterative_optimization(
         # Step 1: Process documents with current summarizers
         logger.info(f"Step 1: Processing {len(train_samples)} documents...")
 
-        pipeline = BatchedManifestoPipeline(
+        pipeline = BatchedDocPipeline(
             config=pipeline_config,
             leaf_summarizer=leaf_summarizer,
             merge_summarizer=merge_summarizer,
@@ -1899,9 +1898,9 @@ def run_iterative_optimization(
         iter_stats["successful"] = sum(1 for r in results if r.error is None)
 
         # Compute pipeline MAE for this iteration
-        valid_results = [r for r in results if r.error is None and r.predicted_rile is not None]
+        valid_results = [r for r in results if r.error is None and r.estimated_score is not None]
         if valid_results:
-            errors = [abs(r.predicted_rile - r.ground_truth_rile) for r in valid_results]
+            errors = [abs(r.estimated_score - r.reference_score) for r in valid_results]
             iter_stats["pipeline_mae"] = sum(errors) / len(errors)
         else:
             iter_stats["pipeline_mae"] = float("inf")
@@ -1933,7 +1932,7 @@ def run_iterative_optimization(
             # Use generic scale-based metric (continuous error-based)
             # Compares predicted label to ground truth using BoundedScale
             def oracle_metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
-                ground_truth = getattr(gold, 'ground_truth_rile', None)
+                ground_truth = getattr(gold, 'reference_score', None)
                 if ground_truth is None:
                     ground_truth = float(getattr(gold, 'label', 0))
                 predicted = float(getattr(pred, 'label', 0))
@@ -2035,9 +2034,17 @@ def run_iterative_optimization(
                 summarization_metric, leaf_oracle_cache = create_cached_oracle_metric(
                     oracle_classifier=oracle_classifier,
                     scale=RILE_SCALE,
-                    ground_truth_field='ground_truth_rile',
+                    ground_truth_field='reference_score',
                     summary_field='summary',
                 )
+                if not getattr(args, 'no_precache', False) and leaf_oracle_cache is not None:
+                    precached = precache_oracle_predictions(
+                        oracle_classifier,
+                        dspy_trainset,
+                        field_name='summary',
+                        max_workers=args.num_threads,
+                    )
+                    leaf_oracle_cache.seed(precached)
 
                 try:
                     with opt_context if opt_lm else dspy.context():
@@ -2099,9 +2106,17 @@ def run_iterative_optimization(
                 merge_metric, merge_oracle_cache = create_cached_oracle_metric(
                     oracle_classifier=oracle_classifier,
                     scale=RILE_SCALE,
-                    ground_truth_field='ground_truth_rile',
+                    ground_truth_field='reference_score',
                     summary_field='merged_summary',
                 )
+                if not getattr(args, 'no_precache', False) and merge_oracle_cache is not None:
+                    precached = precache_oracle_predictions(
+                        oracle_classifier,
+                        dspy_trainset,
+                        field_name='merged_summary',
+                        max_workers=args.num_threads,
+                    )
+                    merge_oracle_cache.seed(precached)
 
                 try:
                     with opt_context if opt_lm else dspy.context():

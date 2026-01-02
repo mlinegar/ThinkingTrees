@@ -17,6 +17,21 @@ source venv/bin/activate
   --train-samples 100 \
   --optimizer bootstrap_random_search
 
+# Full training example (use GenRM for tournaments, prompt tuning on the same port)
+./scripts/run_training_pipeline.sh \
+  --output-dir outputs/train_$(date +%Y%m%d_%H%M) \
+  --train-samples 100 \
+  --val-samples 30 \
+  --test-samples 30 \
+  --enable-genrm \
+  --genrm-port 8001 \
+  --opt-model-port 8001 \
+  --optimizer bootstrap_random_search \
+  --optimizer-budget heavy \
+  --n-iterations 2
+
+# Init trees are filtered by prompt token budget (set with --max-init-prompt-tokens)
+
 # Run with generic summarization task (still on manifestos by default)
 ./scripts/run_training_pipeline.sh \
   --task summarization \
@@ -54,11 +69,10 @@ ThinkingTrees/
 │   │       ├── preference.py      # Preference learning
 │   │       ├── genrm_preference.py # GenRM integration
 │   │       ├── optimizers/        # DSPy optimizer registry
-│   │       └── domains/           # Pluggable domain system
-│   │           ├── base.py        # DomainPlugin protocol
-│   │           ├── registry.py    # Domain discovery
-│   │           ├── manifesto.py   # RILE scoring (-100 to +100)
-│   │           └── summarization.py # Generic quality (0 to 1)
+│   │       └── tasks/             # Pluggable task system
+│   │           ├── base.py        # TaskPlugin protocol
+│   │           ├── registry.py    # Task discovery
+│   │           └── document_analysis.py # Content preservation (0 to 1)
 │   │
 │   ├── pipelines/                 # Task/dataset-agnostic pipelines
 │   │   └── batched.py             # Batched inference pipeline
@@ -105,13 +119,26 @@ from src.tasks import get_task
 # RILE score prediction
 task = get_task("manifesto_rile")  # Scale: -100 to +100
 
-# Generic summarization quality
-task = get_task("summarization")   # Scale: 0 to 1
+# Generic content preservation
+task = get_task("document_analysis")   # Scale: 0 to 1
 
 # Use task-specific components
 rubric = task.create_rubric()
 predictor = task.create_predictor()
 metric = task.create_metric()
+```
+
+### Normalization and Metrics
+Internal optimization uses normalized 0-1 units even when tasks have a real-world scale:
+
+- DSPy metrics expect higher-is-better in [0, 1]; `OracleScore.score` follows this.
+- Tournament preference labels are derived from normalized errors (lower is better), not raw scores.
+- Raw task values (e.g., RILE -100 to +100) are preserved for reporting and stored alongside normalized errors.
+- Tie margins are expressed in normalized units; use the task scale range to convert raw margins.
+
+For tasks with a scale, normalization follows:
+```
+normalized_error = abs(predicted - ground_truth) / scale.range
 ```
 
 ### Dataset Plugins
@@ -129,17 +156,119 @@ samples = dataset.load_samples(limit=100)
 2. **Idempotence (C2)**: `oracle(summarize(S)) ≈ oracle(S)`
 3. **Merge Consistency (C3)**: `oracle(merge) ≈ aggregate(oracle(children))`
 
-## Key Pipeline Flags
+## CLI Reference (src/training/run_pipeline.py)
 
-| Flag | Options | Description |
+### Server Options
+
+| Flag | Default | Description |
 |------|---------|-------------|
-| `--task` | manifesto_rile, summarization | Task plugin (default: manifesto_rile) |
-| `--dataset` | manifesto, jsonl | Dataset plugin (default: manifesto) |
-| `--domain` | legacy | Legacy alias for `--task` |
-| `--optimizer` | bootstrap_random_search, gepa, mipro | DSPy optimizer |
-| `--optimizer-budget` | light, medium, heavy | Optimization intensity |
-| `--enable-genrm` | - | Use GenRM for preference learning |
-| `--n-iterations` | 1, 2+, 0 | Training iterations (0=until convergence) |
+| `--port` | 8000 | vLLM port for summarizer/inference |
+| `--opt-model-port` | None | Optional prompt-tuning LM (set to GenRM port, e.g. 8001) |
+
+### Data Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--train-samples` | 33 | Number of training samples |
+| `--val-samples` | 11 | Number of validation samples |
+| `--test-samples` | 11 | Number of test samples |
+| `--rounds` | 3 | Reserved (currently unused) |
+
+### Concurrency
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--concurrent-docs` | 20 | Documents processed in parallel |
+| `--concurrent-requests` | 200 | Concurrent LLM requests |
+| `--num-threads` | 64 | Parallel metric evaluations |
+
+### Caching
+
+- vLLM prefix caching (APC) is controlled by `vllm.enable_prefix_caching` in `config/settings.yaml` and is enabled by default in the server scripts.
+- DSPy response caching is enabled by default; pass `--no-cache` to disable it for a run.
+- Oracle memoization is used during iterative optimization via `create_cached_oracle_metric` (per-run in-memory cache of oracle predictions).
+- Oracle pre-caching seeds that cache with predictions for the current trainset by default; pass `--no-precache` to skip it.
+- Caching is independent of generation temperature; disable caching if you want maximum variability.
+
+### Optimizer
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--optimizer` | bootstrap_random_search | Optimizer (gepa, bootstrap, bootstrap_random_search, mipro, labeled_fewshot) |
+| `--optimizer-budget` | heavy | Budget level for GEPA/MIPRO |
+| `--max-metric-calls` | None | Explicit metric-call budget (overrides budget) |
+
+### Iterative Optimization
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--n-iterations` | 1 | Iterations (0=until convergence) |
+| `--convergence-threshold` | 0.01 | Early stop threshold |
+| `--convergence-patience` | 3 | Early stop patience |
+| `--skip-oracle-opt` | False | Skip oracle/scorer optimization |
+
+### GenRM OPS Tree Building
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--enable-genrm` | False | Enable GenRM preference collection |
+| `--genrm-port` | 8001 | GenRM server port |
+| `--genrm-init-samples` | 8 | Number of OPS trees to build |
+| `--genrm-init-candidates` | 4 | Candidates per node in tournament |
+| `--max-init-prompt-tokens` | 4000 | Max tokens for init prompts (doc + rubric + instructions) |
+| `--max-init-doc-chars` | None | Deprecated alias for `--max-init-prompt-tokens` |
+| `--train-comparison-module` | False | Train OPSComparisonModule from preferences |
+
+### Judge Optimization
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--optimize-judge` | False | Optimize GenRM judge prompts (single pass) |
+| `--judge-optimization-budget` | light | Judge optimization budget |
+| `--use-dspy-strategy` | False | Reserved (currently unused) |
+| `--load-optimized-judge` | None | Load a pre-optimized judge |
+
+### Tournament of Tournaments (Iterative Judge Optimization)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--tournament-of-tournaments` | False | Full ToT loop (build → optimize → repeat) |
+| `--tot-max-iterations` | 5 | Max ToT iterations |
+| `--tot-convergence-threshold` | 0.01 | ToT convergence threshold |
+| `--tot-convergence-patience` | 2 | ToT convergence patience |
+| `--tot-samples-per-iteration` | 50 | Samples per ToT iteration |
+| `--tot-judge-test-split` | 0.2 | Holdout split for judge accuracy |
+| `--tot-shuffle-samples` | True | Shuffle samples each iteration |
+| `--tot-random-seed` | 42 | RNG seed for ToT sampling |
+
+### Resume and Output
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--resume` | False | Resume from checkpoints |
+| `--output-dir` | required | Output directory |
+
+### Inference Only
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--load-scorer-path` | None | Load scorer module and skip optimization |
+| `--inference-only` | False | Run inference only (requires scorer path) |
+
+### Scale Configuration
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--scale-min` | -100.0 | Minimum score value |
+| `--scale-max` | 100.0 | Maximum score value |
+
+### Task/Dataset Selection
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--task` | settings.yaml default | Task plugin (e.g., manifesto_rile, document_analysis) |
+| `--dataset` | settings.yaml default | Dataset plugin (e.g., manifesto, jsonl) |
+| `--dataset-path` | None | Path for file-based datasets (jsonl) |
 
 ## Models
 

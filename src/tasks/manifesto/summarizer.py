@@ -10,7 +10,7 @@ The key difference from the hardcoded prompts in batched_pipeline.py:
 - Demonstrations can be learned from training data
 
 Usage:
-    from src.manifesto.dspy_summarizer import LeafSummarizer, MergeSummarizer
+    from src.tasks.manifesto import LeafSummarizer, MergeSummarizer
 
     # Create modules
     leaf_summarizer = LeafSummarizer()
