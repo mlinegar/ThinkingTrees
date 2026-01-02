@@ -17,7 +17,8 @@ import logging
 import dspy
 from typing import Optional
 
-from src.core.output_parser import get_field, NormalizedOutputAccessor
+from src.core.output_parser import NormalizedOutputAccessor
+from .constants import RILE_MIN, RILE_MAX
 
 logger = logging.getLogger(__name__)
 
@@ -192,8 +193,12 @@ class RILEScorer(dspy.Module):
         # (e.g., LLM may output 'RILE_score' or 'riLE_score' instead of 'rile_score')
         accessor = NormalizedOutputAccessor(result)
 
+        raw_score = float(accessor.get('rile_score', 0.0))
+        normalized = (raw_score - RILE_MIN) / (RILE_MAX - RILE_MIN)
+        normalized = max(0.0, min(1.0, normalized))
+
         return {
-            'rile_score': accessor.get('rile_score', 0.0),
+            'rile_score': normalized,
             'left_indicators': accessor.get('left_indicators', ''),
             'right_indicators': accessor.get('right_indicators', ''),
             'reasoning': accessor.get('reasoning', ''),
@@ -235,12 +240,18 @@ class RILEComparator(dspy.Module):
         # Use normalized accessor to handle key casing variations
         accessor = NormalizedOutputAccessor(result)
 
+        raw_original = float(accessor.get('original_rile', 0.0))
+        raw_summary = float(accessor.get('summary_rile', 0.0))
+
+        norm_original = (raw_original - RILE_MIN) / (RILE_MAX - RILE_MIN)
+        norm_summary = (raw_summary - RILE_MIN) / (RILE_MAX - RILE_MIN)
+        norm_original = max(0.0, min(1.0, norm_original))
+        norm_summary = max(0.0, min(1.0, norm_summary))
+
         return {
-            'original_rile': accessor.get('original_rile', 0.0),
-            'summary_rile': accessor.get('summary_rile', 0.0),
-            'score_difference': accessor.get('score_difference', 0.0),
+            'original_rile': norm_original,
+            'summary_rile': norm_summary,
+            'score_difference': abs(norm_original - norm_summary),
             'is_preserved': accessor.get('is_preserved', True),
             'drift_explanation': accessor.get('drift_explanation', ''),
         }
-
-

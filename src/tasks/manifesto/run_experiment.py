@@ -9,16 +9,16 @@ Consolidates three experiment modes into a single entry point:
 
 Usage Examples:
     # Basic evaluation
-    python -m src.training.run_experiment --mode single --max-samples 10
+    python -m src.tasks.manifesto.run_experiment --mode single --max-samples 10
 
     # High-throughput batched processing
-    python -m src.training.run_experiment --mode batched --samples 100 --concurrent-docs 30
+    python -m src.tasks.manifesto.run_experiment --mode batched --samples 100 --concurrent-docs 30
 
     # DSPy optimization
-    python -m src.training.run_experiment --mode optimized --iterations 3 --max-samples 20
+    python -m src.tasks.manifesto.run_experiment --mode optimized --iterations 3 --max-samples 20
 
     # Full options
-    python -m src.training.run_experiment \
+    python -m src.tasks.manifesto.run_experiment \
         --mode batched \
         --task manifesto_rile \
         --port 8000 \
@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.config.logging import setup_logging, get_logger
+from src.tasks.manifesto import RILE_SCALE
 
 logger = get_logger(__name__)
 
@@ -43,6 +44,14 @@ logger = get_logger(__name__)
 # =============================================================================
 # Common Utilities
 # =============================================================================
+
+def normalize_score(value: Optional[float], scale) -> Optional[float]:
+    """Normalize a raw score to 0-1."""
+    if value is None:
+        return None
+    normalized = scale.normalize(float(value))
+    return max(0.0, min(1.0, normalized))
+
 
 def compute_metrics(results: list) -> dict:
     """Compute evaluation metrics from results."""
@@ -53,7 +62,7 @@ def compute_metrics(results: list) -> dict:
             "mae": 0.0,
             "rmse": 0.0,
             "correlation": 0.0,
-            "within_10_points": 0.0,
+            "within_0_05": 0.0,
             "n_samples": 0,
             "n_failed": len(results),
         }
@@ -61,7 +70,7 @@ def compute_metrics(results: list) -> dict:
     errors = [abs(r['estimated_score'] - r['reference_score']) for r in valid]
     mae = sum(errors) / len(errors)
     rmse = math.sqrt(sum(e**2 for e in errors) / len(errors))
-    within_10 = sum(1 for e in errors if e <= 10) / len(errors) * 100
+    within_05 = sum(1 for e in errors if e <= 0.05) / len(errors) * 100
 
     # Pearson correlation
     pred = [r['estimated_score'] for r in valid]
@@ -78,7 +87,7 @@ def compute_metrics(results: list) -> dict:
         "mae": mae,
         "rmse": rmse,
         "correlation": correlation,
-        "within_10_points": within_10,
+        "within_0_05": within_05,
         "n_samples": len(valid),
         "n_failed": len(results) - len(valid),
     }
@@ -108,10 +117,10 @@ def print_summary(metrics: dict, mode: str) -> None:
     print("=" * 60)
     print(f"  Samples processed: {metrics['n_samples']}")
     print(f"  Failed:            {metrics['n_failed']}")
-    print(f"  MAE:               {metrics['mae']:.2f} RILE points")
-    print(f"  RMSE:              {metrics['rmse']:.2f} RILE points")
+    print(f"  MAE (0-1):         {metrics['mae']:.3f}")
+    print(f"  RMSE (0-1):        {metrics['rmse']:.3f}")
     print(f"  Correlation:       {metrics['correlation']:.3f}")
-    print(f"  Within 10 points:  {metrics['within_10_points']:.1f}%")
+    print(f"  Within 0.05:       {metrics['within_0_05']:.1f}%")
     print("=" * 60)
 
 
@@ -135,25 +144,26 @@ def run_single_mode(args, samples, output_dir: Path) -> list:
     results = []
     for i, sample in enumerate(samples):
         logger.info(f"[{i+1}/{len(samples)}] Processing {sample.manifesto_id}")
+        reference_score = normalize_score(sample.rile, RILE_SCALE)
         try:
             result = pipeline.process_manifesto(sample)
             result_dict = {
                 "manifesto_id": sample.manifesto_id,
                 "estimated_score": result.estimated_score,
-                "reference_score": result.reference_score,
+                "reference_score": reference_score,
                 "error": str(result.error) if result.error else None,
             }
             results.append(result_dict)
 
             if result.estimated_score is not None:
-                err = abs(result.estimated_score - result.reference_score)
-                logger.info(f"  Pred: {result.estimated_score:.1f}, Actual: {result.reference_score:.1f}, Error: {err:.1f}")
+                err = abs(result.estimated_score - reference_score)
+                logger.info(f"  Pred: {result.estimated_score:.3f}, Actual: {reference_score:.3f}, Error: {err:.3f}")
         except Exception as e:
             logger.error(f"  Failed: {e}")
             results.append({
                 "manifesto_id": sample.manifesto_id,
                 "estimated_score": None,
-                "reference_score": sample.rile,
+                "reference_score": reference_score,
                 "error": str(e),
             })
 
@@ -194,11 +204,17 @@ def run_batched_mode(args, samples, output_dir: Path) -> list:
 
     # Convert to dict format
     results = []
-    for r in raw_results:
+    for idx, r in enumerate(raw_results):
+        sample = samples[idx] if idx < len(samples) else None
+        reference_score = (
+            normalize_score(sample.rile, RILE_SCALE)
+            if sample
+            else getattr(r, "reference_score", None)
+        )
         results.append({
             "manifesto_id": getattr(r, 'doc_id', None),
             "estimated_score": r.estimated_score,
-            "reference_score": r.reference_score,
+            "reference_score": reference_score,
             "error": str(r.error) if r.error else None,
         })
 
@@ -271,14 +287,17 @@ def run_optimized_mode(args, samples, output_dir: Path) -> list:
         """Process single sample through pipeline."""
         result = {
             'manifesto_id': sample.manifesto_id,
-            'reference_score': sample.rile,
+            'reference_score': normalize_score(sample.rile, RILE_SCALE),
             'text_length': len(sample.text),
         }
         try:
             pred = pipeline(text=sample.text)
             result['estimated_score'] = pred.rile_score
             result['summary_length'] = len(pred.final_summary)
-            logger.info(f"[{idx+1}/{total}] {sample.manifesto_id}: Pred={pred.rile_score:.1f}, Actual={sample.rile:.1f}")
+            logger.info(
+                f"[{idx+1}/{total}] {sample.manifesto_id}: "
+                f"Pred={pred.rile_score:.3f}, Actual={result['reference_score']:.3f}"
+            )
         except Exception as e:
             result['error'] = str(e)
             logger.error(f"[{idx+1}/{total}] {sample.manifesto_id}: Error: {e}")
@@ -307,7 +326,9 @@ def run_optimized_mode(args, samples, output_dir: Path) -> list:
             json.dump(results, f, indent=2)
 
         metrics = compute_metrics(results)
-        logger.info(f"Iteration {iteration}: MAE={metrics['mae']:.2f}, Within 10={metrics['within_10_points']:.1f}%")
+        logger.info(
+            f"Iteration {iteration}: MAE={metrics['mae']:.3f}, Within 0.05={metrics['within_0_05']:.1f}%"
+        )
 
         all_results.extend(results)
 

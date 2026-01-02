@@ -229,13 +229,6 @@ Tests for the factory function that constructs trees from leaf nodes.
 | `test_returns_input_unchanged` | Summarizer returns exact input |
 | `test_handles_empty_input` | Empty string returns empty string |
 
-##### `TestTruncatingSummarizer`
-| Test | Description |
-|------|-------------|
-| `test_returns_full_text` | Returns full text (truncation disabled) |
-| `test_ignores_max_length` | Max length parameter is ignored |
-| `test_ignores_suffix` | Suffix parameter is ignored |
-
 ##### `TestConcatenatingSummarizer`
 | Test | Description |
 |------|-------------|

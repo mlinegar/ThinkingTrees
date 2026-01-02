@@ -74,20 +74,39 @@ def _extract_reference_score(sample: Any) -> Optional[float]:
 
 
 def _extract_metadata(sample: Any) -> Dict[str, Any]:
-    metadata = getattr(sample, "metadata", None)
-    if metadata is None:
-        metadata = {}
+    """Extract metadata from a sample object.
 
-    for key, attr in (
-        ("party_name", "party_name"),
-        ("country_name", "country_name"),
-        ("year", "year"),
-        ("party_id", "party_id"),
-        ("party_abbrev", "party_abbrev"),
-        ("country_code", "country_code"),
-    ):
-        if key not in metadata and hasattr(sample, attr):
-            metadata[key] = getattr(sample, attr)
+    Copies any existing metadata dict and adds any additional public attributes
+    from the sample that look like metadata (excluding text content and known
+    data fields).
+
+    This is task-agnostic: it will capture any task-specific fields like
+    party_name, country_code, etc. without hardcoding them.
+    """
+    metadata = dict(getattr(sample, "metadata", {}) or {})
+
+    # Fields to exclude (text content and known data fields)
+    exclude = {
+        "text", "content", "doc_id", "id", "metadata",
+        "reference_score", "score", "label",
+    }
+
+    # Copy additional public attributes that look like metadata
+    for attr in dir(sample):
+        # Skip private attributes, excluded fields, and methods
+        if attr.startswith("_") or attr in exclude:
+            continue
+        if attr in metadata:
+            continue
+
+        try:
+            value = getattr(sample, attr, None)
+            # Only include non-callable, non-None values
+            if value is not None and not callable(value):
+                metadata[attr] = value
+        except Exception:
+            # Skip attributes that raise on access
+            pass
 
     return metadata
 
@@ -168,10 +187,6 @@ class BatchedPipelineConfig:
 
 
 # =============================================================================
-# RILE Scoring (Batched)
-# =============================================================================
-
-# =============================================================================
 # Batched Pipeline
 # =============================================================================
 
@@ -182,14 +197,22 @@ class BatchedDocPipeline:
     Processes multiple documents concurrently, pooling all LLM requests
     for optimal GPU utilization.
 
-    For DSPy optimization, use with task-specific summarizers:
-        from src.tasks.manifesto import ManifestoTask
+    For DSPy optimization, compose tasks from core building blocks:
+        from src.ops_engine.training_framework.tasks import ScoringTask
+        from src.core.scorers import ScaleScorer
+        from src.core.summarization import GenericSummarizer, GenericMerger
 
-        task = ManifestoTask()
+        task = ScoringTask(
+            name="my_task",
+            scale=MY_SCALE,
+            rubric="...",
+            task_context="...",
+            predictor_factory=lambda: ScaleScorer(MySignature),
+        )
         pipeline = BatchedDocPipeline(
             config=config,
-            leaf_summarizer=task.create_leaf_summarizer(),  # Task provides summarizers
-            merge_summarizer=task.create_merge_summarizer(),
+            leaf_summarizer=GenericSummarizer(),
+            merge_summarizer=GenericMerger(),
         )
         # Use process_with_dspy for training
         result = pipeline.process_with_dspy(sample)

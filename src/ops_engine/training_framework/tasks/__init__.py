@@ -6,32 +6,36 @@ Each task represents a different use case (what you're predicting) that can
 plug into the OPS training framework.
 
 Key concept: Tasks represent the end goal, not the method.
-- manifesto_rile → predicts political positioning (-100 to +100)
+- ScoringTask → generic configurable scoring (pass any ScaleDefinition)
 - document_analysis → predicts content preservation quality (0 to 1)
 
 The pipeline (tree building, summarization) is the METHOD that's constant.
 
 Supported Tasks:
-- manifesto_rile: Political manifesto RILE scoring
+- scoring: Generic configurable scoring task
 - document_analysis: Generic content preservation evaluation (default)
 
+Domain-specific task configurations are provided by factory functions in
+their respective modules.
+
 Usage:
-    from ops_engine.training_framework.tasks import (
-        TaskRegistry,
+    from src.ops_engine.training_framework.tasks import (
+        ScoringTask,
+        ScaleDefinition,
         get_task,
         list_tasks,
     )
 
-    # Get a task instance
+    # Create a custom scoring task
+    my_scale = ScaleDefinition(name="quality", min_value=0, max_value=10, ...)
+    task = ScoringTask(name="my_task", scale=my_scale, rubric="...")
+
+    # Or use a pre-configured factory from your domain module
+    # from my_project.tasks.my_domain import create_domain_task
+    # task = create_domain_task()
+
+    # Or get by name from registry
     task = get_task("document_analysis")
-
-    # Create task-specific components
-    metric = task.create_metric(with_feedback=True)
-    predictor = task.create_predictor()
-    training_source = task.create_training_source(results)
-
-    # List available tasks
-    available = list_tasks()
 """
 
 from typing import Any, Dict, Optional
@@ -55,11 +59,12 @@ from .registry import (
     register_task,
 )
 
-# Import task implementations (registration happens on import)
-from src.tasks.manifesto.task import ManifestoTask
+# Import generic scoring task
+from .scoring import ScoringTask
 
 # Default task is document_analysis (general purpose)
 from src.config.settings import DEFAULT_TASK
+
 from .document_analysis import (
     DocumentAnalysisTask,
     DocumentAnalysisTrainingSource,
@@ -78,7 +83,7 @@ def get_task(name: str, **kwargs) -> TaskPlugin:
     Get a task instance by name.
 
     Args:
-        name: Task name (e.g., 'manifesto_rile')
+        name: Task name (e.g., 'document_analysis' or 'scoring')
         **kwargs: Arguments to pass to task constructor
 
     Returns:
@@ -133,8 +138,10 @@ __all__ = [
     'TaskRegistry',
     'register_task',
 
+    # Generic scoring task
+    'ScoringTask',
+
     # Task implementations
-    'ManifestoTask',
     'DocumentAnalysisTask',
     'DocumentAnalysisTrainingSource',
     'PreservationScorer',

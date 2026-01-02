@@ -8,23 +8,23 @@ Consolidates three collection workflows into a single, task-agnostic script:
 3. Oracle scorer on direct documents
 
 Usage Examples:
-    # GenRM on direct manifesto documents
+    # GenRM on direct documents
     python -m src.training.collect_preferences \\
-        --task manifesto_rile \\
+        --task document_analysis \\
         --judge-type genrm \\
         --source-type direct \\
         --output-dir data/preferences
 
     # Oracle on direct documents
     python -m src.training.collect_preferences \\
-        --task manifesto_rile \\
+        --task document_analysis \\
         --judge-type oracle \\
         --source-type direct \\
         --output-dir data/preferences
 
     # GenRM on labeled trees
     python -m src.training.collect_preferences \\
-        --task manifesto_rile \\
+        --task document_analysis \\
         --judge-type genrm \\
         --source-type labeled \\
         --labels-dir data/labels \\
@@ -33,7 +33,7 @@ Usage Examples:
 
     # Full options
     python -m src.training.collect_preferences \\
-        --task manifesto_rile \\
+        --task document_analysis \\
         --judge-type genrm \\
         --source-type direct \\
         --law-type sufficiency \\
@@ -69,10 +69,10 @@ def create_argument_parser() -> argparse.ArgumentParser:
         epilog="""
 Examples:
   # GenRM on direct documents
-  python -m src.training.collect_preferences --task manifesto_rile --judge-type genrm
+  python -m src.training.collect_preferences --task document_analysis --judge-type genrm
 
   # Oracle on direct documents
-  python -m src.training.collect_preferences --task manifesto_rile --judge-type oracle
+  python -m src.training.collect_preferences --task document_analysis --judge-type oracle
 
   # GenRM on labeled trees
   python -m src.training.collect_preferences --source-type labeled --labels-dir data/labels
@@ -331,44 +331,37 @@ def create_collector(config, task, summarizer):
     ]
 
     if judge_settings.judge_type == JudgeType.GENRM:
-        from src.ops_engine.training_framework.genrm_preference import (
-            GenRMJudge,
-            GenRMPreferenceCollector,
-        )
+        from src.ops_engine.training_framework.genrm_preference import GenRMJudge
+        from src.ops_engine.training_framework.preference import PreferenceCollector
 
-        judge = GenRMJudge(
+        genrm_judge = GenRMJudge(
             base_url=server.judge_url,
             model_name=server.judge_model or "nvidia/Qwen3-Nemotron-235B-A22B-GenRM",
             temperature=judge_settings.judge_temperature,
             top_p=judge_settings.judge_top_p,
             max_tokens=judge_settings.judge_max_tokens,
         )
-        return GenRMPreferenceCollector(
+        return PreferenceCollector(
             summarizer=summarizer,
-            judge=judge,
-            k_candidates=gen.k_candidates,
-            temperatures=gen.temperatures,
+            strategy="genrm",
+            genrm_judge=genrm_judge,
+            k=gen.k_candidates,
+            generation_configs=generation_configs,
         )
 
     elif judge_settings.judge_type == JudgeType.ORACLE:
-        from src.ops_engine.training_framework.oracle_preference import (
-            OraclePreferenceCollector,
-            OraclePreferenceConfig,
-        )
+        from src.ops_engine.training_framework.preference import PreferenceCollector
 
         # Get oracle predictor from task
         oracle_predict = task.create_oracle_scorer()
 
-        return OraclePreferenceCollector(
+        return PreferenceCollector(
             summarizer=summarizer,
+            strategy="oracle",
             oracle_predict=oracle_predict,
-            k_candidates=gen.k_candidates,
+            k=gen.k_candidates,
             generation_configs=generation_configs,
-            config=OraclePreferenceConfig(
-                tie_margin=judge_settings.tie_margin,
-                confidence_floor=judge_settings.confidence_floor,
-            ),
-            oracle_name=f"{task.name}_oracle",
+            tie_margin=judge_settings.tie_margin,
         )
 
     elif judge_settings.judge_type == JudgeType.DSPY:

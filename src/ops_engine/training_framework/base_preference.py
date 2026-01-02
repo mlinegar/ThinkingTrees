@@ -14,7 +14,7 @@ from typing import Any, Dict, Generic, List, Optional, Tuple, TypeVar
 
 import dspy
 
-from .preference import GenerationConfig, PreferencePair, PreferenceDataset
+from .preference_types import GenerationConfig, PreferencePair, PreferenceDataset
 from src.config.constants import DIVERSE_TEMPERATURES
 from src.core.protocols import format_merge_input
 

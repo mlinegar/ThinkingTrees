@@ -29,9 +29,7 @@ import dspy
 
 from .core import Prediction, UnifiedTrainingExample
 from .config import OptimizationConfig
-from .metrics import (
-    create_violation_metric,
-)
+from .metrics import metric as default_metric_factory
 
 # Note: The new registry-based optimizer system is in the optimizers/ submodule.
 # To use it, import directly:
@@ -138,7 +136,7 @@ class OracleOptimizer:
 
         # Create default metric if not provided
         if metric is None:
-            metric = create_violation_metric()
+            metric = default_metric_factory()
 
         # Evaluate before optimization
         metric_before = self._evaluate_metric(classifier, valset, metric)
@@ -257,7 +255,7 @@ class OracleOptimizer:
         stage_metrics = stage_metrics or {}
 
         # Default metric for optimization
-        default_metric = create_violation_metric()
+        default_metric = default_metric_factory()
 
         logger.info(f"Starting staged optimization: {stages}")
 

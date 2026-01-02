@@ -161,8 +161,8 @@ def safe_parse_score(
     obj: Any,
     field_names: List[str],
     default: float = 0.0,
-    scale_min: float = -100.0,
-    scale_max: float = 100.0
+    scale_min: Optional[float] = None,
+    scale_max: Optional[float] = None
 ) -> float:
     """
     Safely extract a numeric score from an object, trying multiple field names.
@@ -171,8 +171,8 @@ def safe_parse_score(
         obj: Object to extract score from
         field_names: List of possible field names (tried in order)
         default: Default value if no field found
-        scale_min: Minimum valid value (for clamping)
-        scale_max: Maximum valid value (for clamping)
+        scale_min: Optional minimum value for clamping
+        scale_max: Optional maximum value for clamping
 
     Returns:
         Parsed float score, clamped to valid range
@@ -182,8 +182,11 @@ def safe_parse_score(
         if value is not None:
             try:
                 score = float(value)
-                # Clamp to valid range
-                return max(scale_min, min(scale_max, score))
+                if scale_min is not None:
+                    score = max(scale_min, score)
+                if scale_max is not None:
+                    score = min(scale_max, score)
+                return score
             except (ValueError, TypeError):
                 logger.warning(f"Could not parse {field_name}={value} as float")
                 continue

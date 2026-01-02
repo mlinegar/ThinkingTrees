@@ -19,10 +19,6 @@ Key features:
 Usage:
     # With ground truth oracle
     auditor = TreeAuditor(oracle_judge=ground_truth_oracle, budget=10)
-
-    # With learned oracle approximation (trained on mini-tree samples)
-    oracle_approx = train_oracle_approximation(mini_trees)
-    auditor = TreeAuditor(oracle_judge=oracle_approx, budget=10)
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -37,6 +33,7 @@ import warnings
 
 from src.core.data_models import Node, Tree, AuditStatus, AuditResult
 from src.ops_engine.scoring import OracleScore, ScoringOracle
+from src.ops_engine.ops_checks import CheckType, CheckConfig, aggregate_check_stats
 from src.config.concurrency import ConcurrencyConfig, get_concurrency_config
 
 
@@ -586,14 +583,6 @@ class ReviewQueue:
 
         Returns:
             List of OracleFuncReviewResult for each reviewed item
-
-        Example:
-            >>> from src.ops_engine.oracle_func_approximation import OracleFuncReviewEngine, OracleFuncConfig
-            >>> queue = ReviewQueue()
-            >>> # ... audit items and add to queue ...
-            >>> engine = OracleFuncReviewEngine(config=OracleFuncConfig(), review_queue=queue)
-            >>> engine.train()  # Train from existing reviewed items
-            >>> results = queue.auto_review_with_oracle_func(engine)
         """
         if priority_min is None:
             priority_min = ReviewPriority.MEDIUM
@@ -620,9 +609,9 @@ class Auditor:
     2. Merge Consistency (internal): Does parent preserve info from children?
 
     Example:
-        >>> oracle = create_oracle_from_scorer(SimpleScorer(), threshold=0.3)
+        >>> scorer = SimpleScorer()
         >>> queue = ReviewQueue()
-        >>> auditor = Auditor(oracle, config=AuditConfig(sample_budget=5), review_queue=queue)
+        >>> auditor = Auditor(scorer, config=AuditConfig(sample_budget=5), review_queue=queue)
         >>> report = auditor.audit_tree(tree)
         >>> print(f"Passed: {report.passed}, Failures: {report.nodes_failed}")
         >>> # Get flagged items for human review
@@ -631,7 +620,7 @@ class Auditor:
 
     def __init__(
         self,
-        oracle: Union[OracleJudge, ScoringOracle],
+        oracle: ScoringOracle,
         config: Optional[AuditConfig] = None,
         review_queue: Optional[ReviewQueue] = None,
         summarizer: Optional[Callable[[str], str]] = None
@@ -640,9 +629,7 @@ class Auditor:
         Initialize the auditor.
 
         Args:
-            oracle: Oracle judge for comparing inputs. Accepts both legacy
-                OracleJudge (returns tuple) and new ScoringOracle (returns OracleScore).
-                ScoringOracle is automatically wrapped for internal use.
+            oracle: Oracle judge for comparing inputs (ScoringOracle interface).
             config: Audit configuration
             review_queue: Optional queue for flagging failures for batch review
             summarizer: Optional summarizer function for idempotence/substitution checks.
@@ -1212,7 +1199,6 @@ class Auditor:
 
 def audit_tree(
     tree: Tree,
-    oracle: Optional[Union[OracleJudge, Callable]] = None,
     scorer: Optional[ScoringOracle] = None,
     sample_budget: int = 10,
     threshold: float = 0.1
@@ -1222,35 +1208,26 @@ def audit_tree(
 
     Args:
         tree: Tree to audit
-        oracle: Legacy oracle callable (deprecated, use scorer instead)
-        scorer: ScoringOracle instance (preferred, e.g., SimpleScorer)
+        scorer: ScoringOracle instance (e.g., SimpleScorer)
         sample_budget: Number of nodes to sample
         threshold: Discrepancy threshold
 
     Returns:
         AuditReport
 
-    Example (preferred - using new ScoringOracle API):
+    Example:
         from src.ops_engine.scoring import SimpleScorer
         report = audit_tree(tree, scorer=SimpleScorer(), threshold=0.1)
-
-    Example (legacy - still supported but deprecated):
-        report = audit_tree(tree, oracle=my_oracle, threshold=0.1)
     """
-    if oracle is None:
-        if scorer is not None:
-            # Use the new ScoringOracle API with adapter
-            oracle = create_oracle_from_scorer(scorer, threshold=threshold)
-        else:
-            # Default: use SimpleScorer with adapter (no deprecation warning)
-            oracle = create_oracle_from_scorer(SimpleScorer(), threshold=threshold)
+    if scorer is None:
+        scorer = SimpleScorer()
 
     config = AuditConfig(
         sample_budget=sample_budget,
         discrepancy_threshold=threshold
     )
 
-    auditor = Auditor(oracle, config)
+    auditor = Auditor(scorer, config)
     return auditor.audit_tree(tree)
 
 
@@ -1385,3 +1362,4 @@ def get_audit_statistics(report: AuditReport) -> Dict[str, Any]:
             "substitution": report.substitution_violations,
         }
     }
+

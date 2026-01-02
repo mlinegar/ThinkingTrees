@@ -9,18 +9,18 @@ Consolidates three data generation workflows into a single entry point:
 
 Usage Examples:
     # Generate DPO data
-    python -m src.training.generate_data --type dpo \
+    python -m src.tasks.manifesto.generate_data --type dpo \
         --comparison-module models/comparison.json \
         --output-dir data/dpo
 
     # Generate labeled trees
-    python -m src.training.generate_data --type labeled \
+    python -m src.tasks.manifesto.generate_data --type labeled \
         --oracle-port 8001 \
         --max-documents 10 \
         --output-dir data/labels
 
     # Generate synthetic data
-    python -m src.training.generate_data --type synthetic \
+    python -m src.tasks.manifesto.generate_data --type synthetic \
         --oracle-port 8001 \
         --output-dir data/synthetic
 """
@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.config.logging import setup_logging, get_logger
+from src.tasks.manifesto import RILE_SCALE
 
 logger = get_logger(__name__)
 
@@ -49,7 +50,15 @@ Key information to preserve:
 - Overall political stance and intensity
 - Key policy positions and their framing
 
-The RILE score ranges from -100 (far left) to +100 (far right)."""
+The RILE score ranges from 0.0 (far left) to 1.0 (far right)."""
+
+
+def normalize_score(value: Optional[float], scale) -> Optional[float]:
+    """Normalize a raw score to 0-1."""
+    if value is None:
+        return None
+    normalized = scale.normalize(float(value))
+    return max(0.0, min(1.0, normalized))
 
 
 def print_banner(title: str, config: dict) -> None:
@@ -147,7 +156,7 @@ def generate_dpo_data(args) -> None:
     for i, sample in enumerate(samples):
         doc_id = sample.get("id", f"doc_{i}")
         doc_text = sample.get("text", "") or sample.get("content", "")
-        reference_score = sample.get("rile", 0.0)
+        reference_score = normalize_score(sample.get("rile", 0.0), RILE_SCALE)
 
         if not doc_text:
             continue
@@ -314,7 +323,7 @@ def generate_labeled_trees(args) -> None:
         tree = LabeledTree(
             doc_id=doc_id,
             document_text=sample.text,
-            document_score=sample.rile,
+            document_score=normalize_score(sample.rile, RILE_SCALE),
             label_source=args.oracle_model,
         )
 

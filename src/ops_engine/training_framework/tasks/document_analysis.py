@@ -1,24 +1,24 @@
 """
-Document analysis domain plugin.
+Document analysis task plugin.
 
-This module implements the DomainPlugin interface for generic document
-analysis tasks - the default domain for tree-based summarization and
+This module implements the task plugin interface for generic document
+analysis tasks - a general-purpose option for tree-based summarization and
 information extraction without domain-specific scoring assumptions.
 
-The domain represents the end TASK (what you're predicting), not the method:
-- manifesto_rile → predicts political positioning (-100 to +100)
+The task represents the end goal (what you're predicting), not the method:
+- scoring_task → predicts a continuous score on a defined scale
 - document_analysis → predicts content preservation quality (0 to 1)
 
 The pipeline (tree building, summarization) is the METHOD that's constant
-across domains.
+across tasks.
 
 Uses:
 - Content preservation evaluation (how well summaries preserve information)
 - Generic quality rubrics aligned with OPS laws (sufficiency, merge consistency, idempotence)
 - Simple 0-1 quality scores
 
-Use this domain as the default for general summarization/extraction tasks
-or as a template for creating custom domains.
+Use this task for general summarization/extraction tasks or as a template
+for creating custom tasks.
 """
 
 import logging
@@ -35,7 +35,7 @@ from .base import (
     UnifiedTrainingSource,
     UnifiedResult,
 )
-from src.tasks.prompting import PromptBuilders, default_merge_prompt, default_summarize_prompt, parse_numeric_score
+from src.core.prompting import PromptBuilders, default_merge_prompt, default_summarize_prompt, parse_numeric_score
 from .registry import register_task
 
 if TYPE_CHECKING:
@@ -290,7 +290,7 @@ class DocumentAnalysisTask(AbstractTask):
     """
     Document analysis task implementation.
 
-    This is the default task for general-purpose document processing.
+    This is a general-purpose task for document processing.
     It evaluates content preservation quality using OPS-aligned metrics.
 
     Quality scores range from 0.0 (poor preservation) to 1.0 (excellent).
@@ -392,7 +392,8 @@ class DocumentAnalysisTask(AbstractTask):
 
     def parse_score(self, response: str) -> Optional[float]:
         """Parse a 0-1 preservation score."""
-        return parse_numeric_score(response, min_value=0.0, max_value=1.0)
+        parsed = parse_numeric_score(response, min_value=0.0, max_value=1.0)
+        return self.normalize_score(parsed)
 
     def create_rubric(self, **kwargs) -> str:
         """

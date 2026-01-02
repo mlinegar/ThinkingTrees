@@ -2,74 +2,43 @@
 
 from src.ops_engine.builder import (
     TreeBuilder,
-    AsyncTreeBuilder,
     BuildConfig,
     BuildResult,
     IdentitySummarizer,
-    TruncatingSummarizer,
     ConcatenatingSummarizer,
     build,
     async_build,
     build_test_tree,
-)
-
-# Helper functions for chunking
-# Note: Tournament selection is now in TournamentStrategy (src/core/strategy.py)
-from src.ops_engine.ops_tree import (
+    # Chunking helper (moved from ops_tree.py)
     chunk_binary,
 )
 
+# OPS Law Checking Types (unified)
+from src.ops_engine.ops_checks import (
+    CheckType,
+    CheckConfig,
+    CheckResult,
+    aggregate_check_stats,
+)
+
+# Human-in-the-loop Auditing
 from src.ops_engine.auditor import (
     Auditor,
     AuditConfig,
     AuditReport,
     AuditCheckResult,
-    OracleJudge,
     SimpleScorer,
-    AlwaysPassOracle,
-    AlwaysFailOracle,
+    AlwaysPassScorer,
+    AlwaysFailScorer,
     SamplingStrategy,
     ReviewQueue,
     FlaggedItem,
     ReviewPriority,
     audit_tree,
-    create_oracle_from_scorer,
 )
 
 # For optimization, use the registry-based system:
 # from src.ops_engine.training_framework.optimizers import get_optimizer
-
-from src.ops_engine.oracle_func_approximation import (
-    LearnedOracleFunc,
-    OracleFuncReviewEngine,
-    OracleFuncConfig,
-    OracleFuncTrainingExample,
-    OracleFuncTrainingCollector,
-    OracleFuncReviewResult,
-    OracleFuncMetric,
-    ExampleLabel,
-    create_oracle_func_reviewer,
-    train_oracle_func_from_reviews,
-)
-
-# Bootstrap training loop (Paper Section 3.11)
-from src.ops_engine.bootstrap_loop import (
-    BootstrapTrainer,
-    BootstrapConfig,
-    BootstrapResult,
-    BootstrapIteration,
-    run_bootstrap_training,
-)
-
-# Unified OPS checks
-from src.ops_engine.checks import (
-    CheckRunner,
-    CheckConfig,
-    CheckResult,
-    CheckType,
-    run_all_checks,
-    aggregate_check_stats,
-)
 
 # Score-centric oracle types (new, preferred API)
 from src.ops_engine.scoring import (
@@ -87,71 +56,36 @@ from src.ops_engine.scoring import (
     SYMMETRIC_SCALE,
 )
 
-# Top-down initialization (oracle-aligned demo seeding)
-from src.ops_engine.initialization import (
-    TopDownInitializer,
-    OracleAlignedDemo,
-    MergeAlignedDemo,
-    oracle_demos,
-    initialize_summarizer,
-    quick_demos,
-    run_top_down_initialization,
-    train_on_short_docs,
-)
-
 __all__ = [
     # Builder
     "TreeBuilder",
-    "AsyncTreeBuilder",
     "BuildConfig",
     "BuildResult",
     "IdentitySummarizer",
-    "TruncatingSummarizer",
     "ConcatenatingSummarizer",
     "build",
     "async_build",
     "build_test_tree",
-    # Chunking helper (tournament selection is in TournamentStrategy)
+    # Chunking helper
     "chunk_binary",
-    # Auditor
+    # OPS Law Checking (unified types)
+    "CheckType",
+    "CheckConfig",
+    "CheckResult",
+    "aggregate_check_stats",
+    # Human-in-the-loop Auditing
     "Auditor",
     "AuditConfig",
     "AuditReport",
     "AuditCheckResult",
-    "OracleJudge",
     "SimpleScorer",
-    "AlwaysPassOracle",
-    "AlwaysFailOracle",
+    "AlwaysPassScorer",
+    "AlwaysFailScorer",
     "SamplingStrategy",
     "ReviewQueue",
     "FlaggedItem",
     "ReviewPriority",
     "audit_tree",
-    "create_oracle_from_scorer",
-    # Oracle Function Approximation
-    "LearnedOracleFunc",
-    "OracleFuncReviewEngine",
-    "OracleFuncConfig",
-    "OracleFuncTrainingExample",
-    "OracleFuncTrainingCollector",
-    "OracleFuncReviewResult",
-    "OracleFuncMetric",
-    "ExampleLabel",
-    "create_oracle_func_reviewer",
-    "train_oracle_func_from_reviews",
-    # Bootstrap training loop (Paper Section 3.11)
-    "BootstrapTrainer",
-    "BootstrapConfig",
-    "BootstrapResult",
-    "BootstrapIteration",
-    "run_bootstrap_training",
-    # Unified OPS checks
-    "CheckRunner",
-    "CheckConfig",
-    "CheckResult",
-    "CheckType",
-    "run_all_checks",
-    "aggregate_check_stats",
     # Score-centric oracle types
     "OracleScore",
     "ScoringOracle",
@@ -165,13 +99,4 @@ __all__ = [
     "UNIT_SCALE",
     "PERCENT_SCALE",
     "SYMMETRIC_SCALE",
-    # Top-down initialization (oracle-aligned demo seeding)
-    "TopDownInitializer",
-    "OracleAlignedDemo",
-    "MergeAlignedDemo",
-    "oracle_demos",
-    "initialize_summarizer",
-    "quick_demos",
-    "run_top_down_initialization",
-    "train_on_short_docs",
 ]

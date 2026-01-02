@@ -13,14 +13,9 @@ Usage:
 
 from typing import Optional
 
-from .constants import RILE_MIN, RILE_MAX
 from .rubrics import RILE_TASK_CONTEXT
-from .signatures import RILEScorer
-from src.ops_engine.scoring import SimilarityScorer, BoundedScale
-
-
-# RILE scale: -100 (left) to +100 (right)
-RILE_SCALE = BoundedScale(RILE_MIN, RILE_MAX)
+from .dspy_signatures import RILEScorer
+from src.ops_engine.scoring import SimilarityScorer, UNIT_SCALE
 
 
 def create_rile_scorer(task_context: Optional[str] = None) -> SimilarityScorer:
@@ -28,13 +23,13 @@ def create_rile_scorer(task_context: Optional[str] = None) -> SimilarityScorer:
     Create a RILE similarity scorer.
 
     Returns a generic SimilarityScorer configured for RILE political positioning.
-    The score is: 1.0 - abs(rile_a - rile_b) / 200
+    The score is: 1.0 - abs(norm_a - norm_b)
 
     Args:
         task_context: Optional context for RILE scoring (uses default if None)
 
     Returns:
-        SimilarityScorer configured for RILE scale
+        SimilarityScorer configured for normalized scale
 
     Example:
         scorer = create_rile_scorer()
@@ -51,6 +46,6 @@ def create_rile_scorer(task_context: Optional[str] = None) -> SimilarityScorer:
 
     return SimilarityScorer(
         value_extractor=extract_rile,
-        scale=RILE_SCALE,
+        scale=UNIT_SCALE,
         name="RILE",
     )

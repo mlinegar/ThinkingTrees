@@ -8,6 +8,7 @@ automatic selection based on dataset size and computational budget.
 import logging
 from typing import Any, Dict, Optional, Type, TYPE_CHECKING
 
+from src.core.registry import GenericRegistry, create_register_decorator
 from .base import BaseOptimizer
 
 if TYPE_CHECKING:
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class OptimizerRegistry:
+class OptimizerRegistry(GenericRegistry[BaseOptimizer]):
     """
     Registry for optimizer implementations with auto-selection.
 
@@ -24,58 +25,9 @@ class OptimizerRegistry:
     as well as automatic selection based on dataset size.
     """
 
-    _optimizers: Dict[str, Type[BaseOptimizer]] = {}
+    _registry: Dict[str, Type[BaseOptimizer]] = {}
     _instances: Dict[str, BaseOptimizer] = {}
-
-    @classmethod
-    def register(cls, name: str, optimizer_class: Type[BaseOptimizer]) -> None:
-        """
-        Register an optimizer implementation.
-
-        Args:
-            name: Unique name for the optimizer
-            optimizer_class: Optimizer class implementing BaseOptimizer
-        """
-        if name in cls._optimizers:
-            logger.warning(f"Overwriting existing optimizer: {name}")
-        cls._optimizers[name] = optimizer_class
-        logger.debug(f"Registered optimizer: {name}")
-
-    @classmethod
-    def get_class(cls, name: str) -> Type[BaseOptimizer]:
-        """
-        Get optimizer class by name.
-
-        Args:
-            name: Optimizer name
-
-        Returns:
-            Optimizer class
-
-        Raises:
-            KeyError: If optimizer not found
-        """
-        if name not in cls._optimizers:
-            available = list(cls._optimizers.keys())
-            raise KeyError(
-                f"Unknown optimizer: {name}. Available: {available}"
-            )
-        return cls._optimizers[name]
-
-    @classmethod
-    def get(cls, name: str, config: Optional[Any] = None) -> BaseOptimizer:
-        """
-        Get or create an optimizer instance.
-
-        Args:
-            name: Optimizer name
-            config: Optional configuration
-
-        Returns:
-            Optimizer instance
-        """
-        optimizer_class = cls.get_class(name)
-        return optimizer_class(config)
+    _item_type = "optimizer"
 
     @classmethod
     def list_optimizers(cls) -> Dict[str, Dict[str, Any]]:
@@ -86,8 +38,7 @@ class OptimizerRegistry:
             Dict mapping names to optimizer metadata
         """
         result = {}
-        for name, opt_class in cls._optimizers.items():
-            # Try to get properties from a dummy instance
+        for name, opt_class in cls._registry.items():
             try:
                 dummy = opt_class(None)
                 result[name] = {
@@ -125,13 +76,12 @@ class OptimizerRegistry:
         Returns:
             Name of recommended optimizer
         """
-        # Get thresholds from config or use defaults (matching OptimizationConfig defaults)
+        # Get thresholds from config or use defaults
         if config is not None:
             bootstrap_threshold = getattr(config, 'bootstrap_threshold', 10)
             random_search_threshold = getattr(config, 'random_search_threshold', 50)
             mipro_threshold = getattr(config, 'mipro_threshold', 200)
         else:
-            # Defaults match OptimizationConfig.bootstrap_threshold, etc.
             bootstrap_threshold = 10
             random_search_threshold = 50
             mipro_threshold = 200
@@ -147,44 +97,24 @@ class OptimizerRegistry:
             selected = "mipro"
             reason = f"dataset_size ({dataset_size}) <= mipro_threshold ({mipro_threshold})"
         else:
-            # For very large datasets, GEPA or MIPROv2 heavy
             selected = "gepa"
             reason = f"dataset_size ({dataset_size}) > mipro_threshold ({mipro_threshold})"
 
         # Verify the selected optimizer is registered
-        if selected not in cls._optimizers:
-            # Fall back to whatever is available
+        if selected not in cls._registry:
             fallbacks = ["bootstrap", "bootstrap_random_search", "gepa", "mipro"]
             for fallback in fallbacks:
-                if fallback in cls._optimizers:
+                if fallback in cls._registry:
                     logger.warning(
                         f"Auto-selected '{selected}' not registered, "
                         f"falling back to '{fallback}'"
                     )
                     return fallback
-            # Nothing available
             raise RuntimeError("No optimizers registered")
 
         logger.info(f"Auto-selected optimizer: {selected} ({reason})")
         return selected
 
-    @classmethod
-    def clear(cls) -> None:
-        """Clear all registered optimizers (mainly for testing)."""
-        cls._optimizers.clear()
-        cls._instances.clear()
 
-
-def register_optimizer(name: str):
-    """
-    Decorator to register an optimizer class.
-
-    Usage:
-        @register_optimizer("my_optimizer")
-        class MyOptimizer(AbstractOptimizer):
-            ...
-    """
-    def decorator(cls: Type[BaseOptimizer]) -> Type[BaseOptimizer]:
-        OptimizerRegistry.register(name, cls)
-        return cls
-    return decorator
+# Decorator for registering optimizers
+register_optimizer = create_register_decorator(OptimizerRegistry)

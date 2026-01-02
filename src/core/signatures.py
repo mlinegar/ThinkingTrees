@@ -275,7 +275,7 @@ class MetricScore(dspy.Signature):
     Score text on a bounded numeric scale based on specified criteria.
 
     This is the generic foundation for domain-specific scorers. Domain modules
-    (e.g., manifesto/RILE, sentiment analysis) should extend this pattern with
+    (e.g., sentiment analysis, quality scoring) should extend this pattern with
     their own field names while maintaining the same structure.
 
     The task_context should describe:

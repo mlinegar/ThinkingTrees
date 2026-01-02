@@ -24,10 +24,14 @@ Usage:
 """
 
 import dspy
-from dataclasses import dataclass
 from typing import Optional
 
-from src.core.signatures import RecursiveSummary
+# Import generic components from core
+from src.core.summarization import (
+    GenericSummarizer,
+    GenericMerger,
+    SummarizationResult,
+)
 
 
 # =============================================================================
@@ -93,7 +97,7 @@ class LeafSummarizer(dspy.Module):
         summary = summarizer(content="The party supports...", rubric=RILE_RUBRIC)
 
         # With GEPA optimization
-        metric = create_summarization_metric(oracle_classifier)
+        metric = create_rile_summarization_metric(oracle_classifier)
         optimizer = dspy.GEPA(metric=metric, auto='light')
         optimized_summarizer = optimizer.compile(summarizer, trainset=trainset)
     """
@@ -182,51 +186,6 @@ class MergeSummarizer(dspy.Module):
         return result.merged_summary
 
 
-# =============================================================================
-# Generic Summarizer (Uses RecursiveSummary from core)
-# =============================================================================
-
-class GenericSummarizer(dspy.Module):
-    """
-    Generic summarizer using the core RecursiveSummary signature.
-
-    This provides compatibility with the existing OPS infrastructure while
-    still being optimizable through DSPy.
-    """
-
-    def __init__(self, use_cot: bool = True):
-        super().__init__()
-        if use_cot:
-            self.summarize = dspy.ChainOfThought(RecursiveSummary)
-        else:
-            self.summarize = dspy.Predict(RecursiveSummary)
-
-    def forward(self, content: str, rubric: str) -> str:
-        """Generate summary using the generic RecursiveSummary signature."""
-        result = self.summarize(content=content, rubric=rubric)
-        return result.summary
-
-
-class GenericMerger(dspy.Module):
-    """
-    Generic merger using RecursiveSummary for merge operations.
-
-    Combines summaries by concatenating them as content and re-summarizing.
-    """
-
-    def __init__(self, use_cot: bool = True):
-        super().__init__()
-        if use_cot:
-            self.merge = dspy.ChainOfThought(RecursiveSummary)
-        else:
-            self.merge = dspy.Predict(RecursiveSummary)
-
-    def forward(self, left_summary: str, right_summary: str, rubric: str) -> str:
-        """Merge summaries by re-summarizing their concatenation."""
-        combined = f"PART 1:\n{left_summary}\n\nPART 2:\n{right_summary}"
-        result = self.merge(content=combined, rubric=rubric)
-        return result.summary
-
 
 # =============================================================================
 # Factory Functions
@@ -250,26 +209,3 @@ def create_summarizers(
         return LeafSummarizer(use_cot=use_cot), MergeSummarizer(use_cot=use_cot)
     else:
         return GenericSummarizer(use_cot=use_cot), GenericMerger(use_cot=use_cot)
-
-
-# =============================================================================
-# Dataclass for Summarization Results
-# =============================================================================
-
-@dataclass
-class SummarizationResult:
-    """Result from a summarization operation."""
-    summary: str
-    input_length: int
-    output_length: int
-    compression_ratio: float
-
-    @classmethod
-    def from_summary(cls, original: str, summary: str) -> "SummarizationResult":
-        """Create result from original text and summary."""
-        return cls(
-            summary=summary,
-            input_length=len(original),
-            output_length=len(summary),
-            compression_ratio=len(summary) / max(len(original), 1),
-        )

@@ -94,6 +94,84 @@ def score_to_error(score: float, max_error: float) -> float:
 
 
 # =============================================================================
+# Bounded Scale
+# =============================================================================
+
+@dataclass(frozen=True)
+class BoundedScale:
+    """
+    A bounded linear scale for score normalization.
+
+    Represents a continuous range with defined bounds.
+    Handles the math of converting distances to normalized scores.
+
+    This class provides compatibility with the SimilarityScorer and Oracle
+    classes in this module. For new code, consider using ScaleDefinition
+    from src.ops_engine.training_framework.tasks.base which provides
+    additional metadata like description, higher_is_better, and neutral_value.
+
+    Examples:
+        # Political positioning (-100 to +100)
+        political = BoundedScale(-100.0, 100.0)
+        score = political.values_to_score(pred, gt)  # 0.0-1.0
+
+        # Percentage scale (0 to 100)
+        pct = BoundedScale(0.0, 100.0)
+    """
+    min_value: float
+    max_value: float
+
+    @property
+    def range(self) -> float:
+        """Get the range of the scale."""
+        return self.max_value - self.min_value
+
+    def normalize(self, value: float) -> float:
+        """Normalize a value to 0-1 range."""
+        return (value - self.min_value) / self.range
+
+    def denormalize(self, normalized: float) -> float:
+        """Convert from 0-1 range back to scale range."""
+        return normalized * self.range + self.min_value
+
+    def clamp(self, value: float) -> float:
+        """Clamp a value to the valid range."""
+        return max(self.min_value, min(self.max_value, value))
+
+    def distance_to_score(self, distance: float) -> float:
+        """
+        Convert distance to normalized similarity score.
+
+        Args:
+            distance: Absolute distance between two values
+
+        Returns:
+            Score in [0.0, 1.0] where 1.0 = no distance (identical)
+        """
+        return max(0.0, 1.0 - abs(distance) / self.range)
+
+    def values_to_score(self, value_a: float, value_b: float) -> float:
+        """
+        Compute similarity score between two values on this scale.
+
+        Args:
+            value_a: First value
+            value_b: Second value
+
+        Returns:
+            Score in [0.0, 1.0] where 1.0 = identical values
+        """
+        distance = abs(value_a - value_b)
+        return self.distance_to_score(distance)
+
+
+# Common scale constants
+UNIT_SCALE = BoundedScale(0.0, 1.0)        # [0, 1] - normalized
+PERCENT_SCALE = BoundedScale(0.0, 100.0)   # [0, 100] - percentages
+SYMMETRIC_SCALE = BoundedScale(-1.0, 1.0)  # [-1, +1] - centered
+
+
+# =============================================================================
 # Generic Oracle (Single-Text Prediction)
 # =============================================================================
 
@@ -586,3 +664,69 @@ def oracle_as_metric_with_feedback(
         }
 
     return metric
+
+
+# =============================================================================
+# Oracle Scorer Factory
+# =============================================================================
+
+def create_oracle_scorer(
+    scorer_module,
+    task_context: str,
+    score_field: str = "score",
+    scale: Optional[BoundedScale] = None,
+) -> Callable[[str], float]:
+    """
+    Factory for creating oracle scorer functions from DSPy modules.
+
+    This creates a simple function that takes text and returns a score,
+    suitable for use in tournament-of-tournaments or preference collection.
+
+    Args:
+        scorer_module: A DSPy module with a forward(text, task_context) method
+                       that returns a dict with the score
+        task_context: Context/instructions for the scoring task
+        score_field: Name of the field containing the score in the result dict
+        scale: Optional BoundedScale to normalize the score to 0-1
+
+    Returns:
+        Function(text: str) -> float
+
+    Example:
+        from src.core.scorers import ScaleScorer
+        from src.core.signatures import MetricScore
+
+        scorer = ScaleScorer(MetricScore)
+        oracle_fn = create_oracle_scorer(
+            scorer_module=scorer,
+            task_context="Rate quality 0-10",
+            score_field="score",
+        )
+        score = oracle_fn("Some text to score")  # Returns 0.0-1.0
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    def oracle_predict(text: str) -> float:
+        """Predict score for text."""
+        try:
+            result = scorer_module(text=text, task_context=task_context)
+
+            # Extract raw score
+            if isinstance(result, dict):
+                raw_score = float(result.get(score_field, 0.0))
+            elif hasattr(result, score_field):
+                raw_score = float(getattr(result, score_field))
+            else:
+                raw_score = 0.0
+
+            # Normalize if scale provided
+            if scale:
+                return scale.normalize(raw_score)
+            return raw_score
+
+        except Exception as e:
+            logger.warning(f"Oracle prediction failed: {e}")
+            return 0.5 if scale else 0.0  # Return neutral on error
+
+    return oracle_predict

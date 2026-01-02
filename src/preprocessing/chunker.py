@@ -244,5 +244,23 @@ def chunk_for_ops(
     return chunks
 
 
-# Alias for compatibility
+# =============================================================================
+# Backward Compatibility Aliases
+# =============================================================================
 DocumentChunker = Chunker
+ParagraphChunker = Chunker  # Legacy name, Chunker handles paragraphs
+
+
+class SentenceSplitter:
+    """
+    Backward-compatible sentence splitter.
+
+    DEPRECATED: Use Chunker directly instead.
+    """
+
+    def __init__(self, max_tokens: int = 500):
+        self._chunker = Chunker(max_tokens=max_tokens)
+
+    def split(self, text: str) -> list:
+        """Split text into sentence-based chunks."""
+        return self._chunker.chunk(text)

@@ -86,7 +86,7 @@ class UnifiedTrainingExample:
         is_violation = self.label == TrainingExampleLabel.POSITIVE
 
         # Get label for metric comparison:
-        # - For RILE/ordinal: use discretized_label from context
+        # - For ordinal scales: use discretized_label from context
         # - For categorical: use violation_type
         label = self.context.get('discretized_label')
         if label is None:

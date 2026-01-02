@@ -1,30 +1,32 @@
 """
-Manifesto RILE Scoring Task.
+Manifesto RILE Scoring - Example Components.
 
-This is the canonical location for all manifesto-related code.
+This module provides RILE-specific components (data loader, scorer, rubrics)
+that can be used with the generic ScoringTask.
+
 RILE scores range from -100 (far left) to +100 (far right).
 
 Usage:
-    from src.tasks.manifesto import ManifestoTask, RILE_SCALE
+    from src.ops_engine.training_framework.tasks import ScoringTask, ScaleDefinition
+    from src.tasks.manifesto import (
+        RILE_SCALE,
+        RILE_PRESERVATION_RUBRIC,
+        ManifestoDataLoader,
+        RILEScorer,
+    )
 
-    task = ManifestoTask()
-    rubric = task.create_rubric()
-    metric = task.create_metric()
-
-Data loading:
-    from src.tasks.manifesto import ManifestoDataset, ManifestoDataLoader
-
-    loader = ManifestoDataLoader()
-    samples = loader.get_temporal_split()
-
-Pipeline components:
-    from src.tasks.manifesto import ManifestoPipelineWithStrategy
-
-    pipeline = ManifestoPipelineWithStrategy(judge=judge)
-    result = pipeline(text="...")
+    # Create task with RILE configuration
+    task = ScoringTask(
+        name="rile",
+        scale=RILE_SCALE,
+        rubric=RILE_PRESERVATION_RUBRIC,
+        data_loader_factory=lambda: ManifestoDataLoader(),
+        predictor_factory=lambda: RILEScorer(),
+    )
 """
 
-from .task import ManifestoTask, RILE_SCALE
+from src.ops_engine.training_framework.tasks import ScaleDefinition
+
 from .constants import (
     RILE_RANGE,
     RILE_MIN,
@@ -35,21 +37,33 @@ from .rubrics import (
     RILE_TASK_CONTEXT,
 )
 
-# Oracle (moved from src/manifesto/position_oracle.py)
+# Oracle
 from .oracle import create_rile_scorer
 
-# Data loading (moved from src/manifesto/data_loader.py)
+# Data loading
 from .data_loader import (
     ManifestoDataset,
-    ManifestoDataLoader,
     ManifestoSample,
     create_pilot_dataset,
 )
+# Alias for backwards compatibility
+ManifestoDataLoader = ManifestoDataset
 
-# Summarizer (moved from src/manifesto/dspy_summarizer.py)
+# Summarizer
 from .summarizer import (
     LeafSummarizer,
     MergeSummarizer,
+    GenericSummarizer,
+)
+
+# DSPy signatures
+from .dspy_signatures import (
+    RILEScore,
+    RILEScorer,
+    RILEComparison,
+    RILEComparator,
+    SimpleScore,
+    PairwiseSummaryComparison,
 )
 
 # Pipeline
@@ -72,10 +86,28 @@ from .pipeline import (
     rile_metric,
     is_placeholder,
 )
+from .metrics import (
+    create_rile_summarization_metric,
+    create_rile_merge_metric,
+)
+
+
+# =============================================================================
+# RILE Scale Definition
+# =============================================================================
+
+RILE_SCALE = ScaleDefinition(
+    name="rile",
+    min_value=-100.0,
+    max_value=100.0,
+    description="Right-Left ideological scale. -100 = far left, +100 = far right",
+    higher_is_better=True,
+    neutral_value=0.0,
+)
+
 
 __all__ = [
-    # Main task
-    "ManifestoTask",
+    # Scale
     "RILE_SCALE",
 
     # Constants
@@ -99,6 +131,15 @@ __all__ = [
     # Summarizers
     "LeafSummarizer",
     "MergeSummarizer",
+    "GenericSummarizer",
+
+    # DSPy signatures and modules
+    "RILEScore",
+    "RILEScorer",
+    "RILEComparison",
+    "RILEComparator",
+    "SimpleScore",
+    "PairwiseSummaryComparison",
 
     # Pipeline signatures
     "RILESummarize",
@@ -120,4 +161,6 @@ __all__ = [
     "create_training_examples",
     "rile_metric",
     "is_placeholder",
+    "create_rile_summarization_metric",
+    "create_rile_merge_metric",
 ]

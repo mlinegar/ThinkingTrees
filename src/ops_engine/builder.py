@@ -35,6 +35,62 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# Chunking Helpers
+# =============================================================================
+
+def chunk_binary(text: str, max_chars: int = 8000) -> List[str]:
+    """
+    Split text into exactly 2 chunks for mini-tree construction.
+
+    Splits at the midpoint, preferring sentence boundaries.
+
+    Args:
+        text: Text to split
+        max_chars: Maximum characters per chunk (hint only; no truncation)
+
+    Returns:
+        List of exactly 2 chunks
+    """
+    if not text or not text.strip():
+        return ["", ""]
+
+    text = text.strip()
+
+    # Find midpoint
+    midpoint = len(text) // 2
+
+    # Look for sentence boundary near midpoint (within 20% of doc length)
+    search_range = len(text) // 5
+    best_split = midpoint
+
+    # Search for sentence endings near midpoint
+    for offset in range(0, search_range):
+        # Check forward
+        pos = midpoint + offset
+        if pos < len(text) and text[pos] in '.!?\n':
+            best_split = pos + 1
+            break
+        # Check backward
+        pos = midpoint - offset
+        if pos > 0 and text[pos] in '.!?\n':
+            best_split = pos + 1
+            break
+
+    left = text[:best_split].strip()
+    right = text[best_split:].strip()
+
+    # Ensure we have two non-empty chunks
+    if not left:
+        left = right[:len(right)//2]
+        right = right[len(right)//2:]
+    if not right:
+        right = left[len(left)//2:]
+        left = left[:len(left)//2]
+
+    return [left, right]
+
+
+# =============================================================================
 # Test/Mock Summarizers (for testing without LLM)
 # =============================================================================
 
@@ -43,20 +99,6 @@ class IdentitySummarizer:
     Summarizer that returns content unchanged.
     Useful for testing tree structure without LLM calls.
     """
-
-    def __call__(self, content: str, rubric: str) -> str:
-        return content
-
-
-class TruncatingSummarizer:
-    """
-    Compatibility summarizer that preserves full content.
-    Kept to avoid truncation while maintaining the old interface.
-    """
-
-    def __init__(self, max_length: int = 500, suffix: str = "..."):
-        self.max_length = max_length
-        self.suffix = suffix
 
     def __call__(self, content: str, rubric: str) -> str:
         return content
@@ -74,6 +116,21 @@ class ConcatenatingSummarizer:
     def __call__(self, content: str, rubric: str) -> str:
         # Add a prefix to show summarization happened
         return f"{self.prefix}{content}"
+
+
+class TruncatingSummarizer:
+    """
+    Summarizer that truncates content to a max length.
+    Useful for testing with predictable output sizes.
+    """
+
+    def __init__(self, max_length: int = 100):
+        self.max_length = max_length
+
+    def __call__(self, content: str, rubric: str) -> str:
+        if len(content) <= self.max_length:
+            return content
+        return content[:self.max_length - 3] + "..."
 
 
 # =============================================================================
@@ -530,8 +587,54 @@ def build_test_tree(num_leaves: int = 4) -> Tree:
 
 
 # =============================================================================
-# Backward Compatibility Aliases
+# Backward Compatibility
 # =============================================================================
 
-# Alias for clarity - AsyncTreeBuilder is just TreeBuilder (async-first design)
-AsyncTreeBuilder = TreeBuilder
+class OPSTreeBuilder:
+    """
+    Backward-compatible builder that accepts a callable summarizer.
+
+    This wrapper provides the old OPSTreeBuilder interface for compatibility
+    with existing code. New code should use TreeBuilder with a Strategy.
+    """
+
+    def __init__(self, summarizer: Callable[[str, str], str], config: Optional[BuildConfig] = None):
+        """
+        Initialize with a summarizer callable.
+
+        Args:
+            summarizer: A callable (content, rubric) -> summary
+            config: Build configuration
+        """
+        from src.core.strategy import CallableStrategy
+        self._strategy = CallableStrategy(summarizer=summarizer)
+        self._builder = TreeBuilder(strategy=self._strategy, config=config or BuildConfig())
+        self.config = self._builder.config
+
+    def build_from_text(self, text: str, rubric: str = "") -> BuildResult:
+        """Build a tree from text using the summarizer."""
+        return self._builder.build_sync(text, rubric)
+
+    def build_from_chunks(self, chunks: List[TextChunk], rubric: str = "") -> BuildResult:
+        """Build a tree from pre-chunked text."""
+        return asyncio.run(self._builder.build_from_chunks(chunks, rubric))
+
+    def build_from_file(self, filepath: Path, rubric: str = "") -> BuildResult:
+        """Build a tree from a file."""
+        return asyncio.run(self._builder.build_from_file(filepath, rubric))
+
+    def reset_stats(self) -> None:
+        """Reset build statistics."""
+        self._builder._build_stats = {
+            'summarizer_calls': 0,
+            'total_input_chars': 0,
+            'total_output_chars': 0
+        }
+
+    def get_stats(self) -> Dict[str, int]:
+        """Get build statistics."""
+        return self._builder._build_stats.copy()
+
+
+# Alias for backward compatibility
+build_ops_tree = build

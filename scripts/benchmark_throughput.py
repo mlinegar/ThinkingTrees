@@ -49,7 +49,7 @@ from src.benchmark.throughput import (
     load_model_config,
     save_results,
 )
-from src.manifesto.data_loader import ManifestoDataset
+from src.tasks.manifesto.data_loader import ManifestoDataset
 
 logging.basicConfig(
     level=logging.INFO,

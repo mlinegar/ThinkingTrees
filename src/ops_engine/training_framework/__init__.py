@@ -81,9 +81,6 @@ from .metrics import (
     oracle_as_metric_with_feedback,
     # Summarization-specific
     summarization,
-    # Deprecated (use create_oracle_metric/create_merge_metric instead)
-    oracle,
-    merge,
 )
 
 # Phase 3: Optimization
@@ -113,34 +110,23 @@ from .optimizers import (
     create_parallel_optimizer,
 )
 
-# Phase 4: Online Learning
-from .online_learning import (
-    OnlineLearningManager,
-    OracleReviewResult,
-    create_online_manager,
-)
 
-# Phase 5: Domain Plugins
-from .domains import (
-    DomainPlugin,
-    AbstractDomain,
-    DomainRegistry,
-    get_domain,
-    list_domains,
-    ManifestoDomain,
-    # Generic/unified types (domain-agnostic)
+# Phase 5: Task Plugins
+from .tasks import (
+    TaskPlugin,
+    AbstractTask,
+    TaskRegistry,
+    get_task,
+    list_tasks,
+    OutputType,
+    ScaleDefinition,
+    LabelDefinition,
+    TaskConfig,
     UnifiedTrainingSource,
     UnifiedResult,
     DEFAULT_UNIFIED_RUBRIC,
 )
 
-# Phase 6: Bootstrapping
-from .bootstrapping import (
-    HierarchicalBootstrapper,
-    BootstrappedExample,
-    ProcessedDocument,
-    create_bootstrapped_trainset,
-)
 
 # Preference learning - base infrastructure
 from .base_preference import (
@@ -167,11 +153,6 @@ from .genrm_preference import (
     GenRMJudge,
     GenRMResult,
     GenRMPreferenceCollector,
-)
-from .oracle_preference import (
-    OraclePreferenceCollector,
-    OraclePreferenceConfig,
-    OracleCandidateMetadata,
 )
 from .ops_comparison_module import (
     OPSLawComparison,
@@ -223,12 +204,9 @@ __all__ = [
     'overall_compliance_rate',
     'create_cached_oracle_metric',
     'get_cache_stats',
-    'create_violation_metric',
     # Score-centric metric converters (preferred)
     'oracle_as_metric',
     'oracle_as_metric_with_feedback',
-    # DSPy-style metric factories
-    'violation',
 
     # Optimization (Phase 3 - legacy)
     'OracleOptimizer',
@@ -250,23 +228,19 @@ __all__ = [
     'ModuleOptimizationConfig',
     'create_parallel_optimizer',
 
-    # Domain Plugins (Phase 5)
-    'DomainPlugin',
-    'AbstractDomain',
-    'DomainRegistry',
-    'get_domain',
-    'list_domains',
-    'ManifestoDomain',
-    # Generic/unified types (domain-agnostic)
+    # Task Plugins (Phase 5)
+    'TaskPlugin',
+    'AbstractTask',
+    'TaskRegistry',
+    'get_task',
+    'list_tasks',
+    'OutputType',
+    'ScaleDefinition',
+    'LabelDefinition',
+    'TaskConfig',
     'UnifiedTrainingSource',
     'UnifiedResult',
     'DEFAULT_UNIFIED_RUBRIC',
-
-    # Bootstrapping (Phase 6)
-    'HierarchicalBootstrapper',
-    'BootstrappedExample',
-    'ProcessedDocument',
-    'create_bootstrapped_trainset',
 
     # Preference learning
     'PreferencePair',
@@ -277,21 +251,14 @@ __all__ = [
     'CollectionStatistics',
     'GenRMJudge',
     'GenRMPreferenceCollector',
-    'OraclePreferenceCollector',
-    'OraclePreferenceConfig',
     'OPSLawComparison',
     'OPSComparisonModule',
     # Labeled tree data structures
     'LabeledNode',
     'LabeledTree',
     'LabeledDataset',
-
-    # Online Learning (Phase 4)
-    'OnlineLearningManager',
-    'OracleReviewResult',
-    'create_online_manager',
 ]
 
 # Note: train_oracle() convenience function has been removed.
 # Classification-based training has been deprecated in favor of continuous score prediction.
-# See src.manifesto.training_integration for score-based training approaches.
+# Task-specific training lives under src/tasks (e.g., src/tasks/manifesto).

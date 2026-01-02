@@ -106,15 +106,14 @@ servers:
 
 # Task Configuration
 # Tasks define what we do with documents (e.g., scoring, summarization, extraction)
-# Available tasks: manifesto_rile, document_analysis
-# NOTE: Task must be explicitly specified via --task flag or config
+# Available tasks: document_analysis, scoring (+ domain-specific like manifesto_rile)
 tasks:
-  default: null  # No default - must be explicitly specified
+  default: "document_analysis"
 
 # Dataset Configuration
 # Datasets define where documents come from (e.g., manifesto corpus, JSONL)
 datasets:
-  default: "manifesto"
+  default: "jsonl"
   manifesto:
     data_dir: null
     require_text: true

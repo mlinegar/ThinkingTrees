@@ -661,6 +661,10 @@ class GenRMPreferenceCollector(BasePreferenceCollector[Dict[str, float]]):
     """
     Collects preference pairs using GenRM for comparison.
 
+    .. deprecated::
+        Use `PreferenceCollector(strategy="genrm", genrm_judge=judge)` instead.
+        This class is maintained for backward compatibility.
+
     Generates multiple candidate summaries and uses GenRM to compare them,
     building a preference dataset for training.
 
@@ -679,6 +683,9 @@ class GenRMPreferenceCollector(BasePreferenceCollector[Dict[str, float]]):
         """
         Initialize the collector.
 
+        .. deprecated::
+            Use `PreferenceCollector(strategy="genrm", genrm_judge=judge)` instead.
+
         Args:
             summarizer: Module for generating summaries
             judge: GenRMJudge for comparing summaries
@@ -686,6 +693,14 @@ class GenRMPreferenceCollector(BasePreferenceCollector[Dict[str, float]]):
             temperatures: List of temperatures for diverse generation
             preference_engine: Engine for deriving preferences (uses default GenRM engine if None)
         """
+        import warnings
+        warnings.warn(
+            "GenRMPreferenceCollector is deprecated. "
+            "Use PreferenceCollector(strategy='genrm', genrm_judge=judge) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
         # Create generation configs from temperatures
         temps = temperatures or [0.3, 0.5, 0.7, 0.9]
         generation_configs = [

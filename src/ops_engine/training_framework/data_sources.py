@@ -25,6 +25,8 @@ from .core import (
     TrainingDataSource,
 )
 from .config import TrainingDataConfig
+from .tasks.base import ScaleDefinition
+from .labeling import ThresholdLabeler
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +108,8 @@ class FullDocumentLabelSource:
     """
     Training data from full-document ground truth labels.
 
-    Uses end-to-end task performance (e.g., RILE scores) to bootstrap
-    node-level training examples.
+    Uses end-to-end task performance to bootstrap node-level training examples.
+    Error thresholds are normalized (0-1 scale representing percentage of scale range).
 
     Strategy:
     - Low error predictions -> negative examples (summaries worked)
@@ -116,21 +118,26 @@ class FullDocumentLabelSource:
 
     def __init__(
         self,
-        error_threshold_high: float = 30.0,
-        error_threshold_low: float = 10.0,
+        scale: Optional[ScaleDefinition] = None,
+        error_threshold_high: float = 0.3,  # Normalized: 30% of scale range
+        error_threshold_low: float = 0.1,   # Normalized: 10% of scale range
         confidence: float = 0.75,
     ):
         """
         Args:
-            error_threshold_high: Errors > this are labeled as violations
-            error_threshold_low: Errors < this are labeled as good
+            scale: ScaleDefinition for the task (used to normalize errors)
+            error_threshold_high: Normalized threshold (0-1); errors > this are violations
+            error_threshold_low: Normalized threshold (0-1); errors < this are good
             confidence: Confidence level for bootstrapped examples
         """
-        self.error_threshold_high = error_threshold_high
-        self.error_threshold_low = error_threshold_low
+        self.scale = scale
         self.confidence = confidence
         self._source_type = "document_label"
         self._results: List[Dict[str, Any]] = []
+        self._labeler = ThresholdLabeler(
+            threshold_high=error_threshold_high,
+            threshold_low=error_threshold_low,
+        )
 
     @property
     def source_type(self) -> str:
@@ -151,7 +158,7 @@ class FullDocumentLabelSource:
 
         Args:
             document_id: Unique identifier for the document
-            predicted_value: Model's prediction (e.g., RILE score)
+            predicted_value: Model's prediction (task score)
             ground_truth_value: True label
             final_summary: The summary produced by OPS
             original_content: Original document content (if available)
@@ -168,25 +175,6 @@ class FullDocumentLabelSource:
             'metadata': metadata or {},
         })
 
-    def add_manifesto_result(self, result: Dict[str, Any]) -> None:
-        """
-        Add a manifesto RILE result directly.
-
-        Convenience method for manifesto experiments.
-        """
-        self.add_result(
-            document_id=result.get('manifesto_id', str(len(self._results))),
-            predicted_value=result.get('estimated_score', 0.0),
-            ground_truth_value=result.get('reference_score', 0.0),
-            final_summary=result.get('final_summary', ''),
-            rubric=f"Preserve political position indicators (target: {result.get('reference_score', 0):.1f})",
-            metadata={
-                'party_name': result.get('party_name'),
-                'country': result.get('country'),
-                'year': result.get('year'),
-            },
-        )
-
     def get_examples(self) -> List[UnifiedTrainingExample]:
         """Bootstrap node-level examples from document-level labels."""
         examples = []
@@ -198,9 +186,20 @@ class FullDocumentLabelSource:
             if predicted is None:
                 continue
 
-            error = abs(predicted - ground_truth)
+            raw_error = abs(predicted - ground_truth)
 
-            if error <= self.error_threshold_low:
+            # Use labeler to determine label (handles normalization internally)
+            label = self._labeler.label_from_error(raw_error, scale=self.scale)
+            if label is None:
+                continue  # Ambiguous - skip
+
+            # Compute normalized error for reporting
+            if self.scale:
+                normalized_error = raw_error / self.scale.range
+            else:
+                normalized_error = raw_error
+
+            if label == TrainingExampleLabel.NEGATIVE:
                 # Good prediction -> summary preserved info (negative example)
                 examples.append(UnifiedTrainingExample(
                     example_id=f"doc_{result['document_id']}_good",
@@ -212,16 +211,17 @@ class FullDocumentLabelSource:
                         'document_id': result['document_id'],
                         'predicted': predicted,
                         'ground_truth': ground_truth,
-                        'error': error,
+                        'error': raw_error,
+                        'normalized_error': normalized_error,
                         **result.get('metadata', {}),
                     },
                     label=TrainingExampleLabel.NEGATIVE,
                     violation_type=ViolationType.NONE,
-                    human_reasoning=f"Predicted {predicted:.1f}, actual {ground_truth:.1f}, error {error:.1f} - acceptable",
+                    human_reasoning=f"Predicted {predicted:.1f}, actual {ground_truth:.1f}, error {raw_error:.1f} ({normalized_error:.1%} of scale) - acceptable",
                     confidence=self.confidence,
                 ))
 
-            elif error >= self.error_threshold_high:
+            else:  # label == TrainingExampleLabel.POSITIVE
                 # Bad prediction -> info lost somewhere (positive example)
                 examples.append(UnifiedTrainingExample(
                     example_id=f"doc_{result['document_id']}_violation",
@@ -233,12 +233,13 @@ class FullDocumentLabelSource:
                         'document_id': result['document_id'],
                         'predicted': predicted,
                         'ground_truth': ground_truth,
-                        'error': error,
+                        'error': raw_error,
+                        'normalized_error': normalized_error,
                         **result.get('metadata', {}),
                     },
                     label=TrainingExampleLabel.POSITIVE,
                     violation_type=ViolationType.SUFFICIENCY,  # Most likely cause
-                    human_reasoning=f"Predicted {predicted:.1f}, actual {ground_truth:.1f}, error {error:.1f} - information loss",
+                    human_reasoning=f"Predicted {predicted:.1f}, actual {ground_truth:.1f}, error {raw_error:.1f} ({normalized_error:.1%} of scale) - information loss",
                     corrected_summary=f"[Expected result: {ground_truth:.1f}]",
                     confidence=self.confidence * 0.9,  # Slightly lower for violations
                 ))

@@ -185,25 +185,6 @@ class TokenCounter:
 
         return result
 
-    def truncate_to_tokens(
-        self,
-        text: str,
-        max_tokens: int,
-        suffix: str = ""
-    ) -> str:
-        """
-        Return text unchanged (truncation disabled).
-
-        Args:
-            text: Text to return
-            max_tokens: Unused (kept for compatibility)
-            suffix: Unused (kept for compatibility)
-
-        Returns:
-            Full text (no truncation)
-        """
-        return text
-
     def split_at_token_boundary(
         self,
         text: str,

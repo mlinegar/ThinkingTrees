@@ -47,8 +47,6 @@ if TYPE_CHECKING:
     from src.ops_engine.training_framework.genrm_preference import GenRMJudge
     from src.ops_engine.training_framework.genrm_dspy import GenRMComparisonModule
 
-from src.training.utils import normalize_error_to_01
-
 logger = logging.getLogger(__name__)
 
 
@@ -86,9 +84,8 @@ class ToTConfig:
     # Oracle comparison (normalized units when errors are normalized)
     tie_margin: float = 0.05             # Error difference below this = tie
     normalize_errors: bool = True        # Normalize errors to 0-1
-    scale_range: Optional[float] = None  # Range for normalization (auto-detected or 1.0)
-                                         # For RILE (-100 to +100), use scale_range=200
-                                         # For 0-1 scales, use scale_range=1.0 (default)
+    scale_range: Optional[float] = None  # Range for normalization (defaults to 1.0)
+                                         # Use the task's scale range when available
 
     # Sampling
     shuffle_samples_each_iteration: bool = True
@@ -162,7 +159,7 @@ class TournamentOfTournamentsTrainer:
 
         Args:
             summarizer: Function(content, rubric) -> summary
-            oracle_predict: Function(text) -> score (e.g., RILE predictor)
+            oracle_predict: Function(text) -> score
             initial_judge: GenRMJudge instance for initial tournament selection
             config: Training configuration
             output_dir: Directory for outputs and checkpoints
@@ -378,7 +375,7 @@ class TournamentOfTournamentsTrainer:
         Add oracle scores to preferences.
 
         For each preference pair, we:
-        1. Score each summary with the oracle (e.g., RILE predictor)
+        1. Score each summary with the oracle
         2. Look up the ground truth score for this document
         3. Compute oracle error for each summary
         4. Update the preference with this data
@@ -414,11 +411,14 @@ class TournamentOfTournamentsTrainer:
                         logger.warning(
                             "No scale_range specified for error normalization. "
                             "Using default 1.0 (DSPy convention). "
-                            "For RILE (-100 to +100), use scale_range=200."
+                            "Set scale_range to the task scale range if normalization is needed."
                         )
                         scale_range = 1.0
-                    error_a = normalize_error_to_01(raw_error_a, scale_range)
-                    error_b = normalize_error_to_01(raw_error_b, scale_range)
+                    if scale_range <= 0:
+                        raise ValueError(f"scale_range must be positive, got {scale_range}.")
+                    # Normalize errors to [0, 1] range
+                    error_a = min(1.0, max(0.0, raw_error_a / scale_range))
+                    error_b = min(1.0, max(0.0, raw_error_b / scale_range))
 
                 # Update preference with oracle data
                 pref.score_estimate_a = score_a

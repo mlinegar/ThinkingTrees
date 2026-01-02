@@ -73,7 +73,7 @@ class LabeledNode:
         confidence: Confidence in the label (0-1, defaults to 1.0)
         left_child_id: Left child for merge nodes
         right_child_id: Right child for merge nodes
-        metadata: Task-specific fields (e.g., left_indicators for RILE)
+        metadata: Task-specific fields (e.g., left_indicators for a task)
         timestamp: When this node was labeled
     """
     node_id: str

@@ -16,113 +16,28 @@ Key components:
 - PreferenceDataset: Manages preference pairs for training
 """
 
-import json
 import logging
-import random
-from dataclasses import dataclass, field
-from datetime import datetime
-from pathlib import Path
-from typing import List, Optional, Dict, Any, Literal, Tuple
+from typing import List, Optional, Dict, Any, Callable, Literal
 
 import dspy
 
-# Import generic signature from core; domain-specific version available in manifesto
+# Import generic signature from core; task-specific versions live under src/tasks
 from src.config.constants import DIVERSE_TEMPERATURES
 from src.core.signatures import PairwiseComparison
 from src.core.output_parser import NormalizedOutputAccessor
 
+# Import shared data types (separated to avoid circular imports)
+from .preference_types import PreferencePair, GenerationConfig, PreferenceDataset
+
+# Import base class for OPS law support (idempotence, merge)
+from .base_preference import (
+    BasePreferenceCollector,
+    CandidateInfo,
+    PreferenceResult,
+    CollectionStatistics,
+)
+
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class PreferencePair:
-    """
-    A single pairwise preference judgment.
-
-    Represents the output of comparing two candidate summaries
-    and determining which better preserves the target information.
-    """
-    # Identifiers
-    pair_id: str
-    source_example_id: str
-
-    # Input context
-    original_text: str
-    rubric: str
-    reference_score: float
-
-    # Candidate summaries
-    summary_a: str
-    summary_b: str
-
-    # Judgment
-    preferred: Literal["A", "B", "tie"]
-    reasoning: str
-    confidence: float
-
-    # Fields with defaults (must come after required fields)
-    law_type: str = "sufficiency"
-
-    # Score estimates from judge
-    score_estimate_a: Optional[float] = None
-    score_estimate_b: Optional[float] = None
-    oracle_error_a: Optional[float] = None
-    oracle_error_b: Optional[float] = None
-
-    # Metadata
-    judge_model: str = ""
-    timestamp: Optional[str] = None
-    generation_config_a: Optional[Dict[str, Any]] = None
-    generation_config_b: Optional[Dict[str, Any]] = None
-
-    def __post_init__(self):
-        if self.timestamp is None:
-            self.timestamp = datetime.now().isoformat()
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        return {
-            "pair_id": self.pair_id,
-            "source_example_id": self.source_example_id,
-            "original_text": self.original_text,
-            "rubric": self.rubric,
-            "reference_score": self.reference_score,
-            "law_type": self.law_type,
-            "summary_a": self.summary_a,
-            "summary_b": self.summary_b,
-            "preferred": self.preferred,
-            "reasoning": self.reasoning,
-            "confidence": self.confidence,
-            "score_estimate_a": self.score_estimate_a,
-            "score_estimate_b": self.score_estimate_b,
-            "oracle_error_a": self.oracle_error_a,
-            "oracle_error_b": self.oracle_error_b,
-            "judge_model": self.judge_model,
-            "timestamp": self.timestamp,
-            "generation_config_a": self.generation_config_a,
-            "generation_config_b": self.generation_config_b,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'PreferencePair':
-        """Create from dictionary."""
-        return cls(**data)
-
-    def get_winner(self) -> Optional[str]:
-        """Return the winning summary, or None for ties."""
-        if self.preferred == "A":
-            return self.summary_a
-        elif self.preferred == "B":
-            return self.summary_b
-        return None
-
-    def get_loser(self) -> Optional[str]:
-        """Return the losing summary, or None for ties."""
-        if self.preferred == "A":
-            return self.summary_b
-        elif self.preferred == "B":
-            return self.summary_a
-        return None
 
 
 class PairwiseJudge(dspy.Module):
@@ -224,123 +139,247 @@ class PairwiseJudge(dspy.Module):
         }
 
 
-@dataclass
-class GenerationConfig:
-    """Configuration for generating candidate summaries."""
-    temperature: float = 0.7
-    top_p: float = 0.95
-    max_tokens: int = 8192
-    prompt_variant: str = "default"
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "max_tokens": self.max_tokens,
-            "prompt_variant": self.prompt_variant,
-        }
-
-
-class PreferenceCollector:
+class PreferenceCollector(BasePreferenceCollector[GenerationConfig]):
     """
-    Collects preference pairs by generating diverse outputs and comparing them.
+    Unified preference collector with strategy-based preference derivation.
+
+    Inherits from BasePreferenceCollector to support all three OPS laws:
+    - Sufficiency: original text → summary preserves information
+    - Idempotence: summarize(summary) ≈ summary
+    - Merge: summarize(A + B) preserves information from both
+
+    Supports three strategies for deriving preferences:
+    - "judge": Uses PairwiseJudge for LLM-based comparison (default)
+    - "genrm": Uses GenRMJudge for NVIDIA's Nemotron GenRM comparison
+    - "oracle": Uses oracle predictions to compute error-based preferences
 
     Workflow:
     1. For each input example, generate k candidate summaries
     2. Create all pairwise comparisons (k choose 2)
-    3. Use the judge model to compare each pair
+    3. Use the configured strategy to compare each pair
     4. Store the preference pairs
+
+    Example:
+        # Judge-based (default, backward compatible)
+        collector = PreferenceCollector(summarizer, judge=my_judge)
+
+        # GenRM-based
+        from src.ops_engine.training_framework.genrm_preference import GenRMJudge
+        genrm = GenRMJudge(base_url="http://localhost:8000")
+        collector = PreferenceCollector(summarizer, strategy="genrm", genrm_judge=genrm)
+
+        # Oracle-based
+        collector = PreferenceCollector(
+            summarizer,
+            strategy="oracle",
+            oracle_predict=lambda text: my_oracle(text),
+        )
+
+        # Collect pairs for different OPS laws
+        sufficiency_pairs = collector.collect_pairs_for_example(
+            example_id="doc1", original_text=text, rubric=rubric, law_type="sufficiency"
+        )
+        idempotence_pairs = collector.collect_pairs_for_example(
+            example_id="doc1", original_text=text, rubric=rubric, law_type="idempotence"
+        )
+        merge_pairs = collector.collect_pairs_for_example(
+            example_id="doc1", original_text=text, rubric=rubric, law_type="merge"
+        )
     """
 
     def __init__(
         self,
         summarizer: dspy.Module,
-        judge: PairwiseJudge,
+        judge: Optional[PairwiseJudge] = None,
         k: int = 4,
         generation_configs: Optional[List[GenerationConfig]] = None,
+        # Strategy support
+        strategy: Literal["judge", "genrm", "oracle"] = "judge",
+        genrm_judge: Optional[Any] = None,  # GenRMJudge
+        oracle_predict: Optional[Any] = None,  # Callable[[str], float]
+        tie_margin: float = 5.0,  # For oracle strategy
     ):
         """
         Initialize the collector.
 
         Args:
             summarizer: DSPy module for generating summaries
-            judge: PairwiseJudge for comparing summaries
+            judge: PairwiseJudge for comparing summaries (required for strategy="judge")
             k: Number of candidate summaries to generate per input
             generation_configs: Configurations for generating diverse outputs
+            strategy: Preference derivation strategy ("judge", "genrm", "oracle")
+            genrm_judge: GenRMJudge instance (required for strategy="genrm")
+            oracle_predict: Function (text) -> float (required for strategy="oracle")
+            tie_margin: Error margin for ties in oracle strategy
         """
-        self.summarizer = summarizer
-        self.judge = judge
-        self.k = k
-
-        # Default configs with varying temperatures
+        # Build generation configs first (needed for super().__init__)
         if generation_configs is None:
             prompt_variants = ["concise", "default", "detailed", "creative"]
-            self.generation_configs = [
+            generation_configs = [
                 GenerationConfig(temperature=temp, prompt_variant=variant)
                 for temp, variant in zip(DIVERSE_TEMPERATURES, prompt_variants)
             ]
-        else:
-            self.generation_configs = generation_configs
 
-        self.pairs: List[PreferencePair] = []
-        self._pair_counter = 0
+        # Initialize base class (provides OPS law support)
+        super().__init__(
+            summarizer=summarizer,
+            k_candidates=k,
+            generation_configs=generation_configs,
+        )
 
-    def generate_candidates(
+        self.k = k
+        self.strategy = strategy
+        self.tie_margin = tie_margin
+
+        # Strategy-specific components
+        self.judge = judge
+        self.genrm_judge = genrm_judge
+        self.oracle_predict = oracle_predict
+
+        # Validate strategy configuration
+        if strategy == "judge" and judge is None:
+            raise ValueError("judge is required when strategy='judge'")
+        if strategy == "genrm" and genrm_judge is None:
+            raise ValueError("genrm_judge is required when strategy='genrm'")
+        if strategy == "oracle" and oracle_predict is None:
+            raise ValueError("oracle_predict is required when strategy='oracle'")
+
+        self._oracle_cache: Dict[str, float] = {}  # For oracle strategy
+
+    def _create_candidate_metadata(
         self,
-        content: str,
-        rubric: str,
-    ) -> List[Tuple[str, GenerationConfig]]:
+        gen_config: GenerationConfig,
+        index: int,
+    ) -> GenerationConfig:
+        """Create metadata for a candidate (returns the GenerationConfig itself)."""
+        return gen_config
+
+    def _get_generation_config_dict(
+        self,
+        metadata: GenerationConfig,
+    ) -> Dict[str, Any]:
+        """Convert GenerationConfig metadata to dictionary."""
+        return metadata.to_dict()
+
+    def _get_pair_id_prefix(self) -> str:
+        """Return strategy-specific pair ID prefix."""
+        return {"judge": "pair", "genrm": "genrm", "oracle": "oracle"}.get(self.strategy, "pref")
+
+    def _get_judge_model_name(self) -> str:
+        """Return name of the judge model."""
+        if self.strategy == "genrm" and self.genrm_judge is not None:
+            return getattr(self.genrm_judge, "model_name", "genrm")
+        return ""
+
+    def _get_oracle_score(self, text: str) -> float:
+        """Get oracle score with caching (for oracle strategy)."""
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+        if text_hash not in self._oracle_cache:
+            self._oracle_cache[text_hash] = self.oracle_predict(text)
+        return self._oracle_cache[text_hash]
+
+    def _derive_preference(
+        self,
+        candidate_a: CandidateInfo[GenerationConfig],
+        candidate_b: CandidateInfo[GenerationConfig],
+        context: Dict[str, Any],
+    ) -> PreferenceResult:
         """
-        Generate k candidate summaries for the input.
+        Derive preference using the configured strategy.
+
+        Implements the abstract method from BasePreferenceCollector.
 
         Args:
-            content: Input content to summarize
-            rubric: Information preservation rubric
+            candidate_a: First candidate with summary and metadata
+            candidate_b: Second candidate with summary and metadata
+            context: Dictionary with original_text, rubric, reference_score, law_type
 
         Returns:
-            List of (summary, config) tuples
+            PreferenceResult with preference, confidence, and reasoning
         """
-        candidates = []
+        summary_a = candidate_a.summary
+        summary_b = candidate_b.summary
+        original_text = context.get("original_text", "")
+        rubric = context.get("rubric", "")
+        reference_score = context.get("reference_score", 0.0)
+        law_type = context.get("law_type", "sufficiency")
 
-        lm = getattr(dspy, "settings", None)
-        lm = getattr(lm, "lm", None)
+        if self.strategy == "judge":
+            # PairwiseJudge-based comparison
+            result = self.judge(
+                original_text=original_text,
+                summary_a=summary_a,
+                summary_b=summary_b,
+                rubric=rubric,
+                reference_score=reference_score,
+            )
+            return PreferenceResult(
+                preferred=result["preferred"],
+                reasoning=result["reasoning"],
+                confidence=result["confidence"],
+                score_estimate_a=result.get("score_estimate_a"),
+                score_estimate_b=result.get("score_estimate_b"),
+            )
 
-        for config in self.generation_configs[:self.k]:
-            prev_temp = None
-            prev_top_p = None
-            prev_max_tokens = None
-            if lm is not None and hasattr(lm, "kwargs"):
-                prev_temp = lm.kwargs.get("temperature")
-                prev_top_p = lm.kwargs.get("top_p")
-                prev_max_tokens = lm.kwargs.get("max_tokens")
-                lm.kwargs["temperature"] = config.temperature
-                lm.kwargs["top_p"] = config.top_p
-                lm.kwargs["max_tokens"] = config.max_tokens
+        elif self.strategy == "genrm":
+            # GenRM-based comparison
+            result = self.genrm_judge.compare(
+                context=rubric,
+                original_text=original_text,
+                summary_a=summary_a,
+                summary_b=summary_b,
+                law_type=law_type,
+            )
+            # Handle error results
+            if hasattr(result, 'is_error') and result.is_error():
+                return PreferenceResult(
+                    preferred="tie",
+                    reasoning=f"GenRM error: {result.error_message}",
+                    confidence=0.0,
+                )
+            return PreferenceResult(
+                preferred=result.preferred,
+                reasoning=result.reasoning,
+                confidence=result.confidence,
+                score_estimate_a=result.helpfulness_a,
+                score_estimate_b=result.helpfulness_b,
+            )
 
-            try:
-                result = self.summarizer(content=content, rubric=rubric)
-                summary = getattr(result, 'summary', str(result))
-                candidates.append((summary, config))
-            except Exception as e:
-                logger.warning(f"Failed to generate candidate: {e}")
-            finally:
-                if lm is not None and hasattr(lm, "kwargs"):
-                    if prev_temp is None:
-                        lm.kwargs.pop("temperature", None)
-                    else:
-                        lm.kwargs["temperature"] = prev_temp
-                    if prev_top_p is None:
-                        lm.kwargs.pop("top_p", None)
-                    else:
-                        lm.kwargs["top_p"] = prev_top_p
-                    if prev_max_tokens is None:
-                        lm.kwargs.pop("max_tokens", None)
-                    else:
-                        lm.kwargs["max_tokens"] = prev_max_tokens
+        elif self.strategy == "oracle":
+            # Oracle-based comparison using error difference
+            score_a = self._get_oracle_score(summary_a)
+            score_b = self._get_oracle_score(summary_b)
 
-        return candidates
+            error_a = abs(score_a - reference_score)
+            error_b = abs(score_b - reference_score)
+            error_diff = error_a - error_b
 
-    def pairs(
+            # Lower error is better, so positive diff means A is worse
+            if error_diff > self.tie_margin:
+                preferred = "B"
+                confidence = min(0.5 + abs(error_diff) / 50, 0.95)
+            elif error_diff < -self.tie_margin:
+                preferred = "A"
+                confidence = min(0.5 + abs(error_diff) / 50, 0.95)
+            else:
+                preferred = "tie"
+                confidence = 0.5
+
+            return PreferenceResult(
+                preferred=preferred,
+                reasoning=f"Oracle errors: A={error_a:.2f}, B={error_b:.2f}",
+                confidence=confidence,
+                score_estimate_a=score_a,
+                score_estimate_b=score_b,
+                oracle_error_a=error_a,
+                oracle_error_b=error_b,
+            )
+
+        else:
+            raise ValueError(f"Unknown strategy: {self.strategy}")
+
+    # Backward compatibility: collect_pairs delegates to collect_pairs_for_example
+    def collect_pairs(
         self,
         example_id: str,
         original_text: str,
@@ -352,77 +391,32 @@ class PreferenceCollector:
         """
         Generate candidates and collect all pairwise preferences for one example.
 
+        This is a backward-compatible wrapper around collect_pairs_for_example.
+
         Args:
             example_id: Unique identifier for this example
             original_text: Original source text
             rubric: Information preservation rubric
             reference_score: Ground truth score for original
-            judge_model: Name of the judge model being used
+            law_type: OPS law type (sufficiency, idempotence, merge)
+            judge_model: Name of the judge model being used (ignored, uses strategy)
 
         Returns:
             List of preference pairs
         """
-        # Generate candidates
-        candidates = self.generate_candidates(original_text, rubric)
+        return self.collect_pairs_for_example(
+            example_id=example_id,
+            original_text=original_text,
+            rubric=rubric,
+            reference_score=reference_score,
+            law_type=law_type,
+        )
 
-        if len(candidates) < 2:
-            logger.warning(f"Only generated {len(candidates)} candidates for {example_id}")
-            return []
-
-        pairs = []
-
-        # Create all pairwise comparisons
-        for i in range(len(candidates)):
-            for j in range(i + 1, len(candidates)):
-                summary_a, config_a = candidates[i]
-                summary_b, config_b = candidates[j]
-
-                # Randomly swap to avoid position bias
-                if random.random() < 0.5:
-                    summary_a, summary_b = summary_b, summary_a
-                    config_a, config_b = config_b, config_a
-
-                try:
-                    # Get judge's preference
-                    result = self.judge(
-                        original_text=original_text,
-                        summary_a=summary_a,
-                        summary_b=summary_b,
-                        rubric=rubric,
-                        reference_score=reference_score,
-                    )
-
-                    self._pair_counter += 1
-                    pair = PreferencePair(
-                        pair_id=f"pair_{self._pair_counter:06d}",
-                        source_example_id=example_id,
-                        original_text=original_text,
-                        rubric=rubric,
-                        reference_score=reference_score,
-                        law_type=law_type,
-                        summary_a=summary_a,
-                        summary_b=summary_b,
-                        preferred=result["preferred"],
-                        reasoning=result["reasoning"],
-                        confidence=result["confidence"],
-                        score_estimate_a=result.get("score_estimate_a"),
-                        score_estimate_b=result.get("score_estimate_b"),
-                        judge_model=judge_model,
-                        generation_config_a=config_a.to_dict(),
-                        generation_config_b=config_b.to_dict(),
-                    )
-                    pairs.append(pair)
-                    self.pairs.append(pair)
-
-                except Exception as e:
-                    logger.error(f"Failed to judge pair: {e}")
-                    continue
-
-        return pairs
-
-    def get_all_pairs(self) -> List[PreferencePair]:
-        """Return all collected preference pairs."""
-        return self.pairs
+    @property
+    def pairs(self) -> List[PreferencePair]:
+        """Return all collected preference pairs (property for backward compatibility)."""
+        # Use parent class's pairs list
+        return super().get_all_pairs()
 
     def get_non_tie_pairs(self) -> List[PreferencePair]:
         """Return only pairs with clear preferences (no ties)."""
@@ -432,183 +426,6 @@ class PreferenceCollector:
         """Return pairs with confidence above threshold."""
         return [p for p in self.pairs if p.confidence >= threshold]
 
-
-class PreferenceDataset:
-    """
-    Dataset of preference pairs for training.
-
-    Supports saving/loading, filtering, and conversion to training formats.
-    """
-
-    def __init__(self, pairs: Optional[List[PreferencePair]] = None):
-        """
-        Initialize the dataset.
-
-        Args:
-            pairs: Initial list of preference pairs
-        """
-        self.pairs = pairs or []
-
-    def add_pair(self, pair: PreferencePair):
-        """Add a preference pair to the dataset."""
-        self.pairs.append(pair)
-
-    def add_pairs(self, pairs: List[PreferencePair]):
-        """Add multiple preference pairs."""
-        self.pairs.extend(pairs)
-
-    def __len__(self) -> int:
-        return len(self.pairs)
-
-    def __getitem__(self, idx: int) -> PreferencePair:
-        return self.pairs[idx]
-
-    def filter_by_confidence(self, min_confidence: float) -> 'PreferenceDataset':
-        """Return new dataset with pairs above confidence threshold."""
-        filtered = [p for p in self.pairs if p.confidence >= min_confidence]
-        return PreferenceDataset(filtered)
-
-    def filter_non_ties(self) -> 'PreferenceDataset':
-        """Return new dataset excluding ties."""
-        filtered = [p for p in self.pairs if p.preferred != "tie"]
-        return PreferenceDataset(filtered)
-
-    def split(
-        self,
-        train_ratio: float = 0.8,
-        shuffle: bool = True,
-    ) -> Tuple['PreferenceDataset', 'PreferenceDataset']:
-        """
-        Split into train and validation sets.
-
-        Args:
-            train_ratio: Fraction for training set
-            shuffle: Whether to shuffle before splitting
-
-        Returns:
-            Tuple of (train_dataset, val_dataset)
-        """
-        pairs = self.pairs.copy()
-        if shuffle:
-            random.shuffle(pairs)
-
-        split_idx = int(len(pairs) * train_ratio)
-        return (
-            PreferenceDataset(pairs[:split_idx]),
-            PreferenceDataset(pairs[split_idx:]),
-        )
-
-    def to_dspy_examples(self) -> List[dspy.Example]:
-        """
-        Convert to DSPy examples for training.
-
-        Returns:
-            List of DSPy examples with inputs and preferred output
-        """
-        examples = []
-        for pair in self.pairs:
-            if pair.preferred == "tie":
-                continue
-
-            example = dspy.Example(
-                law_type=pair.law_type,
-                rubric=pair.rubric,
-                original_text=pair.original_text,
-                summary_a=pair.summary_a,
-                summary_b=pair.summary_b,
-                reference_score=pair.reference_score,
-                preferred=pair.preferred,
-                reasoning=pair.reasoning,
-                confidence=pair.confidence,
-            ).with_inputs(
-                "law_type", "rubric", "original_text", "summary_a", "summary_b", "reference_score"
-            )
-            examples.append(example)
-
-        return examples
-
-    def to_dpo_format(self, law_type: Optional[str] = None) -> List[Dict[str, Any]]:
-        """
-        Convert to DPO (Direct Preference Optimization) format.
-
-        Returns:
-            List of dicts with prompt, chosen, rejected
-        """
-        dpo_data = []
-        for pair in self.pairs:
-            if pair.preferred == "tie":
-                continue
-            if law_type is not None and pair.law_type != law_type:
-                continue
-
-            prompt = f"""Summarize the following text while preserving: {pair.rubric}
-
-Text: {pair.original_text}
-
-Summary:"""
-
-            if pair.preferred == "A":
-                chosen = pair.summary_a
-                rejected = pair.summary_b
-            else:
-                chosen = pair.summary_b
-                rejected = pair.summary_a
-
-            dpo_data.append({
-                "prompt": prompt,
-                "chosen": chosen,
-                "rejected": rejected,
-                "metadata": {
-                    "pair_id": pair.pair_id,
-                    "confidence": pair.confidence,
-                    "reference_score": pair.reference_score,
-                    "law_type": pair.law_type,
-                },
-            })
-
-        return dpo_data
-
-    def save(self, path: Path):
-        """Save dataset to JSON file."""
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        data = {
-            "version": "1.0",
-            "created_at": datetime.now().isoformat(),
-            "num_pairs": len(self.pairs),
-            "pairs": [p.to_dict() for p in self.pairs],
-        }
-
-        with open(path, 'w') as f:
-            json.dump(data, f, indent=2)
-
-        logger.info(f"Saved {len(self.pairs)} preference pairs to {path}")
-
-    @classmethod
-    def load(cls, path: Path) -> 'PreferenceDataset':
-        """Load dataset from JSON file."""
-        with open(path) as f:
-            data = json.load(f)
-
-        pairs = [PreferencePair.from_dict(p) for p in data["pairs"]]
-        logger.info(f"Loaded {len(pairs)} preference pairs from {path}")
-
-        return cls(pairs)
-
-    def summary(self) -> Dict[str, Any]:
-        """Return summary statistics about the dataset."""
-        non_ties = [p for p in self.pairs if p.preferred != "tie"]
-
-        return {
-            "total_pairs": len(self.pairs),
-            "non_tie_pairs": len(non_ties),
-            "tie_pairs": len(self.pairs) - len(non_ties),
-            "prefer_a": sum(1 for p in self.pairs if p.preferred == "A"),
-            "prefer_b": sum(1 for p in self.pairs if p.preferred == "B"),
-            "avg_confidence": (
-                sum(p.confidence for p in self.pairs) / len(self.pairs)
-                if self.pairs else 0
-            ),
-            "high_confidence_pairs": sum(1 for p in self.pairs if p.confidence >= 0.8),
-        }
+    def get_statistics(self) -> Dict[str, Any]:
+        """Return comprehensive collection statistics."""
+        return self.stats.to_dict()

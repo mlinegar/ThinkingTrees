@@ -118,8 +118,7 @@ def get_server_urls(settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]
     }
 
 
-# Defaults - document_analysis is the general-purpose domain
-# Use manifesto_rile for political manifesto scoring tasks
+# Defaults
 DEFAULT_TASK = "document_analysis"
 DEFAULT_DATASET = "jsonl"  # Generic format, manifesto for manifesto-specific
 
@@ -131,7 +130,7 @@ def get_default_task(settings: Optional[Dict[str, Any]] = None) -> str:
     Priority:
     1. TASK environment variable
     2. settings.yaml tasks.default
-    3. Default: document_analysis
+    3. DEFAULT_TASK constant
 
     Args:
         settings: Pre-loaded settings dict, or None to load from file.
@@ -163,7 +162,7 @@ def get_default_dataset(settings: Optional[Dict[str, Any]] = None) -> str:
     Priority:
     1. DATASET environment variable
     2. settings.yaml datasets.default
-    3. Default: manifesto
+    3. Default: jsonl
     """
     env_dataset = os.environ.get("DATASET")
     if env_dataset:

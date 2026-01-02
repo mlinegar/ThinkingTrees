@@ -8,12 +8,11 @@ This script is called by scripts/run_training_pipeline.sh and provides
 the main entry point for training the OPS summarization pipeline.
 
 The pipeline is task-agnostic via the --task flag and dataset-agnostic via
-the --dataset flag. Default task uses the manifesto RILE scorer on the
-manifesto dataset.
+the --dataset flag.
 
 Example:
     python -m src.training.run_pipeline --port 8000 --train-samples 30
-    python -m src.training.run_pipeline --task manifesto_rile --dataset manifesto --port 8000
+    python -m src.training.run_pipeline --task document_analysis --dataset jsonl --port 8000
 
 """
 
@@ -154,11 +153,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--inference-only', action='store_true',
                         help='Run inference only (requires --load-scorer-path)')
 
-    # Scale configuration (generalized from RILE-specific)
-    parser.add_argument('--scale-min', type=float, default=-100.0,
-                        help='Minimum value of the scoring scale (default: -100)')
-    parser.add_argument('--scale-max', type=float, default=100.0,
-                        help='Maximum value of the scoring scale (default: 100)')
+    # Scale configuration (task-derived when available)
+    parser.add_argument('--scale-min', type=float, default=None,
+                        help='Minimum value of the scoring scale (required if task has no scale)')
+    parser.add_argument('--scale-max', type=float, default=None,
+                        help='Maximum value of the scoring scale (required if task has no scale)')
 
     # Task/dataset configuration
     parser.add_argument('--task', type=str, default=None,
@@ -574,6 +573,49 @@ def load_doc_data(
     return train_samples, val_samples, test_samples
 
 
+def normalize_samples_scores(samples: List[Any], task: Any) -> None:
+    """Normalize reference scores on samples in-place to 0-1."""
+    for sample in samples:
+        if sample is None:
+            continue
+        raw = getattr(sample, "reference_score", None)
+        if raw is None:
+            continue
+        try:
+            normalized = task.normalize_score(raw)
+        except Exception:
+            continue
+        sample.reference_score = normalized
+        metadata = getattr(sample, "metadata", None)
+        if isinstance(metadata, dict):
+            metadata["score_normalized"] = True
+
+
+def normalize_result_scores(results: List[Any], task: Any) -> None:
+    """Normalize result scores in-place to 0-1 when needed."""
+    for result in results:
+        if result is None:
+            continue
+        metadata = getattr(result, "metadata", None)
+        already_normalized = isinstance(metadata, dict) and metadata.get("score_normalized")
+        if already_normalized:
+            continue
+
+        for field in ("reference_score", "estimated_score", "baseline_score"):
+            value = getattr(result, field, None)
+            if value is None:
+                continue
+            if 0.0 <= float(value) <= 1.0:
+                continue
+            try:
+                setattr(result, field, task.normalize_score(value))
+            except Exception:
+                continue
+
+        if isinstance(metadata, dict):
+            metadata["score_normalized"] = True
+
+
 def process_docs(
     samples: List[Any],
     args: argparse.Namespace,
@@ -645,7 +687,7 @@ def run_optimization(
     """
     from src.ops_engine.training_framework import OptimizationConfig
     from src.ops_engine.training_framework.optimizers import get_optimizer
-    from src.ops_engine.scoring import BoundedScale
+    from src.ops_engine.scoring import UNIT_SCALE
 
     logger.info("Starting optimization...")
 
@@ -674,13 +716,12 @@ def run_optimization(
         except Exception as e:
             logger.warning(f"Could not configure optimization model: {e}, using default")
 
-    # Create scale - use task's scale if available, otherwise from args
+    # Internal optimization uses normalized 0-1 scale
+    scale = UNIT_SCALE
     if task.scale is not None:
-        scale = BoundedScale(task.scale.min_value, task.scale.max_value)
-        logger.info(f"Using task scale '{task.scale.name}': [{scale.min_value}, {scale.max_value}]")
+        logger.info(f"Using normalized scale for task '{task.scale.name}': [0.0, 1.0]")
     else:
-        scale = BoundedScale(args.scale_min, args.scale_max)
-        logger.info(f"Using custom scale: [{scale.min_value}, {scale.max_value}] (range: {scale.range})")
+        logger.info("Using normalized scale: [0.0, 1.0]")
 
     # Create optimization config
     opt_config = OptimizationConfig(
@@ -720,14 +761,14 @@ def run_optimization(
     # Create score prediction metric (task-agnostic)
     # This metric compares predicted score to reference_score
     # Use task's output_field_name for prediction access
-    score_field = task.output_field_name  # e.g., 'rile_score' for manifesto, 'score' for generic
+    score_field = task.output_field_name
 
     def score_prediction_metric(example, prediction, trace=None, pred_name=None, pred_trace=None) -> float:
         """
         Score prediction metric.
 
-        Compares predicted score to reference_score using normalized error.
-        Score = 1 - |predicted - reference| / scale.range
+        Compares predicted score to reference_score on a 0-1 scale.
+        Score = 1 - |predicted - reference|
         """
         try:
             # Get reference score from example
@@ -858,14 +899,31 @@ def run_optimization(
     return stats, scorer
 
 
+def write_score_report(
+    rows: List[Dict[str, Any]],
+    output_dir: Optional[Path],
+    split_name: str,
+) -> Optional[Path]:
+    """Write per-document score report (raw + normalized) as JSONL."""
+    if not output_dir:
+        return None
+    report_path = output_dir / f"{split_name}_score_report.jsonl"
+    with open(report_path, "w") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+    return report_path
+
+
 def evaluate_on_test(
     test_results: List[Any],
     scorer: Any,
     args: argparse.Namespace,
     task: Any,
+    output_dir: Optional[Path] = None,
+    split_name: str = "test",
 ) -> Dict[str, Any]:
-    """Evaluate on test set with comprehensive scale-relative metrics."""
-    logger.info("Evaluating on test set...")
+    """Evaluate on a split with normalized (0-1) metrics."""
+    logger.info(f"Evaluating on {split_name} set...")
 
     test_examples = task.create_trainset(test_results)
 
@@ -876,13 +934,15 @@ def evaluate_on_test(
     results_with_errors = []
     failures = 0
 
-    for ex in test_examples:
+    for idx, ex in enumerate(test_examples):
         try:
             result = scorer(text=ex.summary, task_context=ex.rubric)
             pred_score = float(result.get(task.output_field_name, result.get('score', 0)))
-            true_score = ex.reference_score
+            true_score = float(ex.reference_score)
             error = abs(pred_score - true_score)
+            doc_id = getattr(ex, 'original_content', None) or getattr(ex, 'doc_id', None) or f"example_{idx}"
             results_with_errors.append({
+                'doc_id': doc_id,
                 'example': ex,
                 'predicted': pred_score,
                 'actual': true_score,
@@ -897,18 +957,15 @@ def evaluate_on_test(
 
     errors = [r['error'] for r in results_with_errors]
 
-    # Get scale range from task for normalized thresholds
-    scale = getattr(task, 'scale', None)
-    scale_range = scale.range if scale else (args.scale_max - args.scale_min)
+    # Normalized thresholds (0-1 scale)
+    threshold_5pct = 0.05
+    threshold_10pct = 0.10
 
-    # Scale-relative thresholds
-    threshold_5pct = scale_range * 0.05   # 5% of scale range
-    threshold_10pct = scale_range * 0.10  # 10% of scale range
-
-    # Compute comprehensive metrics
+    # Compute comprehensive metrics (normalized scale)
+    mae = sum(errors) / len(errors)
     metrics = {
-        'mae': sum(errors) / len(errors),
-        'mae_normalized': sum(errors) / len(errors) / scale_range,  # 0-1 scale
+        'mae': mae,
+        'mae_normalized': mae,
         'within_5pct': sum(1 for e in errors if e <= threshold_5pct) / len(errors) * 100,
         'within_10pct': sum(1 for e in errors if e <= threshold_10pct) / len(errors) * 100,
         'max_error': max(errors),
@@ -916,14 +973,34 @@ def evaluate_on_test(
         'n_examples': len(test_examples),
         'n_evaluated': len(results_with_errors),
         'n_failures': failures,
-        'scale_range': scale_range,
     }
+    metrics['within_5pct_normalized'] = metrics['within_5pct']
+    metrics['within_10pct_normalized'] = metrics['within_10pct']
+    metrics['max_error_normalized'] = metrics['max_error']
+    metrics['min_error_normalized'] = metrics['min_error']
+
+    report_rows = []
+    for r in results_with_errors:
+        report_rows.append({
+            'doc_id': r['doc_id'],
+            'predicted': r['predicted'],
+            'actual': r['actual'],
+            'error': r['error'],
+        })
+    report_path = write_score_report(report_rows, output_dir, split_name)
+    if report_path:
+        metrics['report_path'] = str(report_path)
 
     # Log worst predictions for debugging
     sorted_results = sorted(results_with_errors, key=lambda x: x['error'], reverse=True)
     logger.info("Worst 5 predictions:")
     for r in sorted_results[:5]:
-        logger.info(f"  Pred={r['predicted']:.1f}, Actual={r['actual']:.1f}, Error={r['error']:.1f}")
+        logger.info(
+            "  Pred=%.3f, Actual=%.3f, Error=%.3f",
+            r['predicted'],
+            r['actual'],
+            r['error'],
+        )
 
     return metrics
 
@@ -1098,6 +1175,9 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
 
     # Load data
     train_samples, val_samples, test_samples = load_doc_data(args, dataset)
+    normalize_samples_scores(train_samples, task)
+    normalize_samples_scores(val_samples, task)
+    normalize_samples_scores(test_samples, task)
 
     stats = {
         'started_at': datetime.now().isoformat(),
@@ -1134,6 +1214,8 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 phase1_data = pickle.load(f)
                 train_results = phase1_data['train_results']
                 val_results = phase1_data['val_results']
+            normalize_result_scores(train_results, task)
+            normalize_result_scores(val_results, task)
             logger.info(f"Loaded {len(train_results)} train, {len(val_results)} val results from checkpoint")
         else:
             logger.info("\n" + "=" * 60)
@@ -1142,6 +1224,8 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
 
             train_results = process_docs(train_samples, args, task, "Train")
             val_results = process_docs(val_samples, args, task, "Val")
+            normalize_result_scores(train_results, task)
+            normalize_result_scores(val_results, task)
 
             # Save phase 1 checkpoint
             with open(phase1_checkpoint, 'w') as f:
@@ -1301,18 +1385,9 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
             if len(tot_samples) < 10:
                 logger.warning(f"Only {len(tot_samples)} samples for ToT, may be insufficient")
 
-            # Configure ToT (normalize tie margin to 0-1 when scale is available)
-            scale_range = None
-            if hasattr(task, 'scale') and task.scale:
-                scale_range = getattr(task.scale, 'range', None)
-            if not scale_range:
-                logger.warning(
-                    "No scale_range found from task. Using default 1.0. "
-                    "For RILE, ensure task.scale.range=200 or pass --scale-min/-max."
-                )
-                scale_range = 1.0
-            raw_tie_margin = 5.0
-            normalized_tie_margin = min(0.05, raw_tie_margin / scale_range) if scale_range > 0 else 0.05
+            # Configure ToT with normalized 0-1 scale
+            scale_range = 1.0
+            normalized_tie_margin = 0.05
 
             preference_labeler = None
             if hasattr(task, 'create_preference_labeler'):
@@ -1345,7 +1420,7 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
             logger.info(f"  Samples per iteration: {tot_config.n_samples_per_iteration}")
             logger.info(f"  Judge budget: {tot_config.judge_budget}")
             logger.info(f"  Judge test split: {tot_config.judge_test_split:.2f}")
-            logger.info(f"  Tie margin (normalized): {tot_config.tie_margin:.4f} (raw ~{raw_tie_margin})")
+            logger.info(f"  Tie margin (normalized): {tot_config.tie_margin:.4f}")
 
             # Run Tournament of Tournaments
             trainer = TournamentOfTournamentsTrainer(
@@ -1547,26 +1622,87 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 except Exception as e:
                     logger.warning(f"Failed to save trained scorer: {e}")
 
-        # Phase 3: Test evaluation
-        if test_samples and trained_scorer is not None:
+        # Phase 3: Train/Test evaluation
+        if trained_scorer is not None:
             logger.info("\n" + "=" * 60)
-            logger.info("PHASE 3: Test Evaluation")
+            logger.info("PHASE 3: Train/Test Evaluation")
             logger.info("=" * 60)
 
-            test_results = process_docs(test_samples, args, task, "Test")
-            test_eval = evaluate_on_test(test_results, trained_scorer, args, task)
-            stats['test'] = test_eval
-            if 'error' not in test_eval:
-                logger.info(f"Test Results:")
-                logger.info(f"  MAE: {test_eval.get('mae', 0):.2f} (normalized: {test_eval.get('mae_normalized', 0):.3f})")
-                logger.info(f"  Within 5%: {test_eval.get('within_5pct', 0):.1f}%")
-                logger.info(f"  Within 10%: {test_eval.get('within_10pct', 0):.1f}%")
-                logger.info(f"  Evaluated: {test_eval.get('n_evaluated', 0)}/{test_eval.get('n_examples', 0)}")
+            train_eval = evaluate_on_test(
+                train_results,
+                trained_scorer,
+                args,
+                task,
+                output_dir=output_dir,
+                split_name="train",
+            )
+            stats['train'] = train_eval
+            if 'error' not in train_eval:
+                logger.info("Train Results:")
+                logger.info(
+                    "  MAE: %.3f",
+                    train_eval.get('mae', 0),
+                )
+                logger.info(
+                    "  Within 5%%: %.1f%%",
+                    train_eval.get('within_5pct', 0),
+                )
+                logger.info(
+                    "  Within 10%%: %.1f%%",
+                    train_eval.get('within_10pct', 0),
+                )
+                logger.info(
+                    "  Evaluated: %s/%s",
+                    train_eval.get('n_evaluated', 0),
+                    train_eval.get('n_examples', 0),
+                )
+                if train_eval.get('report_path'):
+                    logger.info("  Report: %s", train_eval.get('report_path'))
             else:
-                logger.error(f"Test evaluation error: {test_eval.get('error')}")
+                logger.error("Train evaluation error: %s", train_eval.get('error'))
+
+            if test_samples:
+                test_results = process_docs(test_samples, args, task, "Test")
+                normalize_result_scores(test_results, task)
+                test_eval = evaluate_on_test(
+                    test_results,
+                    trained_scorer,
+                    args,
+                    task,
+                    output_dir=output_dir,
+                    split_name="test",
+                )
+                stats['test'] = test_eval
+                if 'error' not in test_eval:
+                    logger.info("Test Results:")
+                    logger.info(
+                        "  MAE: %.3f",
+                        test_eval.get('mae', 0),
+                    )
+                    logger.info(
+                        "  Within 5%%: %.1f%%",
+                        test_eval.get('within_5pct', 0),
+                    )
+                    logger.info(
+                        "  Within 10%%: %.1f%%",
+                        test_eval.get('within_10pct', 0),
+                    )
+                    logger.info(
+                        "  Evaluated: %s/%s",
+                        test_eval.get('n_evaluated', 0),
+                        test_eval.get('n_examples', 0),
+                    )
+                    if test_eval.get('report_path'):
+                        logger.info("  Report: %s", test_eval.get('report_path'))
+                else:
+                    logger.error("Test evaluation error: %s", test_eval.get('error'))
+            else:
+                logger.info("Skipping test evaluation: no test samples provided")
+                stats['test'] = {'processed': 0, 'evaluated': False}
         elif test_samples:
-            logger.warning("Skipping test evaluation: no trained scorer available")
+            logger.warning("Skipping train/test evaluation: no trained scorer available")
             test_results = process_docs(test_samples, args, task, "Test")
+            normalize_result_scores(test_results, task)
             stats['test'] = {'processed': len(test_results), 'evaluated': False}
 
         stats['completed_at'] = datetime.now().isoformat()

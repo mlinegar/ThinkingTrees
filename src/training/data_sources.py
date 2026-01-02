@@ -10,7 +10,7 @@ enabling the unified preference collection script to work with:
 Example usage:
     # Direct documents
     source = DirectDocumentSource(
-        task=get_task("manifesto_rile"),
+        task=get_task("document_analysis"),
         max_documents=100,
     )
     for example in source.get_examples():
@@ -98,11 +98,10 @@ class DirectDocumentSource:
     """
     Load documents directly from a task's data loader.
 
-    Uses the task's data loader (e.g., ManifestoDataLoader) to get documents
-    with their ground truth scores.
+    Uses the task's data loader to get documents with their ground truth scores.
 
     Example:
-        task = get_task("manifesto_rile")
+        task = get_task("document_analysis")
         source = DirectDocumentSource(task, max_documents=100)
         for example in source.get_examples():
             print(example.example_id, example.reference_score)
@@ -113,21 +112,18 @@ class DirectDocumentSource:
         task: "AbstractTask",
         max_documents: Optional[int] = None,
         splits: Optional[List[str]] = None,
-        truncate_length: Optional[int] = None,
     ):
         """
         Initialize direct document source.
 
         Args:
-            task: AbstractTask instance (e.g., ManifestoTask)
+            task: AbstractTask instance
             max_documents: Maximum documents to return (None = all)
             splits: Which splits to include (default: ["train", "val"])
-            truncate_length: Deprecated/ignored; content is never truncated
         """
         self.task = task
         self.max_documents = max_documents
         self.splits = splits or ["train", "val"]
-        self.truncate_length = truncate_length
         self._rubric: Optional[str] = None
 
     @property
@@ -149,16 +145,35 @@ class DirectDocumentSource:
 
         rubric = self.get_rubric()
 
+        def get_value(item: Any, key: str, default: Any = None) -> Any:
+            if isinstance(item, dict):
+                return item.get(key, default)
+            return getattr(item, key, default)
+
         for i, sample in enumerate(samples):
-            doc_id = sample.get("id", f"doc_{i}")
-            doc_text = sample.get("text", "") or sample.get("content", "")
+            doc_id = get_value(sample, self.task.id_field, None)
+            if doc_id is None:
+                doc_id = get_value(sample, "id", f"doc_{i}")
+
+            doc_text = (
+                get_value(sample, self.task.text_field, "") or
+                get_value(sample, "text", "") or
+                get_value(sample, "content", "")
+            )
 
             if not doc_text:
                 logger.warning(f"Skipping document {doc_id}: no text")
                 continue
-
-
-            ground_truth = sample.get("rile", sample.get("score", None))
+            ground_truth = get_value(sample, self.task.label_field, None)
+            if ground_truth is None:
+                ground_truth = get_value(sample, "reference_score", None)
+            if ground_truth is None:
+                ground_truth = get_value(sample, "score", None)
+            if ground_truth is not None and hasattr(self.task, "normalize_score"):
+                try:
+                    ground_truth = self.task.normalize_score(ground_truth)
+                except Exception:
+                    pass
 
             yield DataSourceExample(
                 example_id=doc_id,
@@ -167,8 +182,8 @@ class DirectDocumentSource:
                 reference_score=ground_truth,
                 metadata={
                     "source": "direct",
-                    "split": sample.get("split", "unknown"),
-                    "original_length": len(sample.get("text", "") or sample.get("content", "")),
+                    "split": get_value(sample, "split", "unknown"),
+                    "original_length": len(doc_text),
                 },
             )
 
@@ -350,7 +365,6 @@ class SyntheticDataSource:
         text_field: str = "text",
         score_field: str = "score",
         max_examples: Optional[int] = None,
-        truncate_length: Optional[int] = None,
     ):
         """
         Initialize synthetic data source.
@@ -362,7 +376,6 @@ class SyntheticDataSource:
             text_field: Field name for text content
             score_field: Field name for ground truth score
             max_examples: Maximum examples to return
-            truncate_length: Deprecated/ignored; content is never truncated
         """
         self.data_path = Path(data_path)
         self._rubric = rubric
@@ -370,7 +383,6 @@ class SyntheticDataSource:
         self.text_field = text_field
         self.score_field = score_field
         self.max_examples = max_examples
-        self.truncate_length = truncate_length
 
     @property
     def source_name(self) -> str:
@@ -480,7 +492,7 @@ def create_data_source(
     Example:
         source = create_data_source(
             "direct",
-            task=get_task("manifesto_rile"),
+            task=get_task("document_analysis"),
             max_documents=100,
         )
     """

@@ -2,8 +2,8 @@
 Task plugin base protocol and abstractions.
 
 This module defines the interface for task-specific training integration.
-Tasks represent different use cases (e.g., manifesto/RILE, legal documents,
-sentiment analysis) that can plug into the OPS training framework.
+Tasks represent different use cases (e.g., scoring, classification,
+information extraction) that can plug into the OPS training framework.
 
 Key abstractions:
 - OutputType: What kind of output the task produces (continuous, discrete, structured)
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from ..config import OracleIRRConfig
     from ..inference import Retriever
 
-from src.tasks.prompting import (
+from src.core.prompting import (
     PromptBuilders,
     default_merge_prompt,
     default_summarize_prompt,
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 class OutputType(Enum):
     """Type of output the task produces."""
-    CONTINUOUS_SCORE = "continuous"   # e.g., RILE -100 to +100, sentiment 0-1
+    CONTINUOUS_SCORE = "continuous"   # e.g., -1 to +1, 0 to 100, 0 to 1
     DISCRETE_LABEL = "discrete"       # e.g., "positive", "negative", "neutral"
     STRUCTURED = "structured"         # e.g., {"entities": [...], "relations": [...]}
 
@@ -52,12 +52,12 @@ class ScaleDefinition:
     Used with OutputType.CONTINUOUS_SCORE to define the valid range
     and semantics of numeric outputs.
     """
-    name: str                    # e.g., "rile", "sentiment", "relevance"
+    name: str                    # e.g., "quality", "sentiment", "relevance"
     min_value: float             # e.g., -100
     max_value: float             # e.g., 100
     description: str = ""        # Human-readable description
     higher_is_better: bool = True  # For optimization direction
-    neutral_value: Optional[float] = None  # e.g., 0 for RILE
+    neutral_value: Optional[float] = None  # e.g., 0.0 or 0.5
 
     @property
     def range(self) -> float:
@@ -145,7 +145,7 @@ class TaskConfig:
             raise ValueError("DISCRETE_LABEL output type requires a LabelDefinition")
 
 
-# RILE_SCALE moved to manifesto.py - this is manifesto-specific, not base task
+# Domain-specific scales should live in task modules.
 
 
 # =============================================================================
@@ -398,9 +398,9 @@ class TaskPlugin(Protocol):
     train and evaluate score predictors for a particular use case.
 
     Example tasks:
-    - manifesto_rile: Political manifesto RILE scoring
-    - legal_relevance: Legal document relevance scoring
+    - relevance_scoring: Document relevance scoring
     - sentiment: Sentiment score prediction
+    - quality: Quality estimation for summaries
     """
 
     @property
@@ -520,6 +520,23 @@ class AbstractTask(ABC):
         if self._config:
             return self._config.output_field_name
         return "score"  # Default
+
+    def normalize_score(self, value: Optional[float]) -> Optional[float]:
+        """Normalize a raw score to 0-1 using the task scale."""
+        if value is None:
+            return None
+        if self.scale:
+            normalized = self.scale.normalize(float(value))
+            return max(0.0, min(1.0, normalized))
+        return float(value)
+
+    def denormalize_score(self, normalized: Optional[float]) -> Optional[float]:
+        """Convert a normalized 0-1 score back to the task scale."""
+        if normalized is None:
+            return None
+        if self.scale:
+            return self.scale.denormalize(float(normalized))
+        return float(normalized)
 
     # =========================================================================
     # Data Field Configuration (for task-agnostic data loading)
@@ -721,7 +738,68 @@ class AbstractTask(ABC):
         """Parse a numeric score from an LLM response."""
         min_value = self.scale.min_value if self.scale else None
         max_value = self.scale.max_value if self.scale else None
-        return parse_numeric_score(response, min_value=min_value, max_value=max_value)
+        parsed = parse_numeric_score(response, min_value=min_value, max_value=max_value)
+        return self.normalize_score(parsed)
+
+    def normalize_prediction_output(self, result: Any) -> Any:
+        """Normalize the output field value in a predictor result."""
+        if result is None:
+            return result
+
+        output_field = self.output_field_name
+        value = None
+
+        if isinstance(result, dict):
+            value = result.get(output_field)
+        else:
+            value = getattr(result, output_field, None)
+            if value is None and hasattr(result, "__getitem__"):
+                try:
+                    value = result[output_field]
+                except (KeyError, TypeError):
+                    value = None
+
+        if value is None:
+            return result
+
+        normalized = self.normalize_score(value)
+
+        if isinstance(result, dict):
+            result[output_field] = normalized
+            return result
+
+        if hasattr(result, output_field):
+            try:
+                setattr(result, output_field, normalized)
+                return result
+            except Exception:
+                pass
+
+        if hasattr(result, "__setitem__"):
+            try:
+                result[output_field] = normalized
+                return result
+            except Exception:
+                pass
+
+        return {output_field: normalized}
+
+    def wrap_predictor(self, predictor: 'dspy.Module') -> 'dspy.Module':
+        """Wrap a predictor to normalize its outputs to 0-1."""
+        import dspy
+
+        task = self
+
+        class NormalizedPredictor(dspy.Module):
+            def __init__(self, base: 'dspy.Module'):
+                super().__init__()
+                self.base = base
+
+            def forward(self, *args, **kwargs):
+                result = self.base(*args, **kwargs)
+                return task.normalize_prediction_output(result)
+
+        return NormalizedPredictor(predictor)
 
     def create_trainset(self, results: List[Any]) -> List['dspy.Example']:
         """

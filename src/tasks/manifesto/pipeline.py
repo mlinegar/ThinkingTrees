@@ -8,13 +8,16 @@ These components are manifesto-specific and use RILE preservation rubrics.
 """
 
 import logging
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import dspy
 
-from src.core.strategy import DSPyStrategy, TournamentStrategy, TournamentConfig
 from src.ops_engine.builder import TreeBuilder, BuildConfig
 from .rubrics import RILE_PRESERVATION_RUBRIC, RILE_TASK_CONTEXT
+from .constants import RILE_MIN, RILE_MAX
+
+if TYPE_CHECKING:
+    from src.core.strategy import DSPyStrategy, TournamentStrategy, TournamentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -119,12 +122,14 @@ class ManifestoScorer(dspy.Module):
     def forward(self, summary: str, task_context: str = RILE_TASK_CONTEXT) -> dict:
         result = self.score(task_context=task_context, summary=summary)
         try:
-            score = float(result.rile_score)
-            score = max(-100, min(100, score))
+            raw_score = float(result.rile_score)
         except (ValueError, TypeError):
-            score = 0.0
+            raw_score = 0.0
+        raw_score = max(RILE_MIN, min(RILE_MAX, raw_score))
+        normalized = (raw_score - RILE_MIN) / (RILE_MAX - RILE_MIN)
+        normalized = max(0.0, min(1.0, normalized))
         return {
-            'rile_score': score,
+            'rile_score': normalized,
             'reasoning': result.reasoning
         }
 
@@ -197,7 +202,7 @@ class ManifestoPipeline(dspy.Module):
         chunks = chunk_for_ops(text, max_chars=self.chunk_size, strategy="sentence")
 
         if not chunks:
-            return dspy.Prediction(rile_score=0.0, reasoning="No text to process", final_summary="")
+            return dspy.Prediction(rile_score=0.5, reasoning="No text to process", final_summary="")
 
         def summarize_chunk(chunk_text):
             return self.summarizer(text=chunk_text, rubric=rubric)
@@ -289,6 +294,9 @@ class ManifestoPipelineWithStrategy(dspy.Module):
         judge=None,
         tournament_k: int = 4,
         tournament_temperature: float = 0.9,
+        leaf_module: Optional[dspy.Module] = None,
+        merge_module: Optional[dspy.Module] = None,
+        scorer: Optional[dspy.Module] = None,
     ):
         """
         Initialize the strategy-based pipeline.
@@ -298,13 +306,16 @@ class ManifestoPipelineWithStrategy(dspy.Module):
             judge: Optional GenRMJudge or GenRMComparisonModule for tournament selection
             tournament_k: Number of candidates for tournament (default 4)
             tournament_temperature: Temperature for candidate generation (default 0.9)
+            leaf_module: Optional leaf summarizer module (content, rubric -> summary)
+            merge_module: Optional merge summarizer module (left_summary, right_summary, rubric -> summary)
+            scorer: Optional scorer module (summary, task_context -> dict/prediction)
         """
         super().__init__()
         self.chunk_size = chunk_size
 
-        self.leaf_module = StrategyCompatibleSummarizer()
-        self.merge_module = StrategyCompatibleMerger()
-        self.scorer = ManifestoScorer()
+        self.leaf_module = leaf_module or StrategyCompatibleSummarizer()
+        self.merge_module = merge_module or StrategyCompatibleMerger()
+        self.scorer = scorer or ManifestoScorer()
 
         self._judge = judge
         self._tournament_k = tournament_k
@@ -315,6 +326,9 @@ class ManifestoPipelineWithStrategy(dspy.Module):
 
     def _create_strategy(self):
         """Create the strategy stack (called per forward pass)."""
+        # Lazy import to avoid circular dependency
+        from src.core.strategy import DSPyStrategy, TournamentStrategy, TournamentConfig
+
         base_strategy = DSPyStrategy(
             leaf_module=self.leaf_module,
             merge_module=self.merge_module,
@@ -348,7 +362,7 @@ class ManifestoPipelineWithStrategy(dspy.Module):
         """
         if not text or len(text.strip()) == 0:
             return dspy.Prediction(
-                rile_score=0.0,
+                rile_score=0.5,
                 reasoning="No text to process",
                 final_summary=""
             )
@@ -368,11 +382,32 @@ class ManifestoPipelineWithStrategy(dspy.Module):
             logger.error(f"Tree building failed: {e}")
             raise
 
-        score_result = self.scorer(summary=final_summary, task_context=task_context)
+        try:
+            score_result = self.scorer(summary=final_summary, task_context=task_context)
+        except TypeError:
+            score_result = self.scorer(text=final_summary, task_context=task_context)
+
+        score_value = None
+        reasoning = ""
+        if isinstance(score_result, dict):
+            if "rile_score" in score_result:
+                score_value = score_result.get("rile_score")
+            elif "score" in score_result:
+                score_value = score_result.get("score")
+            reasoning = score_result.get("reasoning", "") or ""
+        else:
+            if hasattr(score_result, "rile_score"):
+                score_value = getattr(score_result, "rile_score")
+            elif hasattr(score_result, "score"):
+                score_value = getattr(score_result, "score")
+            reasoning = getattr(score_result, "reasoning", "") or ""
+
+        if score_value is None:
+            score_value = 0.5
 
         return dspy.Prediction(
-            rile_score=score_result['rile_score'],
-            reasoning=score_result['reasoning'],
+            rile_score=float(score_value),
+            reasoning=reasoning,
             final_summary=final_summary
         )
 
@@ -396,11 +431,13 @@ def create_training_examples(samples: list) -> list:
     """Create DSPy training examples from samples with ground truth."""
     examples = []
     for sample in samples:
+        normalized_score = (sample.rile - RILE_MIN) / (RILE_MAX - RILE_MIN)
+        normalized_score = max(0.0, min(1.0, normalized_score))
         example = dspy.Example(
             text=sample.text,
             rubric=RILE_PRESERVATION_RUBRIC,
             task_context=RILE_TASK_CONTEXT,
-            rile_score=sample.rile,
+            rile_score=normalized_score,
         ).with_inputs('text', 'rubric', 'task_context')
         examples.append(example)
     return examples
@@ -409,12 +446,12 @@ def create_training_examples(samples: list) -> list:
 def rile_metric(example, prediction, trace=None) -> float:
     """
     DSPy metric: how close is prediction to ground truth RILE?
-    Returns 1.0 for perfect, 0.0 for >=50 points off.
+    Returns 1.0 for perfect, 0.0 for >=1.0 normalized difference.
     """
     try:
         pred_score = float(prediction.rile_score)
         true_score = float(example.rile_score)
         error = abs(pred_score - true_score)
-        return max(0.0, 1.0 - error / 50.0)
+        return max(0.0, 1.0 - error)
     except (ValueError, TypeError, AttributeError):
         return 0.0
