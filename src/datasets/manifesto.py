@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 import random
 
 from src.core.documents import DocumentSample
-from src.manifesto.data_loader import DocDataset
+from src.tasks.manifesto.data_loader import DocDataset
 
 from .base import DatasetInfo, register_dataset
 

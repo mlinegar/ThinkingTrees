@@ -5,7 +5,7 @@ This module defines the fixed bounds for RILE scores.
 RILE (Right-Left) is the Manifesto Project's measure of political positioning.
 
 Usage:
-    from src.manifesto.constants import RILE_MIN, RILE_MAX, RILE_RANGE
+    from src.tasks.manifesto import RILE_MIN, RILE_MAX, RILE_RANGE
 
     # Use RILE_RANGE with normalize_error_to_score
     from src.ops_engine.scoring import normalize_error_to_score

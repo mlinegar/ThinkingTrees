@@ -1,64 +1,73 @@
 """
-Document processing integration for OPS evaluation.
+DEPRECATED: Import from src.tasks.manifesto instead.
 
-This module provides tools for loading Manifesto Project data,
-creating train/test splits, and evaluating RILE score prediction.
+This module exists only for backwards compatibility and will be removed.
+All manifesto-related code has been consolidated into src/tasks/manifesto/.
 
-New in Phase 3/4: Training framework integration for oracle approximation.
+Migration:
+    # Old (deprecated)
+    from src.manifesto import ManifestoTask, create_rile_scorer
+
+    # New (canonical)
+    from src.tasks.manifesto import ManifestoTask, create_rile_scorer
 """
 
-from .constants import RILE_MIN, RILE_MAX, RILE_RANGE
-from .data_loader import DocSample, DocDataset, ManifestoSample, ManifestoDataset, create_pilot_dataset
-from .rubrics import RILE_PRESERVATION_RUBRIC, RILE_TASK_CONTEXT
-from .ops_pipeline import ManifestoOPSPipeline, SimplePipeline, PipelineConfig, DocResult, ManifestoResult
-from .evaluation import ManifestoEvaluator, EvaluationMetrics, save_results, load_results
-from .position_oracle import (
-    RILESimilarityScorer,  # Alias for create_rile_scorer
-    create_rile_scorer,    # Factory for RILE similarity scorer
+import warnings
+
+warnings.warn(
+    "Importing from src.manifesto is deprecated. "
+    "Use src.tasks.manifesto instead. "
+    "This module will be removed in a future version.",
+    DeprecationWarning,
+    stacklevel=2,
 )
 
-# Training framework integration
-from .training_integration import (
-    ManifestoTrainingSource,
-    TrainableManifestoPipeline,
-    create_rile_training_pipeline,
-    create_rile_training_collector,
-    create_rile_training_example,
+# Re-export everything from canonical location for backwards compatibility
+from src.tasks.manifesto import (
+    # Task
+    ManifestoTask,
+    RILE_SCALE,
+    # Constants
+    RILE_MIN,
+    RILE_MAX,
+    RILE_RANGE,
+    # Rubrics
+    RILE_PRESERVATION_RUBRIC,
+    RILE_TASK_CONTEXT,
+    # Oracle
+    create_rile_scorer,
+    # Data loading
+    ManifestoDataset,
+    ManifestoDataLoader,
+    ManifestoSample,
+    create_pilot_dataset,
+    # Summarizers
+    LeafSummarizer,
+    MergeSummarizer,
+    # Pipeline
+    ManifestoPipeline,
+    ManifestoPipelineWithStrategy,
+    create_training_examples,
+    rile_metric,
 )
 
 __all__ = [
-    # RILE constants
+    "ManifestoTask",
+    "RILE_SCALE",
     "RILE_MIN",
     "RILE_MAX",
     "RILE_RANGE",
-    # Data loading (new names)
-    "DocSample",
-    "DocDataset",
-    # Data loading (backwards compat)
-    "ManifestoSample",
-    "ManifestoDataset",
-    "create_pilot_dataset",
-    # Rubrics
     "RILE_PRESERVATION_RUBRIC",
     "RILE_TASK_CONTEXT",
-    # Pipeline
-    "ManifestoOPSPipeline",
-    "SimplePipeline",
-    "PipelineConfig",
-    "DocResult",  # New name
-    "ManifestoResult",  # Backwards compat
-    # Evaluation
-    "ManifestoEvaluator",
-    "EvaluationMetrics",
-    "save_results",
-    "load_results",
-    # Position oracles
-    "RILESimilarityScorer",
     "create_rile_scorer",
-    # Training integration
-    "ManifestoTrainingSource",
-    "TrainableManifestoPipeline",
-    "create_rile_training_pipeline",
-    "create_rile_training_collector",
-    "create_rile_training_example",
+    "ManifestoDataset",
+    "ManifestoDataLoader",
+    "ManifestoSample",
+    "create_pilot_dataset",
+    "LeafSummarizer",
+    "MergeSummarizer",
+    "ManifestoPipeline",
+    "ManifestoPipelineWithStrategy",
+    "create_training_examples",
+    "rile_metric",
 ]

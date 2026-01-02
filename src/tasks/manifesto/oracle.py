@@ -54,7 +54,3 @@ def create_rile_scorer(task_context: Optional[str] = None) -> SimilarityScorer:
         scale=RILE_SCALE,
         name="RILE",
     )
-
-
-# Backwards compatibility alias
-RILESimilarityScorer = create_rile_scorer

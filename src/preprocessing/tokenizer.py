@@ -192,35 +192,17 @@ class TokenCounter:
         suffix: str = ""
     ) -> str:
         """
-        Truncate text to fit within max_tokens.
+        Return text unchanged (truncation disabled).
 
         Args:
-            text: Text to truncate
-            max_tokens: Maximum number of tokens
-            suffix: Optional suffix to append (its tokens are included in limit)
+            text: Text to return
+            max_tokens: Unused (kept for compatibility)
+            suffix: Unused (kept for compatibility)
 
         Returns:
-            Truncated text (possibly with suffix)
+            Full text (no truncation)
         """
-        if not text:
-            return text
-
-        tokens = self._encoding.encode(text)
-
-        if len(tokens) <= max_tokens:
-            return text
-
-        # Account for suffix tokens
-        suffix_tokens = self._encoding.encode(suffix) if suffix else []
-        available_tokens = max_tokens - len(suffix_tokens)
-
-        if available_tokens <= 0:
-            return suffix
-
-        truncated_tokens = tokens[:available_tokens]
-        truncated_text = self._encoding.decode(truncated_tokens)
-
-        return truncated_text + suffix
+        return text
 
     def split_at_token_boundary(
         self,

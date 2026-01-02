@@ -80,6 +80,79 @@ class ManifestoTask(AbstractTask):
     def name(self) -> str:
         return "manifesto_rile"
 
+    # =========================================================================
+    # Data Field Configuration (implements AbstractTask interface)
+    # =========================================================================
+
+    @property
+    def id_field(self) -> str:
+        """Field name for document ID in manifesto samples."""
+        return "manifesto_id"
+
+    @property
+    def label_field(self) -> str:
+        """Field name for ground truth RILE score."""
+        return "rile"
+
+    @property
+    def text_field(self) -> str:
+        """Field name for document text."""
+        return "text"
+
+    # =========================================================================
+    # Data Loading (implements AbstractTask interface)
+    # =========================================================================
+
+    def get_data_loader(self):
+        """Get ManifestoDataLoader instance."""
+        from .data_loader import ManifestoDataLoader
+        return ManifestoDataLoader()
+
+    def get_samples(
+        self,
+        splits: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get manifesto samples from the data loader.
+
+        Args:
+            splits: List of splits to load. Defaults to ["train", "val"].
+                   Valid splits: "train", "val", "test"
+            limit: Maximum number of samples to return.
+
+        Returns:
+            List of sample dictionaries with manifesto_id, text, rile fields.
+        """
+        loader = self.get_data_loader()
+        train, val, test = loader.get_temporal_split()
+
+        samples = []
+        splits = splits or ["train", "val"]
+
+        if "train" in splits:
+            samples.extend(train)
+        if "val" in splits:
+            samples.extend(val)
+        if "test" in splits:
+            samples.extend(test)
+
+        if limit:
+            samples = samples[:limit]
+
+        # Convert to dictionaries if needed
+        result = []
+        for s in samples:
+            if hasattr(s, '__dict__'):
+                result.append({
+                    self.id_field: getattr(s, self.id_field, None),
+                    self.text_field: getattr(s, self.text_field, ''),
+                    self.label_field: getattr(s, self.label_field, None),
+                })
+            else:
+                result.append(s)
+        return result
+
     def create_training_source(
         self,
         results: List[Any],
@@ -183,7 +256,7 @@ class ManifestoTask(AbstractTask):
         """
         # Import the existing rubric or create a parameterized version
         try:
-            from src.manifesto.rubrics import RILE_PRESERVATION_RUBRIC
+            from .rubrics import RILE_PRESERVATION_RUBRIC
             return RILE_PRESERVATION_RUBRIC
         except ImportError:
             # Fallback to a basic rubric
@@ -221,7 +294,7 @@ Scoring:
             Task context string
         """
         try:
-            from src.manifesto.rubrics import RILE_TASK_CONTEXT
+            from .rubrics import RILE_TASK_CONTEXT
             return RILE_TASK_CONTEXT
         except ImportError:
             return """
@@ -245,7 +318,7 @@ Focus on economic policy, social values, and foreign policy positions.
         Returns:
             DSPy Module for RILE score prediction (RILEScorer)
         """
-        from src.manifesto.signatures import RILEScorer
+        from .dspy_signatures import RILEScorer
         return RILEScorer()
 
     def create_oracle_scorer(self) -> Callable[[str], float]:
@@ -263,7 +336,7 @@ Focus on economic policy, social values, and foreign policy positions.
         Returns:
             Function(text) -> RILE score (-100 to +100)
         """
-        from .signatures import RILEScorer
+        from .dspy_signatures import RILEScorer
 
         scorer = RILEScorer()
         task_context = self.get_task_context()
@@ -281,7 +354,7 @@ Focus on economic policy, social values, and foreign policy positions.
 
     def create_summarizer(self) -> dspy.Module:
         """Create a summarizer tuned for RILE preservation."""
-        from src.manifesto.dspy_summarizer import GenericSummarizer
+        from .summarizer import GenericSummarizer
         return GenericSummarizer(use_cot=True)
 
     def create_merge_summarizer(self) -> dspy.Module:
@@ -371,7 +444,7 @@ def _build_rile_audit_prompt(original: str, summary: str, rubric: str):
                 "Does the summary preserve the political position information "
                 "from the original?\n\n"
                 f"Criteria: {rubric}\n\n"
-                f"ORIGINAL:\n{original[:2000]}...\n\n"
+                f"ORIGINAL:\n{original}\n\n"  # Use full text - truncation corrupts evaluation
                 f"SUMMARY:\n{summary}\n\n"
                 "Answer PASS if information is preserved, FAIL if not. "
                 "Format: VERDICT: PASS/FAIL\nREASON: <explanation>"
@@ -379,6 +452,3 @@ def _build_rile_audit_prompt(original: str, summary: str, rubric: str):
         },
     ]
 
-
-# Backward compatibility alias
-ManifestoDomain = ManifestoTask

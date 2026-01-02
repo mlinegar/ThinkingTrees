@@ -36,22 +36,24 @@ except ImportError:
     dspy = None
 
 if TYPE_CHECKING:
-    from src.manifesto.dspy_summarizer import LeafSummarizer, MergeSummarizer
+    import dspy
+    LeafSummarizer = dspy.Module  # Generic type hint
+    MergeSummarizer = dspy.Module  # Generic type hint
 
 from src.core.batch_processor import (
     AsyncBatchLLMClient,
     MultiServerBatchClient,
     BatchOrchestrator,
     BatchRequest,
-    LevelWiseBatchProcessor,
-    DocumentTreeState,
 )
+from src.core.batch_orchestrator import BatchTreeOrchestrator
 from src.core.strategy import (
     SummarizationStrategy,
     DSPyStrategy,
     BatchedStrategy,
 )
-from src.ops_engine.builder import AsyncTreeBuilder, BuildConfig
+from src.core.data_models import Node, Tree, leaf, node
+from src.ops_engine.builder import AsyncTreeBuilder, BuildConfig, BuildResult
 from src.core.progress import (
     PipelineProgress,
     display_batch_summary,
@@ -63,13 +65,6 @@ from src.tasks.prompting import PromptBuilders, default_merge_prompt, default_su
 from src.preprocessing.chunker import chunk_for_ops
 
 logger = logging.getLogger(__name__)
-
-# Backwards compatibility aliases
-DocSample = DocumentSample
-DocResult = DocumentResult
-ManifestoSample = DocumentSample
-ManifestoResult = DocumentResult
-
 
 def _extract_reference_score(sample: Any) -> Optional[float]:
     reference = getattr(sample, "reference_score", None)
@@ -109,7 +104,6 @@ class BatchedPipelineConfig:
     # Defaults are loaded from config/settings.yaml or environment variables
     task_model_url: str = dataclass_field(default_factory=get_task_model_url)
     task_model_urls: Optional[List[str]] = None  # Multiple servers for load balancing
-    auditor_model_url: str = dataclass_field(default_factory=get_genrm_url)  # Deprecated (GenRM server)
 
     # Batching settings
     max_concurrent_requests: int = 200    # Max concurrent HTTP requests
@@ -126,13 +120,8 @@ class BatchedPipelineConfig:
     # Concurrency configuration (prevents thread explosion)
     concurrency: ConcurrencyConfig = dataclass_field(default_factory=get_concurrency_config)
 
-    # Auditing (deprecated - retained for compatibility)
-    audit_budget: int = 10
-    rile_threshold: float = 10.0
-
     # Processing options
     run_baseline: bool = True
-    run_audit: bool = True
 
     # Progress reporting
     show_progress: bool = True
@@ -179,273 +168,6 @@ class BatchedPipelineConfig:
 
 
 # =============================================================================
-# DSPy-based Tree Building (for training/optimization)
-# =============================================================================
-
-def build_tree_with_dspy(
-    text: str,
-    doc_id: str,
-    leaf_summarizer: "LeafSummarizer",
-    merge_summarizer: "MergeSummarizer",
-    config: BatchedPipelineConfig,
-) -> Dict[str, Any]:
-    """
-    Build OPS tree for a document using DSPy modules.
-
-    This function is used during DSPy optimization to allow the summarization
-    prompts to be learned. Unlike build_tree_for_document, this runs
-    synchronously and uses DSPy modules directly.
-
-    Args:
-        text: Full document text
-        doc_id: Document identifier
-        leaf_summarizer: DSPy module for leaf summarization
-        merge_summarizer: DSPy module for merge summarization
-        config: Pipeline config
-
-    Returns:
-        Tree structure with root summary and intermediate chunks
-    """
-    if not DSPY_AVAILABLE:
-        raise RuntimeError("DSPy not available but DSPy modules were requested")
-
-    # Chunk the text using langextract-based chunker
-    text_chunks = chunk_for_ops(text, max_chars=config.max_chunk_chars)
-    chunks = [c.text for c in text_chunks]
-    if len(chunks) > 5:
-        logger.info(f"[{doc_id}] Processing {len(chunks)} chunks...")
-
-    if len(chunks) == 0:
-        return {"root": {"summary": ""}, "height": 0, "leaf_count": 0, "chunks": []}
-
-    if len(chunks) == 1:
-        # Single chunk - just summarize
-        summary = leaf_summarizer(content=chunks[0], rubric=config.rubric)
-        return {
-            "root": {"summary": summary, "content": chunks[0]},
-            "height": 1,
-            "leaf_count": 1,
-            "chunks": chunks,
-            "leaf_summaries": [summary],
-        }
-
-    # Multi-chunk: build tree level by level
-    # Level 0: Summarize all chunks (concurrent for better GPU utilization)
-    # IMPORTANT: Use ConcurrencyConfig to prevent thread explosion when called
-    # from parent ThreadPoolExecutor (e.g., process_batch_with_dspy)
-    current_level = []
-    leaf_summaries = []
-
-    def summarize_chunk(args):
-        i, chunk = args
-        summary = leaf_summarizer(content=chunk, rubric=config.rubric)
-        return i, chunk, summary
-
-    # Use config's concurrency settings instead of hardcoded values
-    # Timeout scales with chunk count to prevent failures on large documents
-    max_chunk_workers = config.concurrency.get_chunk_workers(len(chunks))
-    leaf_timeout = config.concurrency.get_leaf_timeout(len(chunks))
-    with ThreadPoolExecutor(max_workers=max_chunk_workers) as executor:
-        futures = [executor.submit(summarize_chunk, (i, chunk)) for i, chunk in enumerate(chunks)]
-        results = []
-        for future in as_completed(futures, timeout=leaf_timeout):
-            results.append(future.result())
-
-    # Sort by index to maintain order
-    results.sort(key=lambda x: x[0])
-    for i, chunk, summary in results:
-        leaf_summaries.append(summary)
-        current_level.append({
-            "id": f"{doc_id}_leaf_{i}",
-            "content": chunk,
-            "summary": summary,
-            "level": 0,
-        })
-
-    # Build up the tree by merging pairs (concurrent within each level)
-    level_num = 0
-    while len(current_level) > 1:
-        level_num += 1
-
-        # Collect pairs for this level
-        pairs = []
-        for i in range(0, len(current_level), 2):
-            if i + 1 < len(current_level):
-                pairs.append((i // 2, current_level[i], current_level[i + 1]))
-            else:
-                pairs.append((i // 2, current_level[i], None))  # Odd node
-
-        def merge_pair(args):
-            idx, left, right = args
-            if right is None:
-                return idx, left  # Odd node carries forward
-            left_text = left.get("summary") or left.get("content", "")
-            right_text = right.get("summary") or right.get("content", "")
-            merged_summary = merge_summarizer(
-                left_summary=left_text,
-                right_summary=right_text,
-                rubric=config.rubric
-            )
-            return idx, {
-                "id": f"{doc_id}_merge_{level_num}_{idx}",
-                "summary": merged_summary,
-                "level": level_num,
-                "children": [left, right],
-            }
-
-        # Use config's concurrency settings instead of hardcoded values
-        # Timeout scales with number of pairs to prevent failures
-        max_merge_workers = config.concurrency.get_merge_workers(len(pairs))
-        merge_timeout = config.concurrency.get_merge_timeout(len(pairs))
-        with ThreadPoolExecutor(max_workers=max_merge_workers) as executor:
-            futures = [executor.submit(merge_pair, pair) for pair in pairs]
-            merge_results = []
-            for future in as_completed(futures, timeout=merge_timeout):
-                merge_results.append(future.result())
-
-        # Sort by index to maintain order
-        merge_results.sort(key=lambda x: x[0])
-        current_level = [node for _, node in merge_results]
-
-    root = current_level[0] if current_level else {"summary": ""}
-    return {
-        "root": root,
-        "height": level_num,
-        "leaf_count": len(chunks),
-        "chunks": chunks,
-        "leaf_summaries": leaf_summaries,
-    }
-
-
-# =============================================================================
-# Tree Building (Batched)
-# =============================================================================
-
-async def build_tree_for_document(
-    text: str,
-    doc_id: str,
-    client: AsyncBatchLLMClient,
-    config: BatchedPipelineConfig,
-) -> Dict[str, Any]:
-    """
-    Build OPS tree for a single document using batched requests.
-
-    Args:
-        text: Full document text
-        doc_id: Document identifier
-        client: Batch LLM client
-        config: Pipeline config
-
-    Returns:
-        Tree structure with root summary
-    """
-    # Chunk the text using langextract-based chunker
-    text_chunks = chunk_for_ops(text, max_chars=config.max_chunk_chars)
-    chunks = [c.text for c in text_chunks]
-    logger.debug(f"[{doc_id}] Chunked into {len(chunks)} chunks")
-
-    if len(chunks) == 0:
-        return {"root": {"summary": ""}, "height": 0, "leaf_count": 0}
-
-    if len(chunks) == 1:
-        # Single chunk - just summarize
-        request = BatchRequest(
-            request_id=f"{doc_id}_single",
-            messages=config.prompt_builders.summarize(chunks[0], config.rubric),
-            max_tokens=config.max_tokens_summary,
-            document_id=doc_id,
-            request_type="summarize",
-        )
-        await client.submit(request)
-        response = await client.await_response(request.request_id)
-        return {
-            "root": {"summary": response.content, "content": chunks[0]},
-            "height": 1,
-            "leaf_count": 1,
-        }
-
-    # Multi-chunk: build tree level by level
-    # Level 0: Summarize all chunks
-    current_level = []
-    leaf_requests = []
-
-    for i, chunk in enumerate(chunks):
-        request = BatchRequest(
-            request_id=f"{doc_id}_leaf_{i}",
-            messages=config.prompt_builders.summarize(chunk, config.rubric),
-            max_tokens=config.max_tokens_summary,
-            document_id=doc_id,
-            request_type="summarize",
-        )
-        leaf_requests.append((request, chunk))
-
-    # Submit all leaf summarizations
-    for request, _ in leaf_requests:
-        await client.submit(request)
-
-    # Await all leaf responses
-    for i, (request, chunk) in enumerate(leaf_requests):
-        response = await client.await_response(request.request_id)
-        current_level.append({
-            "id": request.request_id,
-            "content": chunk,
-            "summary": response.content if not response.error else chunk[:500],
-            "level": 0,
-        })
-
-    # Build up the tree
-    level_num = 0
-    while len(current_level) > 1:
-        level_num += 1
-        next_level = []
-        merge_requests = []
-
-        # Pair up nodes
-        for i in range(0, len(current_level), 2):
-            if i + 1 < len(current_level):
-                left = current_level[i]
-                right = current_level[i + 1]
-
-                left_text = left.get("summary") or left.get("content", "")
-                right_text = right.get("summary") or right.get("content", "")
-
-                request = BatchRequest(
-                    request_id=f"{doc_id}_merge_{level_num}_{len(merge_requests)}",
-                    messages=config.prompt_builders.merge(left_text, right_text, config.rubric),
-                    max_tokens=config.max_tokens_summary,
-                    document_id=doc_id,
-                    request_type="merge",
-                )
-                merge_requests.append((request, left, right))
-            else:
-                # Odd node carries forward
-                next_level.append(current_level[i])
-
-        # Submit all merges for this level
-        for request, _, _ in merge_requests:
-            await client.submit(request)
-
-        # Await all merges
-        for j, (request, left, right) in enumerate(merge_requests):
-            response = await client.await_response(request.request_id)
-            next_level.append({
-                "id": request.request_id,
-                "summary": response.content if not response.error else "",
-                "level": level_num,
-                "children": [left, right],
-            })
-
-        current_level = next_level
-
-    root = current_level[0] if current_level else {"summary": ""}
-    return {
-        "root": root,
-        "height": level_num,
-        "leaf_count": len(chunks),
-    }
-
-
-# =============================================================================
 # RILE Scoring (Batched)
 # =============================================================================
 
@@ -460,13 +182,14 @@ class BatchedDocPipeline:
     Processes multiple documents concurrently, pooling all LLM requests
     for optimal GPU utilization.
 
-    For DSPy optimization, use with leaf_summarizer and merge_summarizer:
-        from src.manifesto.dspy_summarizer import LeafSummarizer, MergeSummarizer
+    For DSPy optimization, use with task-specific summarizers:
+        from src.tasks.manifesto import ManifestoTask
 
+        task = ManifestoTask()
         pipeline = BatchedDocPipeline(
             config=config,
-            leaf_summarizer=LeafSummarizer(),
-            merge_summarizer=MergeSummarizer(),
+            leaf_summarizer=task.create_leaf_summarizer(),  # Task provides summarizers
+            merge_summarizer=task.create_merge_summarizer(),
         )
         # Use process_with_dspy for training
         result = pipeline.process_with_dspy(sample)
@@ -487,7 +210,7 @@ class BatchedDocPipeline:
             merge_summarizer: Optional DSPy module for merge summarization (training mode)
         """
         self.config = config or BatchedPipelineConfig()
-        self._results: List[DocResult] = []
+        self._results: List[DocumentResult] = []
 
         # DSPy modules for training/optimization mode
         self.leaf_summarizer = leaf_summarizer
@@ -495,8 +218,8 @@ class BatchedDocPipeline:
 
     def process_with_dspy(
         self,
-        sample: DocSample,
-    ) -> DocResult:
+        sample: DocumentSample,
+    ) -> DocumentResult:
         """
         Process a single document using DSPy modules.
 
@@ -507,7 +230,7 @@ class BatchedDocPipeline:
             sample: Document sample to process
 
         Returns:
-            DocResult with tree info and summaries
+            DocumentResult with tree info and summaries
         """
         if self.leaf_summarizer is None or self.merge_summarizer is None:
             raise ValueError(
@@ -519,7 +242,7 @@ class BatchedDocPipeline:
         start_time = time.time()
         logger.debug(f"Starting {doc_id} ({len(sample.text)} chars)")
 
-        result = DocResult(
+        result = DocumentResult(
             doc_id=doc_id,
             reference_score=_extract_reference_score(sample),
             original_length=len(sample.text),
@@ -536,17 +259,20 @@ class BatchedDocPipeline:
                 config=self.config,
             )
 
-            result.tree_height = tree["height"]
-            result.tree_leaves = tree["leaf_count"]
-            result.final_summary = tree["root"].get("summary", "")
+            # Tree is now a Tree dataclass, not a dict
+            result.tree_height = tree.height
+            result.tree_leaves = tree.leaf_count
+            result.final_summary = tree.final_summary
             result.summary_length = len(result.final_summary)
             result.compression_ratio = (
                 result.original_length / max(result.summary_length, 1)
             )
 
             # Store additional tree info for training
-            result.chunks = tree.get("chunks", [])
-            result.leaf_summaries = tree.get("leaf_summaries", [])
+            # Extract chunks and leaf summaries from tree
+            leaves = tree.leaves
+            result.chunks = [l.raw_text_span or "" for l in leaves]
+            result.leaf_summaries = [l.summary for l in leaves]
 
         except Exception as e:
             logger.error(f"Error processing {doc_id} with DSPy: {e}")
@@ -557,9 +283,9 @@ class BatchedDocPipeline:
 
     def process_batch_with_dspy(
         self,
-        samples: List[DocSample],
+        samples: List[DocumentSample],
         show_progress: bool = True,
-    ) -> List[DocResult]:
+    ) -> List[DocumentResult]:
         """
         Process multiple documents using DSPy modules (concurrent).
 
@@ -571,7 +297,7 @@ class BatchedDocPipeline:
             show_progress: Whether to show progress
 
         Returns:
-            List of DocResult
+            List of DocumentResult
         """
         max_workers = self.config.max_concurrent_documents
         results = [None] * len(samples)
@@ -598,14 +324,14 @@ class BatchedDocPipeline:
                     failed += 1
                     logger.error(f"Timeout processing {sample.doc_id} (failed {failed}/{len(samples)})")
                     # Create error result
-                    results[idx] = DocResult(
+                    results[idx] = DocumentResult(
                         doc_id=sample.doc_id,
                         error="Timeout after 600s"
                     )
                 except Exception as e:
                     failed += 1
                     logger.error(f"Error processing {sample.doc_id}: {e} (failed {failed}/{len(samples)})")
-                    results[idx] = DocResult(
+                    results[idx] = DocumentResult(
                         doc_id=sample.doc_id,
                         error=str(e)
                     )
@@ -614,9 +340,9 @@ class BatchedDocPipeline:
 
     async def process_with_strategy(
         self,
-        sample: DocSample,
+        sample: DocumentSample,
         strategy: SummarizationStrategy,
-    ) -> DocResult:
+    ) -> DocumentResult:
         """
         Process a single document using a SummarizationStrategy.
 
@@ -629,12 +355,12 @@ class BatchedDocPipeline:
             strategy: SummarizationStrategy to use for summarization
 
         Returns:
-            DocResult with tree info and summaries
+            DocumentResult with tree info and summaries
         """
         doc_id = sample.doc_id
         start_time = time.time()
 
-        result = DocResult(
+        result = DocumentResult(
             doc_id=doc_id,
             reference_score=_extract_reference_score(sample),
             original_length=len(sample.text),
@@ -666,10 +392,10 @@ class BatchedDocPipeline:
 
     async def process_batch_with_strategy(
         self,
-        samples: List[DocSample],
+        samples: List[DocumentSample],
         strategy: SummarizationStrategy,
         show_progress: bool = True,
-    ) -> List[DocResult]:
+    ) -> List[DocumentResult]:
         """
         Process multiple documents using a SummarizationStrategy.
 
@@ -682,11 +408,11 @@ class BatchedDocPipeline:
             show_progress: Whether to show progress
 
         Returns:
-            List of DocResult
+            List of DocumentResult
         """
         logger.info(f"Processing {len(samples)} documents with strategy")
 
-        async def process_one(idx: int, sample: DocSample):
+        async def process_one(idx: int, sample: DocumentSample):
             result = await self.process_with_strategy(sample, strategy)
             if show_progress:
                 logger.info(f"Completed {idx + 1}/{len(samples)}: {sample.doc_id}")
@@ -720,9 +446,9 @@ class BatchedDocPipeline:
 
     async def process_single_async(
         self,
-        sample: DocSample,
+        sample: DocumentSample,
         client: AsyncBatchLLMClient,
-    ) -> DocResult:
+    ) -> DocumentResult:
         """
         Process a single document (used internally by batch processor).
 
@@ -731,12 +457,12 @@ class BatchedDocPipeline:
             client: Batch LLM client
 
         Returns:
-            DocResult
+            DocumentResult
         """
         doc_id = sample.doc_id
         start_time = time.time()
 
-        result = DocResult(
+        result = DocumentResult(
             doc_id=doc_id,
             reference_score=_extract_reference_score(sample),
             original_length=len(sample.text),
@@ -749,9 +475,10 @@ class BatchedDocPipeline:
                 sample.text, doc_id, client, self.config
             )
 
-            result.tree_height = tree["height"]
-            result.tree_leaves = tree["leaf_count"]
-            result.final_summary = tree["root"].get("summary", "")
+            # Tree is now a Tree dataclass, not a dict
+            result.tree_height = tree.height
+            result.tree_leaves = tree.leaf_count
+            result.final_summary = tree.final_summary
             result.summary_length = len(result.final_summary)
             result.compression_ratio = (
                 result.original_length / max(result.summary_length, 1)
@@ -777,7 +504,7 @@ class BatchedDocPipeline:
 
                 # 3. Baseline score (optional)
                 if self.config.run_baseline:
-                    baseline_text = sample.text[:50000]
+                    baseline_text = sample.text  # Use full text - truncation corrupts results
                     baseline_request = BatchRequest(
                         request_id=f"{doc_id}_baseline",
                         messages=self.config.prompt_builders.score(
@@ -800,10 +527,10 @@ class BatchedDocPipeline:
 
     async def process_batch_async(
         self,
-        samples: List[DocSample],
+        samples: List[DocumentSample],
         progress_callback: Optional[Callable[[int, int], None]] = None,
         show_progress: Optional[bool] = None,
-    ) -> List[DocResult]:
+    ) -> List[DocumentResult]:
         """
         Process multiple documents with full batching.
 
@@ -816,7 +543,7 @@ class BatchedDocPipeline:
             show_progress: Override config.show_progress setting
 
         Returns:
-            List of DocResults
+            List of DocumentResults
         """
         # Use level-wise batching by default for better throughput
         if self.config.use_levelwise_batching:
@@ -914,10 +641,10 @@ class BatchedDocPipeline:
 
     def process_batch(
         self,
-        samples: List[DocSample],
+        samples: List[DocumentSample],
         progress_callback: Optional[Callable[[int, int], None]] = None,
         show_progress: Optional[bool] = None,
-    ) -> List[DocResult]:
+    ) -> List[DocumentResult]:
         """
         Sync wrapper for batch processing.
 
@@ -927,20 +654,20 @@ class BatchedDocPipeline:
             show_progress: Override config.show_progress setting
 
         Returns:
-            List of DocResults
+            List of DocumentResults
         """
         return asyncio.run(self.process_batch_async(samples, progress_callback, show_progress))
 
-    def get_results(self) -> List[DocResult]:
+    def get_results(self) -> List[DocumentResult]:
         """Get all processed results."""
         return self._results
 
     async def process_batch_levelwise_async(
         self,
-        samples: List[DocSample],
+        samples: List[DocumentSample],
         progress_callback: Optional[Callable[[str, int, int], None]] = None,
         show_progress: Optional[bool] = None,
-    ) -> List[DocResult]:
+    ) -> List[DocumentResult]:
         """
         Process documents using level-wise batching for maximum throughput.
 
@@ -960,7 +687,7 @@ class BatchedDocPipeline:
             show_progress: Override config.show_progress setting
 
         Returns:
-            List of DocResults
+            List of DocumentResults
         """
         logger.info(f"Starting LEVEL-WISE batched processing of {len(samples)} documents")
         start_time = time.time()
@@ -986,21 +713,28 @@ class BatchedDocPipeline:
 
         results = []
 
+        # Build doc_id -> sample mapping for later lookup
+        def get_doc_id(s):
+            return getattr(s, "doc_id", "")
+
+        sample_by_id = {get_doc_id(s): s for s in samples}
+
         async with client:
-            # Phase 1: Build all trees level-wise
-            level_processor = LevelWiseBatchProcessor(
+            # Phase 1: Build all trees level-wise using BatchTreeOrchestrator
+            strategy = BatchedStrategy(
                 client=client,
-                rubric=self.config.rubric,
-                max_chunk_chars=self.config.max_chunk_chars,
-                max_tokens_summary=self.config.max_tokens_summary,
                 summarize_prompt_fn=self.config.prompt_builders.summarize,
                 merge_prompt_fn=self.config.prompt_builders.merge,
+                max_tokens=self.config.max_tokens_summary,
             )
+            config = BuildConfig(max_chunk_chars=self.config.max_chunk_chars)
+            orchestrator = BatchTreeOrchestrator(strategy=strategy, config=config)
 
-            tree_states = await level_processor.process_all_documents(
+            build_results = await orchestrator.process_documents(
                 documents=samples,
+                rubric=self.config.rubric,
                 get_text_fn=lambda s: s.text,
-                get_id_fn=lambda s: getattr(s, "doc_id", getattr(s, "manifesto_id", "")),
+                get_id_fn=get_doc_id,
                 progress_callback=progress_callback,
             )
 
@@ -1009,93 +743,99 @@ class BatchedDocPipeline:
 
             if self.config.prompt_builders.score and self.config.score_parser:
                 # Phase 2: Score ALL documents' summaries together
-                logger.info(f"Phase 4: Scoring {len(tree_states)} documents...")
-                score_requests = []  # [(state_idx, request)]
+                logger.info(f"Phase 4: Scoring {len(build_results)} documents...")
+                score_requests = []  # [(result_idx, request)]
 
-                for state_idx, state in enumerate(tree_states):
-                    if state.error or not state.root_summary:
+                for result_idx, build_result in enumerate(build_results):
+                    doc_id = build_result.tree.metadata.get('doc_id', '')
+                    if build_result.errors or not build_result.tree.final_summary:
                         continue
 
                     request = BatchRequest(
-                        request_id=f"{state.doc_id}_score",
+                        request_id=f"{doc_id}_score",
                         messages=self.config.prompt_builders.score(
-                            state.root_summary,
+                            build_result.tree.final_summary,
                             self.config.task_context,
                         ),
                         max_tokens=self.config.max_tokens_score,
-                        document_id=state.doc_id,
+                        document_id=doc_id,
                         request_type="score",
                     )
-                    score_requests.append((state_idx, request))
+                    score_requests.append((result_idx, request))
                     await client.submit(request)
 
                 logger.info(f"  Submitted {len(score_requests)} score requests...")
 
                 # Await all scores
-                for state_idx, request in score_requests:
+                for result_idx, request in score_requests:
                     response = await client.await_response(request.request_id)
-                    scores[state_idx] = self.config.score_parser(response.content)
+                    scores[result_idx] = self.config.score_parser(response.content)
 
                 # Phase 3: Baseline scores (optional)
                 if self.config.run_baseline:
                     logger.info(f"Phase 5: Computing baseline scores...")
                     baseline_requests = []
 
-                    for state_idx, state in enumerate(tree_states):
-                        if state.error:
+                    for result_idx, build_result in enumerate(build_results):
+                        doc_id = build_result.tree.metadata.get('doc_id', '')
+                        if build_result.errors:
                             continue
 
-                        sample = state.sample
-                        baseline_text = sample.text[:50000]
+                        sample = sample_by_id.get(doc_id)
+                        if not sample:
+                            continue
+                        baseline_text = sample.text  # Use full text - truncation corrupts results
 
                         request = BatchRequest(
-                            request_id=f"{state.doc_id}_baseline",
+                            request_id=f"{doc_id}_baseline",
                             messages=self.config.prompt_builders.score(
                                 baseline_text,
                                 self.config.task_context,
                             ),
                             max_tokens=self.config.max_tokens_score,
-                            document_id=state.doc_id,
+                            document_id=doc_id,
                             request_type="baseline",
                         )
-                        baseline_requests.append((state_idx, request))
+                        baseline_requests.append((result_idx, request))
                         await client.submit(request)
 
                     logger.info(f"  Submitted {len(baseline_requests)} baseline requests...")
 
-                    for state_idx, request in baseline_requests:
+                    for result_idx, request in baseline_requests:
                         response = await client.await_response(request.request_id)
-                        baselines[state_idx] = self.config.score_parser(response.content)
+                        baselines[result_idx] = self.config.score_parser(response.content)
 
-            # Convert tree states to DocResults
-            for state_idx, state in enumerate(tree_states):
-                sample = state.sample
+            # Convert BuildResults to DocumentResults
+            for result_idx, build_result in enumerate(build_results):
+                doc_id = build_result.tree.metadata.get('doc_id', '')
+                sample = sample_by_id.get(doc_id)
 
-                # Extract leaf summaries from level_history if available
-                leaf_summaries = []
-                if state.level_history and len(state.level_history) > 0:
-                    # Level 0 contains the leaf nodes with their summaries
-                    leaf_summaries = [
-                        node.get('summary', '')
-                        for node in state.level_history[0]
-                    ]
+                # Extract leaf summaries from tree.leaves
+                leaf_summaries = [
+                    leaf_node.summary or ""
+                    for leaf_node in build_result.tree.leaves
+                ]
 
-                result = DocResult(
-                    doc_id=state.doc_id,
-                    reference_score=_extract_reference_score(sample),
-                    original_length=len(sample.text),
-                    tree_height=state.tree_height,
-                    tree_leaves=state.leaf_count,
-                    final_summary=state.root_summary,
-                    summary_length=len(state.root_summary),
-                    compression_ratio=len(sample.text) / max(len(state.root_summary), 1),
-                    estimated_score=scores.get(state_idx),
-                    baseline_score=baselines.get(state_idx),
-                    error=state.error,
-                    chunks=state.chunks,
+                # Get original text length
+                original_length = len(sample.text) if sample else 0
+                final_summary = build_result.tree.final_summary or ""
+
+                result = DocumentResult(
+                    doc_id=doc_id,
+                    reference_score=_extract_reference_score(sample) if sample else None,
+                    original_length=original_length,
+                    tree_height=build_result.tree.height,
+                    tree_leaves=build_result.tree.leaf_count,
+                    final_summary=final_summary,
+                    summary_length=len(final_summary),
+                    compression_ratio=original_length / max(len(final_summary), 1) if original_length else 1.0,
+                    estimated_score=scores.get(result_idx),
+                    baseline_score=baselines.get(result_idx),
+                    error=build_result.errors[0] if build_result.errors else None,
+                    chunks=build_result.chunks_created,
                     leaf_summaries=leaf_summaries,
-                    level_history=state.level_history,
-                    metadata=_extract_metadata(sample),
+                    level_history=None,  # Not available from BuildResult
+                    metadata=_extract_metadata(sample) if sample else {},
                 )
                 results.append(result)
 
@@ -1119,10 +859,10 @@ class BatchedDocPipeline:
 # =============================================================================
 
 async def process_documents_batched(
-    samples: List[DocSample],
+    samples: List[DocumentSample],
     config: Optional[BatchedPipelineConfig] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
-) -> List[DocResult]:
+) -> List[DocumentResult]:
     """
     High-level async function to process documents with batching.
 
@@ -1132,16 +872,16 @@ async def process_documents_batched(
         progress_callback: Progress callback
 
     Returns:
-        List of DocResults
+        List of DocumentResults
     """
     pipeline = BatchedDocPipeline(config)
     return await pipeline.process_batch_async(samples, progress_callback)
 
 
 def run_batched_experiment(
-    samples: List[DocSample],
+    samples: List[DocumentSample],
     config: Optional[BatchedPipelineConfig] = None,
-) -> List[DocResult]:
+) -> List[DocumentResult]:
     """
     Sync convenience function for running batched experiments.
 
@@ -1154,8 +894,3 @@ def run_batched_experiment(
     """
     pipeline = BatchedDocPipeline(config)
     return pipeline.process_batch(samples)
-
-
-# Backwards compatibility alias
-BatchedManifestoPipeline = BatchedDocPipeline
-process_manifestos_batched = process_documents_batched
