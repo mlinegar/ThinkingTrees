@@ -16,7 +16,7 @@ class OPSLawComparison(dspy.Signature):
     original_text: str = dspy.InputField(desc="Original/reference text")
     summary_a: str = dspy.InputField(desc="First candidate")
     summary_b: str = dspy.InputField(desc="Second candidate")
-    ground_truth_score: float = dspy.InputField(desc="Oracle score for original")
+    reference_score: float = dspy.InputField(desc="Oracle score for original")
 
     preferred: str = dspy.OutputField(desc="'A', 'B', or 'tie'")
     confidence: float = dspy.OutputField(desc="0.0 to 1.0")
@@ -40,7 +40,7 @@ class OPSComparisonModule(dspy.Module):
         original_text: str,
         summary_a: str,
         summary_b: str,
-        ground_truth_score: float,
+        reference_score: float,
     ):
         result = self.compare(
             law_type=law_type,
@@ -48,7 +48,7 @@ class OPSComparisonModule(dspy.Module):
             original_text=original_text,
             summary_a=summary_a,
             summary_b=summary_b,
-            ground_truth_score=ground_truth_score,
+            reference_score=reference_score,
         )
 
         preferred = str(result.preferred).upper().strip()

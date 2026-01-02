@@ -8,7 +8,7 @@ allowing dynamic discovery and selection of tasks.
 import logging
 from typing import Dict, List, Optional, Type, Union, Iterable
 
-from .base import TaskPlugin, AbstractTask, DomainPlugin, AbstractDomain
+from .base import TaskPlugin, AbstractTask
 
 logger = logging.getLogger(__name__)
 
@@ -124,10 +124,6 @@ class TaskRegistry:
         cls._instances.clear()
 
 
-# Backward compatibility alias
-DomainRegistry = TaskRegistry
-
-
 def register_task(name: Union[str, Iterable[str]]):
     """
     Decorator to register a task class.
@@ -143,7 +139,3 @@ def register_task(name: Union[str, Iterable[str]]):
             TaskRegistry.register(item, cls)
         return cls
     return decorator
-
-
-# Backward compatibility alias
-register_domain = register_task

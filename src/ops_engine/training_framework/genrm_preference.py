@@ -25,7 +25,7 @@ Usage:
 
     # Compare two summaries
     result = judge.compare(
-        context="Summarize this political text preserving its left-right stance",
+        context="Summarize this text preserving the key information",
         original_text="...",
         summary_a="...",
         summary_b="...",
@@ -34,18 +34,19 @@ Usage:
     # result.ranking_score = 1-6
 """
 
+import asyncio
 import json
 import logging
-import random
 import re
 from dataclasses import dataclass
-from datetime import datetime
-from typing import List, Optional, Dict, Any, Tuple, Literal
+from typing import Any, Dict, List, Literal, Optional, Union
 
+import aiohttp
 import requests
-import dspy
 
-from .preference import PreferencePair, PreferenceDataset
+from .base_preference import BasePreferenceCollector, CandidateInfo, PreferenceResult
+from .preference import GenerationConfig, PreferenceDataset
+from .preference_engine import DEFAULT_GENRM_ENGINE, PreferenceEngine
 
 logger = logging.getLogger(__name__)
 
@@ -62,12 +63,41 @@ class GenRMResult:
     raw_response: str = ""
 
 
+@dataclass
+class GenRMErrorResult:
+    """Error result from GenRM - distinct from legitimate ties.
+
+    This type exists to prevent network/timeout errors from being confused
+    with genuine 50/50 preference ties. Callers should filter these out
+    of training data rather than treating them as preferences.
+    """
+    error_type: Literal["network", "timeout", "parse_error", "server_error"]
+    error_message: str
+    raw_response: str = ""
+
+    def is_error(self) -> bool:
+        """Always True for error results."""
+        return True
+
+
+# Type alias for GenRM comparison results
+GenRMComparisonResult = Union[GenRMResult, GenRMErrorResult]
+
+
+def is_genrm_error(result: GenRMComparisonResult) -> bool:
+    """Check if a GenRM result is an error (not a valid preference)."""
+    return isinstance(result, GenRMErrorResult)
+
+
 class GenRMJudge:
     """
     Judge using NVIDIA's Qwen3-Nemotron-235B-A22B-GenRM.
 
     Uses the special response_1/response_2 format for comparison.
     """
+
+    # Class-level cache for model names per server URL (avoids repeated HTTP requests)
+    _model_cache: Dict[str, str] = {}
 
     def __init__(
         self,
@@ -76,6 +106,7 @@ class GenRMJudge:
         temperature: float = 0.6,
         top_p: float = 0.95,
         max_tokens: int = 16384,
+        batch_client: Optional[Any] = None,  # AsyncBatchLLMClient (optional)
     ):
         """
         Initialize the GenRM judge.
@@ -86,6 +117,7 @@ class GenRMJudge:
             temperature: Generation temperature
             top_p: Top-p sampling
             max_tokens: Maximum tokens for response
+            batch_client: Optional AsyncBatchLLMClient for batched requests (better performance)
         """
         # Auto-detect base URL from config if not provided
         if base_url is None:
@@ -95,6 +127,7 @@ class GenRMJudge:
         self.temperature = temperature
         self.top_p = top_p
         self.max_tokens = max_tokens
+        self.batch_client = batch_client  # Optional batching support
 
         # Auto-detect model name from server if not provided
         if model_name is None:
@@ -103,13 +136,21 @@ class GenRMJudge:
             self.model_name = model_name
 
     def _detect_model_name(self) -> Optional[str]:
-        """Auto-detect the model name from the vLLM server."""
+        """Auto-detect the model name from the vLLM server (cached per URL)."""
+        # Check class-level cache first
+        if self.base_url in GenRMJudge._model_cache:
+            model_id = GenRMJudge._model_cache[self.base_url]
+            logger.debug(f"Using cached GenRM model: {model_id}")
+            return model_id
+
         try:
             response = requests.get(f"{self.base_url}/models", timeout=10)
             response.raise_for_status()
             data = response.json()
             if data.get("data") and len(data["data"]) > 0:
                 model_id = data["data"][0]["id"]
+                # Cache for future instances
+                GenRMJudge._model_cache[self.base_url] = model_id
                 logger.info(f"Auto-detected GenRM model: {model_id}")
                 return model_id
         except Exception as e:
@@ -221,7 +262,7 @@ class GenRMJudge:
 
         original_section = ""
         if original_text.strip():
-            original_section = f"\n\nOriginal text being summarized:\n{original_text[:4000]}"
+            original_section = f"\n\nOriginal text being summarized:\n{original_text}"  # Use full text
 
         extra_section = ""
         if extra_context:
@@ -295,7 +336,7 @@ Analyze step by step following the evaluation plan, then provide your judgment a
         summary_b: str,
         law_type: str = "sufficiency",
         extra_context: Optional[str] = None,
-    ) -> GenRMResult:
+    ) -> GenRMComparisonResult:
         """
         Compare two summaries using GenRM.
 
@@ -354,6 +395,138 @@ Analyze step by step following the evaluation plan, then provide your judgment a
             logger.error(f"GenRM request failed: {e}")
             return self._error_result(str(e))
 
+    async def compare_async(
+        self,
+        context: str,
+        original_text: str,
+        summary_a: str,
+        summary_b: str,
+        law_type: str = "sufficiency",
+        extra_context: Optional[str] = None,
+    ) -> GenRMComparisonResult:
+        """
+        Async version of compare() - uses batch client when available for better throughput.
+
+        If batch_client is provided during init, uses it for batched requests.
+        Otherwise falls back to direct HTTP calls via aiohttp.
+
+        Args:
+            context: Description of what information to preserve
+            original_text: Original text being summarized
+            summary_a: First candidate summary
+            summary_b: Second candidate summary
+            law_type: OPS law type (sufficiency, idempotence, merge)
+            extra_context: Additional context for the comparison
+
+        Returns:
+            GenRMResult with preference and scores
+        """
+        # Ensure model name is detected
+        self._ensure_model_name()
+
+        messages = self._build_messages(
+            context=context,
+            original_text=original_text,
+            summary_a=summary_a,
+            summary_b=summary_b,
+            law_type=law_type,
+            extra_context=extra_context,
+        )
+
+        # Use batch client if available (better for tournament mode across multiple docs)
+        if self.batch_client is not None:
+            from src.core.batch_processor import BatchRequest
+            import uuid
+
+            request = BatchRequest(
+                request_id=f"genrm_{uuid.uuid4().hex}",
+                messages=messages,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                request_type="genrm_compare",
+            )
+
+            response = await self.batch_client.call(request)
+
+            if response.error:
+                logger.error(f"GenRM batch request failed: {response.error}")
+                return self._error_result(response.error)
+
+            return self._parse_genrm_response(response.content)
+
+        # Fall back to direct aiohttp call if no batch client
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.base_url}/chat/completions",
+                    json={
+                        "model": self.model_name,
+                        "messages": messages,
+                        "temperature": self.temperature,
+                        "top_p": self.top_p,
+                        "max_tokens": self.max_tokens,
+                    },
+                    timeout=aiohttp.ClientTimeout(total=600),  # 10 min for large GenRM models
+                ) as resp:
+                    data = await resp.json()
+
+                    if resp.status == 200:
+                        content = data["choices"][0]["message"]["content"]
+                        return self._parse_genrm_response(content)
+                    else:
+                        error_msg = f"HTTP {resp.status}: {data}"
+                        logger.error(f"GenRM request failed: {error_msg}")
+                        return self._error_result(error_msg)
+
+        except Exception as e:
+            logger.error(f"GenRM async request failed: {e}")
+            return self._error_result(str(e))
+
+    async def compare_batch_async(
+        self,
+        comparisons: List[tuple],
+    ) -> List[GenRMComparisonResult]:
+        """
+        Batch compare multiple summary pairs concurrently.
+
+        Each comparison tuple: (context, original_text, summary_a, summary_b, law_type, extra_context)
+        Uses asyncio.gather for concurrent execution within a round.
+
+        Args:
+            comparisons: List of (context, original_text, summary_a, summary_b, law_type, extra_context) tuples
+
+        Returns:
+            List of GenRMComparisonResult (may include GenRMErrorResult for failed comparisons)
+        """
+        if not comparisons:
+            return []
+
+        # Use asyncio.gather to run all comparisons concurrently
+        tasks = [
+            self.compare_async(
+                context=comp[0],
+                original_text=comp[1],
+                summary_a=comp[2],
+                summary_b=comp[3],
+                law_type=comp[4] if len(comp) > 4 else "sufficiency",
+                extra_context=comp[5] if len(comp) > 5 else None,
+            )
+            for comp in comparisons
+        ]
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Convert exceptions to error results
+        processed_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Batch comparison {i} failed: {result}")
+                processed_results.append(self._error_result(str(result)))
+            else:
+                processed_results.append(result)
+
+        return processed_results
+
     def _compare_via_completions(
         self,
         context: str,
@@ -362,7 +535,7 @@ Analyze step by step following the evaluation plan, then provide your judgment a
         summary_b: str,
         law_type: str = "sufficiency",
         extra_context: Optional[str] = None,
-    ) -> GenRMResult:
+    ) -> GenRMComparisonResult:
         """
         Compare using the /completions endpoint as fallback.
         """
@@ -393,15 +566,15 @@ Analyze step by step following the evaluation plan, then provide your judgment a
             logger.error(f"GenRM completions request failed: {e}")
             return self._error_result(str(e))
 
-    def _error_result(self, error_msg: str) -> GenRMResult:
-        """Return a tie result with low confidence for errors."""
-        return GenRMResult(
-            preferred="tie",
-            ranking_score=3,
-            helpfulness_a=3.0,
-            helpfulness_b=3.0,
-            reasoning=f"Error during comparison: {error_msg}",
-            confidence=0.0,
+    def _error_result(self, error_msg: str, error_type: str = "network") -> GenRMErrorResult:
+        """Return an error result distinct from legitimate ties.
+
+        Callers should filter out GenRMErrorResult from training data
+        rather than treating them as preferences.
+        """
+        return GenRMErrorResult(
+            error_type=error_type,
+            error_message=error_msg,
             raw_response="",
         )
 
@@ -459,37 +632,40 @@ Analyze step by step following the evaluation plan, then provide your judgment a
                 else:
                     ranking_score = 3  # Roughly equal
 
-        # Determine preference from ranking score
+        # Determine preference from ranking score (1-6 scale per Nemotron paper)
+        # 1,2 = A wins, 3,4 = tie, 5,6 = B wins (symmetric)
+        # NOTE: This is the canonical implementation. PreferenceEngine.RANKING_SCORE_THRESHOLD
+        # strategy provides the same logic for use outside GenRMJudge.
         if ranking_score <= 2:
             preferred = "A"
             confidence = (3 - ranking_score) * 0.3 + 0.4  # 0.7-1.0
         elif ranking_score >= 5:
             preferred = "B"
             confidence = (ranking_score - 4) * 0.3 + 0.4  # 0.7-1.0
-        elif ranking_score == 3:
+        else:  # 3 or 4 = tie (symmetric middle ground)
             preferred = "tie"
             confidence = 0.5
-        else:
-            preferred = "B"
-            confidence = 0.55
 
         return GenRMResult(
             preferred=preferred,
             ranking_score=ranking_score,
             helpfulness_a=helpfulness_a,
             helpfulness_b=helpfulness_b,
-            reasoning=reasoning if reasoning else content[:500],
+            reasoning=reasoning if reasoning else content,
             confidence=confidence,
             raw_response=content,
         )
 
 
-class GenRMPreferenceCollector:
+class GenRMPreferenceCollector(BasePreferenceCollector[Dict[str, float]]):
     """
     Collects preference pairs using GenRM for comparison.
 
     Generates multiple candidate summaries and uses GenRM to compare them,
     building a preference dataset for training.
+
+    This class extends BasePreferenceCollector to use GenRMJudge for
+    preference derivation instead of oracle-based scoring.
     """
 
     def __init__(
@@ -498,6 +674,7 @@ class GenRMPreferenceCollector:
         judge: GenRMJudge,
         k_candidates: int = 4,
         temperatures: Optional[List[float]] = None,
+        preference_engine: Optional[PreferenceEngine] = None,
     ):
         """
         Initialize the collector.
@@ -507,360 +684,89 @@ class GenRMPreferenceCollector:
             judge: GenRMJudge for comparing summaries
             k_candidates: Number of candidate summaries per input
             temperatures: List of temperatures for diverse generation
+            preference_engine: Engine for deriving preferences (uses default GenRM engine if None)
         """
-        self.summarizer = summarizer
-        self.judge = judge
-        self.k_candidates = k_candidates
-        self.temperatures = temperatures or [0.3, 0.5, 0.7, 0.9]
+        # Create generation configs from temperatures
+        temps = temperatures or [0.3, 0.5, 0.7, 0.9]
+        generation_configs = [
+            GenerationConfig(temperature=t, prompt_variant=f"temp_{t}")
+            for t in temps[:k_candidates]
+        ]
 
-        self.pairs: List[PreferencePair] = []
-        self._pair_counter = 0
-
-    def generate_candidates(
-        self,
-        content: str,
-        rubric: str,
-    ) -> List[str]:
-        """Generate k candidate summaries with varying temperatures."""
-        candidates = []
-
-        for temp in self.temperatures[:self.k_candidates]:
-            lm = getattr(dspy, "settings", None)
-            lm = getattr(lm, "lm", None)
-            prev_temp = None
-            if lm is not None and hasattr(lm, "kwargs"):
-                prev_temp = lm.kwargs.get("temperature")
-                lm.kwargs["temperature"] = temp
-
-            try:
-                result = self.summarizer(content=content, rubric=rubric)
-                summary = getattr(result, 'summary', str(result))
-                candidates.append(summary)
-            except Exception as e:
-                logger.warning(f"Failed to generate candidate: {e}")
-            finally:
-                if lm is not None and hasattr(lm, "kwargs"):
-                    if prev_temp is None:
-                        lm.kwargs.pop("temperature", None)
-                    else:
-                        lm.kwargs["temperature"] = prev_temp
-
-        return candidates
-
-    def collect_pairs_for_example(
-        self,
-        example_id: str,
-        original_text: str,
-        rubric: str,
-        ground_truth_score: float = 0.0,
-        law_type: str = "sufficiency",
-    ) -> List[PreferencePair]:
-        """
-        Generate candidates and collect all pairwise preferences.
-
-        Args:
-            example_id: Unique identifier
-            original_text: Original text to summarize
-            rubric: What information to preserve
-            ground_truth_score: Optional ground truth score
-
-        Returns:
-            List of preference pairs
-        """
-        if law_type == "idempotence":
-            return self._collect_idempotence_pairs(
-                example_id, original_text, rubric, ground_truth_score
-            )
-        if law_type == "merge":
-            return self._collect_merge_pairs(
-                example_id, original_text, rubric, ground_truth_score
-            )
-        return self._collect_sufficiency_pairs(
-            example_id, original_text, rubric, ground_truth_score
+        super().__init__(
+            summarizer=summarizer,
+            k_candidates=k_candidates,
+            generation_configs=generation_configs,
         )
 
-    def _collect_sufficiency_pairs(
+        self.judge = judge
+        self.temperatures = temps
+        self.preference_engine = preference_engine or DEFAULT_GENRM_ENGINE
+
+    def _create_candidate_metadata(
         self,
-        example_id: str,
-        original_text: str,
-        rubric: str,
-        ground_truth_score: float,
-    ) -> List[PreferencePair]:
-        """Collect preference pairs for sufficiency."""
-        candidates = self.generate_candidates(original_text, rubric)
+        gen_config: GenerationConfig,
+        index: int,
+    ) -> Dict[str, float]:
+        """Create temperature dict for candidate metadata."""
+        return {"temperature": gen_config.temperature}
 
-        if len(candidates) < 2:
-            logger.warning(f"Only {len(candidates)} candidates for {example_id}")
-            return []
-
-        pairs: List[PreferencePair] = []
-        for i in range(len(candidates)):
-            for j in range(i + 1, len(candidates)):
-                summary_a = candidates[i]
-                summary_b = candidates[j]
-                idx_a, idx_b = i, j
-
-                swapped = random.random() < 0.5
-                if swapped:
-                    summary_a, summary_b = summary_b, summary_a
-                    idx_a, idx_b = idx_b, idx_a
-
-                try:
-                    result = self.judge.compare(
-                        context=rubric,
-                        original_text=original_text,
-                        summary_a=summary_a,
-                        summary_b=summary_b,
-                        law_type="sufficiency",
-                    )
-
-                    preferred = result.preferred
-
-                    self._pair_counter += 1
-                    pair = PreferencePair(
-                        pair_id=f"genrm_{self._pair_counter:06d}",
-                        source_example_id=example_id,
-                        original_text=original_text,
-                        rubric=rubric,
-                        ground_truth_score=ground_truth_score,
-                        law_type="sufficiency",
-                        summary_a=summary_a,
-                        summary_b=summary_b,
-                        preferred=preferred,
-                        reasoning=f"{result.reasoning} (candidates {idx_a},{idx_b})",
-                        confidence=result.confidence,
-                        score_estimate_a=result.helpfulness_a,
-                        score_estimate_b=result.helpfulness_b,
-                        judge_model="qwen3-nemotron-genrm",
-                        generation_config_a={"temperature": self.temperatures[idx_a]},
-                        generation_config_b={"temperature": self.temperatures[idx_b]},
-                    )
-                    pairs.append(pair)
-                    self.pairs.append(pair)
-
-                except Exception as e:
-                    logger.error(f"Failed to judge pair: {e}")
-
-        return pairs
-
-    def _collect_idempotence_pairs(
+    def _get_generation_config_dict(
         self,
-        example_id: str,
-        original_text: str,
-        rubric: str,
-        ground_truth_score: float,
-    ) -> List[PreferencePair]:
-        """Collect preference pairs for idempotence."""
-        candidates = self.generate_candidates(original_text, rubric)
+        metadata: Dict[str, float],
+    ) -> Dict[str, Any]:
+        """Return temperature dict as-is."""
+        return metadata
 
-        if len(candidates) < 2:
-            logger.warning(f"Only {len(candidates)} candidates for {example_id}")
-            return []
+    def _get_pair_id_prefix(self) -> str:
+        """Return GenRM-specific pair ID prefix."""
+        return "genrm"
 
-        resummaries: List[str] = []
-        for summary in candidates:
-            try:
-                result = self.summarizer(content=summary, rubric=rubric)
-                resummary = getattr(result, "summary", str(result))
-                resummaries.append(resummary)
-            except Exception as e:
-                logger.warning(f"Failed to generate resummary: {e}")
-                resummaries.append("")
+    def _get_judge_model_name(self) -> str:
+        """Return GenRM model name."""
+        return "qwen3-nemotron-genrm"
 
-        pairs: List[PreferencePair] = []
-        for i in range(len(candidates)):
-            for j in range(i + 1, len(candidates)):
-                summary_a = candidates[i]
-                summary_b = candidates[j]
-                resummary_a = resummaries[i]
-                resummary_b = resummaries[j]
-                idx_a, idx_b = i, j
-
-                swapped = random.random() < 0.5
-                if swapped:
-                    summary_a, summary_b = summary_b, summary_a
-                    resummary_a, resummary_b = resummary_b, resummary_a
-                    idx_a, idx_b = idx_b, idx_a
-
-                extra_context = (
-                    "Idempotence check (re-summaries):\n"
-                    f"Candidate A resummary:\n{resummary_a}\n\n"
-                    f"Candidate B resummary:\n{resummary_b}"
-                )
-
-                try:
-                    result = self.judge.compare(
-                        context=rubric,
-                        original_text="",
-                        summary_a=summary_a,
-                        summary_b=summary_b,
-                        law_type="idempotence",
-                        extra_context=extra_context,
-                    )
-
-                    preferred = result.preferred
-
-                    self._pair_counter += 1
-                    pair = PreferencePair(
-                        pair_id=f"genrm_idem_{self._pair_counter:06d}",
-                        source_example_id=example_id,
-                        original_text=original_text,
-                        rubric=rubric,
-                        ground_truth_score=ground_truth_score,
-                        law_type="idempotence",
-                        summary_a=summary_a,
-                        summary_b=summary_b,
-                        preferred=preferred,
-                        reasoning=f"{result.reasoning} (candidates {idx_a},{idx_b})",
-                        confidence=result.confidence,
-                        score_estimate_a=result.helpfulness_a,
-                        score_estimate_b=result.helpfulness_b,
-                        judge_model="qwen3-nemotron-genrm",
-                        generation_config_a={"temperature": self.temperatures[idx_a]},
-                        generation_config_b={"temperature": self.temperatures[idx_b]},
-                    )
-                    pairs.append(pair)
-                    self.pairs.append(pair)
-
-                except Exception as e:
-                    logger.error(f"Failed to judge pair: {e}")
-
-        return pairs
-
-    def _collect_merge_pairs(
+    def _derive_preference(
         self,
-        example_id: str,
-        original_text: str,
-        rubric: str,
-        ground_truth_score: float,
-    ) -> List[PreferencePair]:
-        """Collect preference pairs for merge consistency."""
-        words = original_text.split()
-        if not words:
-            logger.warning(f"No text for merge pairing on {example_id}")
-            return []
+        candidate_a: CandidateInfo[Dict[str, float]],
+        candidate_b: CandidateInfo[Dict[str, float]],
+        context: Dict[str, Any],
+    ) -> PreferenceResult:
+        """
+        Derive preference by calling GenRM judge.
 
-        mid = len(words) // 2
-        text_a = " ".join(words[:mid])
-        text_b = " ".join(words[mid:])
+        Args:
+            candidate_a: First candidate with summary and temperature metadata
+            candidate_b: Second candidate
+            context: Contains original_text, rubric, law_type, extra_context
 
-        k_per_half = max(2, self.k_candidates // 2)
-        candidates_a = self.generate_candidates(text_a, rubric)[:k_per_half]
-        candidates_b = self.generate_candidates(text_b, rubric)[:k_per_half]
+        Returns:
+            PreferenceResult from GenRM comparison
+        """
+        law_type = context.get("law_type", "sufficiency")
+        extra_context = context.get("extra_context")
 
-        if not candidates_a or not candidates_b:
-            logger.warning(f"Insufficient candidates for merge on {example_id}")
-            return []
+        # For idempotence/merge, we don't pass original_text to judge
+        original_text = context.get("original_text", "")
+        if law_type in ("idempotence", "merge"):
+            original_text = ""
 
-        merged_candidates: List[Tuple[str, str, str, int, int]] = []
-        for idx_a, summary_a in enumerate(candidates_a):
-            for idx_b, summary_b in enumerate(candidates_b):
-                merged_text = f"{summary_a}\n\n{summary_b}"
-                try:
-                    result = self.summarizer(content=merged_text, rubric=rubric)
-                    merged_summary = getattr(result, "summary", str(result))
-                    merged_candidates.append((summary_a, summary_b, merged_summary, idx_a, idx_b))
-                except Exception as e:
-                    logger.warning(f"Failed to generate merged summary: {e}")
+        result = self.judge.compare(
+            context=context.get("rubric", ""),
+            original_text=original_text,
+            summary_a=candidate_a.summary,
+            summary_b=candidate_b.summary,
+            law_type=law_type,
+            extra_context=extra_context,
+        )
 
-        if len(merged_candidates) < 2:
-            logger.warning(f"Only {len(merged_candidates)} merged candidates for {example_id}")
-            return []
-
-        pairs: List[PreferencePair] = []
-        for i in range(len(merged_candidates)):
-            for j in range(i + 1, len(merged_candidates)):
-                left_a, right_a, merged_a, idx_a_left, idx_a_right = merged_candidates[i]
-                left_b, right_b, merged_b, idx_b_left, idx_b_right = merged_candidates[j]
-                idx_a, idx_b = i, j
-
-                swapped = random.random() < 0.5
-                if swapped:
-                    left_a, left_b = left_b, left_a
-                    right_a, right_b = right_b, right_a
-                    merged_a, merged_b = merged_b, merged_a
-                    idx_a_left, idx_b_left = idx_b_left, idx_a_left
-                    idx_a_right, idx_b_right = idx_b_right, idx_a_right
-                    idx_a, idx_b = idx_b, idx_a
-
-                extra_context = (
-                    "Merge check (child summaries):\n"
-                    f"Candidate A left summary:\n{left_a}\n"
-                    f"Candidate A right summary:\n{right_a}\n\n"
-                    f"Candidate B left summary:\n{left_b}\n"
-                    f"Candidate B right summary:\n{right_b}"
-                )
-
-                try:
-                    result = self.judge.compare(
-                        context=rubric,
-                        original_text="",
-                        summary_a=merged_a,
-                        summary_b=merged_b,
-                        law_type="merge",
-                        extra_context=extra_context,
-                    )
-
-                    preferred = result.preferred
-
-                    self._pair_counter += 1
-                    pair = PreferencePair(
-                        pair_id=f"genrm_merge_{self._pair_counter:06d}",
-                        source_example_id=example_id,
-                        original_text=original_text,
-                        rubric=rubric,
-                        ground_truth_score=ground_truth_score,
-                        law_type="merge",
-                        summary_a=merged_a,
-                        summary_b=merged_b,
-                        preferred=preferred,
-                        reasoning=f"{result.reasoning} (candidates {idx_a},{idx_b})",
-                        confidence=result.confidence,
-                        score_estimate_a=result.helpfulness_a,
-                        score_estimate_b=result.helpfulness_b,
-                        judge_model="qwen3-nemotron-genrm",
-                        generation_config_a={
-                            "temperature_left": self.temperatures[idx_a_left],
-                            "temperature_right": self.temperatures[idx_a_right],
-                        },
-                        generation_config_b={
-                            "temperature_left": self.temperatures[idx_b_left],
-                            "temperature_right": self.temperatures[idx_b_right],
-                        },
-                    )
-                    pairs.append(pair)
-                    self.pairs.append(pair)
-
-                except Exception as e:
-                    logger.error(f"Failed to judge pair: {e}")
-
-        return pairs
-
-    def get_all_pairs(self) -> List[PreferencePair]:
-        """Return all collected pairs."""
-        return self.pairs
-
-    def get_dataset(self) -> PreferenceDataset:
-        """Return pairs as a PreferenceDataset."""
-        return PreferenceDataset(self.pairs)
-
-    def get_statistics(self) -> Dict[str, Any]:
-        """Return collection statistics."""
-        if not self.pairs:
-            return {"total": 0}
-
-        prefer_a = sum(1 for p in self.pairs if p.preferred == "A")
-        prefer_b = sum(1 for p in self.pairs if p.preferred == "B")
-        ties = sum(1 for p in self.pairs if p.preferred == "tie")
-
-        return {
-            "total_pairs": len(self.pairs),
-            "prefer_a": prefer_a,
-            "prefer_b": prefer_b,
-            "ties": ties,
-            "avg_confidence": sum(p.confidence for p in self.pairs) / len(self.pairs),
-            "position_balance": abs(prefer_a - prefer_b) / max(1, prefer_a + prefer_b),
-        }
+        return PreferenceResult(
+            preferred=result.preferred,
+            confidence=result.confidence,
+            reasoning=result.reasoning,
+            score_estimate_a=result.helpfulness_a,
+            score_estimate_b=result.helpfulness_b,
+        )
 
 
 def create_genrm_comparison_prompt(

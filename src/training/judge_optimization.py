@@ -27,9 +27,9 @@ Usage:
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple, Callable
+from typing import Dict, List, Optional, Tuple, Callable
 
 import dspy
 
@@ -39,6 +39,52 @@ from src.ops_engine.training_framework.preference import PreferencePair
 PreferenceLabeler = Callable[[PreferencePair, float], Optional[str]]
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SkippedReasons:
+    """Track skip reasons for training data preparation.
+
+    Each counter is mutually exclusive - a pair is only counted once
+    in the first applicable category.
+    """
+    missing_oracle_no_labeler: int = 0  # No oracle_error and no preference_labeler
+    labeler_returned_none: int = 0       # preference_labeler was provided but returned None
+    oracle_tie_margin_none: int = 0      # Oracle-based derivation returned None (shouldn't happen)
+
+    @property
+    def total(self) -> int:
+        return (
+            self.missing_oracle_no_labeler +
+            self.labeler_returned_none +
+            self.oracle_tie_margin_none
+        )
+
+    def to_dict(self) -> Dict[str, int]:
+        return {
+            'missing_oracle_no_labeler': self.missing_oracle_no_labeler,
+            'labeler_returned_none': self.labeler_returned_none,
+            'oracle_tie_margin_none': self.oracle_tie_margin_none,
+            'total': self.total,
+        }
+
+# =============================================================================
+# Constants
+# =============================================================================
+
+# Ranking scale constants for GenRM judge output
+# The judge outputs scores on a 1-6 Likert scale where:
+# - 1 = Strongly prefer A
+# - 6 = Strongly prefer B
+# - 3-4 = Neutral/uncertain
+RANKING_SCALE_MIN = 1.0
+RANKING_SCALE_MAX = 6.0
+RANKING_SCALE_CENTER = 3.5  # Midpoint representing maximum uncertainty
+RANKING_SCALE_HALF_RANGE = 2.5  # Distance from center to extremes: (6-1)/2
+
+# NOTE: We no longer truncate original text for training examples.
+# Truncation corrupts training signal - models should see full context.
+# DSPy and GenRM can handle longer contexts natively.
 
 
 # =============================================================================
@@ -55,7 +101,7 @@ def derive_ground_truth_preference(
 
     By default:
     - If oracle_error_a/b are present, lower error is better.
-    - Otherwise, falls back to score_estimate_a/b where higher is better.
+    - Otherwise, requires a preference_labeler to provide ground truth.
 
     Args:
         pair: PreferencePair with optional score estimates
@@ -74,14 +120,7 @@ def derive_ground_truth_preference(
             return 'tie'
         return 'A' if diff < 0 else 'B'  # Lower error is better
 
-    if pair.score_estimate_a is None or pair.score_estimate_b is None:
-        return None
-
-    diff = pair.score_estimate_a - pair.score_estimate_b
-
-    if abs(diff) < tie_margin:
-        return 'tie'
-    return 'A' if diff > 0 else 'B'  # Higher score is better
+    return None
 
 
 def make_preference_labeler(
@@ -119,9 +158,8 @@ def create_judge_trainset(
     pairs: List[PreferencePair],
     tie_margin: float = 0.5,
     use_oracle_as_ground_truth: bool = True,
-    max_original_text_chars: int = 4000,
     preference_labeler: Optional[PreferenceLabeler] = None,
-) -> List[dspy.Example]:
+) -> Tuple[List[dspy.Example], SkippedReasons]:
     """
     Create DSPy training examples for judge optimization.
 
@@ -130,30 +168,47 @@ def create_judge_trainset(
         tie_margin: Score difference below this is considered a tie
         use_oracle_as_ground_truth: If True, derive ground truth from oracle scores.
                                    If False, use the existing 'preferred' field.
-        max_original_text_chars: Truncate original text to this length
         preference_labeler: Optional override for custom preference labeling
 
     Returns:
-        List of dspy.Example with judge training data
+        Tuple of (examples, skipped_reasons) for full visibility into data quality
     """
     examples = []
+    skipped = SkippedReasons()
 
     for pair in pairs:
         if use_oracle_as_ground_truth:
+            # Check if we can derive ground truth
+            has_oracle = (
+                pair.oracle_error_a is not None and pair.oracle_error_b is not None
+            )
+
+            if preference_labeler is None and not has_oracle:
+                # No way to get ground truth
+                skipped.missing_oracle_no_labeler += 1
+                continue
+
             ground_truth = derive_ground_truth_preference(
                 pair,
                 tie_margin=tie_margin,
                 preference_labeler=preference_labeler,
             )
+
             if ground_truth is None:
-                # Skip pairs without oracle scores
+                # Labeler was provided but returned None
+                if preference_labeler is not None:
+                    skipped.labeler_returned_none += 1
+                else:
+                    # This shouldn't happen if has_oracle is True
+                    skipped.oracle_tie_margin_none += 1
                 continue
         else:
             ground_truth = pair.preferred
 
+        # Use full original_text - no truncation
         example = dspy.Example(
             context=pair.rubric,
-            original_text=pair.original_text[:max_original_text_chars],
+            original_text=pair.original_text,
             summary_a=pair.summary_a,
             summary_b=pair.summary_b,
             law_type=pair.law_type,
@@ -163,7 +218,15 @@ def create_judge_trainset(
         examples.append(example)
 
     logger.info(f"Created {len(examples)} training examples for judge optimization")
-    return examples
+
+    if skipped.total > 0:
+        logger.warning(
+            "Skipped %d pairs: %s",
+            skipped.total,
+            skipped.to_dict(),
+        )
+
+    return examples, skipped
 
 
 # =============================================================================
@@ -204,9 +267,10 @@ def judge_accuracy_with_confidence(example, prediction, trace=None) -> float:
         # Get confidence from ranking_score if available
         try:
             ranking_score = float(prediction.ranking_score)
-            # Convert ranking_score (1-6) to confidence (0-1)
-            # 1 or 6 = high confidence, 3.5 = low confidence
-            confidence = abs(ranking_score - 3.5) / 2.5
+            # Convert ranking_score to confidence (0-1):
+            # - Extremes (1 or 6) = high confidence (1.0)
+            # - Center (3.5) = low confidence (0.0)
+            confidence = abs(ranking_score - RANKING_SCALE_CENTER) / RANKING_SCALE_HALF_RANGE
         except (ValueError, TypeError, AttributeError):
             confidence = 0.5
 
@@ -285,7 +349,7 @@ class JudgeOptimizer:
             Tuple of (optimized_judge, evaluation_results)
         """
         # Create training examples
-        all_examples = create_judge_trainset(
+        all_examples, skipped_reasons = create_judge_trainset(
             pairs,
             tie_margin=self.config.tie_margin,
             use_oracle_as_ground_truth=use_oracle_as_ground_truth,
@@ -351,6 +415,8 @@ class JudgeOptimizer:
             'train_size': len(trainset),
             'test_size': len(testset),
             'budget': self.config.budget,
+            'skipped_pairs': skipped_reasons.to_dict(),
+            'total_pairs_input': len(pairs),
         }
 
         return optimized_judge, results

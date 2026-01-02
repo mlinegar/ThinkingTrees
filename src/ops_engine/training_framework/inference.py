@@ -77,9 +77,9 @@ class Retriever:
         """
         self._examples = examples
 
-        # Create text representation of each example
+        # Create text representation of each example (full content for accurate embeddings)
         example_texts = [
-            f"Content: {ex.original_content[:500]}... Summary: {ex.summary[:300]}..."
+            f"Content: {ex.original_content}\nSummary: {ex.summary}"
             for ex in examples
         ]
 

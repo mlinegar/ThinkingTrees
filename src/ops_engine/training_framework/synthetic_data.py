@@ -368,7 +368,7 @@ class ChallengeGenerator(dspy.Module):
         )
 
         # Create challenge
-        challenge_id = f"challenge_{hash(document[:100]) % 1000000:06d}"
+        challenge_id = f"challenge_{hash(document) % 1000000:06d}"
 
         return OracleChallenge(
             challenge_id=challenge_id,

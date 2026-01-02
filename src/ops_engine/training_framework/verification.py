@@ -76,7 +76,7 @@ class NodeVerificationResult:
         """Convert all law check results to training examples."""
         examples = []
         for law_name, result in self.law_results.items():
-            example_id = f"{self.node_id}_{law_name}_{uuid.uuid4().hex[:8]}"
+            example_id = f"{self.node_id}_{law_name}_{uuid.uuid4().hex}"
             examples.append(result.to_training_example(
                 original_content=original_content,
                 summary=summary,
@@ -174,8 +174,8 @@ class OracleNodeVerifier:
             reasoning = (
                 f"Sufficiency violation: Original predicted '{orig_pred.label}' "
                 f"but summary predicted '{summ_pred.label}' (discrepancy={discrepancy:.2f}). "
-                f"Original reasoning: {orig_pred.reasoning[:200]}... "
-                f"Summary reasoning: {summ_pred.reasoning[:200]}..."
+                f"Original reasoning: {orig_pred.reasoning} "
+                f"Summary reasoning: {summ_pred.reasoning}"
             )
 
         return LawCheckResult(
@@ -217,10 +217,12 @@ class OracleNodeVerifier:
                 # Can't check idempotence without a summarizer
                 return LawCheckResult(
                     law="idempotence",
-                    passed=True,
+                    passed=False,  # NOT passed - check wasn't performed
                     discrepancy=0.0,
                     node_id=node_id,
                     reasoning="Skipped: no summarizer provided for idempotence check",
+                    skipped=True,
+                    skip_reason="no_summarizer",
                 )
             re_summary = self.summarizer(summary)
 
@@ -447,7 +449,7 @@ class OracleNodeVerifier:
             NodeVerificationResult with all check results
         """
         if node_id is None:
-            node_id = f"node_{uuid.uuid4().hex[:8]}"
+            node_id = f"node_{uuid.uuid4().hex}"
 
         results = {}
         is_leaf = child_summaries is None or len(child_summaries) == 0
@@ -524,7 +526,7 @@ class TreeVerifier:
         """Recursively verify nodes. Supports both Node objects and dicts."""
         # Handle both Node objects and dicts
         if isinstance(node, dict):
-            node_id = node.get('id', f"node_{uuid.uuid4().hex[:8]}")
+            node_id = node.get('id', f"node_{uuid.uuid4().hex}")
             summary = node.get('summary', '')
             children = node.get('children', [])
             original = node.get('original', node.get('raw_text_span', summary))

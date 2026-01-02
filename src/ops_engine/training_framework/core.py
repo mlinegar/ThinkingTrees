@@ -131,66 +131,6 @@ class UnifiedTrainingExample:
         return cls(**data)
 
     @classmethod
-    def from_legacy_training_example(
-        cls,
-        legacy: Any,  # TrainingExample from optimizer.py
-        example_id: Optional[str] = None,
-    ) -> 'UnifiedTrainingExample':
-        """
-        Convert from legacy TrainingExample (optimizer.py).
-
-        Legacy format has: content, rubric, summary, source, node_id, tree_id, discrepancy_score
-        """
-        return cls(
-            example_id=example_id or f"legacy_{legacy.node_id or 'unknown'}",
-            source_type=f"legacy_{legacy.source}",
-            original_content=legacy.content,
-            summary=legacy.summary,
-            rubric=legacy.rubric,
-            context={
-                'node_id': legacy.node_id,
-                'tree_id': legacy.tree_id,
-                'discrepancy_score': legacy.discrepancy_score,
-            },
-            label=TrainingExampleLabel.POSITIVE,  # Legacy examples are positive examples
-            violation_type=ViolationType.SUFFICIENCY,
-            corrected_summary=legacy.summary,  # Legacy format uses summary as the corrected version
-            confidence=0.8 if legacy.source == "oracle" else 1.0,
-        )
-
-    @classmethod
-    def from_audit_training_example(
-        cls,
-        audit: Any,  # AuditTrainingExample from bootstrap_loop.py (deprecated)
-    ) -> 'UnifiedTrainingExample':
-        """
-        Convert from AuditTrainingExample (bootstrap_loop.py).
-
-        DEPRECATED: Use create_audit_example() directly instead.
-
-        Audit format has: example_id, check_type, is_violation, original_content,
-        current_summary, rubric, oracle_original, oracle_summary, discrepancy,
-        node_id, document_id
-        """
-        return cls(
-            example_id=audit.example_id,
-            source_type="audit_bootstrap",
-            original_content=audit.original_content,
-            summary=audit.current_summary,
-            rubric=audit.rubric,
-            context={
-                'oracle_original': audit.oracle_original,
-                'oracle_summary': audit.oracle_summary,
-                'discrepancy': audit.discrepancy,
-                'node_id': audit.node_id,
-                'document_id': audit.document_id,
-            },
-            label=TrainingExampleLabel.POSITIVE if audit.is_violation else TrainingExampleLabel.NEGATIVE,
-            violation_type=ViolationType.from_check_type(audit.check_type),
-            confidence=min(1.0, 0.5 + abs(audit.discrepancy) / 100),  # Higher discrepancy = higher confidence
-        )
-
-    @classmethod
     def create_audit_example(
         cls,
         example_id: str,
@@ -331,6 +271,15 @@ class LawCheckResult:
     # Context
     node_id: Optional[str] = None
     reasoning: Optional[str] = None
+
+    # Skipped checks (e.g., no summarizer provided)
+    skipped: bool = False
+    skip_reason: Optional[str] = None
+
+    @property
+    def was_evaluated(self) -> bool:
+        """True if the check was actually performed (not skipped)."""
+        return not self.skipped
 
     def to_training_example(
         self,

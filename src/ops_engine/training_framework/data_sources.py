@@ -176,10 +176,10 @@ class FullDocumentLabelSource:
         """
         self.add_result(
             document_id=result.get('manifesto_id', str(len(self._results))),
-            predicted_value=result.get('predicted_rile', 0.0),
-            ground_truth_value=result.get('ground_truth_rile', 0.0),
+            predicted_value=result.get('estimated_score', 0.0),
+            ground_truth_value=result.get('reference_score', 0.0),
             final_summary=result.get('final_summary', ''),
-            rubric=f"Preserve political position indicators (target: {result.get('ground_truth_rile', 0):.1f})",
+            rubric=f"Preserve political position indicators (target: {result.get('reference_score', 0):.1f})",
             metadata={
                 'party_name': result.get('party_name'),
                 'country': result.get('country'),
@@ -205,7 +205,7 @@ class FullDocumentLabelSource:
                 examples.append(UnifiedTrainingExample(
                     example_id=f"doc_{result['document_id']}_good",
                     source_type=self._source_type,
-                    original_content=result['original_content'][:2000] if result['original_content'] else "",
+                    original_content=result['original_content'] or "",  # Use full text
                     summary=result['final_summary'],
                     rubric=result['rubric'],
                     context={
@@ -226,7 +226,7 @@ class FullDocumentLabelSource:
                 examples.append(UnifiedTrainingExample(
                     example_id=f"doc_{result['document_id']}_violation",
                     source_type=self._source_type,
-                    original_content=result['original_content'][:2000] if result['original_content'] else "",
+                    original_content=result['original_content'] or "",  # Use full text
                     summary=result['final_summary'],
                     rubric=result['rubric'],
                     context={

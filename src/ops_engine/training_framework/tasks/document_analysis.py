@@ -28,15 +28,15 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 import dspy
 
 from .base import (
-    AbstractDomain,
+    AbstractTask,
     OutputType,
-    DomainConfig,
+    TaskConfig,
     ScaleDefinition,
     UnifiedTrainingSource,
     UnifiedResult,
 )
 from src.tasks.prompting import PromptBuilders, default_merge_prompt, default_summarize_prompt, parse_numeric_score
-from .registry import register_domain
+from .registry import register_task
 
 if TYPE_CHECKING:
     from ..core import TrainingDataSource, UnifiedTrainingExample
@@ -60,16 +60,10 @@ PRESERVATION_SCALE = ScaleDefinition(
     neutral_value=0.5,
 )
 
-# Backward compatibility alias
-QUALITY_SCALE = PRESERVATION_SCALE
-
 
 # =============================================================================
 # Training Data Source
 # =============================================================================
-
-# Backward compatibility alias - use UnifiedResult from base
-DocumentAnalysisResult = UnifiedResult
 
 
 class DocumentAnalysisTrainingSource(UnifiedTrainingSource):
@@ -256,10 +250,6 @@ class PreservationScorer(dspy.Module):
         }
 
 
-# Backward compatibility alias
-SummarizationScorer = PreservationScorer
-
-
 def _build_preservation_score_prompt(
     original_text: str,
     summary: str,
@@ -297,14 +287,10 @@ def _build_preservation_score_prompt(
 
 @register_task(["document_analysis", "content_preservation"])
 class DocumentAnalysisTask(AbstractTask):
-
-# Backward compatibility aliases
-DocumentAnalysisDomain = DocumentAnalysisTask  # type: ignore
-SummarizationDomain = DocumentAnalysisTask  # type: ignore
     """
-    Document analysis domain implementation.
+    Document analysis task implementation.
 
-    This is the default domain for general-purpose document processing tasks.
+    This is the default task for general-purpose document processing.
     It evaluates content preservation quality using OPS-aligned metrics.
 
     Quality scores range from 0.0 (poor preservation) to 1.0 (excellent).
@@ -327,8 +313,8 @@ SummarizationDomain = DocumentAnalysisTask  # type: ignore
         self.error_threshold_high = error_threshold_high
         self.error_threshold_low = error_threshold_low
 
-        # Set up domain configuration
-        self._config = DomainConfig(
+        # Set up task configuration
+        self._config = TaskConfig(
             name="document_analysis",
             output_type=OutputType.CONTINUOUS_SCORE,
             scale=PRESERVATION_SCALE,
@@ -481,7 +467,3 @@ Output a single score between 0.0 (poor preservation) and 1.0 (excellent preserv
             'description': 'Document analysis with content preservation evaluation',
         })
         return base_info
-
-
-# Backward compatibility alias
-SummarizationDomain = DocumentAnalysisDomain

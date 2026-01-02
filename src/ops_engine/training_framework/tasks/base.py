@@ -147,9 +147,6 @@ class TaskConfig:
 
 # RILE_SCALE moved to manifesto.py - this is manifesto-specific, not base task
 
-# Backward compatibility alias
-DomainConfig = TaskConfig
-
 
 # =============================================================================
 # Unified Training Source (Generic, Task-Agnostic)
@@ -244,7 +241,7 @@ class UnifiedTrainingSource:
         else:
             # Duck-type from object attributes
             self._results.append(UnifiedResult(
-                doc_id=getattr(result, 'doc_id', getattr(result, 'manifesto_id', str(len(self._results)))),
+                doc_id=getattr(result, 'doc_id', str(len(self._results))),
                 final_summary=getattr(result, 'final_summary', ''),
                 reference_score=getattr(result, 'reference_score', None),
                 estimated_score=getattr(result, 'estimated_score', None),
@@ -475,10 +472,6 @@ class TaskPlugin(Protocol):
         ...
 
 
-# Backward compatibility alias
-DomainPlugin = TaskPlugin
-
-
 # =============================================================================
 # Abstract Base Class
 # =============================================================================
@@ -527,6 +520,83 @@ class AbstractTask(ABC):
         if self._config:
             return self._config.output_field_name
         return "score"  # Default
+
+    # =========================================================================
+    # Data Field Configuration (for task-agnostic data loading)
+    # =========================================================================
+
+    @property
+    def id_field(self) -> str:
+        """Field name for document ID in samples.
+
+        Override in subclasses if the task uses a different ID field name.
+        Default: "doc_id"
+        """
+        return "doc_id"
+
+    @property
+    def label_field(self) -> str:
+        """Field name for ground truth label/score in samples.
+
+        Override in subclasses if the task uses a different label field name.
+        Default: "reference_score"
+        """
+        return "reference_score"
+
+    @property
+    def text_field(self) -> str:
+        """Field name for document text in samples.
+
+        Override in subclasses if the task uses a different text field name.
+        Default: "text"
+        """
+        return "text"
+
+    # =========================================================================
+    # Data Loading (for task-agnostic data access)
+    # =========================================================================
+
+    def get_data_loader(self) -> Any:
+        """Get task-specific data loader instance.
+
+        Override in subclasses to provide task-specific data loading.
+
+        Returns:
+            Data loader instance (task-specific type)
+
+        Raises:
+            NotImplementedError: If task doesn't implement data loading
+        """
+        raise NotImplementedError(
+            f"get_data_loader not implemented for task '{self.name}'. "
+            "Override this method to enable data loading."
+        )
+
+    def get_samples(
+        self,
+        splits: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get samples from the task's data source.
+
+        Override in subclasses to provide task-specific sample loading.
+
+        Args:
+            splits: List of splits to load (e.g., ["train", "val"]).
+                   If None, loads default splits.
+            limit: Maximum number of samples to return. If None, returns all.
+
+        Returns:
+            List of sample dictionaries with at least id_field, text_field,
+            and optionally label_field.
+
+        Raises:
+            NotImplementedError: If task doesn't implement sample loading
+        """
+        raise NotImplementedError(
+            f"get_samples not implemented for task '{self.name}'. "
+            "Override this method to enable sample loading."
+        )
 
     def create_training_source(
         self,
@@ -589,8 +659,43 @@ class AbstractTask(ABC):
         """
         raise NotImplementedError("create_predictor not implemented for this task")
 
+    def create_oracle_scorer(self) -> Callable[[str], float]:
+        """
+        Create an oracle scorer function for tournament of tournaments.
+
+        The oracle scorer takes a summary text and returns a predicted score.
+        This is used to determine which summaries lead to better downstream
+        task performance during judge optimization.
+
+        The oracle scorer should be fast enough to score many summaries
+        (hundreds to thousands) during the training loop.
+
+        Returns:
+            Function(text) -> score
+
+        Raises:
+            NotImplementedError: If task doesn't support oracle scoring
+        """
+        raise NotImplementedError(
+            f"create_oracle_scorer not implemented for task '{self.name}'. "
+            "Override this method to enable tournament of tournaments."
+        )
+
+    def create_preference_labeler(self) -> Optional[Callable[['PreferencePair', float], Optional[str]]]:
+        """
+        Optional preference labeler for tournament of tournaments.
+
+        Override to customize how preference pairs are labeled from metrics
+        (e.g., lower error is better, higher score is better, domain-specific rules).
+        """
+        return None
+
     def create_merge_summarizer(self) -> 'dspy.Module':
         """Create a merge summarizer module for tree building."""
+        return self.create_summarizer()
+
+    def create_summarizer(self) -> 'dspy.Module':
+        """Create a summarizer module for tree building."""
         from src.core.signatures import Summarizer
         return Summarizer()
 
@@ -682,7 +787,3 @@ class AbstractTask(ABC):
         if self._config and self._config.labels:
             info['labels'] = self._config.labels.labels
         return info
-
-
-# Backward compatibility alias
-AbstractDomain = AbstractTask

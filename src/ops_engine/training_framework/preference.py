@@ -27,11 +27,9 @@ from typing import List, Optional, Dict, Any, Literal, Tuple
 import dspy
 
 # Import generic signature from core; domain-specific version available in manifesto
+from src.config.constants import DIVERSE_TEMPERATURES
 from src.core.signatures import PairwiseComparison
 from src.core.output_parser import NormalizedOutputAccessor
-
-# Backward compatibility alias
-PairwiseSummaryComparison = PairwiseComparison
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +49,7 @@ class PreferencePair:
     # Input context
     original_text: str
     rubric: str
-    ground_truth_score: float
+    reference_score: float
 
     # Candidate summaries
     summary_a: str
@@ -88,7 +86,7 @@ class PreferencePair:
             "source_example_id": self.source_example_id,
             "original_text": self.original_text,
             "rubric": self.rubric,
-            "ground_truth_score": self.ground_truth_score,
+            "reference_score": self.reference_score,
             "law_type": self.law_type,
             "summary_a": self.summary_a,
             "summary_b": self.summary_b,
@@ -144,9 +142,9 @@ class PairwiseJudge(dspy.Module):
         """
         super().__init__()
         if use_cot:
-            self.compare = dspy.ChainOfThought(PairwiseSummaryComparison)
+            self.compare = dspy.ChainOfThought(PairwiseComparison)
         else:
-            self.compare = dspy.Predict(PairwiseSummaryComparison)
+            self.compare = dspy.Predict(PairwiseComparison)
 
     def forward(
         self,
@@ -154,7 +152,7 @@ class PairwiseJudge(dspy.Module):
         summary_a: str,
         summary_b: str,
         rubric: str,
-        ground_truth_score: float,
+        reference_score: float,
     ) -> Dict[str, Any]:
         """
         Compare two summaries and determine which is better.
@@ -164,7 +162,7 @@ class PairwiseJudge(dspy.Module):
             summary_a: First candidate summary
             summary_b: Second candidate summary
             rubric: Information preservation criteria
-            ground_truth_score: Ground truth score for original text
+            reference_score: Ground truth score for original text
 
         Returns:
             Dictionary with preference judgment and reasoning
@@ -174,7 +172,7 @@ class PairwiseJudge(dspy.Module):
             original_text=original_text,
             summary_a=summary_a,
             summary_b=summary_b,
-            ground_truth_score=ground_truth_score,
+            reference_score=reference_score,
         )
 
         # Use normalized accessor to handle key casing variations
@@ -276,11 +274,10 @@ class PreferenceCollector:
 
         # Default configs with varying temperatures
         if generation_configs is None:
+            prompt_variants = ["concise", "default", "detailed", "creative"]
             self.generation_configs = [
-                GenerationConfig(temperature=0.3, prompt_variant="concise"),
-                GenerationConfig(temperature=0.5, prompt_variant="default"),
-                GenerationConfig(temperature=0.7, prompt_variant="detailed"),
-                GenerationConfig(temperature=0.9, prompt_variant="creative"),
+                GenerationConfig(temperature=temp, prompt_variant=variant)
+                for temp, variant in zip(DIVERSE_TEMPERATURES, prompt_variants)
             ]
         else:
             self.generation_configs = generation_configs
@@ -348,7 +345,7 @@ class PreferenceCollector:
         example_id: str,
         original_text: str,
         rubric: str,
-        ground_truth_score: float,
+        reference_score: float,
         law_type: str = "sufficiency",
         judge_model: str = "",
     ) -> List[PreferencePair]:
@@ -359,7 +356,7 @@ class PreferenceCollector:
             example_id: Unique identifier for this example
             original_text: Original source text
             rubric: Information preservation rubric
-            ground_truth_score: Ground truth score for original
+            reference_score: Ground truth score for original
             judge_model: Name of the judge model being used
 
         Returns:
@@ -392,7 +389,7 @@ class PreferenceCollector:
                         summary_a=summary_a,
                         summary_b=summary_b,
                         rubric=rubric,
-                        ground_truth_score=ground_truth_score,
+                        reference_score=reference_score,
                     )
 
                     self._pair_counter += 1
@@ -401,7 +398,7 @@ class PreferenceCollector:
                         source_example_id=example_id,
                         original_text=original_text,
                         rubric=rubric,
-                        ground_truth_score=ground_truth_score,
+                        reference_score=reference_score,
                         law_type=law_type,
                         summary_a=summary_a,
                         summary_b=summary_b,
@@ -519,12 +516,12 @@ class PreferenceDataset:
                 original_text=pair.original_text,
                 summary_a=pair.summary_a,
                 summary_b=pair.summary_b,
-                ground_truth_score=pair.ground_truth_score,
+                reference_score=pair.reference_score,
                 preferred=pair.preferred,
                 reasoning=pair.reasoning,
                 confidence=pair.confidence,
             ).with_inputs(
-                "law_type", "rubric", "original_text", "summary_a", "summary_b", "ground_truth_score"
+                "law_type", "rubric", "original_text", "summary_a", "summary_b", "reference_score"
             )
             examples.append(example)
 
@@ -564,7 +561,7 @@ Summary:"""
                 "metadata": {
                     "pair_id": pair.pair_id,
                     "confidence": pair.confidence,
-                    "ground_truth_score": pair.ground_truth_score,
+                    "reference_score": pair.reference_score,
                     "law_type": pair.law_type,
                 },
             })

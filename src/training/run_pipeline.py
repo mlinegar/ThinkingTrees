@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import dspy
 
+from src.config.constants import DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS
 from src.config.dspy_config import configure_dspy
 
 # Configure logging early
@@ -93,9 +94,6 @@ def parse_args() -> argparse.Namespace:
                         help='Threshold for early stopping')
     parser.add_argument('--convergence-patience', type=int, default=3,
                         help='Rounds without improvement before stopping')
-    # NOTE: Summarizer optimization not yet implemented - only scorer optimization is available
-    # parser.add_argument('--skip-summarizer-opt', action='store_true',
-    #                     help='Skip summarizer optimization')
     parser.add_argument('--skip-oracle-opt', action='store_true',
                         help='Skip oracle/scorer optimization')
 
@@ -104,18 +102,45 @@ def parse_args() -> argparse.Namespace:
     # NOTE: For initialization with demo seeding, use --enable-genrm (replaces old top-down-init)
     parser.add_argument('--enable-genrm', action='store_true',
                         help='Enable GenRM for OPS tree building and preference collection')
-    parser.add_argument('--max-init-doc-chars', type=int, default=20000,
-                        help='Max chars for init segments (~4k tokens to fit GenRM context)')
+    parser.add_argument('--max-init-prompt-tokens', type=int, default=4000,
+                        help='Max tokens for init prompts (doc + rubric + instructions)')
     parser.add_argument('--genrm-port', type=int, default=8001,
                         help='Port for GenRM server')
     parser.add_argument('--genrm-init-samples', type=int, default=8,
                         help='Number of OPS trees to build')
     parser.add_argument('--genrm-init-candidates', type=int, default=4,
                         help='Candidates per node for GenRM tournament')
-    parser.add_argument('--no-mini-trees', action='store_true', default=False,
-                        help='Disable mini-trees and use natural chunking instead')
     parser.add_argument('--train-comparison-module', action='store_true',
                         help='Train OPSComparisonModule from collected preferences')
+
+    # Tournament of Tournaments (Judge Optimization)
+    parser.add_argument('--optimize-judge', action='store_true',
+                        help='Shorthand for --tournament-of-tournaments --tot-max-iterations 1 (single-pass judge optimization)')
+    parser.add_argument('--judge-optimization-budget', type=str, default='light',
+                        choices=['light', 'medium', 'heavy', 'superheavy'],
+                        help='Budget for judge optimization (default: light)')
+    parser.add_argument('--use-dspy-strategy', action='store_true',
+                        help='Use DSPyStrategy for tree building (enables tournament + preference collection via strategy pattern)')
+    parser.add_argument('--load-optimized-judge', type=str, default=None,
+                        help='Path to load pre-optimized judge (skips judge optimization)')
+
+    # Full Iterative Tournament of Tournaments Loop
+    parser.add_argument('--tournament-of-tournaments', action='store_true',
+                        help='Enable full iterative ToT loop (builds trees, optimizes judge, repeats until convergence)')
+    parser.add_argument('--tot-max-iterations', type=int, default=5,
+                        help='Maximum ToT iterations (default: 5)')
+    parser.add_argument('--tot-convergence-threshold', type=float, default=0.01,
+                        help='Stop if improvement below this (default: 0.01)')
+    parser.add_argument('--tot-convergence-patience', type=int, default=2,
+                        help='Stop after N iterations without improvement (default: 2)')
+    parser.add_argument('--tot-samples-per-iteration', type=int, default=50,
+                        help='Number of samples to process per ToT iteration (default: 50)')
+    parser.add_argument('--tot-judge-test-split', type=float, default=0.2,
+                        help='Holdout split for judge optimization (default: 0.2)')
+    parser.add_argument('--tot-shuffle-samples', action=argparse.BooleanOptionalAction, default=True,
+                        help='Shuffle samples each ToT iteration (default: True)')
+    parser.add_argument('--tot-random-seed', type=int, default=42,
+                        help='Random seed for ToT sample shuffling (default: 42)')
 
     # Resume and output
     parser.add_argument('--resume', action='store_true',
@@ -142,11 +167,25 @@ def parse_args() -> argparse.Namespace:
                         help='Dataset plugin to use (default: settings.yaml datasets.default)')
     parser.add_argument('--dataset-path', type=str, default=None,
                         help='Path for file-based datasets (e.g., jsonl)')
-    # Legacy alias (domain == task)
-    parser.add_argument('--domain', type=str, default=None,
-                        help='Legacy alias for --task (default: settings.yaml domains.default)')
 
     return parser.parse_args()
+
+
+def normalize_judge_optimization_args(args: argparse.Namespace) -> argparse.Namespace:
+    """
+    Unify --optimize-judge and --tournament-of-tournaments into a single path.
+
+    When --optimize-judge is set without --tournament-of-tournaments, treat it
+    as ToT with max_iterations=1. This avoids duplicate code paths and ensures
+    consistent behavior.
+    """
+    if getattr(args, 'optimize_judge', False) and not getattr(args, 'tournament_of_tournaments', False):
+        logger.info("--optimize-judge is shorthand for --tournament-of-tournaments --tot-max-iterations 1")
+        args.tournament_of_tournaments = True
+        # Only set max_iterations to 1 if user didn't explicitly set it
+        if not hasattr(args, 'tot_max_iterations') or args.tot_max_iterations == 5:  # 5 is default
+            args.tot_max_iterations = 1
+    return args
 
 
 def resolve_task_and_dataset(args: argparse.Namespace) -> Tuple[str, str, dict]:
@@ -160,12 +199,8 @@ def resolve_task_and_dataset(args: argparse.Namespace) -> Tuple[str, str, dict]:
     )
 
     settings = load_settings()
-    task_name = args.task or args.domain or get_default_task(settings)
+    task_name = args.task or get_default_task(settings)
     dataset_name = args.dataset or get_default_dataset(settings)
-
-    # Log legacy usage
-    if args.domain and not args.task:
-        logger.info("Using legacy --domain as task alias")
 
     task_config = get_task_config(task_name, settings)
     dataset_config = get_dataset_config(dataset_name, settings)
@@ -194,10 +229,72 @@ def setup_dspy(args: argparse.Namespace) -> None:
         model=f"openai/{model_name}",
         api_base=model_url,
         api_key="EMPTY",
-        temperature=0.7,
-        max_tokens=16384,
+        temperature=DEFAULT_TEMPERATURE,
+        max_tokens=DEFAULT_MAX_TOKENS,
     )
     configure_dspy(lm=lm)
+
+
+def create_prompt_lm(args: argparse.Namespace) -> tuple[Optional[dspy.LM], Optional[str]]:
+    """Create a separate LM for prompt optimization (optional)."""
+    if args.opt_model_port is None:
+        return None, None
+
+    from src.config.settings import load_settings
+    from src.core.model_detection import detect_model_from_port
+
+    settings = load_settings()
+    gen_cfg = settings.get('generation', {})
+    prompt_cfg = gen_cfg.get('comparison_judge', {})
+
+    model_name = detect_model_from_port(port=args.opt_model_port)
+    lm = dspy.LM(
+        model=f"openai/{model_name}",
+        api_base=f"http://localhost:{args.opt_model_port}/v1",
+        api_key="EMPTY",
+        temperature=prompt_cfg.get('temperature', 0.3),
+        max_tokens=prompt_cfg.get('max_tokens', 16384),
+    )
+    return lm, model_name
+
+
+def save_prompt_context(
+    judge: Any,
+    output_dir: Path,
+    rubric: str,
+    law_types: List[str],
+    source: str,
+) -> Optional[Path]:
+    """Persist prompt-tuned GenRM context for inspection."""
+    if judge is None or not getattr(judge, "use_dspy_prompt", False):
+        return None
+
+    report = {
+        "source": source,
+        "rubric": rubric,
+        "law_types": {},
+        "created_at": datetime.now().isoformat(),
+    }
+
+    for law_type in law_types:
+        try:
+            extra_context = judge.get_prompt_context(rubric, law_type)
+            report["law_types"][law_type] = {
+                "extra_context": extra_context,
+            }
+        except Exception as e:
+            report["law_types"][law_type] = {
+                "extra_context": "",
+                "error": str(e),
+            }
+
+    prompt_dir = output_dir / "optimized_judge"
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    prompt_path = prompt_dir / "prompt_context.json"
+    with open(prompt_path, "w") as f:
+        json.dump(report, f, indent=2)
+
+    return prompt_path
 
 
 def build_trees(
@@ -206,17 +303,20 @@ def build_trees(
     args: argparse.Namespace,
     task: Optional[Any] = None,
     output_dir: Path = None,
-    mini: bool = True,
+    judge_override: Optional[Any] = None,
 ) -> Tuple[List[Any], Any, List[dspy.Example]]:
     """
     Build OPS trees and collect preferences using GenRM.
+
+    Filters to init documents whose full summarizer prompt fits within the
+    init prompt budget (doc + rubric + instructions).
 
     Args:
         train_results: List of processed document results from Phase 1
         train_samples: Original document samples (for accessing original text)
         args: Command line arguments
         output_dir: Output directory for saving preferences
-        mini: If True, build mini-trees (2 chunks). If False, use natural chunking.
+        judge_override: Optional judge to use for tournament selection
 
     Returns:
         Tuple of (trees, preferences, demos)
@@ -225,13 +325,14 @@ def build_trees(
     from src.ops_engine.builder import TreeBuilder, BuildConfig
     from src.ops_engine.training_framework.genrm_preference import GenRMJudge
     from src.ops_engine.training_framework.preference import PreferenceDataset
-    from src.core.llm_utils import get_vllm_model_name
+    from src.core.strategy import CallableStrategy, TournamentStrategy, TournamentConfig
+    from src.core.model_detection import detect_model_from_port
     from src.config.settings import load_settings
     from src.tasks import get_task
 
     # Load task plugin for rubric/context
     if task is None:
-        task = get_task(args.task or args.domain)
+        task = get_task(args.task)
     logger.info(f"Using task: {task.name}")
 
     logger.info("Building OPS trees with GenRM validation...")
@@ -243,7 +344,7 @@ def build_trees(
     judge_cfg = gen_cfg.get('genrm_judge', {})
 
     # Configure summarizer LM (main model on args.port)
-    summarizer_model_name = get_vllm_model_name(args.port)
+    summarizer_model_name = detect_model_from_port(port=args.port)
     logger.info(f"  Summarizer model: {summarizer_model_name}")
 
     summarizer_lm = dspy.LM(
@@ -255,28 +356,46 @@ def build_trees(
     )
     configure_dspy(lm=summarizer_lm)
 
-    # Create merge summarizer module for tree building
-    summarizer = task.create_merge_summarizer()
+    # Create summarizer module for tree building
+    summarizer = task.create_summarizer()
 
     # Create GenRM judge (auto-detects model from server)
-    logger.info(f"  GenRM judge on port {args.genrm_port}")
-    judge = GenRMJudge(
-        base_url=f"http://localhost:{args.genrm_port}/v1",
-        model_name=None,  # Auto-detect
-        temperature=judge_cfg.get('temperature', 0.6),
-        top_p=judge_cfg.get('top_p', 0.95),
-        max_tokens=judge_cfg.get('max_tokens', 8192),
-    )
+    judge = judge_override
+    if judge is None:
+        logger.info(f"  GenRM judge on port {args.genrm_port}")
+        judge = GenRMJudge(
+            base_url=f"http://localhost:{args.genrm_port}/v1",
+            model_name=None,  # Auto-detect
+            temperature=judge_cfg.get('temperature', 0.6),
+            top_p=judge_cfg.get('top_p', 0.95),
+            max_tokens=judge_cfg.get('max_tokens', 8192),
+        )
+    else:
+        logger.info("  Using provided judge override for tournament selection")
 
     # Get rubric from task plugin (task-agnostic)
     rubric = task.create_rubric()
+    prompt_builders = task.create_prompt_builders()
+    summarize_prompt_fn = prompt_builders.summarize
     k_candidates = args.genrm_init_candidates
     n_samples = args.genrm_init_samples
+    init_prompt_token_limit = args.max_init_prompt_tokens
+    from src.preprocessing.tokenizer import TokenCounter
+    token_counter = TokenCounter(model=summarizer_model_name)
+
+    def _count_prompt_tokens(text: str) -> int:
+        messages = summarize_prompt_fn(text, rubric)
+        prompt_text = "\n".join(
+            f"{msg.get('role', '')}: {msg.get('content', '')}"
+            for msg in messages
+            if isinstance(msg, dict)
+        )
+        return token_counter.count(prompt_text)
 
     # Create lookup from doc_id to original sample text
     sample_text_lookup = {s.doc_id: s.text for s in train_samples}
 
-    # Collect short segments from results
+    # Collect init segments whose full prompt fits in the context budget
     segments = []
     skipped_count = 0
     for result in train_results:
@@ -295,21 +414,26 @@ def build_trees(
 
         reference_score = getattr(result, 'reference_score', None)
 
-        # For mini-trees, we can use any length text (it will be split in 2)
-        # For full trees, prefer texts that fit GenRM context
-        max_chars = args.max_init_doc_chars if mini else 40000
-        if len(text) <= max_chars:
+        prompt_tokens = _count_prompt_tokens(text)
+        if prompt_tokens <= init_prompt_token_limit:
             segments.append({
                 'text': text,
                 'doc_id': doc_id,
                 'reference_score': reference_score,
             })
         else:
-            logger.debug(f"Skipping {doc_id}: text too long ({len(text)} > {max_chars} chars)")
+            logger.debug(
+                f"Skipping {doc_id}: init prompt too long "
+                f"({prompt_tokens} > {init_prompt_token_limit} tokens)"
+            )
             skipped_count += 1
 
     if not segments:
-        logger.warning(f"No suitable segments found for tree building (skipped {skipped_count}/{len(train_results)})")
+        logger.warning(
+            "No suitable init segments found for tree building "
+            f"(skipped {skipped_count}/{len(train_results)}). "
+            "Proceeding without GenRM init trees."
+        )
         return [], PreferenceDataset(), []
 
     if skipped_count > 0:
@@ -320,12 +444,19 @@ def build_trees(
     random.seed(42)
     samples = random.sample(segments, min(len(segments), n_samples))
 
-    logger.info(f"  Building {len(samples)} {'mini-' if mini else ''}trees")
+    logger.info(f"  Init prompt budget: {init_prompt_token_limit} tokens (doc + rubric + instructions)")
+    logger.info(f"  Building {len(samples)} init trees")
     logger.info(f"  K candidates: {k_candidates}")
 
-    # Build trees using TreeBuilder with judge (enables tournament mode)
+    # Build trees using TreeBuilder + TournamentStrategy (consolidated path)
     config = BuildConfig(k=k_candidates)
-    builder = TreeBuilder(summarizer, judge, config)
+    base_strategy = CallableStrategy(summarizer)
+    tournament_strategy = TournamentStrategy(
+        base=base_strategy,
+        judge=judge,
+        config=TournamentConfig(k=k_candidates),
+    )
+    builder = TreeBuilder(strategy=tournament_strategy, config=config)
 
     trees = []
     all_demos = []
@@ -334,7 +465,7 @@ def build_trees(
     for i, segment in enumerate(samples):
         try:
             # Build tree using new unified API
-            result = builder.build_from_text(segment['text'], rubric)
+            result = builder.build_sync(segment['text'], rubric)
             tree = result.tree
 
             # Store metadata for tracking
@@ -342,12 +473,15 @@ def build_trees(
             tree.metadata['reference_score'] = segment['reference_score']
 
             trees.append(tree)
+            for pref in result.preferences:
+                pref.source_example_id = segment['doc_id']
+                pref.reference_score = segment['reference_score']
             all_preferences.add_pairs(result.preferences)
 
             # Create demos: pair leaves with final summary
             for leaf in tree.leaves:
                 all_demos.append(dspy.Example(
-                    content=leaf.summary,
+                    content=leaf.raw_text_span,
                     rubric=rubric,
                     summary=tree.final_summary,
                 ).with_inputs("content", "rubric"))
@@ -355,7 +489,7 @@ def build_trees(
             logger.debug(f"  Tree {i+1}/{len(samples)}: {tree}")
 
             # Reset preferences for next tree
-            builder.reset_preferences()
+            builder.reset()
 
         except Exception as e:
             logger.warning(f"  Failed to build tree for {segment['doc_id']}: {e}")
@@ -385,7 +519,7 @@ def build_trees(
             'n_trees': len(trees),
             'n_preferences': len(all_preferences),
             'n_demos': len(all_demos),
-            'mini_trees': mini,
+            'init_prompt_token_limit': init_prompt_token_limit,
             'k_candidates': k_candidates,
             'tree_summaries': [
                 {
@@ -464,10 +598,8 @@ def process_docs(
     prompt_builders = task.create_prompt_builders()
     pipeline_config = BatchedPipelineConfig(
         task_model_url=f"http://localhost:{args.port}/v1",
-        auditor_model_url=f"http://localhost:{args.port}/v1",  # Deprecated
         max_concurrent_documents=args.concurrent_docs,
         max_concurrent_requests=args.concurrent_requests,
-        use_levelwise_batching=True,  # Recommended for max throughput
         show_progress=True,
         rubric=task.create_rubric(),
         task_context=task.get_task_context(),
@@ -535,8 +667,8 @@ def run_optimization(
                 model=f"openai/{opt_model_name}",
                 api_base=opt_model_url,
                 api_key="EMPTY",
-                temperature=0.7,
-                max_tokens=16384,
+                temperature=DEFAULT_TEMPERATURE,
+                max_tokens=DEFAULT_MAX_TOKENS,
             )
             dspy.configure(lm=opt_lm)
         except Exception as e:
@@ -566,14 +698,15 @@ def run_optimization(
 
     logger.info(f"Created {len(train_examples)} train, {len(val_examples)} val examples")
 
-    if len(train_examples) < 4:
-        logger.warning("Not enough training examples for optimization")
-        return {'error': 'insufficient_training_data'}, None
-
     # Initialize scorer using task plugin
     # The task's create_predictor returns the appropriate scorer for that task
     scorer = task.create_predictor()
     logger.info(f"Created scorer using task '{task.name}': {type(scorer).__name__}")
+
+    if len(train_examples) < 4:
+        logger.warning("Not enough training examples for optimization")
+        logger.warning("Returning untrained scorer for test evaluation")
+        return {'error': 'insufficient_training_data', 'scorer_trained': False}, scorer
 
     # Seed scorer with demos if available
     if init_demos and len(init_demos) > 0:
@@ -1047,7 +1180,6 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 # Build trees - this collects both demos and preferences in one pass
                 ops_trees, preference_dataset, init_demos = build_trees(
                     train_results, train_samples, args, task, output_dir,
-                    mini=not getattr(args, 'no_mini_trees', False),
                 )
 
                 # Save checkpoint data for resume
@@ -1065,6 +1197,7 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 'n_demos': len(init_demos) if init_demos else 0,
                 'n_samples': args.genrm_init_samples,
                 'n_candidates': args.genrm_init_candidates,
+                'init_prompt_token_limit': args.max_init_prompt_tokens,
             }
 
             if preference_dataset:
@@ -1089,6 +1222,290 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 )
                 if comparison_module is not None:
                     stats['comparison_module_trained'] = True
+
+        # Phase 1.6: Tournament of Tournaments (Full Iterative Loop)
+        # Iteratively improves the judge by: build trees → enrich with oracle → optimize judge → repeat
+        optimized_judge = None
+        tot_result = None
+
+        if getattr(args, 'tournament_of_tournaments', False):
+            from src.training.tournament_loop import (
+                TournamentOfTournamentsTrainer,
+                ToTConfig,
+                load_optimized_judge as load_tot_judge,
+            )
+            from src.ops_engine.training_framework.genrm_preference import GenRMJudge
+            from src.config.settings import load_settings
+            from src.core.model_detection import detect_model_from_port
+
+            logger.info("\n" + "=" * 60)
+            logger.info("PHASE 1.6: Tournament of Tournaments (Full Iterative Loop)")
+            logger.info("=" * 60)
+
+            # Create summarizer for tree building
+            settings = load_settings()
+            gen_cfg = settings.get('generation', {})
+            summarizer_cfg = gen_cfg.get('summarizer', {})
+            judge_cfg = gen_cfg.get('genrm_judge', {})
+
+            summarizer_model_name = detect_model_from_port(port=args.port)
+            summarizer_lm = dspy.LM(
+                model=f"openai/{summarizer_model_name}",
+                api_base=f"http://localhost:{args.port}/v1",
+                api_key="EMPTY",
+                temperature=summarizer_cfg.get('temperature', 0.5),
+                max_tokens=summarizer_cfg.get('max_tokens', 8192),
+            )
+            configure_dspy(lm=summarizer_lm)
+
+            prompt_lm, prompt_model_name = create_prompt_lm(args)
+            if prompt_lm is not None:
+                logger.info(f"  Prompt optimization model: {prompt_model_name} (port {args.opt_model_port})")
+
+            # Create summarizer function (wraps DSPy module for sync API)
+            summarizer_module = task.create_summarizer()
+            rubric = task.create_rubric()
+
+            def summarizer_fn(content: str, rubric: str) -> str:
+                """Sync summarizer function for ToT."""
+                result = summarizer_module(content=content, rubric=rubric)
+                return getattr(result, 'summary', str(result))
+
+            # Create initial judge
+            initial_judge = GenRMJudge(
+                base_url=f"http://localhost:{args.genrm_port}/v1",
+                model_name=None,
+                temperature=judge_cfg.get('temperature', 0.6),
+                top_p=judge_cfg.get('top_p', 0.95),
+                max_tokens=judge_cfg.get('max_tokens', 8192),
+            )
+
+            # Create oracle scorer from task
+            oracle_predict = task.create_oracle_scorer()
+
+            # Create sample lookup for ToT
+            sample_lookup = {s.doc_id: s for s in train_samples}
+            tot_samples = []
+            for result in train_results:
+                if result is None or getattr(result, 'error', None):
+                    continue
+                doc_id = getattr(result, 'doc_id', 'unknown')
+                sample = sample_lookup.get(doc_id)
+                if sample and hasattr(sample, 'text'):
+                    tot_samples.append({
+                        'text': sample.text,
+                        'doc_id': doc_id,
+                        'reference_score': getattr(result, 'reference_score', None),
+                    })
+
+            if len(tot_samples) < 10:
+                logger.warning(f"Only {len(tot_samples)} samples for ToT, may be insufficient")
+
+            # Configure ToT (normalize tie margin to 0-1 when scale is available)
+            scale_range = None
+            if hasattr(task, 'scale') and task.scale:
+                scale_range = getattr(task.scale, 'range', None)
+            if not scale_range:
+                logger.warning(
+                    "No scale_range found from task. Using default 1.0. "
+                    "For RILE, ensure task.scale.range=200 or pass --scale-min/-max."
+                )
+                scale_range = 1.0
+            raw_tie_margin = 5.0
+            normalized_tie_margin = min(0.05, raw_tie_margin / scale_range) if scale_range > 0 else 0.05
+
+            preference_labeler = None
+            if hasattr(task, 'create_preference_labeler'):
+                try:
+                    preference_labeler = task.create_preference_labeler()
+                except Exception as e:
+                    logger.warning(f"Preference labeler creation failed: {e}")
+
+            tot_config = ToTConfig(
+                max_iterations=getattr(args, 'tot_max_iterations', 5),
+                min_iterations=1,
+                convergence_threshold=getattr(args, 'tot_convergence_threshold', 0.01),
+                convergence_patience=getattr(args, 'tot_convergence_patience', 2),
+                k_candidates=args.genrm_init_candidates,
+                n_samples_per_iteration=getattr(args, 'tot_samples_per_iteration', 50),
+                candidate_temperature=0.9,
+                judge_budget=getattr(args, 'judge_optimization_budget', 'medium'),
+                num_threads=args.num_threads,
+                judge_test_split=getattr(args, 'tot_judge_test_split', 0.2),
+                tie_margin=normalized_tie_margin,
+                normalize_errors=True,
+                scale_range=scale_range,
+                preference_labeler=preference_labeler,
+                shuffle_samples_each_iteration=getattr(args, 'tot_shuffle_samples', True),
+                random_seed=getattr(args, 'tot_random_seed', 42),
+            )
+
+            logger.info(f"  Max iterations: {tot_config.max_iterations}")
+            logger.info(f"  Convergence threshold: {tot_config.convergence_threshold}")
+            logger.info(f"  Samples per iteration: {tot_config.n_samples_per_iteration}")
+            logger.info(f"  Judge budget: {tot_config.judge_budget}")
+            logger.info(f"  Judge test split: {tot_config.judge_test_split:.2f}")
+            logger.info(f"  Tie margin (normalized): {tot_config.tie_margin:.4f} (raw ~{raw_tie_margin})")
+
+            # Run Tournament of Tournaments
+            trainer = TournamentOfTournamentsTrainer(
+                summarizer=summarizer_fn,
+                oracle_predict=oracle_predict,
+                initial_judge=initial_judge,
+                config=tot_config,
+                output_dir=output_dir,
+                prompt_lm=prompt_lm,
+            )
+
+            tot_result = trainer.train(tot_samples, rubric)
+
+            # Record stats
+            stats['tournament_of_tournaments'] = {
+                'converged': tot_result.converged,
+                'convergence_reason': tot_result.convergence_reason,
+                'final_iteration': tot_result.final_iteration,
+                'final_judge_accuracy': tot_result.final_judge_accuracy,
+                'improvement_history': tot_result.improvement_history,
+                'optimized_judge_path': str(tot_result.optimized_judge_path) if tot_result.optimized_judge_path else None,
+            }
+
+            if tot_result.optimized_judge_path:
+                optimized_judge = load_tot_judge(
+                    tot_result.optimized_judge_path,
+                    base_url=f"http://localhost:{args.genrm_port}/v1",
+                    prompt_lm=prompt_lm,
+                )
+                logger.info(f"\nToT Complete:")
+                logger.info(f"  Converged: {tot_result.converged} ({tot_result.convergence_reason})")
+                logger.info(f"  Final accuracy: {tot_result.final_judge_accuracy:.3f}")
+                logger.info(f"  Iterations: {tot_result.final_iteration}")
+                logger.info(f"  Judge saved to: {tot_result.optimized_judge_path}")
+
+            if optimized_judge is not None:
+                prompt_path = save_prompt_context(
+                    optimized_judge,
+                    output_dir,
+                    rubric,
+                    ["sufficiency", "merge", "idempotence"],
+                    source="tournament_of_tournaments",
+                )
+                if prompt_path is not None:
+                    logger.info(f"  Prompt context saved to: {prompt_path}")
+
+                logger.info("\n" + "=" * 60)
+                logger.info("PHASE 1.65: Rebuilding OPS Trees with Optimized Judge")
+                logger.info("=" * 60)
+
+                opt_ops_trees, opt_preference_dataset, opt_init_demos = build_trees(
+                    train_results, train_samples, args, task, output_dir,
+                    judge_override=optimized_judge,
+                )
+
+                stats['genrm_trees_optimized_judge'] = {
+                    'n_trees': len(opt_ops_trees) if opt_ops_trees else 0,
+                    'n_preferences': len(opt_preference_dataset) if opt_preference_dataset else 0,
+                    'n_demos': len(opt_init_demos) if opt_init_demos else 0,
+                    'n_samples': args.genrm_init_samples,
+                    'n_candidates': args.genrm_init_candidates,
+                    'init_prompt_token_limit': args.max_init_prompt_tokens,
+                }
+
+                if opt_preference_dataset:
+                    stats['preference_collection_optimized_judge'] = opt_preference_dataset.summary()
+
+                if opt_init_demos:
+                    init_demos = opt_init_demos
+
+        # Phase 1.75: Judge Optimization (Legacy - now handled by ToT)
+        # NOTE: As of the unification, --optimize-judge sets tournament_of_tournaments=True,
+        # so Phase 1.6 (ToT) handles judge optimization. This block is kept for backwards
+        # compatibility but should rarely execute.
+        elif getattr(args, 'optimize_judge', False) and preference_dataset and len(preference_dataset) > 20:
+            from src.training.judge_optimization import JudgeOptimizer, JudgeOptimizationConfig
+
+            logger.info("\n" + "=" * 60)
+            logger.info("PHASE 1.75: Judge Optimization (Tournament of Tournaments)")
+            logger.info("=" * 60)
+
+            if getattr(args, 'load_optimized_judge', None):
+                # Load pre-optimized judge
+                logger.info(f"Loading pre-optimized judge from {args.load_optimized_judge}")
+                from src.training.judge_optimization import load_optimized_judge
+                prompt_lm, prompt_model_name = create_prompt_lm(args)
+                if prompt_lm is not None:
+                    logger.info(f"  Prompt optimization model: {prompt_model_name} (port {args.opt_model_port})")
+                optimized_judge = load_optimized_judge(
+                    Path(args.load_optimized_judge),
+                    use_dspy_prompt=True,
+                    prompt_lm=prompt_lm,
+                )
+                stats['judge_loaded_from'] = str(args.load_optimized_judge)
+                logger.info("  Note: Loaded judge available for use in future phases")
+                rubric = task.create_rubric()
+                prompt_path = save_prompt_context(
+                    optimized_judge,
+                    output_dir,
+                    rubric,
+                    ["sufficiency", "merge", "idempotence"],
+                    source="judge_optimization_loaded",
+                )
+                if prompt_path is not None:
+                    logger.info(f"  Prompt context saved to: {prompt_path}")
+                # TODO: Wire optimized_judge into tree rebuilding for full tournament-of-tournaments loop
+            else:
+                # Optimize judge from preferences
+                judge_config = JudgeOptimizationConfig(
+                    budget=getattr(args, 'judge_optimization_budget', 'light'),
+                    num_threads=args.num_threads,
+                    checkpoint_dir=checkpoint_dir,
+                )
+
+                judge_optimizer = JudgeOptimizer(config=judge_config)
+
+                # Convert PreferenceDataset to list if needed
+                pref_list = list(preference_dataset) if hasattr(preference_dataset, '__iter__') else []
+                from src.ops_engine.training_framework.genrm_dspy import GenRMComparisonModule
+                prompt_lm, prompt_model_name = create_prompt_lm(args)
+                if prompt_lm is not None:
+                    logger.info(f"  Prompt optimization model: {prompt_model_name} (port {args.opt_model_port})")
+
+                prompt_tuned_judge = GenRMComparisonModule(
+                    use_dspy_prompt=True,
+                    prompt_lm=prompt_lm,
+                )
+                if prompt_lm is not None:
+                    with dspy.context(lm=prompt_lm):
+                        optimized_judge, judge_results = judge_optimizer.optimize(
+                            pref_list,
+                            initial_judge=prompt_tuned_judge,
+                        )
+                else:
+                    optimized_judge, judge_results = judge_optimizer.optimize(
+                        pref_list,
+                        initial_judge=prompt_tuned_judge,
+                    )
+
+                # Save optimized judge
+                judge_path = output_dir / 'optimized_judge' / 'judge.json'
+                judge_path.parent.mkdir(parents=True, exist_ok=True)
+                judge_optimizer.save(optimized_judge, judge_path)
+
+                stats['judge_optimization'] = judge_results
+                stats['optimized_judge_path'] = str(judge_path)
+                logger.info(f"Judge optimization complete. Improvement: {judge_results.get('improvement', 0):+.3f}")
+                logger.info(f"  Optimized judge saved to: {judge_path}")
+                logger.info(f"  To use in subsequent runs: --load_optimized_judge {judge_path}")
+
+                rubric = task.create_rubric()
+                prompt_path = save_prompt_context(
+                    optimized_judge,
+                    output_dir,
+                    rubric,
+                    ["sufficiency", "merge", "idempotence"],
+                    source="judge_optimization",
+                )
+                if prompt_path is not None:
+                    logger.info(f"  Prompt context saved to: {prompt_path}")
 
         # Phase 2: Optimization (or load pre-trained scorer)
         logger.info("\n" + "=" * 60)
@@ -1169,6 +1586,7 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
 def main() -> int:
     """CLI entry point."""
     args = parse_args()
+    args = normalize_judge_optimization_args(args)
 
     try:
         stats = run_training_pipeline(args)

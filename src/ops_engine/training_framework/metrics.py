@@ -21,8 +21,10 @@ Summarization metrics:
 """
 
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple, Callable
+from collections import OrderedDict
+from typing import List, Dict, Optional, Tuple, Callable, Any
 import math
+import threading
 import warnings
 
 from .core import Prediction, LawCheckResult
@@ -39,6 +41,35 @@ from src.ops_engine.scoring import (
     Oracle,
     OraclePrediction,
 )
+
+
+# =============================================================================
+# Utilities
+# =============================================================================
+
+def _extract_text_from_pred(pred, *attr_names: str, default: str = "") -> str:
+    """Extract text from a prediction, checking multiple attribute names.
+
+    Handles both string predictions and object predictions with various
+    attribute names (summary, merged_summary, etc).
+
+    Args:
+        pred: Prediction value (str or object)
+        *attr_names: Attribute names to check in order (e.g., 'summary', 'merged_summary')
+        default: Default value if no text found (defaults to empty string)
+
+    Returns:
+        Extracted text string
+    """
+    if isinstance(pred, str):
+        return pred
+
+    for attr in attr_names:
+        text = getattr(pred, attr, None)
+        if text:
+            return text
+
+    return str(pred) if pred else default
 
 
 # =============================================================================
@@ -91,15 +122,8 @@ def metric(
         # Get ground truth
         ground_truth = getattr(gold, ground_truth_field, 0.0)
 
-        # Get prediction - handle both string returns and object returns
-        if isinstance(pred, str):
-            text_to_score = pred
-        else:
-            text_to_score = getattr(pred, 'summary', None)
-            if text_to_score is None:
-                text_to_score = getattr(pred, prediction_field, None)
-            if text_to_score is None:
-                text_to_score = str(pred)
+        # Get prediction text
+        text_to_score = _extract_text_from_pred(pred, 'summary', prediction_field)
 
         # Call oracle function
         try:
@@ -113,7 +137,7 @@ def metric(
                 reasoning = ""
         except Exception as e:
             if with_feedback:
-                return {'score': 0.0, 'feedback': f"Oracle error: {str(e)[:50]}"}
+                return {'score': 0.0, 'feedback': f"Oracle error: {str(e)}"}
             return 0.0
 
         # Compute score using scale
@@ -130,8 +154,9 @@ def metric(
     return metric
 
 
+
 # Note: cached_oracle has been removed.
-# Use @functools.lru_cache decorator directly on oracle prediction functions instead.
+# Use create_cached_oracle_metric() or @functools.lru_cache for oracle prediction caching.
 
 # Note: path_aggregate_score and probabilistic_audit have been removed.
 # These were complex tree-path-based metrics that are no longer used.
@@ -388,7 +413,7 @@ def llm_judge(judge_lm=None) -> Callable:
     class MetricJudge(dspy.Signature):
         """Evaluate the quality of a political classification prediction."""
 
-        original_text: str = dspy.InputField(desc="The original manifesto text (truncated)")
+        original_text: str = dspy.InputField(desc="The original manifesto text")
         summary: str = dspy.InputField(desc="The summary being classified")
         predicted_label: str = dspy.InputField(desc="The predicted RILE label")
         predicted_reasoning: str = dspy.InputField(desc="The model's reasoning for the prediction")
@@ -420,7 +445,7 @@ def llm_judge(judge_lm=None) -> Callable:
         original_text = getattr(gold, 'original_content', '')
         if not original_text:
             original_text = getattr(gold, 'text', '')
-        original_text = original_text[:2000]  # Truncate for context limits
+        # Use full text - truncation corrupts evaluation
 
         summary = getattr(gold, 'summary', '')
         pred_label = str(getattr(pred, 'label', ''))
@@ -458,7 +483,7 @@ def llm_judge(judge_lm=None) -> Callable:
             # Fallback on any error
             return {
                 'score': 0.5,
-                'feedback': f'Judge evaluation failed: {str(e)[:100]}'
+                'feedback': f'Judge evaluation failed: {str(e)}'
             }
 
     return metric
@@ -501,7 +526,7 @@ def summarization(
         threshold: Maximum acceptable score drift
         min_summary_length: Minimum acceptable summary length
         max_error: Scale for error normalization (default 100.0).
-            For RILE scores, use RILE_RANGE (200.0) from src.manifesto.constants.
+            Use task.scale.range for task-specific scales (e.g., 200.0 for RILE).
 
     Returns:
         Metric function compatible with DSPy optimizers (including GEPA)
@@ -513,11 +538,11 @@ def summarization(
             max_error=100.0,
         )
 
-        # RILE-specific usage (see src.manifesto.examples for full patterns)
-        from src.manifesto.constants import RILE_RANGE
+        # Task-specific usage (e.g., RILE with 200-point range)
+        from src.tasks.manifesto import RILE_SCALE
         metric = create_summarization_metric(
             oracle_classifier=oracle,
-            max_error=RILE_RANGE,  # 200.0
+            max_error=RILE_SCALE.range,  # 200.0 for RILE
         )
     """
 
@@ -530,7 +555,7 @@ def summarization(
         Args:
             gold: Training example with:
                 - original_text: The original chunk/text being summarized
-                - ground_truth_rile: The true RILE score for the full document
+                - reference_score: The true RILE score for the full document
                 - rubric: The preservation rubric
                 - human_score: Optional human feedback score (0.0-1.0)
             pred: Prediction with:
@@ -547,18 +572,11 @@ def summarization(
         if not original_text:
             original_text = getattr(gold, 'content', '')
 
-        ground_truth_rile = getattr(gold, 'ground_truth_rile', 0.0)
+        reference_score = getattr(gold, 'reference_score', 0.0)
         human_score = getattr(gold, 'human_score', None)
 
-        # Extract prediction - handle both string returns and object returns
-        if isinstance(pred, str):
-            summary = pred
-        else:
-            summary = getattr(pred, 'summary', '')
-            if not summary:
-                summary = getattr(pred, 'merged_summary', '')
-            if not summary:
-                summary = str(pred)
+        # Extract prediction text
+        summary = _extract_text_from_pred(pred, 'summary', 'merged_summary')
 
         # Initialize feedback
         feedback_parts = []
@@ -567,7 +585,7 @@ def summarization(
         # 1. Oracle score: Does summary preserve RILE positioning?
         try:
             oracle_pred_rile, confidence, _ = oracle_classifier.predict_rile(summary)
-            rile_diff = abs(oracle_pred_rile - ground_truth_rile)
+            rile_diff = abs(oracle_pred_rile - reference_score)
 
             # Normalize to 0-1: perfect preservation = 1.0, max_error points off = 0.0
             oracle_score = normalize_error_to_score(rile_diff, max_error=max_error)
@@ -576,7 +594,7 @@ def summarization(
             if rile_diff > threshold:
                 feedback_parts.append(
                     f"RILE drift detected: oracle predicted {oracle_pred_rile:.1f}, "
-                    f"expected ~{ground_truth_rile:.1f} (diff={rile_diff:.1f}). "
+                    f"expected ~{reference_score:.1f} (diff={rile_diff:.1f}). "
                     f"Preserve more politically relevant content."
                 )
             if confidence < 0.5:
@@ -587,7 +605,7 @@ def summarization(
         except Exception as e:
             oracle_score = 0.5  # Default on error
             scores['oracle'] = oracle_score
-            feedback_parts.append(f"Oracle evaluation failed: {str(e)[:50]}")
+            feedback_parts.append(f"Oracle evaluation failed: {str(e)}")
 
         # 2. Quality checks
         quality_penalty = 0.0
@@ -652,10 +670,10 @@ def summarization(
     return metric
 
 
-def merge(
+def create_merge_metric(
     oracle_classifier,
+    scale: "BoundedScale",
     threshold: float = 10.0,
-    max_error: float = None,
 ) -> Callable:
     """
     Create a metric for evaluating merge quality.
@@ -663,50 +681,55 @@ def merge(
     Similar to summarization metric but specifically for merge operations
     where two summaries are combined.
 
+    This is the preferred API - it requires an explicit scale parameter.
+
     Args:
-        oracle_classifier: Score predictor with predict_rile() method
-        threshold: Maximum acceptable RILE drift
-        max_error: Maximum error scale for scoring. Defaults to RILE_RANGE (200.0).
+        oracle_classifier: Score predictor with predict_score() or predict_rile() method
+        scale: BoundedScale defining the value range for normalization
+        threshold: Maximum acceptable score drift
 
     Returns:
         Metric function for merge evaluation
+
+    Example:
+        from src.tasks.manifesto import RILE_SCALE
+
+        metric = create_merge_metric(
+            oracle_classifier=oracle,
+            scale=RILE_SCALE,
+            threshold=10.0,
+        )
     """
-    # Resolve default max_error using lazy import to avoid module-level dependency
-    if max_error is None:
-        from src.manifesto.constants import RILE_RANGE
-        max_error = RILE_RANGE
+    max_error = scale.range if hasattr(scale, 'range') else (scale.max_value - scale.min_value)
 
     def metric(gold, pred, trace=None, pred_name=None, pred_trace=None):
-        """Evaluate merge quality for RILE preservation.
-
-        Compatible with GEPA's 5-argument signature.
-        """
+        """Evaluate merge quality for score preservation."""
         # Extract inputs
         left_summary = getattr(gold, 'left_summary', '')
         right_summary = getattr(gold, 'right_summary', '')
-        ground_truth_rile = getattr(gold, 'ground_truth_rile', 0.0)
+        ground_truth = getattr(gold, 'reference_score', 0.0)
 
-        # Extract prediction
-        if isinstance(pred, str):
-            merged = pred
-        else:
-            merged = getattr(pred, 'merged_summary', '')
-            if not merged:
-                merged = getattr(pred, 'summary', '')
-            if not merged:
-                merged = str(pred)
+        # Extract prediction text
+        merged = _extract_text_from_pred(pred, 'merged_summary', 'summary')
 
         feedback_parts = []
 
-        # Check merged preserves RILE
+        # Check merged preserves score
         try:
-            merged_rile, confidence, _ = oracle_classifier.predict_rile(merged)
-            rile_diff = abs(merged_rile - ground_truth_rile)
-            oracle_score = normalize_error_to_score(rile_diff, max_error=max_error)
+            if hasattr(oracle_classifier, 'predict_score'):
+                merged_score, confidence, _ = oracle_classifier.predict_score(merged)
+            elif hasattr(oracle_classifier, 'predict_rile'):
+                merged_score, confidence, _ = oracle_classifier.predict_rile(merged)
+            else:
+                merged_score = float(oracle_classifier(merged))
+                confidence = 1.0
 
-            if rile_diff > threshold:
+            score_diff = abs(merged_score - ground_truth)
+            oracle_score = normalize_error_to_score(score_diff, max_error=max_error)
+
+            if score_diff > threshold:
                 feedback_parts.append(
-                    f"Merge lost RILE signal: {merged_rile:.1f} vs expected {ground_truth_rile:.1f}"
+                    f"Merge lost signal: {merged_score:.1f} vs expected {ground_truth:.1f}"
                 )
         except Exception:
             oracle_score = 0.5
@@ -796,92 +819,215 @@ def numeric_match(
     return metric
 
 
-def oracle(
+def create_oracle_metric(
     oracle_fn: Callable,
-    comparison_fn: Callable = None,
-    input_field: str = "output",
-    gold_field: str = None,
-    default_max_error: float = None,
+    scale: "BoundedScale",
+    input_field: str = "summary",
+    gold_field: str = "reference_score",
+    with_feedback: bool = False,
 ) -> Callable:
     """
-    Create a metric that uses any oracle/classifier as the scoring function.
+    Create a unified oracle-as-metric function.
 
-    This generalizes the oracle-as-metric pattern used in summarization optimization.
+    This is the preferred API for creating oracle-based DSPy metrics.
+    It consolidates the functionality of oracle() and oracle_score_prediction()
+    into a single, clean interface.
 
     Args:
-        oracle_fn: Callable that takes text and returns a score/prediction.
-                   Signature: oracle_fn(text) -> Any
-        comparison_fn: How to compare oracle output to ground truth.
-                       Signature: comparison_fn(oracle_output, gold_value) -> float
-                       Default: Uses normalize_error_to_score with default_max_error
+        oracle_fn: Callable that takes text and returns a score.
+                   Signature: oracle_fn(text) -> float OR
+                   Signature: oracle_fn(text) -> Tuple[float, float, str]
+        scale: BoundedScale defining the value range for normalization.
+               Example: BoundedScale(-100.0, 100.0) for RILE scores
         input_field: Field name to extract from prediction for oracle input
-        gold_field: Field name for ground truth (if None, uses same as input_field)
-        default_max_error: Max error scale for default comparison function.
-                          Defaults to RILE_RANGE (200.0) for RILE-style scores.
+        gold_field: Field name for ground truth score
+        with_feedback: Return dict with feedback for GEPA compatibility
 
     Returns:
-        Metric function compatible with DSPy optimizers
+        DSPy-compatible metric function (supports both 3-arg and 5-arg signatures)
 
-    Examples:
-        # RILE oracle as metric
-        from src.manifesto.constants import RILE_RANGE
+    Example:
+        from src.tasks.manifesto import RILE_SCALE
+
         metric = create_oracle_metric(
             oracle_fn=rile_oracle.predict,
-            comparison_fn=lambda pred, gold: normalize_error_to_score(abs(pred - gold), RILE_RANGE),
+            scale=RILE_SCALE,
             input_field="summary",
-            gold_field="ground_truth_rile",
-        )
-
-        # Binary oracle (pass/fail)
-        metric = create_oracle_metric(
-            oracle_fn=law_checker.check,
-            comparison_fn=lambda result, _: 1.0 if result.passed else 0.0,
-            input_field="summary",
+            gold_field="reference_score",
         )
     """
-    # Resolve default max_error using lazy import to avoid module-level dependency
-    if default_max_error is None:
-        from src.manifesto.constants import RILE_RANGE
-        default_max_error = RILE_RANGE
-
-    # Default comparison function for numeric scores
-    if comparison_fn is None:
-        def comparison_fn(oracle_out, gold_val):
-            try:
-                return normalize_error_to_score(
-                    abs(float(oracle_out) - float(gold_val)), default_max_error
-                )
-            except (ValueError, TypeError):
-                return 0.0 if oracle_out != gold_val else 1.0
-
-    gold_field = gold_field or input_field
-
-    def metric(gold, pred, trace=None) -> float:
-        # Get input for oracle from prediction
-        pred_text = getattr(pred, input_field, None)
-        if pred_text is None:
-            pred_text = str(pred)
-
-        # Get ground truth from gold example
-        gold_value = getattr(gold, gold_field, None)
-
+    def metric_fn(gold, pred, trace=None, pred_name=None, pred_trace=None):
+        # Get ground truth
+        ground_truth = getattr(gold, gold_field, None)
+        if ground_truth is None:
+            ground_truth = getattr(gold, 'label', 0.0)
         try:
-            # Run oracle
-            oracle_output = oracle_fn(pred_text)
+            ground_truth = float(ground_truth)
+        except (ValueError, TypeError):
+            ground_truth = (scale.min_value + scale.max_value) / 2
 
-            # Compare oracle output to ground truth
-            if gold_value is not None:
-                return comparison_fn(oracle_output, gold_value)
+        # Get input from prediction
+        if isinstance(pred, str):
+            text_to_score = pred
+        else:
+            text_to_score = getattr(pred, input_field, None)
+            if text_to_score is None:
+                text_to_score = getattr(pred, 'summary', None)
+            if text_to_score is None:
+                text_to_score = str(pred)
+
+        # Call oracle
+        try:
+            result = oracle_fn(text_to_score)
+            if isinstance(result, tuple):
+                predicted_value = result[0]
+                reasoning = result[2] if len(result) > 2 else ""
             else:
-                # If no ground truth, return oracle output directly if it's a score
-                if isinstance(oracle_output, (int, float)):
-                    return float(oracle_output)
-                return 1.0 if oracle_output else 0.0
-
+                predicted_value = float(result)
+                reasoning = ""
         except Exception as e:
+            if with_feedback:
+                return {'score': 0.0, 'feedback': f"Oracle error: {str(e)}"}
             return 0.0
 
-    return metric
+        # Compute score using scale
+        score = scale.values_to_score(predicted_value, ground_truth)
+
+        if with_feedback:
+            error = abs(predicted_value - ground_truth)
+            feedback = f"Predicted {predicted_value:.1f}, expected {ground_truth:.1f} (error: {error:.1f})"
+            if reasoning:
+                feedback += f" - {reasoning}"
+            return {'score': score, 'feedback': feedback}
+
+        return score
+
+    return metric_fn
+
+
+class OraclePredictionCache:
+    """Thread-safe LRU cache for oracle predictions."""
+
+    def __init__(self, max_entries: int = 10000):
+        self.max_entries = max_entries
+        self._lock = threading.Lock()
+        self._cache: "OrderedDict[str, Any]" = OrderedDict()
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: str):
+        """Return cached value or None, tracking hit/miss stats."""
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                self.hits += 1
+                return self._cache[key]
+            self.misses += 1
+            return None
+
+    def set(self, key: str, value) -> None:
+        """Insert value with LRU eviction."""
+        with self._lock:
+            if key in self._cache:
+                self._cache[key] = value
+                self._cache.move_to_end(key)
+                return
+
+            if self.max_entries and len(self._cache) >= self.max_entries:
+                self._cache.popitem(last=False)
+
+            self._cache[key] = value
+
+    def seed(self, values: Dict[str, Tuple[float, float, str]]) -> None:
+        """Seed the cache with precomputed oracle predictions."""
+        with self._lock:
+            for key, value in values.items():
+                if key in self._cache:
+                    continue
+                if self.max_entries and len(self._cache) >= self.max_entries:
+                    self._cache.popitem(last=False)
+                self._cache[key] = value
+
+    def stats(self) -> Dict[str, Any]:
+        """Return cache statistics."""
+        total = self.hits + self.misses
+        hit_rate = self.hits / total if total > 0 else 0.0
+        return {
+            "cache_size": len(self._cache),
+            "hits": self.hits,
+            "misses": self.misses,
+            "hit_rate": hit_rate,
+            "max_entries": self.max_entries,
+        }
+
+
+def _resolve_oracle_fn(oracle_classifier: Callable) -> Callable:
+    """Normalize oracle interfaces into a callable (text) -> score/tuple."""
+    if hasattr(oracle_classifier, "predict_score"):
+        return oracle_classifier.predict_score
+    if hasattr(oracle_classifier, "predict_rile"):
+        return oracle_classifier.predict_rile
+    if callable(oracle_classifier):
+        return oracle_classifier
+    raise ValueError("oracle_classifier must be callable or implement predict_score/predict_rile")
+
+
+def create_cached_oracle_metric(
+    oracle_classifier: Callable,
+    scale: "BoundedScale",
+    ground_truth_field: str = "reference_score",
+    summary_field: str = "summary",
+    cache_size: int = 10000,
+    with_feedback: bool = False,
+) -> Tuple[Callable, Optional[OraclePredictionCache]]:
+    """
+    Create an oracle metric with memoized oracle predictions.
+
+    Returns:
+        (metric_fn, cache_obj) where cache_obj can be passed to get_cache_stats().
+    """
+    oracle_fn = _resolve_oracle_fn(oracle_classifier)
+    cache = OraclePredictionCache(max_entries=cache_size) if cache_size > 0 else None
+
+    def cached_oracle_fn(text: str):
+        if cache is None:
+            return oracle_fn(text)
+        cached = cache.get(text)
+        if cached is not None:
+            return cached
+        result = oracle_fn(text)
+        cache.set(text, result)
+        return result
+
+    metric_fn = create_oracle_metric(
+        oracle_fn=cached_oracle_fn,
+        scale=scale,
+        input_field=summary_field,
+        gold_field=ground_truth_field,
+        with_feedback=with_feedback,
+    )
+    return metric_fn, cache
+
+
+def get_cache_stats(cache: Optional[OraclePredictionCache]) -> Dict[str, Any]:
+    """Return cache statistics for logging."""
+    if cache is None:
+        return {
+            "cache_size": 0,
+            "hits": 0,
+            "misses": 0,
+            "hit_rate": 0.0,
+            "max_entries": 0,
+        }
+    if hasattr(cache, "stats"):
+        return cache.stats()
+    return {
+        "cache_size": len(cache),
+        "hits": 0,
+        "misses": 0,
+        "hit_rate": 0.0,
+        "max_entries": len(cache),
+    }
 
 
 def combine_metrics(
@@ -1001,7 +1147,7 @@ def combine_feedback(
 
             except Exception as e:
                 component_scores[name] = 0.0
-                feedback_parts.append(f"{name}: error ({str(e)[:50]})")
+                feedback_parts.append(f"{name}: error ({str(e)})")
 
         return {
             'score': total_score,
@@ -1103,7 +1249,7 @@ def oracle_score_prediction(
 
         except Exception as e:
             if with_feedback:
-                return {'score': 0.0, 'feedback': f"Oracle error: {str(e)[:50]}"}
+                return {'score': 0.0, 'feedback': f"Oracle error: {str(e)}"}
             return 0.0
 
         # Compute score using scale's built-in method
@@ -1194,7 +1340,7 @@ def pairwise_consistency_metric(
 
         except Exception as e:
             if with_feedback:
-                return {'score': 0.0, 'feedback': f"Comparison error: {str(e)[:50]}"}
+                return {'score': 0.0, 'feedback': f"Comparison error: {str(e)}"}
             return 0.0
 
     return metric_fn

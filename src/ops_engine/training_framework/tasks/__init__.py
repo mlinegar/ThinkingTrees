@@ -44,43 +44,28 @@ from .base import (
     ScaleDefinition,
     LabelDefinition,
     TaskConfig,
-    # Generic/unified types (task-agnostic)
     UnifiedTrainingSource,
     UnifiedResult,
     DEFAULT_UNIFIED_RUBRIC,
-    # Backward compatibility aliases
-    DomainPlugin,
-    AbstractDomain,
-    DomainConfig,
 )
 
 # Import registry
 from .registry import (
     TaskRegistry,
     register_task,
-    # Backward compatibility aliases
-    DomainRegistry,
-    register_domain,
 )
 
 # Import task implementations (registration happens on import)
-# RILE_SCALE is manifesto-specific, exported from manifesto module
-from .manifesto import ManifestoTask, RILE_SCALE, ManifestoDomain  # ManifestoDomain is backward compat alias
+from src.tasks.manifesto.task import ManifestoTask
 
 # Default task is document_analysis (general purpose)
-# Import from config to maintain single source of truth
-from src.config.settings import DEFAULT_TASK, DEFAULT_DOMAIN  # DEFAULT_DOMAIN for backward compat
+from src.config.settings import DEFAULT_TASK
 from .document_analysis import (
     DocumentAnalysisTask,
     DocumentAnalysisTrainingSource,
-    DocumentAnalysisResult,
     PRESERVATION_SCALE,
-    QUALITY_SCALE,  # Backward compatibility
     PreservationScorer,
     OPS_PRESERVATION_RUBRIC,
-    # Backward compatibility aliases
-    DocumentAnalysisDomain,
-    SummarizationDomain,
 )
 
 
@@ -128,62 +113,37 @@ def is_task_registered(name: str) -> bool:
     return TaskRegistry.is_registered(name)
 
 
-# Backward compatibility aliases
-get_domain = get_task
-list_domains = list_tasks
-is_domain_registered = is_task_registered
-
-
 # =============================================================================
 # Public API
 # =============================================================================
 
 __all__ = [
-    # Base classes and abstractions (new names)
+    # Base classes and abstractions
     'TaskPlugin',
     'AbstractTask',
     'OutputType',
     'ScaleDefinition',
     'LabelDefinition',
     'TaskConfig',
-    'RILE_SCALE',
-
-    # Generic/unified types (task-agnostic)
     'UnifiedTrainingSource',
     'UnifiedResult',
     'DEFAULT_UNIFIED_RUBRIC',
 
-    # Registry (new names)
+    # Registry
     'TaskRegistry',
     'register_task',
 
-    # Task implementations (new names)
+    # Task implementations
     'ManifestoTask',
     'DocumentAnalysisTask',
     'DocumentAnalysisTrainingSource',
-    'DocumentAnalysisResult',  # Alias for UnifiedResult
     'PreservationScorer',
     'DEFAULT_TASK',
     'PRESERVATION_SCALE',
     'OPS_PRESERVATION_RUBRIC',
 
-    # Convenience functions (new names)
+    # Convenience functions
     'get_task',
     'list_tasks',
     'is_task_registered',
-
-    # Backward compatibility aliases
-    'DomainPlugin',
-    'AbstractDomain',
-    'DomainConfig',
-    'DomainRegistry',
-    'register_domain',
-    'ManifestoDomain',
-    'DocumentAnalysisDomain',
-    'SummarizationDomain',
-    'QUALITY_SCALE',
-    'DEFAULT_DOMAIN',
-    'get_domain',
-    'list_domains',
-    'is_domain_registered',
 ]

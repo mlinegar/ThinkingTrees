@@ -47,6 +47,8 @@ if TYPE_CHECKING:
     from src.ops_engine.training_framework.genrm_preference import GenRMJudge
     from src.ops_engine.training_framework.genrm_dspy import GenRMComparisonModule
 
+from src.training.utils import normalize_error_to_01
+
 logger = logging.getLogger(__name__)
 
 
@@ -67,7 +69,12 @@ class ToTConfig:
     convergence_patience: int = 2        # Stop after N iterations without improvement
 
     # Tree building
-    k_candidates: int = 4                # Candidates per tournament
+    # Number of candidate summaries generated per tournament round.
+    # 4 provides a good diversity-cost tradeoff:
+    # - Higher (8+): More diversity but 4x more LLM calls per merge
+    # - Lower (2): Faster but less exploration of summary space
+    # - 4: 4 candidates → 6 pairwise comparisons, covers space well
+    k_candidates: int = 4
     n_samples_per_iteration: int = 50    # Samples to process per iteration
     candidate_temperature: float = 0.9   # Temperature for candidate generation
 
@@ -79,11 +86,9 @@ class ToTConfig:
     # Oracle comparison (normalized units when errors are normalized)
     tie_margin: float = 0.05             # Error difference below this = tie
     normalize_errors: bool = True        # Normalize errors to 0-1
-    scale_range: Optional[float] = None  # Range for normalization (None = defaults to 1.0)
-                                         # IMPORTANT: Set this to your oracle's actual range!
+    scale_range: Optional[float] = None  # Range for normalization (auto-detected or 1.0)
                                          # For RILE (-100 to +100), use scale_range=200
-                                         # For 0-1 scales, use scale_range=1.0
-                                         # If None and normalize_errors=True, uses 1.0 (may be wrong)
+                                         # For 0-1 scales, use scale_range=1.0 (default)
 
     # Sampling
     shuffle_samples_each_iteration: bool = True
@@ -351,7 +356,7 @@ class TournamentOfTournamentsTrainer:
                 doc_id = sample.get('doc_id', f"doc_{idx}")
                 for pref in result.preferences:
                     pref.source_example_id = doc_id
-                    pref.ground_truth_score = sample.get('reference_score')
+                    pref.reference_score = sample.get('reference_score')
 
                 all_preferences.extend(result.preferences)
 
@@ -404,10 +409,16 @@ class TournamentOfTournamentsTrainer:
                 error_a = raw_error_a
                 error_b = raw_error_b
                 if self.config.normalize_errors and gt is not None:
-                    scale_range = self.config.scale_range or 1.0
-                    if scale_range > 0:
-                        error_a = min(1.0, max(0.0, raw_error_a / scale_range))
-                        error_b = min(1.0, max(0.0, raw_error_b / scale_range))
+                    scale_range = self.config.scale_range
+                    if scale_range is None:
+                        logger.warning(
+                            "No scale_range specified for error normalization. "
+                            "Using default 1.0 (DSPy convention). "
+                            "For RILE (-100 to +100), use scale_range=200."
+                        )
+                        scale_range = 1.0
+                    error_a = normalize_error_to_01(raw_error_a, scale_range)
+                    error_b = normalize_error_to_01(raw_error_b, scale_range)
 
                 # Update preference with oracle data
                 pref.score_estimate_a = score_a
@@ -415,7 +426,7 @@ class TournamentOfTournamentsTrainer:
                 pref.oracle_error_a = error_a
                 pref.oracle_error_b = error_b
                 if gt is not None:
-                    pref.ground_truth_score = gt
+                    pref.reference_score = gt
 
                 enriched.append(pref)
 

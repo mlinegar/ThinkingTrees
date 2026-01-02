@@ -307,7 +307,7 @@ class ThroughputBenchmark:
 
     def _build_benchmark_prompt(self, sample: Any) -> List[Dict[str, str]]:
         """Build a standardized prompt for benchmarking (full document)."""
-        text = self._get_text(sample)[:4000]
+        text = self._get_text(sample)  # Use full text - truncation corrupts benchmarks
         return self._build_chunk_prompt(text)
 
     def _build_chunk_prompt(self, chunk: str) -> List[Dict[str, str]]:

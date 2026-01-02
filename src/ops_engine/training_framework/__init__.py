@@ -69,12 +69,21 @@ from .metrics import (
     calibration_error,
     law_compliance_rate,
     overall_compliance_rate,
-    create_violation_metric,
-    # Score-centric metric converters (preferred)
+    # Preferred API - scale-aware metric factories
+    create_cached_oracle_metric,
+    create_oracle_metric,
+    create_merge_metric,
+    get_cache_stats,
+    metric,
+    oracle_score_prediction,
+    # Score-centric metric converters
     oracle_as_metric,
     oracle_as_metric_with_feedback,
-    # DSPy-style metric factories
-    violation,
+    # Summarization-specific
+    summarization,
+    # Deprecated (use create_oracle_metric/create_merge_metric instead)
+    oracle,
+    merge,
 )
 
 # Phase 3: Optimization
@@ -133,7 +142,20 @@ from .bootstrapping import (
     create_bootstrapped_trainset,
 )
 
-# Preference learning
+# Preference learning - base infrastructure
+from .base_preference import (
+    BasePreferenceCollector,
+    CandidateInfo,
+    PreferenceResult,
+    CollectionStatistics,
+)
+from .preference_engine import (
+    PreferenceEngine,
+    PreferenceEngineConfig,
+    PreferenceDerivationStrategy,
+    DEFAULT_GENRM_ENGINE,
+    DEFAULT_ORACLE_ENGINE,
+)
 from .preference import (
     PreferencePair,
     PairwiseJudge,
@@ -143,20 +165,23 @@ from .preference import (
 )
 from .genrm_preference import (
     GenRMJudge,
+    GenRMResult,
     GenRMPreferenceCollector,
 )
 from .oracle_preference import (
     OraclePreferenceCollector,
     OraclePreferenceConfig,
+    OracleCandidateMetadata,
 )
 from .ops_comparison_module import (
     OPSLawComparison,
     OPSComparisonModule,
 )
-from .oracle_ground_truth import (
-    ChunkGroundTruth,
-    ManifestoGroundTruthTree,
-    GroundTruthDataset,
+# Labeled tree data structures (formerly "ground truth")
+from .labeled_tree import (
+    LabeledNode,
+    LabeledTree,
+    LabeledDataset,
 )
 
 __all__ = [
@@ -196,6 +221,8 @@ __all__ = [
     'calibration_error',
     'law_compliance_rate',
     'overall_compliance_rate',
+    'create_cached_oracle_metric',
+    'get_cache_stats',
     'create_violation_metric',
     # Score-centric metric converters (preferred)
     'oracle_as_metric',
@@ -247,15 +274,17 @@ __all__ = [
     'PreferenceCollector',
     'PreferenceDataset',
     'GenerationConfig',
+    'CollectionStatistics',
     'GenRMJudge',
     'GenRMPreferenceCollector',
     'OraclePreferenceCollector',
     'OraclePreferenceConfig',
     'OPSLawComparison',
     'OPSComparisonModule',
-    'ChunkGroundTruth',
-    'ManifestoGroundTruthTree',
-    'GroundTruthDataset',
+    # Labeled tree data structures
+    'LabeledNode',
+    'LabeledTree',
+    'LabeledDataset',
 
     # Online Learning (Phase 4)
     'OnlineLearningManager',
