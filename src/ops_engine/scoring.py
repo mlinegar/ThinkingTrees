@@ -19,6 +19,8 @@ Usage:
     optimizer.compile(student, trainset, metric=metric)
 """
 
+import hashlib
+import threading
 import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -89,114 +91,6 @@ def score_to_error(score: float, max_error: float) -> float:
         error = score_to_error(0.0, max_error=200.0)  # → 200.0 points
     """
     return max_error * (1.0 - score)
-
-
-# =============================================================================
-# Bounded Scale (Generic)
-# =============================================================================
-
-@dataclass(frozen=True)
-class BoundedScale:
-    """
-    A bounded linear scale for score normalization.
-
-    DEPRECATED: Use ScaleDefinition from src.ops_engine.training_framework.domains.base instead.
-    ScaleDefinition provides the same functionality with additional metadata like description,
-    higher_is_better, and neutral_value.
-
-    Represents any continuous range with defined bounds.
-    Handles the math of converting distances to normalized scores.
-
-    This is the generic foundation for domain-specific scales.
-    Domain modules should create their own BoundedScale instances with
-    appropriate bounds for their use case.
-
-    Examples:
-        # Political positioning (-100 to +100)
-        political = BoundedScale(-100.0, 100.0)
-        score = political.values_to_score(pred, gt)  # 0.0-1.0
-
-        # Percentage scale (0 to 100)
-        pct = BoundedScale(0.0, 100.0)
-
-        # Sentiment (-1 to +1)
-        sentiment = BoundedScale(-1.0, 1.0)
-
-        # Temperature (Fahrenheit, water phases)
-        temp = BoundedScale(32.0, 212.0)
-    """
-    min_value: float
-    max_value: float
-
-    def __post_init__(self):
-        """Validate that min < max and emit deprecation warning."""
-        warnings.warn(
-            "BoundedScale is deprecated, use ScaleDefinition from "
-            "src.ops_engine.training_framework.domains.base instead",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if self.min_value >= self.max_value:
-            raise ValueError(
-                f"min_value ({self.min_value}) must be less than "
-                f"max_value ({self.max_value})"
-            )
-
-    @property
-    def range(self) -> float:
-        """Total range of the scale."""
-        return self.max_value - self.min_value
-
-    def distance_to_score(self, distance: float) -> float:
-        """
-        Convert distance to normalized score.
-
-        Args:
-            distance: Absolute distance between two values
-
-        Returns:
-            Score in [0.0, 1.0] where 1.0 = no distance
-        """
-        return normalize_error_to_score(distance, max_error=self.range)
-
-    def values_to_score(self, value_a: float, value_b: float) -> float:
-        """
-        Compute similarity score between two values on this scale.
-
-        Args:
-            value_a: First value
-            value_b: Second value
-
-        Returns:
-            Score in [0.0, 1.0] where 1.0 = identical
-        """
-        return self.distance_to_score(abs(value_a - value_b))
-
-    def clamp(self, value: float) -> float:
-        """Clamp value to scale bounds."""
-        return max(self.min_value, min(self.max_value, value))
-
-    def normalize(self, value: float) -> float:
-        """
-        Normalize value to [0.0, 1.0] range.
-
-        Maps min_value -> 0.0, max_value -> 1.0.
-        """
-        return (value - self.min_value) / self.range
-
-    def denormalize(self, normalized: float) -> float:
-        """
-        Convert normalized [0.0, 1.0] back to scale value.
-
-        Maps 0.0 -> min_value, 1.0 -> max_value.
-        """
-        return self.min_value + normalized * self.range
-
-
-# Pre-defined scales for common use cases
-UNIT_SCALE = BoundedScale(0.0, 1.0)       # 0-1 probabilities/scores
-PERCENT_SCALE = BoundedScale(0.0, 100.0)  # Percentages
-SYMMETRIC_SCALE = BoundedScale(-1.0, 1.0)  # Sentiment, correlation
 
 
 # =============================================================================
@@ -365,6 +259,7 @@ class SimilarityScorer:
         value_extractor: Callable[[str], float],
         scale: BoundedScale,
         name: str = "value",
+        cache_size: int = 1024,
     ):
         """
         Initialize the similarity scorer.
@@ -373,10 +268,69 @@ class SimilarityScorer:
             value_extractor: Function (text) -> float that extracts a value
             scale: BoundedScale for normalizing the comparison
             name: Name for the extracted value (used in reasoning)
+            cache_size: Max entries to cache (0 = no caching). Caching avoids
+                        redundant LLM calls when scoring same texts repeatedly.
         """
-        self.value_extractor = value_extractor
+        self._value_extractor_raw = value_extractor
         self.scale = scale
         self.name = name
+        self.cache_size = cache_size
+        self._cache: Dict[str, float] = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._cache_lock = threading.Lock()  # Thread safety for cache operations
+
+    def _text_hash(self, text: str) -> str:
+        """Compute hash key for text caching."""
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    def value_extractor(self, text: str) -> float:
+        """Cached value extraction. Avoids redundant LLM calls for same text.
+
+        Thread-safe implementation using a lock to protect cache operations.
+        """
+        if self.cache_size == 0:
+            return self._value_extractor_raw(text)
+
+        key = self._text_hash(text)
+
+        # Check cache with lock
+        with self._cache_lock:
+            if key in self._cache:
+                self._cache_hits += 1
+                return self._cache[key]
+            self._cache_misses += 1
+
+        # Call extractor outside lock to avoid holding lock during LLM call
+        value = self._value_extractor_raw(text)
+
+        # Add to cache with lock
+        with self._cache_lock:
+            # Double-check in case another thread added it
+            if key in self._cache:
+                return self._cache[key]
+
+            # Add to cache (with simple LRU eviction if full)
+            if len(self._cache) >= self.cache_size:
+                # Remove oldest entry (first key in dict - Python 3.7+ preserves order)
+                oldest_key = next(iter(self._cache))
+                del self._cache[oldest_key]
+            self._cache[key] = value
+
+        return value
+
+    def cache_stats(self) -> Dict[str, Any]:
+        """Return cache statistics (thread-safe)."""
+        with self._cache_lock:
+            total = self._cache_hits + self._cache_misses
+            hit_rate = (self._cache_hits / total * 100) if total > 0 else 0
+            return {
+                "hits": self._cache_hits,
+                "misses": self._cache_misses,
+                "hit_rate": hit_rate,
+                "entries": len(self._cache),
+                "max_entries": self.cache_size,
+            }
 
     def score(
         self,
@@ -461,18 +415,6 @@ class OracleScore:
         """
         return self.score >= threshold
 
-    def to_discrepancy(self) -> float:
-        """
-        Convert to old discrepancy convention for backward compatibility.
-
-        Old convention: 0.0 = good, 1.0 = bad
-        New convention: 1.0 = good, 0.0 = bad
-
-        Returns:
-            Discrepancy score (1.0 - similarity)
-        """
-        return 1.0 - self.score
-
     def as_metric(self) -> float:
         """
         Return score directly usable as DSPy metric.
@@ -481,48 +423,6 @@ class OracleScore:
         it can be used directly as a DSPy metric return value.
         """
         return self.score
-
-    @classmethod
-    def from_discrepancy(
-        cls,
-        discrepancy: float,
-        reasoning: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> 'OracleScore':
-        """
-        Create from old discrepancy convention.
-
-        Use this to migrate code that computes discrepancy (0.0 = good).
-
-        Args:
-            discrepancy: Old-style score where 0.0 = good, 1.0 = bad
-            reasoning: Explanation of the score
-            metadata: Optional domain-specific details
-
-        Returns:
-            OracleScore with inverted score (similarity convention)
-        """
-        return cls(
-            score=1.0 - discrepancy,
-            reasoning=reasoning,
-            metadata=metadata,
-        )
-
-    def to_legacy_tuple(self, threshold: float = 0.9) -> Tuple[bool, float, str]:
-        """
-        Convert to old OracleJudge return format.
-
-        Args:
-            threshold: Classification threshold
-
-        Returns:
-            (is_congruent, discrepancy, reasoning) tuple
-        """
-        return (
-            self.passes_threshold(threshold),
-            self.to_discrepancy(),
-            self.reasoning,
-        )
 
     @classmethod
     def from_error(

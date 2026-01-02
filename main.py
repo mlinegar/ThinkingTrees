@@ -6,7 +6,6 @@ Entry point for building and analyzing OPS trees from documents.
 """
 
 import argparse
-import logging
 import sys
 from pathlib import Path
 from typing import Optional
@@ -14,19 +13,12 @@ import yaml
 
 from src.core.data_models import Tree
 from src.ops_engine.builder import (
-    TreeBuilder, BuildConfig, BuildResult,
-    IdentitySummarizer, TruncatingSummarizer
+    BuildConfig, BuildResult, build,
+    IdentitySummarizer
 )
 from src.preprocessing.chunker import DocumentChunker
 from src.core.llm_client import LLMConfig, LLMClient, create_summarizer, create_client
-
-
-def setup_logging(level: str = "INFO") -> None:
-    """Configure logging."""
-    logging.basicConfig(
-        level=getattr(logging, level.upper()),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
+from src.config.logging import setup_logging
 
 
 def load_config(config_path: Optional[Path] = None) -> dict:
@@ -56,7 +48,7 @@ def build_tree(
         rubric: Information preservation criteria
         output_path: Optional path to save tree
         config: Configuration dictionary
-        llm_port: Optional port for vLLM server (uses mock/truncating if not available)
+        llm_port: Optional port for vLLM server (uses identity summarizer if not available)
 
     Returns:
         BuildResult containing the tree and statistics
@@ -88,14 +80,31 @@ def build_tree(
         except Exception as e:
             logger.warning(f"Could not connect to LLM server on port {llm_port}: {e}")
 
-    # Fallback to truncating summarizer
+    # Fallback to identity summarizer
     if summarizer is None:
-        logger.info("Using truncating summarizer (no LLM server)")
-        summarizer = TruncatingSummarizer(max_length=500)
+        logger.info("Using identity summarizer (no LLM server)")
+        summarizer = IdentitySummarizer()
 
-    # Build tree
-    builder = TreeBuilder(summarizer=summarizer, config=build_config)
-    result = builder.build_from_file(input_path, rubric)
+    # Read file content
+    text = Path(input_path).read_text(encoding='utf-8')
+
+    # Build tree using the build() helper (handles sync summarizer wrapping)
+    tree = build(
+        text=text,
+        rubric=rubric,
+        summarizer=summarizer,
+        max_chars=build_config.max_chunk_chars
+    )
+
+    # Wrap in BuildResult for consistent API
+    result = BuildResult(
+        tree=tree,
+        chunks_created=tree.leaf_count,
+        nodes_created=tree.node_count,
+        levels_created=tree.height + 1,
+        errors=[],
+        preferences=[],
+    )
 
     # Save if output path specified
     if output_path:
@@ -143,11 +152,9 @@ def print_tree_info(result: BuildResult) -> None:
     print(f"Tree height:     {tree.height}")
     print(f"Leaf count:      {tree.leaf_count}")
     print(f"{'='*50}")
-    print(f"\nFinal Summary (first 500 chars):")
+    print(f"\nFinal Summary:")
     print(f"{'-'*50}")
-    print(tree.final_summary[:500])
-    if len(tree.final_summary) > 500:
-        print("...")
+    print(tree.final_summary)
     print(f"{'-'*50}\n")
 
 

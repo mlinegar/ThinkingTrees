@@ -20,11 +20,6 @@ class DocumentSample:
         """Dict-like access for metadata."""
         return self.metadata.get(key, default)
 
-    @property
-    def manifesto_id(self) -> str:
-        """Legacy alias for doc_id."""
-        return self.doc_id
-
 
 @dataclass
 class DocumentResult:
@@ -50,9 +45,8 @@ class DocumentResult:
 
     error: Optional[str] = None
     reasoning: str = ""
-    left_indicators: str = ""
-    right_indicators: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Task-specific fields like 'left_indicators' should be stored in metadata
 
     @property
     def prediction_error(self) -> Optional[float]:
@@ -65,13 +59,3 @@ class DocumentResult:
         if self.baseline_score is None or self.reference_score is None:
             return None
         return abs(self.baseline_score - self.reference_score)
-
-    @property
-    def predicted_rile(self) -> Optional[float]:
-        """Legacy alias for estimated_score."""
-        return self.estimated_score
-
-    @property
-    def ground_truth_rile(self) -> Optional[float]:
-        """Legacy alias for reference_score."""
-        return self.reference_score

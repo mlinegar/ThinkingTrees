@@ -128,6 +128,7 @@ else:
 print(f'HOST={vllm.get(\"host\", \"0.0.0.0\")}')
 print(f'PORT={vllm.get(\"port\", 8000)}')
 print(f'GPU_MEM={vllm.get(\"gpu_memory_utilization\", 0.90)}')
+print(f'PREFIX_CACHE={str(vllm.get(\"enable_prefix_caching\", False)).lower()}')
 "
 }
 
@@ -147,6 +148,7 @@ echo "Model: $MODEL_PATH"
 echo "Port: $PORT"
 echo "Tensor Parallel: $TENSOR_PARALLEL"
 echo "Max Model Length: $MAX_MODEL_LEN"
+echo "Prefix Cache: $PREFIX_CACHE"
 if [[ -n "$KV_CACHE_DTYPE" ]]; then
     echo "KV Cache DType: $KV_CACHE_DTYPE"
 fi
@@ -171,6 +173,18 @@ VLLM_CMD=(
     --trust-remote-code
     --enforce-eager
 )
+
+# Add prefix caching unless explicitly overridden
+PREFIX_FLAG_PRESENT=false
+for arg in "${EXTRA_ARGS[@]}"; do
+    if [[ "$arg" == "--enable-prefix-caching" || "$arg" == "--disable-prefix-caching" ]]; then
+        PREFIX_FLAG_PRESENT=true
+        break
+    fi
+done
+if [[ "$PREFIX_CACHE" == "true" && "$PREFIX_FLAG_PRESENT" == "false" ]]; then
+    VLLM_CMD+=(--enable-prefix-caching)
+fi
 
 # Add --kv-cache-dtype if specified
 if [[ -n "$KV_CACHE_DTYPE" ]]; then

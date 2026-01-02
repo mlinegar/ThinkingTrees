@@ -68,7 +68,7 @@ class Node:
         parent: Parent node (None for root)
         audit_result: Result of verification audit
     """
-    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
     level: int = 0
 
     # Content
@@ -589,5 +589,4 @@ def node(
     right.parent = node
 
     return node
-
 

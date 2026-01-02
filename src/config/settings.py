@@ -45,8 +45,7 @@ def get_task_model_url(settings: Optional[Dict[str, Any]] = None) -> str:
     Priority:
     1. TASK_MODEL_URL environment variable
     2. settings.yaml servers.task_model_url
-    3. settings.yaml llm.base_url (legacy)
-    4. Default: http://localhost:8000/v1
+    3. Default: http://localhost:8000/v1
 
     Args:
         settings: Pre-loaded settings dict, or None to load from file.
@@ -63,15 +62,10 @@ def get_task_model_url(settings: Optional[Dict[str, Any]] = None) -> str:
     if settings is None:
         settings = load_settings()
 
-    # Check servers section first (new location)
+    # Check servers section
     servers = settings.get("servers", {})
     if servers.get("task_model_url"):
         return servers["task_model_url"].rstrip("/")
-
-    # Fall back to llm.base_url (legacy location)
-    llm = settings.get("llm", {})
-    if llm.get("base_url"):
-        return llm["base_url"].rstrip("/")
 
     return DEFAULT_TASK_MODEL_URL
 
@@ -126,41 +120,8 @@ def get_server_urls(settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]
 
 # Defaults - document_analysis is the general-purpose domain
 # Use manifesto_rile for political manifesto scoring tasks
-DEFAULT_DOMAIN = "document_analysis"
 DEFAULT_TASK = "document_analysis"
 DEFAULT_DATASET = "jsonl"  # Generic format, manifesto for manifesto-specific
-
-
-def get_default_domain(settings: Optional[Dict[str, Any]] = None) -> str:
-    """
-    Get the default domain name.
-
-    Priority:
-    1. DOMAIN environment variable
-    2. settings.yaml domains.default
-    3. Default: manifesto_rile
-
-    Args:
-        settings: Pre-loaded settings dict, or None to load from file.
-
-    Returns:
-        Domain name.
-    """
-    # Environment variable takes precedence
-    env_domain = os.environ.get("DOMAIN")
-    if env_domain:
-        return env_domain
-
-    # Load settings if not provided
-    if settings is None:
-        settings = load_settings()
-
-    # Check domains section
-    domains = settings.get("domains", {})
-    if domains.get("default"):
-        return domains["default"]
-
-    return DEFAULT_DOMAIN
 
 
 def get_default_task(settings: Optional[Dict[str, Any]] = None) -> str:
@@ -170,21 +131,29 @@ def get_default_task(settings: Optional[Dict[str, Any]] = None) -> str:
     Priority:
     1. TASK environment variable
     2. settings.yaml tasks.default
-    3. settings.yaml domains.default (legacy)
-    4. Default: manifesto_rile
+    3. Default: document_analysis
+
+    Args:
+        settings: Pre-loaded settings dict, or None to load from file.
+
+    Returns:
+        Task name.
     """
+    # Environment variable takes precedence
     env_task = os.environ.get("TASK")
     if env_task:
         return env_task
 
+    # Load settings if not provided
     if settings is None:
         settings = load_settings()
 
+    # Check tasks section
     tasks = settings.get("tasks", {})
     if tasks.get("default"):
         return tasks["default"]
 
-    return get_default_domain(settings)
+    return DEFAULT_TASK
 
 
 def get_default_dataset(settings: Optional[Dict[str, Any]] = None) -> str:
@@ -210,30 +179,6 @@ def get_default_dataset(settings: Optional[Dict[str, Any]] = None) -> str:
     return DEFAULT_DATASET
 
 
-def get_domain_config(
-    domain_name: Optional[str] = None,
-    settings: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """
-    Get configuration for a specific domain.
-
-    Args:
-        domain_name: Domain name (uses default if None)
-        settings: Pre-loaded settings dict, or None to load from file.
-
-    Returns:
-        Domain configuration dict.
-    """
-    if settings is None:
-        settings = load_settings()
-
-    if domain_name is None:
-        domain_name = get_default_domain(settings)
-
-    domains = settings.get("domains", {})
-    return domains.get(domain_name, {})
-
-
 def get_task_config(
     task_name: Optional[str] = None,
     settings: Optional[Dict[str, Any]] = None,
@@ -246,11 +191,7 @@ def get_task_config(
         task_name = get_default_task(settings)
 
     tasks = settings.get("tasks", {})
-    if task_name in tasks:
-        return tasks.get(task_name, {})
-
-    # Fall back to domains section (legacy)
-    return get_domain_config(task_name, settings)
+    return tasks.get(task_name, {})
 
 
 def get_dataset_config(

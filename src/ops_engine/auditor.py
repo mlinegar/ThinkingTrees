@@ -3,12 +3,26 @@ OPS Auditor - Probabilistic verification of summarization quality.
 
 The auditor samples nodes from the OPS tree and verifies that summaries
 preserve the information specified in the rubric. It uses an Oracle
-(approximate or exact) to detect information loss.
+(ground truth or learned approximation) to detect information loss.
+
+Oracle Options:
+- Ground Truth Oracle: Uses actual task oracle (e.g., human labels, external API)
+- Oracle Approximation: Uses learned classifier trained on oracle samples
+- Mini-Trees: Samples from smaller trees to generate training data for approximation
 
 Key features:
 - Probabilistic sampling with configurable budget
 - Flagging system for human/oracle batch review
 - Review queue for collecting items needing verification
+- Support for both exact oracles and learned approximations
+
+Usage:
+    # With ground truth oracle
+    auditor = TreeAuditor(oracle_judge=ground_truth_oracle, budget=10)
+
+    # With learned oracle approximation (trained on mini-tree samples)
+    oracle_approx = train_oracle_approximation(mini_trees)
+    auditor = TreeAuditor(oracle_judge=oracle_approx, budget=10)
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -29,34 +43,8 @@ from src.config.concurrency import ConcurrencyConfig, get_concurrency_config
 logger = logging.getLogger(__name__)
 
 
-class OracleJudge(Protocol):
-    """Protocol for oracle judge functions."""
-
-    def __call__(
-        self,
-        input_a: str,
-        input_b: str,
-        rubric: str
-    ) -> Tuple[bool, float, str]:
-        """
-        Compare two inputs for task-equivalence according to rubric.
-
-        Args:
-            input_a: First input (e.g., concatenated child summaries)
-            input_b: Second input (e.g., parent summary)
-            rubric: Information preservation criteria
-
-        Returns:
-            Tuple of:
-            - is_congruent: bool - Are the inputs task-equivalent?
-            - discrepancy_score: float - 0.0 (perfect) to 1.0 (total loss)
-            - reasoning: str - Explanation of the comparison
-        """
-        ...
-
-
 # =============================================================================
-# Score-Centric Oracles (New, Preferred API)
+# Score-Centric Oracles (ScoringOracle Protocol)
 # =============================================================================
 
 class SimpleScorer:
@@ -111,65 +99,39 @@ class SimpleScorer:
 
 
 # =============================================================================
-# Oracle Adapters
+# Test Oracle Implementations
 # =============================================================================
 
-def create_oracle_from_scorer(
-    scorer: ScoringOracle,
-    threshold: float = 0.1,
-) -> Callable[[str, str, str], Tuple[bool, float, str]]:
+class AlwaysPassScorer:
     """
-    Create a legacy oracle callable from a ScoringOracle.
+    Scorer that always returns a perfect score - useful for testing.
 
-    This adapter allows using the new ScoringOracle API with code that
-    expects the legacy (bool, float, str) tuple format.
-
-    Args:
-        scorer: A ScoringOracle instance (e.g., SimpleScorer)
-        threshold: Discrepancy threshold for congruence (0.0-1.0)
-
-    Returns:
-        Callable with signature (input_a, input_b, rubric) -> (is_congruent, discrepancy, reasoning)
-
-    Example:
-        from src.ops_engine.scoring import SimpleScorer
-        scorer = SimpleScorer()
-        oracle = create_oracle_from_scorer(scorer, threshold=0.1)
-
-        # Now use with Auditor
-        auditor = Auditor(oracle=oracle, config=config)
+    Implements ScoringOracle protocol.
     """
-    def oracle_fn(input_a: str, input_b: str, rubric: str) -> Tuple[bool, float, str]:
-        result = scorer.score(input_a, input_b, rubric)
-        discrepancy = result.to_discrepancy()
-        is_congruent = discrepancy <= threshold
-        return is_congruent, discrepancy, result.reasoning
 
-    return oracle_fn
-
-
-class AlwaysPassOracle:
-    """Oracle that always passes - useful for testing."""
-
-    def __call__(
+    def score(
         self,
         input_a: str,
         input_b: str,
-        rubric: str
-    ) -> Tuple[bool, float, str]:
-        return True, 0.0, "Always pass oracle"
+        rubric: str,
+    ) -> OracleScore:
+        return OracleScore(score=1.0, reasoning="Always pass scorer")
 
 
-class AlwaysFailOracle:
-    """Oracle that always fails - useful for testing."""
+class AlwaysFailScorer:
+    """
+    Scorer that always returns zero score - useful for testing.
 
-    def __call__(
+    Implements ScoringOracle protocol.
+    """
+
+    def score(
         self,
         input_a: str,
         input_b: str,
-        rubric: str
-    ) -> Tuple[bool, float, str]:
-        return False, 1.0, "Always fail oracle"
+        rubric: str,
+    ) -> OracleScore:
+        return OracleScore(score=0.0, reasoning="Always fail scorer")
 
 
 class SamplingStrategy(Enum):
@@ -179,21 +141,8 @@ class SamplingStrategy(Enum):
     PRIORITY = "priority"          # Use node priority scores
 
 
-class Summarizer(Protocol):
-    """Protocol for summarizer functions used in idempotence/substitution checks."""
-
-    def __call__(self, text: str, rubric: str) -> str:
-        """
-        Summarize the given text according to the rubric.
-
-        Args:
-            text: Input text to summarize
-            rubric: Information preservation criteria
-
-        Returns:
-            Summary string
-        """
-        ...
+# Summarizer protocol and utilities imported from shared module
+from src.core.protocols import Summarizer, format_merge_input
 
 
 @dataclass
@@ -240,6 +189,14 @@ class AuditCheckResult:
     reasoning: str
     input_a: str = ""
     input_b: str = ""
+    # Skipped checks (e.g., no summarizer configured)
+    skipped: bool = False
+    skip_reason: Optional[str] = None
+
+    @property
+    def was_evaluated(self) -> bool:
+        """True if the check was actually performed (not skipped)."""
+        return not self.skipped
 
 
 @dataclass
@@ -703,16 +660,19 @@ class Auditor:
         """
         Call the oracle and return (is_congruent, discrepancy, reasoning).
 
-        Handles both ScoringOracle and legacy OracleJudge interfaces.
+        Requires ScoringOracle interface (has .score() method returning OracleScore).
+
+        Returns:
+            Tuple of (is_congruent, discrepancy, reasoning) where:
+            - is_congruent: True if discrepancy <= threshold
+            - discrepancy: 0.0-1.0 where 0.0 = perfect match (1 - score)
+            - reasoning: Explanation from oracle
         """
-        from src.ops_engine.oracle_utils import call_oracle
-        return call_oracle(
-            self._oracle,
-            input_a,
-            input_b,
-            rubric,
-            threshold=self.config.discrepancy_threshold,
-        )
+        result = self._oracle.score(input_a, input_b, rubric)
+        # Score is 0.0-1.0 where 1.0 = good; discrepancy is inverse
+        discrepancy = 1.0 - result.score
+        is_congruent = discrepancy <= self.config.discrepancy_threshold
+        return is_congruent, discrepancy, result.reasoning
 
     def audit_tree(self, tree: Tree) -> AuditReport:
         """
@@ -982,8 +942,8 @@ class Auditor:
             passed=passed,
             discrepancy_score=score,
             reasoning=reasoning,
-            input_a=input_a[:200],  # Truncate for report
-            input_b=input_b[:200]
+            input_a=input_a,
+            input_b=input_b
         )
         return result, input_a, input_b
 
@@ -1012,7 +972,7 @@ class Auditor:
         if node.right_child:
             child_summaries.append(node.right_child.summary)
 
-        input_a = "\n\n".join(child_summaries)
+        input_a = format_merge_input(*child_summaries)
         input_b = node.summary
 
         is_congruent, score, reasoning = self._call_oracle(input_a, input_b, rubric)
@@ -1024,8 +984,8 @@ class Auditor:
             passed=passed,
             discrepancy_score=score,
             reasoning=reasoning,
-            input_a=input_a[:200],
-            input_b=input_b[:200]
+            input_a=input_a,
+            input_b=input_b
         )
         return result, input_a, input_b
 
@@ -1053,9 +1013,11 @@ class Auditor:
             return AuditCheckResult(
                 node_id=node.id,
                 check_type="idempotence",
-                passed=True,
+                passed=False,  # NOT passed - check wasn't performed
                 discrepancy_score=0.0,
-                reasoning="Skipped: no summarizer configured"
+                reasoning="Skipped: no summarizer configured",
+                skipped=True,
+                skip_reason="no_summarizer",
             )
 
         # The original summary s
@@ -1084,8 +1046,8 @@ class Auditor:
             passed=passed,
             discrepancy_score=score,
             reasoning=f"Idempotence: {reasoning}",
-            input_a=original_summary[:200],
-            input_b=re_summarized[:200]
+            input_a=original_summary,
+            input_b=re_summarized
         )
 
     def _check_substitution(
@@ -1115,9 +1077,11 @@ class Auditor:
             return AuditCheckResult(
                 node_id=f"{left_node.id}+{right_node.id}",
                 check_type="substitution",
-                passed=True,
+                passed=False,  # NOT passed - check wasn't performed
                 discrepancy_score=0.0,
-                reasoning="Skipped: no summarizer configured"
+                reasoning="Skipped: no summarizer configured",
+                skipped=True,
+                skip_reason="no_summarizer",
             )
 
         # Get raw text spans
@@ -1125,7 +1089,7 @@ class Auditor:
         raw_right = right_node.raw_text_span or ""
 
         # Joint path: g(u ⊕ v, rubric) - summarize the concatenated raw text directly
-        joint_raw = raw_left + "\n\n" + raw_right
+        joint_raw = format_merge_input(raw_left, raw_right)
         try:
             joint_summary = self.summarizer(joint_raw, rubric)
         except Exception as e:
@@ -1144,7 +1108,7 @@ class Auditor:
         right_summary = right_node.summary if right_node.summary else self.summarizer(raw_right, rubric)
 
         # Concatenate child summaries and re-summarize
-        concat_summaries = left_summary + "\n\n" + right_summary
+        concat_summaries = format_merge_input(left_summary, right_summary)
         try:
             disjoint_summary = self.summarizer(concat_summaries, rubric)
         except Exception as e:
@@ -1167,8 +1131,8 @@ class Auditor:
             passed=passed,
             discrepancy_score=score,
             reasoning=f"Substitution (joint vs disjoint): {reasoning}",
-            input_a=joint_summary[:200],
-            input_b=disjoint_summary[:200]
+            input_a=joint_summary,
+            input_b=disjoint_summary
         )
 
     def _get_adjacent_leaf_pairs(

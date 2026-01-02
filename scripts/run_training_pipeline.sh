@@ -68,7 +68,7 @@ SKIP_ORACLE_OPT=${SKIP_ORACLE_OPT:-false}
 # Top-down initialization (oracle-aligned demo seeding from short docs)
 USE_TOP_DOWN_INIT=${USE_TOP_DOWN_INIT:-false}
 N_INIT_DEMOS=${N_INIT_DEMOS:-8}
-MAX_INIT_DOC_CHARS=${MAX_INIT_DOC_CHARS:-20000}
+MAX_INIT_PROMPT_TOKENS=${MAX_INIT_PROMPT_TOKENS:-${MAX_INIT_DOC_CHARS:-4000}}
 
 # Resume from checkpoint
 RESUME=${RESUME:-false}
@@ -80,7 +80,6 @@ GENRM_PORT=${GENRM_PORT:-8001}
 GENRM_MODEL=${GENRM_MODEL:-genrm-nvfp4}
 GENRM_INIT_SAMPLES=${GENRM_INIT_SAMPLES:-8}      # Number of OPS trees to build
 GENRM_INIT_CANDIDATES=${GENRM_INIT_CANDIDATES:-4}  # Candidates per node for tournament
-USE_MINI_TREES=${USE_MINI_TREES:-true}           # Use 2-chunk mini-trees (faster)
 TRAIN_COMPARISON_MODULE=${TRAIN_COMPARISON_MODULE:-false}
 
 # Paths (auto-detect project root from script location)
@@ -140,7 +139,8 @@ ITERATIVE OPTIMIZATION:
 TOP-DOWN INITIALIZATION:
   --use-top-down-init     Enable oracle-aligned demo seeding from short docs
   --n-init-demos N        Number of initialization demos (default: 8)
-  --max-init-doc-chars N  Max chars for init segments (default: 20000, ~4k tokens)
+  --max-init-prompt-tokens N  Max tokens for init prompts (doc + rubric + instructions)
+  --max-init-doc-chars N      Deprecated alias for --max-init-prompt-tokens
 
 GENRM OPS TREE BUILDING (Unified demo + preference collection):
   --start-genrm           Auto-start GenRM server on GPUs 2,3
@@ -148,8 +148,8 @@ GENRM OPS TREE BUILDING (Unified demo + preference collection):
   --genrm-model MODEL     GenRM model to use (default: genrm-nvfp4)
   --genrm-init-samples N  Number of OPS trees to build (default: 8)
   --genrm-init-candidates N  Candidates per node for tournament (default: 4)
-  --use-mini-trees        Use 2-chunk mini-trees for faster processing (default)
-  --no-mini-trees         Use full natural chunking instead
+  --max-init-prompt-tokens N  Max tokens for init prompts (doc + rubric + instructions)
+  --max-init-doc-chars N      Deprecated alias for --max-init-prompt-tokens
   --train-comparison-module  Train OPSComparisonModule from collected preferences
 
 RESUME:
@@ -179,8 +179,8 @@ EXAMPLES:
   # Run with GenRM OPS tree building (unified demo + preference collection)
   ./scripts/run_training_pipeline.sh --start-server --start-genrm
 
-  # Build full trees instead of mini-trees (slower but more data)
-  ./scripts/run_training_pipeline.sh --start-genrm --no-mini-trees --genrm-init-samples 4
+  # Tighten init prompt budget (filters to shorter docs)
+  ./scripts/run_training_pipeline.sh --start-genrm --max-init-prompt-tokens 3000 --genrm-init-samples 4
 
   # Run in background
   nohup ./scripts/run_training_pipeline.sh > training.log 2>&1 &
@@ -286,8 +286,12 @@ while [[ $# -gt 0 ]]; do
             N_INIT_DEMOS="$2"
             shift 2
             ;;
+        --max-init-prompt-tokens)
+            MAX_INIT_PROMPT_TOKENS="$2"
+            shift 2
+            ;;
         --max-init-doc-chars)
-            MAX_INIT_DOC_CHARS="$2"
+            MAX_INIT_PROMPT_TOKENS="$2"
             shift 2
             ;;
         --resume)
@@ -328,14 +332,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --train-comparison-module)
             TRAIN_COMPARISON_MODULE="true"
-            shift
-            ;;
-        --use-mini-trees)
-            USE_MINI_TREES="true"
-            shift
-            ;;
-        --no-mini-trees)
-            USE_MINI_TREES="false"
             shift
             ;;
         --genrm-init-samples)
@@ -432,7 +428,7 @@ echo "    Iterations:      ${N_ITERATIONS} (0=until convergence)"
 echo "    Conv Threshold:  ${CONVERGENCE_THRESHOLD}"
 echo "    Conv Patience:   ${CONVERGENCE_PATIENCE}"
 echo "    Skip Summarizer: ${SKIP_SUMMARIZER_OPT}"
-echo "    Top-Down Init:   ${USE_TOP_DOWN_INIT} (demos: ${N_INIT_DEMOS}, max_chars: ${MAX_INIT_DOC_CHARS})"
+echo "    Top-Down Init:   ${USE_TOP_DOWN_INIT} (demos: ${N_INIT_DEMOS}, max_tokens: ${MAX_INIT_PROMPT_TOKENS})"
 echo ""
 echo "  GenRM OPS Tree Building:"
 echo "    Start GenRM:     ${START_GENRM}"
@@ -442,7 +438,7 @@ fi
 echo "    GenRM Port:      ${GENRM_PORT}"
 echo "    Trees to Build:  ${GENRM_INIT_SAMPLES}"
 echo "    Candidates/Node: ${GENRM_INIT_CANDIDATES}"
-echo "    Mini-Trees:      ${USE_MINI_TREES}"
+echo "    Init Prompt Max: ${MAX_INIT_PROMPT_TOKENS} tokens"
 echo "    Train Comparison: ${TRAIN_COMPARISON_MODULE}"
 echo ""
 echo "  Resume:"
@@ -682,7 +678,7 @@ if [[ "${SKIP_ORACLE_OPT}" == "true" ]]; then
 fi
 
 if [[ "${USE_TOP_DOWN_INIT}" == "true" ]]; then
-    CMD+=(--use-top-down-init --n-init-demos ${N_INIT_DEMOS} --max-init-doc-chars ${MAX_INIT_DOC_CHARS})
+    CMD+=(--use-top-down-init --n-init-demos ${N_INIT_DEMOS} --max-init-prompt-tokens ${MAX_INIT_PROMPT_TOKENS})
 fi
 
 if [[ "${RESUME}" == "true" ]]; then
@@ -694,9 +690,7 @@ if [[ "${START_GENRM}" == "true" ]] || curl -s "http://localhost:${GENRM_PORT}/v
     CMD+=(--enable-genrm --genrm-port ${GENRM_PORT})
     CMD+=(--genrm-init-samples ${GENRM_INIT_SAMPLES})
     CMD+=(--genrm-init-candidates ${GENRM_INIT_CANDIDATES})
-    if [[ "${USE_MINI_TREES}" == "true" ]]; then
-        CMD+=(--use-mini-trees)
-    fi
+    CMD+=(--max-init-prompt-tokens ${MAX_INIT_PROMPT_TOKENS})
 fi
 
 if [[ "${TRAIN_COMPARISON_MODULE}" == "true" ]]; then

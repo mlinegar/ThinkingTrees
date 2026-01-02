@@ -28,6 +28,7 @@ from enum import Enum
 import logging
 
 from src.ops_engine.scoring import ScoringOracle, OracleScore
+from src.core.protocols import format_merge_input
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +76,20 @@ class CheckResult:
     # Node/context info
     node_id: Optional[str] = None
 
+    # Skipped checks (e.g., no summarizer provided)
+    # IMPORTANT: skipped checks are NOT passed checks - they couldn't be evaluated
+    skipped: bool = False
+    skip_reason: Optional[str] = None
+
     @property
     def is_violation(self) -> bool:
-        """Alias for not passed."""
-        return not self.passed
+        """Alias for not passed. Skipped checks are not violations."""
+        return not self.passed and not self.skipped
+
+    @property
+    def was_evaluated(self) -> bool:
+        """True if the check was actually performed (not skipped)."""
+        return not self.skipped
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dictionary."""
@@ -92,6 +103,8 @@ class CheckResult:
             'score_a': self.score_a,
             'score_b': self.score_b,
             'node_id': self.node_id,
+            'skipped': self.skipped,
+            'skip_reason': self.skip_reason,
         }
 
 
@@ -135,7 +148,7 @@ class CheckRunner:
         Initialize the check runner.
 
         Args:
-            oracle_fn: Oracle implementing ScoringOracle (preferred) or OracleProtocol
+            oracle_fn: Oracle implementing ScoringOracle protocol
             config: Check configuration (uses defaults if None)
             summarizer_fn: Optional summarizer for idempotence checks
                           Signature: (content, rubric) -> summary
@@ -148,16 +161,13 @@ class CheckRunner:
         """
         Call the oracle and return (is_congruent, discrepancy, reasoning).
 
-        Handles both ScoringOracle and legacy OracleProtocol interfaces.
+        Requires ScoringOracle interface (has .score() method returning OracleScore).
         """
-        from src.ops_engine.oracle_utils import call_oracle
-        return call_oracle(
-            self._oracle,
-            input_a,
-            input_b,
-            rubric,
-            threshold=self.config.discrepancy_threshold,
-        )
+        result = self._oracle.score(input_a, input_b, rubric)
+        # Score is 0.0-1.0 where 1.0 = good; discrepancy is inverse
+        discrepancy = 1.0 - result.score
+        is_congruent = discrepancy <= self.config.discrepancy_threshold
+        return is_congruent, discrepancy, result.reasoning
 
     def check_sufficiency(
         self,
@@ -205,8 +215,8 @@ class CheckRunner:
             passed=passed,
             discrepancy=discrepancy,
             reasoning=reasoning,
-            value_a=original_content[:100] + "..." if len(original_content) > 100 else original_content,
-            value_b=summary[:100] + "..." if len(summary) > 100 else summary,
+            value_a=original_content,
+            value_b=summary,
             node_id=node_id,
         )
 
@@ -240,10 +250,12 @@ class CheckRunner:
             if self.summarizer is None:
                 return CheckResult(
                     check_type=CheckType.IDEMPOTENCE,
-                    passed=True,
+                    passed=False,  # NOT passed - check wasn't performed
                     discrepancy=0.0,
                     reasoning="Skipped: no summarizer provided for idempotence check",
                     node_id=node_id,
+                    skipped=True,
+                    skip_reason="no_summarizer",
                 )
             re_summary = self.summarizer(summary, rubric)
 
@@ -267,8 +279,8 @@ class CheckRunner:
             passed=passed,
             discrepancy=discrepancy,
             reasoning=reasoning,
-            value_a=summary[:100] + "...",
-            value_b=re_summary[:100] + "..." if re_summary else None,
+            value_a=summary,
+            value_b=re_summary,
             node_id=node_id,
         )
 
@@ -303,17 +315,19 @@ class CheckRunner:
             CheckResult with pass/fail and discrepancy
         """
         # Concatenate raw and summaries
-        joint_raw = left_raw + "\n\n" + right_raw
-        joint_summaries = left_summary + "\n\n" + right_summary
+        joint_raw = format_merge_input(left_raw, right_raw)
+        joint_summaries = format_merge_input(left_summary, right_summary)
 
         # Get summaries of both concatenations
         if self.summarizer is None:
             return CheckResult(
                 check_type=CheckType.SUBSTITUTION,
-                passed=True,
+                passed=False,  # NOT passed - check wasn't performed
                 discrepancy=0.0,
                 reasoning="Skipped: no summarizer provided for substitution check",
                 node_id=node_id,
+                skipped=True,
+                skip_reason="no_summarizer",
             )
 
         summary_of_raw = self.summarizer(joint_raw, rubric)
@@ -339,8 +353,8 @@ class CheckRunner:
             passed=passed,
             discrepancy=discrepancy,
             reasoning=reasoning,
-            value_a=summary_of_raw[:100] + "...",
-            value_b=summary_of_summaries[:100] + "...",
+            value_a=summary_of_raw,
+            value_b=summary_of_summaries,
             node_id=node_id,
         )
 
@@ -371,7 +385,7 @@ class CheckRunner:
             CheckResult with pass/fail and discrepancy
         """
         # Concatenate child summaries
-        children_concat = "\n\n".join(child_summaries)
+        children_concat = format_merge_input(*child_summaries)
 
         is_congruent, discrepancy, reasoning = self._call_oracle(
             children_concat,
@@ -392,8 +406,8 @@ class CheckRunner:
             passed=passed,
             discrepancy=discrepancy,
             reasoning=reasoning,
-            value_a=children_concat[:100] + "...",
-            value_b=parent_summary[:100] + "...",
+            value_a=children_concat,
+            value_b=parent_summary,
             node_id=node_id,
         )
 

@@ -228,16 +228,13 @@ class BootstrapTrainer:
         """
         Call the oracle and return (is_congruent, discrepancy, reasoning).
 
-        Handles both ScoringOracle and legacy OracleProtocol interfaces.
+        Requires ScoringOracle interface (has .score() method returning OracleScore).
         """
-        from src.ops_engine.oracle_utils import call_oracle
-        return call_oracle(
-            self._oracle,
-            input_a,
-            input_b,
-            rubric,
-            threshold=self.config.target_p_suff,  # Use target threshold
-        )
+        result = self._oracle.score(input_a, input_b, rubric)
+        # Score is 0.0-1.0 where 1.0 = good; discrepancy is inverse
+        discrepancy = 1.0 - result.score
+        is_congruent = discrepancy <= self.config.target_p_suff
+        return is_congruent, discrepancy, result.reasoning
 
     def train(
         self,

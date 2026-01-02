@@ -39,8 +39,6 @@ from src.core.strategy import (
     SummarizationStrategy,
     DSPyStrategy,
     BatchedStrategy,
-    dspy_strategy,
-    batched_strategy,
 )
 
 from src.core.checkpoints import (
@@ -83,8 +81,6 @@ __all__ = [
     "SummarizationStrategy",
     "DSPyStrategy",
     "BatchedStrategy",
-    "dspy_strategy",
-    "batched_strategy",
     # Checkpoints
     "CheckpointManager",
     "CheckpointMetadata",

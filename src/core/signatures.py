@@ -352,7 +352,7 @@ class PairwiseComparison(dspy.Signature):
     summary_b: str = dspy.InputField(
         desc="Second candidate summary"
     )
-    ground_truth_score: float = dspy.InputField(
+    reference_score: float = dspy.InputField(
         desc="Ground truth score for the original text"
     )
     preferred: str = dspy.OutputField(
@@ -379,7 +379,7 @@ class PairwiseComparer(dspy.Module):
         summary_a: str,
         summary_b: str,
         rubric: str,
-        ground_truth_score: float = 0.0
+        reference_score: float = 0.0
     ) -> dict:
         """
         Compare two summaries for information preservation.
@@ -389,7 +389,7 @@ class PairwiseComparer(dspy.Module):
             summary_a: First candidate summary
             summary_b: Second candidate summary
             rubric: Preservation criteria
-            ground_truth_score: Ground truth score for original
+            reference_score: Ground truth score for original
 
         Returns:
             Dictionary with preference, reasoning, and confidence
@@ -399,7 +399,7 @@ class PairwiseComparer(dspy.Module):
             original_text=original_text,
             summary_a=summary_a,
             summary_b=summary_b,
-            ground_truth_score=ground_truth_score
+            reference_score=reference_score
         )
         return {
             'preferred': result.preferred,

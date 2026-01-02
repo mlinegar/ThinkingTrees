@@ -13,10 +13,9 @@ from src.ops_engine.builder import (
     build_test_tree,
 )
 
-# Helper functions for tournament selection
+# Helper functions for chunking
+# Note: Tournament selection is now in TournamentStrategy (src/core/strategy.py)
 from src.ops_engine.ops_tree import (
-    candidates,
-    tournament,
     chunk_binary,
 )
 
@@ -112,9 +111,7 @@ __all__ = [
     "build",
     "async_build",
     "build_test_tree",
-    # Tournament selection helpers
-    "candidates",
-    "tournament",
+    # Chunking helper (tournament selection is in TournamentStrategy)
     "chunk_binary",
     # Auditor
     "Auditor",

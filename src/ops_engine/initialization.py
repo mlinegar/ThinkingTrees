@@ -26,8 +26,8 @@ Usage:
 
     # Create initializer with context limit
     initializer = TopDownInitializer(
-        max_doc_chars=4000,  # Must fit in context
-        label_field='ground_truth_rile',
+        max_doc_chars=DEFAULT_MAX_DOC_CHARS,  # Must fit in context
+        label_field='reference_score',
     )
 
     # Generate demos from labeled documents (filters to short docs)
@@ -45,6 +45,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import dspy
+
+from src.config.constants import DEFAULT_MAX_DOC_CHARS
+from src.core.protocols import format_merge_input
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +142,7 @@ class TopDownInitializer:
         """
         self.max_doc_chars = max_doc_chars
         self.max_doc_tokens = max_doc_tokens
-        self.label_extractor = label_extractor or (lambda x: getattr(x, 'ground_truth_rile', None))
+        self.label_extractor = label_extractor or (lambda x: getattr(x, 'reference_score', None))
         self.oracle_fn = oracle_fn
         self.oracle_classifier = oracle_classifier
         self.max_workers = max_workers
@@ -285,7 +288,7 @@ def oracle_demos(
     n_demos: int = 8,
     max_doc_chars: int = 4000,
     text_field: str = 'text',
-    label_field: str = 'ground_truth_rile',
+    label_field: str = 'reference_score',
 ) -> List[OracleAlignedDemo]:
     """
     Create oracle-aligned demonstrations from labeled samples.
@@ -294,7 +297,7 @@ def oracle_demos(
     Filters to SHORT documents where oracle(doc) = ground_truth by definition.
 
     Args:
-        samples: Labeled samples (e.g., ManifestoSample with ground_truth_rile)
+        samples: Labeled samples (e.g., ManifestoSample with reference_score)
         rubric: Information preservation rubric
         n_demos: Number of demos to create
         max_doc_chars: Maximum document length in characters
@@ -306,13 +309,13 @@ def oracle_demos(
 
     Example:
         from src.ops_engine.initialization import create_oracle_aligned_demos
-        from src.manifesto.rubrics import RILE_PRESERVATION_RUBRIC
+        from src.tasks.manifesto import RILE_PRESERVATION_RUBRIC
 
         demos = create_oracle_aligned_demos(
             samples=train_samples,
             rubric=RILE_PRESERVATION_RUBRIC,
             n_demos=8,
-            max_doc_chars=4000,  # Short docs only
+            max_doc_chars=DEFAULT_MAX_DOC_CHARS,  # Short docs only
         )
     """
     initializer = TopDownInitializer(
@@ -347,7 +350,7 @@ def initialize_summarizer(
             create_oracle_aligned_demos,
             initialize_summarizer_with_demos,
         )
-        from src.manifesto.dspy_summarizer import LeafSummarizer
+        from src.tasks.manifesto import LeafSummarizer  # Or use task.create_summarizer()
 
         demos = create_oracle_aligned_demos(train_samples, rubric, n_demos=8)
         summarizer = LeafSummarizer()
@@ -362,7 +365,7 @@ def quick_demos(
     rubric: str,
     n_demos: int = 4,
     text_field: str = 'text',
-    label_field: str = 'ground_truth_rile',
+    label_field: str = 'reference_score',
 ) -> List[dspy.Example]:
     """
     Quickly create initialization demos without oracle verification.
@@ -399,7 +402,7 @@ def quick_demos(
         summary_hint = f"[Political content with RILE indicators suggesting {label}]"
 
         demo = dspy.Example(
-            content=text[:2000],
+            content=text,  # Use full text - truncation corrupts training examples
             rubric=rubric,
             summary=summary_hint,
             ground_truth_label=label,
@@ -424,7 +427,7 @@ def run_top_down_initialization(
     n_merge_demos: int = 4,
     max_doc_chars: int = 4000,
     text_field: str = 'text',
-    label_field: str = 'ground_truth_rile',
+    label_field: str = 'reference_score',
 ) -> Tuple[dspy.Module, Optional[dspy.Module]]:
     """
     Run complete top-down initialization for summarizers.
@@ -448,7 +451,7 @@ def run_top_down_initialization(
 
     Example:
         from src.ops_engine.initialization import run_top_down_initialization
-        from src.manifesto.dspy_summarizer import LeafSummarizer, MergeSummarizer
+        from src.tasks.manifesto import LeafSummarizer, MergeSummarizer  # Or use task.create_summarizer()
 
         leaf = LeafSummarizer()
         merge = MergeSummarizer()
@@ -457,9 +460,9 @@ def run_top_down_initialization(
             train_samples=samples,
             leaf_summarizer=leaf,
             merge_summarizer=merge,
-            rubric=RILE_RUBRIC,
+            rubric=task.create_rubric(),  # Use task's rubric
             n_leaf_demos=8,
-            max_doc_chars=4000,  # Short docs only
+            max_doc_chars=DEFAULT_MAX_DOC_CHARS,  # Short docs only
         )
 
         # Now use init_leaf, init_merge in training pipeline
@@ -498,7 +501,7 @@ def run_top_down_initialization(
                     left_summary=left.summary,
                     right_summary=right.summary,
                     rubric=rubric,
-                    merged_summary=f"{left.summary}\n\n{right.summary}",  # Simple concat as init
+                    merged_summary=format_merge_input(left.summary, right.summary),  # Simple concat as init
                     ground_truth_label=left.ground_truth_label,
                 )
                 merge_demos.append(merge_demo)
@@ -586,7 +589,7 @@ def train_on_short_docs(
     logger.info(f"Found {len(short_samples)} short docs for training")
 
     # 2. Create trainset: for short docs, doc IS the ideal summary
-    # Include ground_truth_rile for the metric
+    # Include reference_score for the metric
     trainset = []
     for sample in short_samples:
         text = getattr(sample, text_field, '')  # FULL text, no truncation
@@ -597,7 +600,7 @@ def train_on_short_docs(
                 content=text,
                 rubric=rubric,
                 summary=text,  # Short doc is its own ideal summary
-                ground_truth_rile=label,  # Known label for metric
+                reference_score=label,  # Known label for metric
             ).with_inputs('content', 'rubric'))
 
     if not trainset:
@@ -621,9 +624,9 @@ def train_on_short_docs(
         # Use oracle to predict RILE from summary, compare to ground truth
         if oracle_classifier is not None:
             try:
-                predicted_rile = oracle_classifier.predict_rile(summary)
-                ground_truth = example.ground_truth_rile
-                error = abs(predicted_rile - ground_truth)
+                estimated_score = oracle_classifier.predict_rile(summary)
+                reference = example.reference_score
+                error = abs(estimated_score - reference)
                 # Convert error to score (100-point RILE scale)
                 return max(0.0, 1.0 - error / 100.0)
             except Exception as e:
@@ -681,7 +684,7 @@ def train_on_short_docs(
                     right_summary=right.content,
                     rubric=rubric,
                     merged_summary=f"{left.content}\n\n{right.content}",
-                    ground_truth_rile=(left.ground_truth_rile + right.ground_truth_rile) / 2,
+                    reference_score=(left.reference_score + right.reference_score) / 2,
                 ).with_inputs('left_summary', 'right_summary', 'rubric'))
 
             if merge_trainset:

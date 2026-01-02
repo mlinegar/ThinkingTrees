@@ -37,7 +37,8 @@ class ConcurrencyConfig:
     # ==========================================================================
 
     # Maximum concurrent documents being processed
-    max_concurrent_documents: int = 20
+    # Canonical value aligned with BatchedPipelineConfig
+    max_concurrent_documents: int = 30
 
     # ==========================================================================
     # Chunk-level concurrency (inner loop - CAPPED to prevent explosion)
@@ -60,16 +61,18 @@ class ConcurrencyConfig:
 
     # ==========================================================================
     # LLM client concurrency
+    # Canonical values aligned with BatchedPipelineConfig (src/pipelines/batched.py)
     # ==========================================================================
 
     # Maximum concurrent HTTP requests to LLM server
-    max_concurrent_requests: int = 100
+    max_concurrent_requests: int = 200
 
-    # Batch size for request batching
-    batch_size: int = 100
+    # Batch size for request batching (smaller batches = lower latency)
+    batch_size: int = 50
 
     # Batch timeout in seconds (how long to wait to fill a batch)
-    batch_timeout: float = 0.05
+    # 20ms provides good balance between batching efficiency and latency
+    batch_timeout: float = 0.02
 
     # ==========================================================================
     # Optimization concurrency
@@ -88,13 +91,17 @@ class ConcurrencyConfig:
     # Timeouts
     # ==========================================================================
 
-    # Base timeout for leaf summarization batch (seconds)
-    # NOTE: Actual timeout scales with number of chunks (see get_leaf_timeout)
-    leaf_summarization_timeout: float = 300.0  # 5 minutes base
+    # Base timeout for leaf summarization (5 minutes).
+    # Actual timeout scales: max(base, per_chunk * num_chunks)
+    # Conservative to prevent timeouts during large batch processing.
+    # Typical chunk summarization takes 10-30s, but network issues can cause spikes.
+    leaf_summarization_timeout: float = 300.0
 
-    # Timeout per chunk for leaf summarization (seconds)
-    # Actual timeout = max(base_timeout, per_chunk * num_chunks)
-    leaf_timeout_per_chunk: float = 120.0  # 120 seconds per chunk (conservative)
+    # Time budget per chunk during leaf summarization.
+    # 120s is generous; typical chunk summarization takes 10-30s.
+    # Scales with document complexity (more chunks = higher total timeout).
+    # Formula: actual_timeout = max(base_timeout, per_chunk * num_chunks)
+    leaf_timeout_per_chunk: float = 120.0
 
     # Base timeout for merge operations (seconds)
     merge_timeout: float = 300.0  # 5 minutes

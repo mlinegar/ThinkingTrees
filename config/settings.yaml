@@ -89,6 +89,12 @@ vllm:
   port: 8000
   gpu_memory_utilization: 0.90
 
+  # Automatic Prefix Caching (APC)
+  # Caches KV cache for repeated prompts (e.g., same rubric/system prompts)
+  # Benefits: 30-70% faster prefill for repeated contexts
+  # Trade-off: ~5-10% throughput reduction when no shared prefixes
+  enable_prefix_caching: true
+
   # Default model to use
   default: "nemotron-30b-fp8"
 
@@ -99,9 +105,11 @@ servers:
   genrm_url: "http://localhost:8001/v1"
 
 # Task Configuration
-# Tasks define what we do with documents (e.g., scoring, summarization)
+# Tasks define what we do with documents (e.g., scoring, summarization, extraction)
+# Available tasks: manifesto_rile, document_analysis
+# NOTE: Task must be explicitly specified via --task flag or config
 tasks:
-  default: "manifesto_rile"
+  default: null  # No default - must be explicitly specified
 
 # Dataset Configuration
 # Datasets define where documents come from (e.g., manifesto corpus, JSONL)
@@ -113,12 +121,12 @@ datasets:
   jsonl:
     path: null
 
-# Domain Configuration (legacy alias for tasks)
-# Domains define the scoring/prediction task (e.g., manifesto RILE scoring)
+# Domain Configuration (DEPRECATED - use 'tasks' instead)
+# Kept for backward compatibility only
 domains:
-  default: "manifesto_rile"
+  default: null  # Use tasks.default instead
 
-  # Manifesto/RILE domain for political text analysis
+  # Manifesto/RILE task configuration (task-specific settings)
   manifesto_rile:
     scale_min: -100
     scale_max: 100

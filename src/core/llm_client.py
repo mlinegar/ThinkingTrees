@@ -70,19 +70,13 @@ class LLMConfig:
 
         If model is "default", auto-detect from the vLLM /v1/models endpoint.
         """
+        from src.core.model_detection import detect_model_sync
+
         base_url = f"http://{host}:{port}/v1"
 
         # Auto-detect model name if using "default"
         if model == "default":
-            try:
-                import requests
-                resp = requests.get(f"{base_url}/models", timeout=5)
-                if resp.ok:
-                    data = resp.json()
-                    if data.get("data") and len(data["data"]) > 0:
-                        model = data["data"][0]["id"]
-            except Exception:
-                pass  # Fall back to "default" if detection fails
+            model = detect_model_sync(base_url, fallback="default")
 
         return cls(
             base_url=base_url,
@@ -386,10 +380,10 @@ class MockLLMClient:
         self._call_count = 0
 
     def _default_response(self, prompt: str) -> str:
-        """Default mock response: truncate input."""
+        """Default mock response: echo input with a simple label."""
         if len(prompt) > 100:
-            return f"Summary: {prompt[:50]}..."
-        return f"Response to: {prompt[:30]}..."
+            return f"Summary: {prompt}"
+        return f"Response to: {prompt}"
 
     def __call__(self, prompt: str, **kwargs) -> str:
         """Call the mock LLM."""

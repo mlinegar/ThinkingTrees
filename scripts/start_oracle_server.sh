@@ -107,12 +107,14 @@ source /home/mlinegar/vllm-env/bin/activate
 cd "$PROJECT_ROOT"
 
 # Get model path and tensor_parallel from config
-read MODEL_PATH MODEL_TP MODEL_MAX_LEN < <(python3 -c "
+read MODEL_PATH MODEL_TP MODEL_MAX_LEN PREFIX_CACHE < <(python3 -c "
 import yaml
 with open('$CONFIG_FILE') as f:
     cfg = yaml.safe_load(f)
-model_cfg = cfg.get('vllm', {}).get('models', {}).get('$MODEL', {})
-print(model_cfg.get('path', ''), model_cfg.get('tensor_parallel', 2), model_cfg.get('max_model_len', 16384))
+vllm = cfg.get('vllm', {})
+model_cfg = vllm.get('models', {}).get('$MODEL', {})
+prefix_cache = vllm.get('enable_prefix_caching', False)
+print(model_cfg.get('path', ''), model_cfg.get('tensor_parallel', 2), model_cfg.get('max_model_len', 16384), str(prefix_cache).lower())
 " 2>/dev/null)
 
 # Use config values if not overridden by command line
@@ -139,6 +141,14 @@ for name in cfg.get('vllm', {}).get('models', {}):
     exit 1
 fi
 
+# Normalize prefix caching flag from config.
+PREFIX_CACHE=${PREFIX_CACHE:-false}
+if [[ "$PREFIX_CACHE" == "true" ]]; then
+    PREFIX_CACHE_FLAG="--enable-prefix-caching"
+else
+    PREFIX_CACHE_FLAG=""
+fi
+
 # Check if model exists (can be a directory or a single GGUF file)
 if [[ ! -d "$MODEL_PATH" && ! -f "$MODEL_PATH" ]]; then
     echo "ERROR: Model not found at $MODEL_PATH"
@@ -161,6 +171,7 @@ echo "CUDA Devices:   $CUDA_DEVICES"
 echo "Tensor Parallel:$TENSOR_PARALLEL"
 echo "Max Model Len:  $MAX_MODEL_LEN"
 echo "GPU Memory:     $GPU_MEM"
+echo "Prefix Cache:   $PREFIX_CACHE"
 echo "========================================"
 echo ""
 
@@ -174,4 +185,5 @@ CUDA_VISIBLE_DEVICES=$CUDA_DEVICES python -m vllm.entrypoints.openai.api_server 
     --gpu-memory-utilization "$GPU_MEM" \
     --trust-remote-code \
     --enforce-eager \
+    $PREFIX_CACHE_FLAG \
     --disable-log-requests

@@ -39,11 +39,11 @@ import logging
 import time
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any, Callable, Awaitable, Tuple, Union
-from collections import defaultdict
 import aiohttp
-from concurrent.futures import ThreadPoolExecutor
 
 from src.preprocessing.chunker import chunk_for_ops
+from src.core.data_models import Node
+from src.config.constants import LOG_TRUNCATE_LENGTH
 
 logger = logging.getLogger(__name__)
 
@@ -206,18 +206,28 @@ class AsyncBatchLLMClient:
 
     async def _detect_model(self) -> str:
         """Auto-detect model name from vLLM server."""
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{self.base_url}/models") as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data.get("data"):
-                            model_id = data["data"][0]["id"]
-                            logger.info(f"Auto-detected model: {model_id}")
-                            return model_id
-        except Exception as e:
-            logger.warning(f"Failed to auto-detect model: {e}")
-        return "default"
+        from src.core.model_detection import detect_model_async
+        return await detect_model_async(self.base_url, fallback="default")
+
+    def _handle_request_error(
+        self,
+        request: BatchRequest,
+        error_msg: str,
+    ) -> None:
+        """Handle request errors consistently.
+
+        Args:
+            request: The failed request
+            error_msg: Error message to include in the response
+        """
+        logger.error(f"Request {request.request_id} failed: {error_msg}")
+        self.stats.failed_requests += 1
+        if request.future and not request.future.done():
+            request.future.set_result(BatchResponse(
+                request_id=request.request_id,
+                content="",
+                error=error_msg,
+            ))
 
     async def start(self):
         """Start the batch processor."""
@@ -409,36 +419,17 @@ class AsyncBatchLLMClient:
                         request.future.set_result(response)
 
             except aiohttp.ClientError as e:
-                # Connection errors, timeouts, etc.
-                error_msg = f"{type(e).__name__}: {str(e) or 'Connection failed'}"
-                logger.error(f"Request {request.request_id} failed: {error_msg}")
-                self.stats.failed_requests += 1
-                if request.future and not request.future.done():
-                    request.future.set_result(BatchResponse(
-                        request_id=request.request_id,
-                        content="",
-                        error=error_msg,
-                    ))
+                self._handle_request_error(
+                    request,
+                    f"{type(e).__name__}: {str(e) or 'Connection failed'}",
+                )
             except asyncio.TimeoutError:
-                error_msg = "Request timed out"
-                logger.error(f"Request {request.request_id} failed: {error_msg}")
-                self.stats.failed_requests += 1
-                if request.future and not request.future.done():
-                    request.future.set_result(BatchResponse(
-                        request_id=request.request_id,
-                        content="",
-                        error=error_msg,
-                    ))
+                self._handle_request_error(request, "Request timed out")
             except Exception as e:
-                error_msg = f"{type(e).__name__}: {str(e) or 'Unknown error'}"
-                logger.error(f"Request {request.request_id} failed: {error_msg}")
-                self.stats.failed_requests += 1
-                if request.future and not request.future.done():
-                    request.future.set_result(BatchResponse(
-                        request_id=request.request_id,
-                        content="",
-                        error=error_msg,
-                    ))
+                self._handle_request_error(
+                    request,
+                    f"{type(e).__name__}: {str(e) or 'Unknown error'}",
+                )
 
 
 # =============================================================================
@@ -641,18 +632,18 @@ class BatchOrchestrator:
             # Store results and optionally show per-doc status
             for idx, result in zip(wave_indices, wave_results):
                 if isinstance(result, Exception):
-                    logger.error(f"  ✗ Doc {idx}: {str(result)[:60]}")
+                    logger.error(f"  ✗ Doc {idx}: {str(result)[:LOG_TRUNCATE_LENGTH]}")
                     results[idx] = None
                 else:
                     results[idx] = result
                     # Show per-doc status for small batches (domain-agnostic)
                     if show_per_doc:
-                        # Use generic doc_id or fall back to manifesto_id for backwards compat
-                        doc_id = getattr(result, 'doc_id', None) or getattr(result, 'manifesto_id', None)
+                        # Use generic doc_id
+                        doc_id = getattr(result, 'doc_id', None)
                         if doc_id:
-                            # Get predicted/truth scores (try generic then domain-specific)
-                            pred = getattr(result, 'predicted_score', None) or getattr(result, 'predicted_rile', None)
-                            truth = getattr(result, 'ground_truth_score', None) or getattr(result, 'ground_truth_rile', None)
+                            # Get predicted/truth scores using canonical field names
+                            pred = getattr(result, 'estimated_score', None)
+                            truth = getattr(result, 'reference_score', None)
                             leaves = getattr(result, 'tree_leaves', 0)
                             pred_str = f"{pred:.1f}" if pred is not None else "?"
                             truth_str = f"{truth:.1f}" if truth is not None else "?"
@@ -668,111 +659,6 @@ class BatchOrchestrator:
 
         self.documents_processed += len(documents)
         return results
-
-
-# =============================================================================
-# Level-wise Batch Tree Builder
-# =============================================================================
-
-async def build_tree_batched(
-    chunks: List[str],
-    rubric: str,
-    client: AsyncBatchLLMClient,
-    document_id: str,
-    summarize_prompt_fn: Callable[[str, str], List[Dict[str, str]]],
-    merge_prompt_fn: Callable[[str, str, str], List[Dict[str, str]]],
-) -> Dict[str, Any]:
-    """
-    Build an OPS tree using batched requests.
-
-    Each tree level's requests are batched together.
-    When processing multiple documents, their requests at the same level
-    will be pooled by the AsyncBatchLLMClient.
-
-    Args:
-        chunks: List of text chunks (leaves)
-        rubric: Summarization rubric
-        client: Batch LLM client
-        document_id: Identifier for this document
-        summarize_prompt_fn: Function(text, rubric) -> messages
-        merge_prompt_fn: Function(left, right, rubric) -> messages
-
-    Returns:
-        Tree structure with summaries
-    """
-    import uuid
-
-    # Initialize leaves
-    current_level = []
-    for i, chunk in enumerate(chunks):
-        node = {
-            "id": f"{document_id}_leaf_{i}",
-            "content": chunk,
-            "summary": None,
-            "level": 0,
-            "children": [],
-        }
-        current_level.append(node)
-
-    level_num = 0
-
-    # Build tree level by level
-    while len(current_level) > 1:
-        level_num += 1
-        next_level = []
-
-        # Pair up nodes
-        pairs = []
-        for i in range(0, len(current_level), 2):
-            if i + 1 < len(current_level):
-                pairs.append((current_level[i], current_level[i + 1]))
-            else:
-                # Odd node - carry forward
-                next_level.append(current_level[i])
-
-        # Create batch requests for all merges at this level
-        merge_requests = []
-        for left, right in pairs:
-            left_text = left.get("summary") or left["content"]
-            right_text = right.get("summary") or right["content"]
-
-            messages = merge_prompt_fn(left_text, right_text, rubric)
-
-            request = BatchRequest(
-                request_id=f"{document_id}_merge_{level_num}_{len(merge_requests)}",
-                messages=messages,
-                document_id=document_id,
-                request_type="merge",
-            )
-            merge_requests.append((request, left, right))
-
-        # Submit all requests (they'll be batched with requests from other docs)
-        for request, _, _ in merge_requests:
-            await client.submit(request)
-
-        # Await all responses
-        for request, left, right in merge_requests:
-            response = await client.await_response(request.request_id)
-
-            # Create parent node
-            parent = {
-                "id": f"{document_id}_node_{level_num}_{len(next_level)}",
-                "content": None,
-                "summary": response.content if not response.error else f"[Error: {response.error}]",
-                "level": level_num,
-                "children": [left, right],
-            }
-            next_level.append(parent)
-
-        current_level = next_level
-
-    # Return root
-    root = current_level[0] if current_level else None
-    return {
-        "root": root,
-        "height": level_num,
-        "leaf_count": len(chunks),
-    }
 
 
 # =============================================================================
@@ -833,285 +719,6 @@ async def audit_nodes_batched(
     return results
 
 
-# =============================================================================
-# Level-Wise Multi-Document Batch Processor
-# =============================================================================
-
-@dataclass
-class DocumentTreeState:
-    """Tracks tree-building state for a single document."""
-    doc_id: str
-    sample: Any
-    chunks: List[str] = field(default_factory=list)
-    current_level: List[Dict[str, Any]] = field(default_factory=list)
-    level_num: int = 0
-    error: Optional[str] = None
-
-    # Level history for merge law support
-    # Each entry is a list of nodes at that level (level 0 = leaves, level N = root)
-    level_history: List[List[Dict[str, Any]]] = field(default_factory=list)
-
-    # Results
-    root_summary: str = ""
-    tree_height: int = 0
-    leaf_count: int = 0
-
-
-class LevelWiseBatchProcessor:
-    """
-    Processes multiple document trees level-by-level for maximum batching.
-
-    Unlike per-document processing, this:
-    1. Pre-chunks ALL documents
-    2. Submits ALL leaf summaries together
-    3. Awaits ALL responses
-    4. Submits ALL level-1 merges together
-    5. Continues level by level
-
-    This ensures vLLM sees the largest possible batches at each level.
-    """
-
-    def __init__(
-        self,
-        client: Union[AsyncBatchLLMClient, MultiServerBatchClient],
-        rubric: str,
-        max_chunk_chars: int = 2000,
-        max_tokens_summary: int = 500,
-        summarize_prompt_fn: Optional[Callable] = None,
-        merge_prompt_fn: Optional[Callable] = None,
-    ):
-        self.client = client
-        self.rubric = rubric
-        self.max_chunk_chars = max_chunk_chars
-        self.max_tokens_summary = max_tokens_summary
-
-        # Use provided prompt functions or defaults
-        self.summarize_prompt_fn = summarize_prompt_fn
-        self.merge_prompt_fn = merge_prompt_fn
-
-    def _chunk_text(self, text: str) -> List[str]:
-        """Split text into chunks using langextract-based chunker."""
-        text_chunks = chunk_for_ops(text, max_chars=self.max_chunk_chars)
-        return [c.text for c in text_chunks]
-
-    async def process_all_documents(
-        self,
-        documents: List[Any],
-        get_text_fn: Callable[[Any], str],
-        get_id_fn: Callable[[Any], str],
-        progress_callback: Optional[Callable[[str, int, int], None]] = None,
-    ) -> List[DocumentTreeState]:
-        """
-        Process all documents using level-wise batching.
-
-        Args:
-            documents: List of documents
-            get_text_fn: Function to extract text from document
-            get_id_fn: Function to extract ID from document
-            progress_callback: Optional callback(phase, completed, total)
-
-        Returns:
-            List of DocumentTreeState with results
-        """
-        # Phase 1: Pre-chunk all documents
-        logger.info(f"Phase 1: Chunking {len(documents)} documents...")
-        states = []
-        total_chunks = 0
-
-        for doc in documents:
-            doc_id = get_id_fn(doc)
-            try:
-                text = get_text_fn(doc)
-                if not text or len(text.strip()) == 0:
-                    logger.warning(f"Document {doc_id} has no text content, skipping")
-                    state = DocumentTreeState(
-                        doc_id=doc_id,
-                        sample=doc,
-                        chunks=[],
-                        leaf_count=0,
-                        error="No text content",
-                    )
-                    states.append(state)
-                    continue
-
-                chunks = self._chunk_text(text)
-
-                if not chunks or len(chunks) == 0:
-                    logger.warning(f"Document {doc_id} produced no chunks, skipping")
-                    state = DocumentTreeState(
-                        doc_id=doc_id,
-                        sample=doc,
-                        chunks=[],
-                        leaf_count=0,
-                        error="Chunking failed",
-                    )
-                    states.append(state)
-                    continue
-
-                state = DocumentTreeState(
-                    doc_id=doc_id,
-                    sample=doc,
-                    chunks=chunks,
-                    leaf_count=len(chunks),
-                )
-                states.append(state)
-                total_chunks += len(chunks)
-            except Exception as e:
-                logger.error(f"Failed to process document {doc_id}: {e}")
-                state = DocumentTreeState(
-                    doc_id=doc_id,
-                    sample=doc,
-                    chunks=[],
-                    leaf_count=0,
-                    error=str(e),
-                )
-                states.append(state)
-
-        logger.info(f"  Total chunks across all docs: {total_chunks}")
-        if progress_callback:
-            progress_callback("chunk", len(documents), len(documents))
-
-        # Phase 2: Submit ALL leaf summaries
-        logger.info(f"Phase 2: Submitting {total_chunks} leaf summaries...")
-        leaf_requests = []  # [(state_idx, chunk_idx, request)]
-
-        for state_idx, state in enumerate(states):
-            if len(state.chunks) == 0:
-                state.error = "No chunks"
-                continue
-
-            for chunk_idx, chunk in enumerate(state.chunks):
-                request = BatchRequest(
-                    request_id=f"{state.doc_id}_leaf_{chunk_idx}",
-                    messages=self.summarize_prompt_fn(chunk, self.rubric),
-                    max_tokens=self.max_tokens_summary,
-                    document_id=state.doc_id,
-                    request_type="summarize",
-                )
-                leaf_requests.append((state_idx, chunk_idx, request))
-                await self.client.submit(request)
-
-        logger.info(f"  Submitted {len(leaf_requests)} requests, awaiting responses...")
-
-        # Await ALL leaf responses
-        completed = 0
-        for state_idx, chunk_idx, request in leaf_requests:
-            state = states[state_idx]
-            response = await self.client.await_response(request.request_id)
-
-            # Initialize current_level if needed
-            while len(state.current_level) <= chunk_idx:
-                state.current_level.append(None)
-
-            state.current_level[chunk_idx] = {
-                "id": request.request_id,
-                "content": state.chunks[chunk_idx],
-                "summary": response.content if not response.error else state.chunks[chunk_idx][:500],
-                "level": 0,
-            }
-
-            completed += 1
-            if progress_callback and completed % 100 == 0:
-                progress_callback("leaf", completed, len(leaf_requests))
-
-        logger.info(f"  Completed {completed} leaf summaries")
-        if progress_callback:
-            progress_callback("leaf", completed, len(leaf_requests))
-
-        # Save leaf level (level 0) to history for merge law support
-        for state in states:
-            if state.current_level and state.error is None:
-                state.level_history.append([node.copy() for node in state.current_level])
-
-        # Phase 3: Build trees level by level
-        level_num = 0
-        docs_needing_merge = [s for s in states if len(s.current_level) > 1 and s.error is None]
-
-        while docs_needing_merge:
-            level_num += 1
-            logger.info(f"Phase 3.{level_num}: Merging level {level_num} for {len(docs_needing_merge)} documents...")
-
-            # Collect ALL merge requests for this level
-            merge_requests = []  # [(state_idx, pair_idx, request, left, right)]
-
-            for state in docs_needing_merge:
-                state.level_num = level_num
-                pairs = []
-
-                # Pair up nodes
-                for i in range(0, len(state.current_level), 2):
-                    if i + 1 < len(state.current_level):
-                        left = state.current_level[i]
-                        right = state.current_level[i + 1]
-                        pairs.append((left, right))
-
-                # Create merge requests for this doc
-                for pair_idx, (left, right) in enumerate(pairs):
-                    left_text = left.get("summary") or left.get("content", "")
-                    right_text = right.get("summary") or right.get("content", "")
-
-                    request = BatchRequest(
-                        request_id=f"{state.doc_id}_merge_{level_num}_{pair_idx}",
-                        messages=self.merge_prompt_fn(left_text, right_text, self.rubric),
-                        max_tokens=self.max_tokens_summary,
-                        document_id=state.doc_id,
-                        request_type="merge",
-                    )
-                    merge_requests.append((states.index(state), pair_idx, request, left, right))
-
-            if not merge_requests:
-                break
-
-            # Submit ALL merge requests for this level
-            for _, _, request, _, _ in merge_requests:
-                await self.client.submit(request)
-
-            logger.info(f"  Submitted {len(merge_requests)} merge requests, awaiting...")
-
-            # Await ALL merge responses and build next level
-            next_levels = {states.index(s): [] for s in docs_needing_merge}
-
-            completed = 0
-            for state_idx, pair_idx, request, left, right in merge_requests:
-                response = await self.client.await_response(request.request_id)
-
-                next_levels[state_idx].append({
-                    "id": request.request_id,
-                    "summary": response.content if not response.error else "",
-                    "level": level_num,
-                    "children": [left, right],
-                })
-
-                completed += 1
-
-            # Handle odd nodes (carry forward)
-            for state in docs_needing_merge:
-                state_idx = states.index(state)
-                if len(state.current_level) % 2 == 1:
-                    next_levels[state_idx].append(state.current_level[-1])
-
-                state.current_level = next_levels[state_idx]
-                state.tree_height = level_num
-
-                # Save this level to history for merge law support
-                if state.current_level:
-                    state.level_history.append([node.copy() for node in state.current_level])
-
-            logger.info(f"  Completed {completed} merges")
-            if progress_callback:
-                progress_callback(f"merge_L{level_num}", completed, len(merge_requests))
-
-            # Update which docs need more merging
-            docs_needing_merge = [s for s in states if len(s.current_level) > 1 and s.error is None]
-
-        # Extract final summaries
-        for state in states:
-            if state.current_level and state.error is None:
-                root = state.current_level[0]
-                state.root_summary = root.get("summary") or root.get("content", "")
-
-        logger.info(f"Tree building complete: {len(states)} documents processed")
-        return states
 
 
 # =============================================================================

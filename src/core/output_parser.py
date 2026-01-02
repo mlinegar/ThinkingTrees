@@ -2,17 +2,17 @@
 Output parsing utilities with case-insensitive key normalization.
 
 This module handles the common issue where LLMs output JSON with inconsistent
-key casing (e.g., 'RILE_score' vs 'rile_score'). It provides utilities to
+key casing (e.g., 'Score_Value' vs 'score_value'). It provides utilities to
 normalize keys and extract values robustly.
 
 Usage:
     from src.core.output_parser import normalize_output_keys, get_field
 
     # Normalize a DSPy result or dict
-    normalized = normalize_output_keys(result, expected_fields=['rile_score', 'reasoning'])
+    normalized = normalize_output_keys(result, expected_fields=['score', 'reasoning'])
 
     # Or get a specific field with fallback
-    score = get_field(result, 'rile_score', default=0.0)
+    score = get_field(result, 'score', default=0.0)
 """
 
 import logging
@@ -27,10 +27,10 @@ def normalize_key(key: str) -> str:
     Normalize a key to lowercase with underscores.
 
     Examples:
-        'RILE_score' -> 'rile_score'
-        'riLE_score' -> 'rile_score'
-        'RileScore' -> 'rilescore'
-        'rile-score' -> 'rile_score'
+        'Score_Value' -> 'score_value'
+        'scoreValue' -> 'scorevalue'
+        'ScoreValue' -> 'scorevalue'
+        'score-value' -> 'score_value'
     """
     # Replace hyphens with underscores
     key = key.replace('-', '_')
@@ -135,9 +135,9 @@ def normalize_output_keys(
         Dict with normalized keys matching expected_fields
 
     Example:
-        >>> result = {'RILE_score': 5.0, 'Reasoning': 'test'}
-        >>> normalize_output_keys(result, ['rile_score', 'reasoning'])
-        {'rile_score': 5.0, 'reasoning': 'test'}
+        >>> result = {'Score_Value': 5.0, 'Reasoning': 'test'}
+        >>> normalize_output_keys(result, ['score_value', 'reasoning'])
+        {'score_value': 5.0, 'reasoning': 'test'}
     """
     normalized = {}
     missing_fields = []
@@ -201,7 +201,7 @@ class NormalizedOutputAccessor:
     Example:
         result = some_dspy_module(text=text)
         accessor = NormalizedOutputAccessor(result)
-        score = accessor.rile_score  # Works even if result has 'RILE_score'
+        score = accessor.score_value  # Works even if result has 'Score_Value'
     """
 
     def __init__(self, obj: Any):
