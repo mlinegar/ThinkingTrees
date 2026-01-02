@@ -50,55 +50,43 @@ ThinkingTrees/
 │   │   ├── documents.py           # DocumentSample, DocumentResult
 │   │   ├── llm_client.py          # LLMClient (vLLM/OpenAI)
 │   │   ├── signatures.py          # DSPy signatures (generic)
-│   │   ├── scorers.py             # ScaleScorer, PairwiseScorer
-│   │   ├── summarization.py       # GenericSummarizer, GenericMerger
+│   │   ├── strategy.py            # SummarizationStrategy protocol + registry
+│   │   ├── scoring.py             # OracleScore, ScoringOracle
+│   │   ├── ops_checks.py          # CheckType, CheckConfig
 │   │   ├── batch_processor.py     # Level-wise batch processing
-│   │   ├── output_parser.py       # Case-insensitive LLM output parsing
-│   │   └── strategy.py            # SummarizationStrategy protocol + registry
+│   │   └── output_parser.py       # Case-insensitive LLM output parsing
 │   │
-│   ├── datasets/                  # Dataset plugins (where data comes from)
+│   ├── tree/                      # Tree building and verification
+│   │   ├── builder.py             # TreeBuilder (async-first)
+│   │   ├── auditor.py             # Probabilistic verification
+│   │   ├── labeled.py             # LabeledTree, LabeledDataset
+│   │   └── verification.py        # TreeVerifier, OracleNodeVerifier
+│   │
+│   ├── training/                  # Training and optimization
+│   │   ├── run_pipeline.py        # Main training entry point
+│   │   ├── optimization/          # DSPy optimizers (GEPA, MIPRO, Bootstrap)
+│   │   ├── preference/            # Preference learning
+│   │   ├── judges/                # Pairwise comparison judges
+│   │   ├── metrics/               # Evaluation metrics
+│   │   └── data_sources/          # Training data sources
+│   │
+│   ├── tasks/                     # Task plugins
+│   │   ├── base.py                # AbstractTask, ScaleDefinition
+│   │   ├── registry.py            # Task discovery
+│   │   ├── scoring.py             # Generic ScoringTask
+│   │   ├── document_analysis.py   # Content preservation (0 to 1)
+│   │   └── manifesto/             # RILE scoring building blocks
+│   │
+│   ├── datasets/                  # Dataset plugins
 │   │   ├── base.py                # DatasetPlugin protocol
 │   │   ├── manifesto.py           # Manifesto dataset
 │   │   └── jsonl.py               # Generic JSONL dataset
 │   │
-│   ├── ops_engine/
-│   │   ├── builder.py             # TreeBuilder (bottom-up construction)
-│   │   ├── auditor.py             # Probabilistic verification
-│   │   ├── bootstrap_loop.py      # Multi-iteration training loop
-│   │   ├── scoring.py             # OracleScore, ScoringOracle, create_oracle_scorer
-│   │   ├── initialization.py      # Top-down demo seeding
-│   │   └── training_framework/
-│   │       ├── config.py          # Training configuration
-│   │       ├── preference.py      # Preference learning
-│   │       ├── preference_types.py # PreferenceDeriver protocol + registry
-│   │       ├── genrm_preference.py # GenRM integration
-│   │       ├── metrics.py         # MetricBuilder + metric factories
-│   │       ├── labeling.py        # LabelingStrategy protocol + registry
-│   │       ├── optimizers/        # DSPy optimizer registry
-│   │       ├── judges/            # Pairwise comparison judges
-│   │       │   ├── base.py        # BaseJudge protocol, JudgeResult
-│   │       │   ├── dspy.py        # DSPyJudge (optimizable)
-│   │       │   ├── genrm.py       # GenRMJudgeWrapper
-│   │       │   └── oracle.py      # OracleJudge
-│   │       └── tasks/             # Pluggable task system
-│   │           ├── base.py        # AbstractTask, ScaleDefinition
-│   │           ├── registry.py    # Task discovery
-│   │           ├── scoring.py     # Generic ScoringTask
-│   │           └── document_analysis.py # Content preservation (0 to 1)
-│   │
 │   ├── pipelines/                 # Task/dataset-agnostic pipelines
 │   │   └── batched.py             # Batched inference pipeline
 │   │
-│   ├── tasks/                     # Domain-specific building blocks
-│   │   └── manifesto/             # RILE scoring example
-│   │       ├── constants.py       # RILE scale bounds
-│   │       ├── rubrics.py         # RILE preservation rubric
-│   │       ├── data_loader.py     # ManifestoDataset
-│   │       ├── dspy_signatures.py # RILEScorer, RILEComparator
-│   │       └── summarizer.py      # RILE-specific summarizers
-│   │
-│   └── training/
-│       └── run_pipeline.py        # Main training entry point
+│   └── preprocessing/             # Document processing
+│       └── chunker.py             # DocumentChunker
 │
 ├── scripts/
 │   ├── start_dual_servers.sh      # Start inference servers

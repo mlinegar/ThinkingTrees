@@ -75,43 +75,37 @@ src/
 │   ├── data_models.py      # Node, Tree, AuditStatus/Result
 │   ├── llm_client.py       # LLMConfig, LLMClient (vLLM/SGLang/OpenAI)
 │   ├── signatures.py       # DSPy signatures (RecursiveSummary, OracleJudge, etc.)
-│   ├── strategy.py         # SummarizationStrategy, DSPyStrategy
+│   ├── strategy.py         # SummarizationStrategy, DSPyStrategy, CallableStrategy
+│   ├── scoring.py          # OracleScore, ScoringOracle
+│   ├── ops_checks.py       # CheckType, CheckConfig, CheckResult
 │   ├── batch_processor.py  # Batch processing utilities
 │   └── output_parser.py    # Case-insensitive LLM output parsing
 │
 ├── tree/
-│   ├── builder.py          # TreeBuilder, BuildConfig
+│   ├── builder.py          # TreeBuilder, BuildConfig, build(), build_test_tree()
+│   ├── auditor.py          # Auditor, AuditConfig, ReviewQueue
 │   ├── labeled.py          # LabeledNode, LabeledTree, LabeledDataset
 │   └── verification.py     # TreeVerifier, OracleNodeVerifier
 │
-├── audit/
-│   ├── auditor.py          # Auditor, AuditConfig, ReviewQueue
-│   └── ops_checks.py       # CheckType, CheckConfig, CheckResult
-│
 ├── training/
+│   ├── run_pipeline.py     # Main training entry point
 │   ├── preference/         # PreferencePair, PreferenceCollector, GenRMJudge
 │   ├── optimization/       # OptimizerRegistry, GEPA, MIPRO, Bootstrap
+│   ├── judges/             # Pairwise comparison judges (DSPy, GenRM, Oracle)
 │   ├── metrics/            # Training metrics
+│   ├── data_sources/       # Training data sources
 │   └── judge_optimization.py  # JudgeOptimizer
 │
 ├── tasks/
-│   ├── base.py             # TaskPlugin, AbstractTask
+│   ├── base.py             # TaskPlugin, AbstractTask, ScaleDefinition
 │   ├── registry.py         # TaskRegistry
-│   └── manifesto/          # Manifesto/RILE task (default)
+│   ├── scoring.py          # Generic ScoringTask
+│   └── manifesto/          # RILE building blocks (default task)
 │
-├── manifesto/
-│   ├── data_loader.py      # ManifestoSample, ManifestoDataset, splits
-│   ├── ops_pipeline.py     # ManifestoOPSPipeline, PipelineConfig
-│   ├── evaluation.py       # ManifestoEvaluator, metrics
-│   └── training_integration.py  # TrainableManifestoPipeline
-│
+├── datasets/               # Dataset plugins (manifesto, jsonl)
+├── pipelines/              # BatchedDocPipeline
 └── preprocessing/
     └── chunker.py          # DocumentChunker (token-based)
-
-experiments/manifesto_rile/
-├── run_training_pipeline.py    # Main training entry point
-├── collect_preferences.py      # Preference data collection
-└── generate_synthetic_data.py  # Synthetic data generation
 
 scripts/
 ├── start_dual_servers.sh       # Start small+large models

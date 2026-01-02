@@ -8,7 +8,7 @@ ThinkingTrees is a generalized framework for document analysis using OPS (Oracle
 
 ### 1. Task Plugin System
 Tasks define **what** we do with documents (scoring, extraction, classification):
-- **Task Plugins** (`src/tasks/`, `src/ops_engine/training_framework/tasks/`): Define task-specific behavior
+- **Task Plugins** (`src/tasks/`): Define task-specific behavior
 - **Examples**: manifesto_rile (political scoring), document_analysis (generic preservation)
 - **Interface**: `AbstractTask` provides create_predictor(), create_rubric(), parse_score(), etc.
 
@@ -27,7 +27,7 @@ High-throughput parallel document processing:
 
 ### 4. Optimization Framework
 DSPy-based iterative improvement:
-- **Optimizer** (`src/ops_engine/training_framework/`): Improve predictors using training data
+- **Optimizer** (`src/training/optimization/`): Improve predictors using training data
 - **Metrics**: Task-specific score comparison (e.g., MAE for continuous scales)
 - **Output**: Optimized prompts and few-shot examples
 
@@ -38,7 +38,7 @@ Normalization conventions:
 
 ### 5. Audit System
 Quality control through sampling:
-- **Auditor** (`src/ops_engine/auditor.py`): Sample tree nodes and verify quality
+- **Auditor** (`src/tree/auditor.py`): Sample tree nodes and verify quality
 - **Oracle**: Ground truth or learned approximation
 - **Mini-trees**: Generate training data for oracle approximation
 
@@ -53,11 +53,12 @@ Quality control through sampling:
                           │
 ┌─────────────────────────────────────────────────────────┐
 │                   Task Plugins                          │
-│  src/tasks/manifesto/       (RILE scoring)              │
-│  src/ops_engine/training_framework/tasks/               │
-│    - document_analysis      (generic)                   │
-│    - base.py               (AbstractTask interface)     │
-│    - registry.py           (task discovery)             │
+│  src/tasks/                                             │
+│    - base.py              (AbstractTask interface)      │
+│    - registry.py          (task discovery)              │
+│    - scoring.py           (generic ScoringTask)         │
+│    - manifesto/           (RILE scoring building blocks)│
+│    - document_analysis.py (generic preservation)        │
 └─────────────────────────────────────────────────────────┘
                           │
 ┌─────────────────────────────────────────────────────────┐
@@ -73,29 +74,29 @@ Quality control through sampling:
                           │
 ┌─────────────────────────────────────────────────────────┐
 │                 Tree Building                           │
-│  src/ops_engine/builder.py                              │
-│    - TreeBuilder           (sync, supports GenRM)       │
-│    - AsyncTreeBuilder      (async, strategy pattern)    │
+│  src/tree/builder.py                                    │
+│    - TreeBuilder           (async-first, strategy)      │
+│    - build(), build_sync() (sync convenience functions) │
 │  src/core/data_models.py   (Node, Tree structures)      │
+│  src/core/strategy.py      (SummarizationStrategy)      │
 └─────────────────────────────────────────────────────────┘
                           │
 ┌─────────────────────────────────────────────────────────┐
 │              Optimization Engine                        │
-│  src/ops_engine/training_framework/                     │
-│    - optimizers.py         (DSPy-based optimization)    │
-│    - metrics.py            (evaluation metrics)         │
-│    - preference.py         (preference collection)      │
-│    - genrm_preference.py   (GenRM tournament)           │
+│  src/training/                                          │
+│    - optimization/         (DSPy-based optimizers)      │
+│    - metrics/              (evaluation metrics)         │
+│    - preference/           (preference collection)      │
+│    - judges/               (pairwise comparison judges) │
 └─────────────────────────────────────────────────────────┘
                           │
 ┌─────────────────────────────────────────────────────────┐
 │                  Audit & Quality                        │
-│  src/ops_engine/auditor.py                              │
-│    - TreeAuditor           (probabilistic sampling)     │
-│    - Oracle/Approximation  (quality verification)       │
-│  src/ops_engine/ops_tree.py                             │
-│    - Tournament selection  (GenRM-based)                │
-│    - Mini-tree sampling    (for oracle training)        │
+│  src/tree/auditor.py                                    │
+│    - Auditor               (probabilistic sampling)     │
+│    - ReviewQueue           (human review flagging)      │
+│  src/tree/verification.py                               │
+│    - TreeVerifier          (OPS law verification)       │
 └─────────────────────────────────────────────────────────┘
                           │
 ┌─────────────────────────────────────────────────────────┐
@@ -190,21 +191,24 @@ results = pipeline.process_batch(samples)
 - `src/core/data_models.py` - Node, Tree, AuditResult structures
 - `src/core/batch_processor.py` - Batched LLM client
 - `src/core/documents.py` - DocumentSample, DocumentResult
+- `src/core/strategy.py` - SummarizationStrategy interface
+- `src/core/scoring.py` - OracleScore, ScoringOracle
 
 ### Processing
 - `src/pipelines/batched.py` - Main batched pipeline
-- `src/ops_engine/builder.py` - Tree construction
+- `src/tree/builder.py` - Tree construction (async-first)
 - `src/preprocessing/chunker.py` - Document chunking
 
-### Optimization
-- `src/ops_engine/training_framework/core.py` - Training orchestration
-- `src/ops_engine/training_framework/optimizers.py` - DSPy optimizers
-- `src/ops_engine/training_framework/metrics.py` - Evaluation
+### Training
+- `src/training/run_pipeline.py` - Main training entry point
+- `src/training/optimization/` - DSPy optimizers (GEPA, MIPRO, Bootstrap)
+- `src/training/metrics/metrics.py` - Evaluation metrics
+- `src/training/judges/` - Pairwise comparison judges
 
 ### Tasks
-- `src/ops_engine/training_framework/tasks/base.py` - Task interface
-- `src/ops_engine/training_framework/tasks/registry.py` - Task discovery
-- `src/tasks/manifesto/task.py` - Example task implementation
+- `src/tasks/base.py` - Task interface (AbstractTask, ScaleDefinition)
+- `src/tasks/registry.py` - Task discovery
+- `src/tasks/manifesto/` - RILE scoring building blocks
 
 ## Extension Points
 
@@ -220,7 +224,7 @@ results = pipeline.process_batch(samples)
 3. Register with `@register_dataset("dataset_name")`
 
 ### Custom Optimization
-1. Implement optimizer in `src/ops_engine/training_framework/optimizers.py`
+1. Implement optimizer in `src/training/optimization/`
 2. Use DSPy's optimizer interface
 3. Configure via command-line args or config
 
@@ -268,19 +272,11 @@ results = pipeline.process_batch(samples)
 
 ### Audit Quality
 ```python
-from src.tree.auditor import Auditor
+from src.tree import Auditor, AuditConfig
 
 auditor = Auditor(oracle=my_oracle, config=AuditConfig(budget=10))
 violations = auditor.audit(tree, rubric)
 ```
-
-## Future Enhancements
-
-1. **Strategy Pattern**: Complete migration to unified strategy interface
-2. **Async Tree Builder**: Add tournament selection support
-3. **Auditor Integration**: Full pipeline integration with oracle approximation
-4. **More Tasks**: Expand task plugin library (summarization, QA, etc.)
-5. **Distributed**: Scale across multiple GPUs/nodes
 
 ## Troubleshooting
 
