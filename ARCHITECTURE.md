@@ -268,9 +268,9 @@ results = pipeline.process_batch(samples)
 
 ### Audit Quality
 ```python
-from src.ops_engine.auditor import TreeAuditor
+from src.tree.auditor import Auditor
 
-auditor = TreeAuditor(oracle_judge=my_oracle, budget=10)
+auditor = Auditor(oracle=my_oracle, config=AuditConfig(budget=10))
 violations = auditor.audit(tree, rubric)
 ```
 

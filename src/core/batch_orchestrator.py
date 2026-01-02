@@ -24,12 +24,12 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Callable, Any, Dict, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from src.ops_engine.training_framework.preference import PreferencePair
+    from src.training.preference import PreferencePair
 
 from src.core.data_models import Node, Tree, leaf, node
 from src.preprocessing.chunker import TextChunk, chunk_for_ops as chunk
 from src.core.strategy import SummarizationStrategy, TournamentStrategy, tournament_doc_id
-from src.ops_engine.builder import BuildConfig, BuildResult
+from src.tree.builder import BuildConfig, BuildResult
 from src.core.protocols import format_merge_input
 
 

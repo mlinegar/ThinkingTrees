@@ -12,7 +12,7 @@ from typing import Optional, TYPE_CHECKING
 
 import dspy
 
-from src.ops_engine.builder import TreeBuilder, BuildConfig
+from src.tree.builder import TreeBuilder, BuildConfig
 from .rubrics import RILE_PRESERVATION_RUBRIC, RILE_TASK_CONTEXT
 from .constants import RILE_MIN, RILE_MAX
 

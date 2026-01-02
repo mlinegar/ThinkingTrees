@@ -181,7 +181,7 @@ This keeps a single "tie" bucket and avoids introducing score binning.
 ### Minimal usage
 
 ```python
-from src.ops_engine.training_framework.genrm_preference import GenRMJudge
+from src.training.preference.genrm import GenRMJudge
 
 judge = GenRMJudge(base_url="http://localhost:8001/v1")
 result = judge.compare(
@@ -212,11 +212,11 @@ print(result.preferred, result.confidence)
 Minimal usage:
 
 ```python
-from src.ops_engine.training_framework.genrm_preference import (
+from src.training.preference.genrm import (
     GenRMJudge,
     GenRMPreferenceCollector,
 )
-from src.manifesto.dspy_summarizer import LeafSummarizer
+from src.tasks.manifesto import LeafSummarizer
 
 summarizer = LeafSummarizer(use_cot=True)
 judge = GenRMJudge(base_url="http://localhost:8001/v1")
@@ -250,15 +250,15 @@ The GenRM preference collection is now integrated into the unified training pipe
 Minimal usage:
 
 ```python
-from src.ops_engine.training_framework.oracle_preference import (
-    OraclePreferenceCollector,
-    OraclePreferenceConfig,
+from src.training.preference import (
+    PreferenceCollector,
+    PreferenceConfig,
 )
 
-collector = OraclePreferenceCollector(
+collector = PreferenceCollector(
     summarizer=summarizer,
     oracle_predict=oracle_predict,
-    config=OraclePreferenceConfig(tie_margin=5.0),
+    config=PreferenceConfig(tie_margin=5.0),
 )
 ```
 

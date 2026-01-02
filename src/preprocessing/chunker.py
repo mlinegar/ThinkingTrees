@@ -7,12 +7,6 @@ Thin wrapper around langextract's chunking with tiktoken token counting.
 from dataclasses import dataclass, field
 from typing import List, Iterator
 from pathlib import Path
-import sys
-
-# Add langextract to path
-_langextract_path = Path(__file__).parent.parent.parent / "langextract"
-if _langextract_path.exists() and str(_langextract_path) not in sys.path:
-    sys.path.insert(0, str(_langextract_path))
 
 from langextract.chunking import ChunkIterator
 from langextract.core.tokenizer import RegexTokenizer
@@ -251,16 +245,3 @@ DocumentChunker = Chunker
 ParagraphChunker = Chunker  # Legacy name, Chunker handles paragraphs
 
 
-class SentenceSplitter:
-    """
-    Backward-compatible sentence splitter.
-
-    DEPRECATED: Use Chunker directly instead.
-    """
-
-    def __init__(self, max_tokens: int = 500):
-        self._chunker = Chunker(max_tokens=max_tokens)
-
-    def split(self, text: str) -> list:
-        """Split text into sentence-based chunks."""
-        return self._chunker.chunk(text)

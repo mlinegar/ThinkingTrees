@@ -41,7 +41,7 @@ sys.path.insert(0, str(project_root))
 import dspy
 
 from src.config.dspy_config import configure_dspy
-from src.ops_engine.training_framework.preference import PreferencePair
+from src.training.preference import PreferencePair
 from src.training.judge_optimization import (
     JudgeOptimizer,
     JudgeOptimizationConfig,

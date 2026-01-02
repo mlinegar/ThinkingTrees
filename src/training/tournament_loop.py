@@ -43,9 +43,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from src.ops_engine.training_framework.preference import PreferencePair
-    from src.ops_engine.training_framework.genrm_preference import GenRMJudge
-    from src.ops_engine.training_framework.genrm_dspy import GenRMComparisonModule
+    from src.training.preference import PreferencePair
+    from src.training.preference.genrm import GenRMJudge
+    from src.training.preference.genrm_dspy import GenRMComparisonModule
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +194,7 @@ class TournamentOfTournamentsTrainer:
         Returns:
             ToTResult with training statistics and final judge path
         """
-        from src.ops_engine.training_framework.genrm_dspy import GenRMComparisonModule
+        from src.training.preference.genrm_dspy import GenRMComparisonModule
 
         # Initialize prompt-tuned GenRM judge for optimization + tournament selection
         self._current_dspy_judge = GenRMComparisonModule(
@@ -317,7 +317,7 @@ class TournamentOfTournamentsTrainer:
         Preferences are "free" - we get them from the tournament selection
         process without any extra GenRM calls.
         """
-        from src.ops_engine.builder import TreeBuilder, BuildConfig
+        from src.tree.builder import TreeBuilder, BuildConfig
         from src.core.strategy import CallableStrategy, TournamentStrategy, TournamentConfig
 
         base_strategy = CallableStrategy(self.summarizer)

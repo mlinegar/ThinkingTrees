@@ -79,22 +79,25 @@ src/
 │   ├── batch_processor.py  # Batch processing utilities
 │   └── output_parser.py    # Case-insensitive LLM output parsing
 │
-├── ops_engine/
+├── tree/
 │   ├── builder.py          # TreeBuilder, BuildConfig
-│   ├── auditor.py          # Probabilistic verification
-│   ├── optimizer.py        # [DEPRECATED] Use training_framework.optimizers
-│   ├── bootstrap_loop.py   # Multi-iteration training loop (uses Node objects)
-│   ├── scoring.py          # OracleScore, ScoringOracle
-│   ├── initialization.py   # Top-down demo seeding
-│   └── training_framework/
-│       ├── config.py       # Training configuration
-│       ├── preference.py   # Preference learning structures
-│       ├── genrm_preference.py  # GenRM integration
-│       └── domains/
-│           ├── base.py         # DomainPlugin protocol, AbstractDomain
-│           ├── registry.py     # DomainRegistry for plugin discovery
-│           ├── manifesto.py    # Manifesto/RILE domain (default)
-│           └── summarization.py # Generic summarization domain
+│   ├── labeled.py          # LabeledNode, LabeledTree, LabeledDataset
+│   └── verification.py     # TreeVerifier, OracleNodeVerifier
+│
+├── audit/
+│   ├── auditor.py          # Auditor, AuditConfig, ReviewQueue
+│   └── ops_checks.py       # CheckType, CheckConfig, CheckResult
+│
+├── training/
+│   ├── preference/         # PreferencePair, PreferenceCollector, GenRMJudge
+│   ├── optimization/       # OptimizerRegistry, GEPA, MIPRO, Bootstrap
+│   ├── metrics/            # Training metrics
+│   └── judge_optimization.py  # JudgeOptimizer
+│
+├── tasks/
+│   ├── base.py             # TaskPlugin, AbstractTask
+│   ├── registry.py         # TaskRegistry
+│   └── manifesto/          # Manifesto/RILE task (default)
 │
 ├── manifesto/
 │   ├── data_loader.py      # ManifestoSample, ManifestoDataset, splits
@@ -137,12 +140,12 @@ The training framework supports pluggable domains for different use cases:
 | `summarization` | 0 to 1 | Generic summarization quality evaluation |
 
 ```python
-# Using domains programmatically
-from src.ops_engine.training_framework.domains import get_domain, list_domains
+# Using tasks programmatically
+from src.tasks.registry import get_task, list_tasks
 
-domain = get_domain("summarization")
-rubric = domain.create_rubric()
-predictor = domain.create_predictor()
+task = get_task("rile")
+rubric = task.rubric
+predictor = task.predictor_factory()
 ```
 
 ---

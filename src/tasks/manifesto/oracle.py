@@ -15,7 +15,7 @@ from typing import Optional
 
 from .rubrics import RILE_TASK_CONTEXT
 from .dspy_signatures import RILEScorer
-from src.ops_engine.scoring import SimilarityScorer, UNIT_SCALE
+from src.core.scoring import SimilarityScorer, UNIT_SCALE
 
 
 def create_rile_scorer(task_context: Optional[str] = None) -> SimilarityScorer:

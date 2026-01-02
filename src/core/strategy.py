@@ -45,9 +45,9 @@ from typing import Optional, List, Dict, Any, Protocol, TYPE_CHECKING, Literal, 
 if TYPE_CHECKING:
     import dspy
     from src.core.batch_processor import AsyncBatchLLMClient, BatchRequest
-    from src.ops_engine.training_framework.genrm_preference import GenRMJudge
-    from src.ops_engine.training_framework.genrm_dspy import GenRMComparisonModule
-    from src.ops_engine.training_framework.preference import PreferencePair
+    from src.training.preference.genrm import GenRMJudge
+    from src.training.preference.genrm_dspy import GenRMComparisonModule
+    from src.training.preference import PreferencePair
 
 from src.core.prompting import default_merge_prompt, default_summarize_prompt
 logger = logging.getLogger(__name__)
@@ -638,7 +638,7 @@ class TournamentStrategy:
 
         Returns (winner, list of PreferencePair).
         """
-        from src.ops_engine.training_framework.preference import PreferencePair
+        from src.training.preference import PreferencePair
 
         if len(candidates) == 0:
             raise ValueError("No candidates provided")

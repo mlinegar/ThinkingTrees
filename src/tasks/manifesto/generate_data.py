@@ -96,9 +96,9 @@ def generate_dpo_data(args) -> None:
     import dspy
     from src.config.dspy_config import configure_dspy
     from src.config.settings import load_settings
-    from src.ops_engine.training_framework.ops_comparison_module import OPSComparisonModule
-    from src.ops_engine.training_framework.preference import PreferenceDataset, PreferencePair
-    from src.tasks.manifesto import LeafSummarizer, ManifestoDataLoader
+    from src.training.comparison import OPSComparisonModule
+    from src.training.preference import PreferenceDataset, PreferencePair
+    from src.tasks.manifesto import LeafSummarizer, ManifestoDataset
 
     if not args.comparison_module or not args.comparison_module.exists():
         raise ValueError(f"Comparison module required for DPO generation: {args.comparison_module}")
@@ -142,7 +142,7 @@ def generate_dpo_data(args) -> None:
 
     # Load data
     logger.info("Loading manifesto data...")
-    loader = ManifestoDataLoader()
+    loader = ManifestoDataset()
     train_samples, val_samples, _ = loader.get_temporal_split()
     samples = train_samples if args.train_only else train_samples + val_samples
     if args.max_documents:
@@ -243,7 +243,7 @@ def generate_labeled_trees(args) -> None:
     from src.config.settings import load_settings
     from src.tasks.manifesto import ManifestoDataset, create_rile_scorer
     from src.pipelines.batched import chunk_text
-    from src.ops_engine.training_framework.labeled_tree import (
+    from src.training.tree import (
         LabeledNode,
         LabeledTree,
         LabeledDataset,
@@ -376,13 +376,13 @@ def generate_synthetic_data(args) -> None:
     import dspy
     from src.config.dspy_config import configure_dspy
     from src.config.settings import load_settings
-    from src.ops_engine.training_framework.synthetic_data import (
+    from src.training.synthetic_data import (
         SyntheticDataGenerator,
         ChallengeGenerator,
         ReferenceGenerator,
         SyntheticDataset,
     )
-    from src.tasks.manifesto import ManifestoDataLoader
+    from src.tasks.manifesto import ManifestoDataset
 
     print_banner("SYNTHETIC DATA GENERATION", {
         "Oracle Model:": args.oracle_model,
@@ -414,7 +414,7 @@ def generate_synthetic_data(args) -> None:
 
     # Load data
     logger.info("Loading manifesto data...")
-    loader = ManifestoDataLoader()
+    loader = ManifestoDataset()
     train_samples, val_samples, _ = loader.get_temporal_split()
     samples = train_samples + val_samples
     if args.max_documents:

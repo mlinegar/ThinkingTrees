@@ -4,8 +4,8 @@ RILE-specific metrics for manifesto training and evaluation.
 
 from typing import Callable, Optional, Any
 
-from src.ops_engine.scoring import UNIT_SCALE
-from src.ops_engine.training_framework.metrics import summarization, create_merge_metric
+from src.core.scoring import UNIT_SCALE
+from src.training.metrics import summarization, create_merge_metric
 
 from .constants import RILE_RANGE
 

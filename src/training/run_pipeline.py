@@ -64,8 +64,6 @@ def parse_args() -> argparse.Namespace:
                         help='Number of validation samples')
     parser.add_argument('--test-samples', type=int, default=11,
                         help='Number of test samples')
-    parser.add_argument('--rounds', type=int, default=3,
-                        help='Document processing rounds (currently unused - reserved for future multi-round processing)')
 
     # Concurrency options
     parser.add_argument('--concurrent-docs', type=int, default=20,
@@ -321,9 +319,9 @@ def build_trees(
         Tuple of (trees, preferences, demos)
     """
     from datetime import datetime
-    from src.ops_engine.builder import TreeBuilder, BuildConfig
-    from src.ops_engine.training_framework.genrm_preference import GenRMJudge
-    from src.ops_engine.training_framework.preference import PreferenceDataset
+    from src.tree.builder import TreeBuilder, BuildConfig
+    from src.training.preference import GenRMJudge
+    from src.training.preference import PreferenceDataset
     from src.core.strategy import CallableStrategy, TournamentStrategy, TournamentConfig
     from src.core.model_detection import detect_model_from_port
     from src.config.settings import load_settings
@@ -685,9 +683,9 @@ def run_optimization(
     Returns:
         Tuple of (optimization statistics dict, trained scorer module)
     """
-    from src.ops_engine.training_framework import OptimizationConfig
-    from src.ops_engine.training_framework.optimizers import get_optimizer
-    from src.ops_engine.scoring import UNIT_SCALE
+    from src.training.core import OptimizationConfig
+    from src.training.optimization import get_optimizer
+    from src.core.scoring import UNIT_SCALE
 
     logger.info("Starting optimization...")
 
@@ -1043,7 +1041,7 @@ def train_comparison_module(
         Trained OPSComparisonModule
     """
     from datetime import datetime
-    from src.ops_engine.training_framework.ops_comparison_module import OPSComparisonModule
+    from src.training.comparison import OPSComparisonModule
 
     logger.info("\n" + "-" * 60)
     logger.info("Training OPSComparisonModule from preferences")
@@ -1318,7 +1316,7 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 ToTConfig,
                 load_optimized_judge as load_tot_judge,
             )
-            from src.ops_engine.training_framework.genrm_preference import GenRMJudge
+            from src.training.preference import GenRMJudge
             from src.config.settings import load_settings
             from src.core.model_detection import detect_model_from_port
 
@@ -1539,7 +1537,7 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
 
                 # Convert PreferenceDataset to list if needed
                 pref_list = list(preference_dataset) if hasattr(preference_dataset, '__iter__') else []
-                from src.ops_engine.training_framework.genrm_dspy import GenRMComparisonModule
+                from src.training.preference.genrm_dspy import GenRMComparisonModule
                 prompt_lm, prompt_model_name = create_prompt_lm(args)
                 if prompt_lm is not None:
                     logger.info(f"  Prompt optimization model: {prompt_model_name} (port {args.opt_model_port})")

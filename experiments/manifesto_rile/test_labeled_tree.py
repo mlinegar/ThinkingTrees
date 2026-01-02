@@ -22,12 +22,12 @@ print()
 # Test 1: Import modules
 print("Test 1: Importing modules...")
 try:
-    from src.ops_engine.training_framework.labeled_tree import (
+    from src.tree.labeled import (
         LabeledNode,
         LabeledTree,
         LabeledDataset,
     )
-    from src.ops_engine.training_framework.preference import PreferencePair
+    from src.training.preference import PreferencePair
     print("✓ All imports successful")
 except Exception as e:
     print(f"✗ Import failed: {e}")

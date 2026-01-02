@@ -7,11 +7,11 @@ that can be used with the generic ScoringTask.
 RILE scores range from -100 (far left) to +100 (far right).
 
 Usage:
-    from src.ops_engine.training_framework.tasks import ScoringTask, ScaleDefinition
+    from src.tasks.base import ScoringTask, ScaleDefinition
     from src.tasks.manifesto import (
         RILE_SCALE,
         RILE_PRESERVATION_RUBRIC,
-        ManifestoDataLoader,
+        ManifestoDataset,
         RILEScorer,
     )
 
@@ -20,12 +20,12 @@ Usage:
         name="rile",
         scale=RILE_SCALE,
         rubric=RILE_PRESERVATION_RUBRIC,
-        data_loader_factory=lambda: ManifestoDataLoader(),
+        data_loader_factory=lambda: ManifestoDataset(),
         predictor_factory=lambda: RILEScorer(),
     )
 """
 
-from src.ops_engine.training_framework.tasks import ScaleDefinition
+from src.tasks.base import ScaleDefinition
 
 from .constants import (
     RILE_RANGE,
@@ -46,8 +46,6 @@ from .data_loader import (
     ManifestoSample,
     create_pilot_dataset,
 )
-# Alias for backwards compatibility
-ManifestoDataLoader = ManifestoDataset
 
 # Summarizer
 from .summarizer import (
@@ -124,7 +122,6 @@ __all__ = [
 
     # Data loading
     "ManifestoDataset",
-    "ManifestoDataLoader",
     "ManifestoSample",
     "create_pilot_dataset",
 

@@ -91,14 +91,14 @@ preferences = tournament.get_collected_preferences()
 
 **Code**:
 ```python
-from src.ops_engine.training_framework.oracle_preference import OraclePreferenceCollector
+from src.training.preference import PreferenceCollector
 from src.tasks.manifesto import create_rile_scorer
 
 # Create oracle scorer
 oracle = create_rile_scorer()
 
 # Collect preferences from oracle
-collector = OraclePreferenceCollector(
+collector = PreferenceCollector(
     summarizer=summarizer,
     oracle=oracle,
     num_candidates=4,
@@ -113,7 +113,7 @@ optimized = optimizer.compile(summarizer, trainset=preferences)
 ```
 
 **Files**:
-- `src/ops_engine/training_framework/oracle_preference.py` - OraclePreferenceCollector
+- `src/training/preference/` - Preference collection framework
 - `src/tasks/manifesto/task.py` - ManifestoTask with oracle creation
 - `src/training/run_pipeline.py` - Unified training entry point
 
@@ -269,7 +269,7 @@ When implementing any of these paths, use the canonical tree builders:
 
 **Single Document**:
 ```python
-from src.ops_engine.builder import TreeBuilder
+from src.tree.builder import TreeBuilder
 
 builder = TreeBuilder(strategy=my_strategy)
 tree = await builder.build(text)

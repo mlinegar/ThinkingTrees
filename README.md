@@ -129,7 +129,7 @@ class Node:
 Tasks are composed from generic building blocks, not hardcoded:
 
 ```python
-from src.ops_engine.training_framework.tasks import ScoringTask, ScaleDefinition
+from src.tasks.base import ScoringTask, ScaleDefinition
 from src.core import ScaleScorer, GenericSummarizer
 
 # Define your scale
@@ -152,11 +152,11 @@ task = ScoringTask(
 Example using RILE building blocks from `src/tasks/manifesto/`:
 
 ```python
-from src.ops_engine.training_framework.tasks import ScoringTask
+from src.tasks.base import ScoringTask
 from src.tasks.manifesto import (
     RILE_SCALE,                  # ScaleDefinition(-100, +100)
     RILE_PRESERVATION_RUBRIC,   # Domain rubric
-    ManifestoDataLoader,        # Data loading
+    ManifestoDataset,           # Data loading
     RILEScorer,                 # Domain scorer
 )
 
@@ -164,7 +164,7 @@ rile_task = ScoringTask(
     name="rile",
     scale=RILE_SCALE,
     rubric=RILE_PRESERVATION_RUBRIC,
-    data_loader_factory=lambda: ManifestoDataLoader(),
+    data_loader_factory=lambda: ManifestoDataset(),
     predictor_factory=lambda: RILEScorer(),
 )
 ```

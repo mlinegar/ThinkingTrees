@@ -172,11 +172,11 @@ pipeline = BatchedManifestoPipeline(config, rubric=RILE_PRESERVATION_RUBRIC)
 
 ### After (building blocks approach):
 ```python
-from src.ops_engine.training_framework.tasks import ScoringTask, ScaleDefinition
+from src.tasks.base import ScoringTask, ScaleDefinition
 from src.tasks.manifesto import (
     RILE_SCALE,                  # ScaleDefinition(-100, +100)
     RILE_PRESERVATION_RUBRIC,   # Domain rubric
-    ManifestoDataLoader,        # Data loading
+    ManifestoDataset,           # Data loading
     RILEScorer,                 # Domain scorer
 )
 
@@ -185,7 +185,7 @@ rile_task = ScoringTask(
     name="rile",
     scale=RILE_SCALE,
     rubric=RILE_PRESERVATION_RUBRIC,
-    data_loader_factory=lambda: ManifestoDataLoader(),
+    data_loader_factory=lambda: ManifestoDataset(),
     predictor_factory=lambda: RILEScorer(),
 )
 
@@ -247,7 +247,7 @@ my_task = ScoringTask(
 
 ### Full Breaking (No Backward Compatibility)
 Backward compatibility aliases were removed in January 2025:
-- `from src.ops_engine.training_framework.domains import get_domain` ✗ No longer works
+- `from src.tasks.registry import get_task, list_tasks` ✓ Use task registry instead of domains
 - `DomainPlugin`, `AbstractDomain`, etc. ✗ No longer exist
 - `ManifestoTask` ✗ Replaced with `ScoringTask` + building blocks
 
@@ -311,15 +311,15 @@ Extended the building blocks pattern to the training pipeline with registry-base
 
 ```python
 # JudgeRegistry
-from src.ops_engine.training_framework.judges import get_judge, JudgeConfig
+from src.training.judges import get_judge, JudgeConfig
 judge = get_judge("genrm", config=JudgeConfig(base_url="http://localhost:8001/v1"))
 
 # MetricBuilder
-from src.ops_engine.training_framework.metrics import MetricBuilder
+from src.training.metrics import MetricBuilder
 metric = MetricBuilder().with_oracle(fn).with_scale(scale).with_caching().build_metric()
 
 # LabelingStrategy
-from src.ops_engine.training_framework.labeling import get_labeler
+from src.training.labeling import get_labeler
 labeler = get_labeler("threshold", threshold_high=0.3, threshold_low=0.1)
 
 # StrategyRegistry

@@ -96,14 +96,11 @@ The oracle approximation learns to predict which RILE predictions are likely wro
 
 ### Usage
 ```python
-from src.ops_engine.oracle_func_approximation import LearnedOracleFunc
+# Note: LearnedOracleFunc was part of an experimental optimization path
+# and has been deprecated. Use the training pipeline instead:
+from src.training import JudgeOptimizer
 
-oracle = LearnedOracleFunc()
-oracle.load_checkpoint(Path("data/oracle_func_checkpoints/oracle_func_model_*.json"))
-
-# Review a flagged item
-result = oracle.review_item(flagged_item)
-print(f"Violation: {result.is_true_violation}, Confidence: {result.confidence}")
+# See src/training/judge_optimization.py for the current approach
 ```
 
 ## Next Steps

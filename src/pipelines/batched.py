@@ -53,7 +53,7 @@ from src.core.strategy import (
     BatchedStrategy,
 )
 from src.core.data_models import Node, Tree, leaf, node
-from src.ops_engine.builder import AsyncTreeBuilder, BuildConfig, BuildResult
+from src.tree.builder import AsyncTreeBuilder, BuildConfig, BuildResult
 from src.core.progress import (
     PipelineProgress,
     display_batch_summary,
@@ -198,7 +198,7 @@ class BatchedDocPipeline:
     for optimal GPU utilization.
 
     For DSPy optimization, compose tasks from core building blocks:
-        from src.ops_engine.training_framework.tasks import ScoringTask
+        from src.tasks import ScoringTask
         from src.core.scorers import ScaleScorer
         from src.core.summarization import GenericSummarizer, GenericMerger
 

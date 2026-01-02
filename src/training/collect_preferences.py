@@ -318,7 +318,7 @@ def create_data_source(config, task):
 def create_collector(config, task, summarizer):
     """Create appropriate preference collector based on judge type."""
     from .preference_config import JudgeType
-    from src.ops_engine.training_framework.preference import GenerationConfig
+    from src.training.preference import GenerationConfig
 
     gen = config.generation
     judge_settings = config.judge
@@ -331,8 +331,7 @@ def create_collector(config, task, summarizer):
     ]
 
     if judge_settings.judge_type == JudgeType.GENRM:
-        from src.ops_engine.training_framework.genrm_preference import GenRMJudge
-        from src.ops_engine.training_framework.preference import PreferenceCollector
+        from src.training.preference import GenRMJudge, PreferenceCollector
 
         genrm_judge = GenRMJudge(
             base_url=server.judge_url,
@@ -350,7 +349,7 @@ def create_collector(config, task, summarizer):
         )
 
     elif judge_settings.judge_type == JudgeType.ORACLE:
-        from src.ops_engine.training_framework.preference import PreferenceCollector
+        from src.training.preference import PreferenceCollector
 
         # Get oracle predictor from task
         oracle_predict = task.create_oracle_scorer()

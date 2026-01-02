@@ -68,8 +68,8 @@ def train_ops_comparison(args) -> None:
     import dspy
     from src.config.dspy_config import configure_dspy
     from src.config.settings import load_settings
-    from src.ops_engine.training_framework.ops_comparison_module import OPSComparisonModule
-    from src.ops_engine.training_framework.preference import PreferenceDataset
+    from src.training.comparison import OPSComparisonModule
+    from src.training.preference import PreferenceDataset
 
     if not args.preference_data or not args.preference_data.exists():
         raise ValueError(f"Preference data required: {args.preference_data}")

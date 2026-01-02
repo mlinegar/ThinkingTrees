@@ -33,8 +33,8 @@ from typing import Dict, List, Optional, Tuple, Callable
 
 import dspy
 
-from src.ops_engine.training_framework.genrm_dspy import GenRMComparisonModule
-from src.ops_engine.training_framework.preference import PreferencePair
+from src.training.preference.genrm_dspy import GenRMComparisonModule
+from src.training.preference import PreferencePair
 
 PreferenceLabeler = Callable[[PreferencePair, float], Optional[str]]
 

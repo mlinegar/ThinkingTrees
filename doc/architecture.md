@@ -81,7 +81,7 @@ to create domain-specific tasks. The core `ScoringTask` is fully configurable vi
 #### ScoringTask - The Generic Task
 
 ```python
-from src.ops_engine.training_framework.tasks import ScoringTask, ScaleDefinition
+from src.tasks.base import ScoringTask, ScaleDefinition
 
 # Define your scale
 MY_SCALE = ScaleDefinition(
@@ -115,11 +115,11 @@ task = ScoringTask(
 The manifesto RILE task demonstrates the building blocks pattern:
 
 ```python
-from src.ops_engine.training_framework.tasks import ScoringTask, ScaleDefinition
+from src.tasks.base import ScoringTask, ScaleDefinition
 from src.tasks.manifesto import (
     RILE_SCALE,                  # ScaleDefinition(-100, +100)
     RILE_PRESERVATION_RUBRIC,   # Domain-specific rubric
-    ManifestoDataLoader,        # Data loading component
+    ManifestoDataset,        # Data loading component
     RILEScorer,                 # Domain-specific DSPy scorer
 )
 
@@ -128,7 +128,7 @@ rile_task = ScoringTask(
     name="rile",
     scale=RILE_SCALE,
     rubric=RILE_PRESERVATION_RUBRIC,
-    data_loader_factory=lambda: ManifestoDataLoader(),
+    data_loader_factory=lambda: ManifestoDataset(),
     predictor_factory=lambda: RILEScorer(),
 )
 ```
@@ -240,7 +240,7 @@ class BootstrapTrainer:
 #### Optimizer Registry (`optimizers/`)
 
 ```python
-from src.ops_engine.training_framework.optimizers import get_optimizer
+from src.training.optimization.registry import get_optimizer
 
 optimizer = get_optimizer("bootstrap_random_search", config)
 compiled = optimizer.compile(student, trainset, metric=metric)
@@ -271,14 +271,14 @@ The training framework uses a registry pattern for pluggable components:
 
 | Registry | Location | Available Types |
 |----------|----------|-----------------|
-| `JudgeRegistry` | `training_framework/judges/` | `dspy`, `genrm`, `oracle` |
-| `LabelingStrategy` | `training_framework/labeling.py` | `threshold`, `binary`, `percentile`, `adaptive` |
-| `PreferenceDeriver` | `training_framework/preference_types.py` | `judge`, `genrm`, `oracle` |
+| `JudgeRegistry` | `src/training/judges/` | `dspy`, `genrm`, `oracle` |
+| `LabelingStrategy` | `src/training/labeling.py` | `threshold`, `binary`, `percentile`, `adaptive` |
+| `PreferenceDeriver` | `src/training/preference/types.py` | `judge`, `genrm`, `oracle` |
 | `StrategyRegistry` | `src/core/strategy.py` | `batched`, `dspy`, `callable`, `tournament` |
 
 **JudgeRegistry** - Pairwise comparison judges:
 ```python
-from src.ops_engine.training_framework.judges import get_judge, JudgeConfig
+from src.training.judges import get_judge, JudgeConfig
 
 config = JudgeConfig(type="genrm", base_url="http://localhost:8001/v1")
 judge = get_judge("genrm", config)
@@ -294,7 +294,7 @@ print(result.preferred)  # "A", "B", or "tie"
 
 **MetricBuilder** - Fluent API for composing metrics:
 ```python
-from src.ops_engine.training_framework.metrics import MetricBuilder
+from src.training.metrics import MetricBuilder
 
 metric = (MetricBuilder()
     .with_oracle(oracle_fn)
@@ -306,7 +306,7 @@ metric = (MetricBuilder()
 
 **LabelingStrategy** - Error-to-label conversion:
 ```python
-from src.ops_engine.training_framework.labeling import get_labeler
+from src.training.labeling import get_labeler
 
 labeler = get_labeler("threshold", threshold_high=0.3, threshold_low=0.1)
 label = labeler.label_from_error(error=0.25, scale=my_scale)
@@ -443,7 +443,7 @@ The preferred way to create new tasks is by composing generic building blocks:
 
 ```python
 from src.core import ScaleScorer, GenericSummarizer
-from src.ops_engine.training_framework.tasks import ScoringTask, ScaleDefinition
+from src.tasks.base import ScoringTask, ScaleDefinition
 
 # 1. Define your scale
 my_scale = ScaleDefinition(name="my_task", min_value=0, max_value=100)

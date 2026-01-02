@@ -120,19 +120,6 @@ datasets:
   jsonl:
     path: null
 
-# Domain Configuration (DEPRECATED - use 'tasks' instead)
-# Kept for backward compatibility only
-domains:
-  default: null  # Use tasks.default instead
-
-  # Manifesto/RILE task configuration (task-specific settings)
-  manifesto_rile:
-    scale_min: -100
-    scale_max: 100
-    score_field: "rile_score"
-    error_threshold_high: 20.0
-    error_threshold_low: 10.0
-
 # LLM Configuration
 llm:
   # Provider: vllm, openai, anthropic

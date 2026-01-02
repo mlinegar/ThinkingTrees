@@ -8,7 +8,7 @@ Usage:
     from src.tasks.manifesto import RILE_MIN, RILE_MAX, RILE_RANGE
 
     # Use RILE_RANGE with normalize_error_to_score
-    from src.ops_engine.scoring import normalize_error_to_score
+    from src.core.scoring import normalize_error_to_score
     score = normalize_error_to_score(error, max_error=RILE_RANGE)
 """
 
