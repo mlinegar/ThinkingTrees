@@ -16,6 +16,7 @@ Example:
 
 """
 
+import asyncio
 import os
 
 # Set NumExpr thread limit before any imports that might load it
@@ -34,6 +35,7 @@ import dspy
 
 from src.config.constants import DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS
 from src.config.dspy_config import configure_dspy
+from src.preprocessing.chunker import Chunker
 
 # Configure logging early
 logging.basicConfig(
@@ -320,7 +322,7 @@ def build_trees(
     """
     from datetime import datetime
     from src.tree.builder import TreeBuilder, BuildConfig
-    from src.training.preference import GenRMJudge
+    from src.training.preference import GenRMJudge, create_genrm_batch_client
     from src.training.preference import PreferenceDataset
     from src.core.strategy import CallableStrategy, TournamentStrategy, TournamentConfig
     from src.core.model_detection import detect_model_from_port
@@ -356,17 +358,29 @@ def build_trees(
     # Create summarizer module for tree building
     summarizer = task.create_summarizer()
 
-    # Create GenRM judge (auto-detects model from server)
+    # Create GenRM judge with batch client for concurrent requests
     judge = judge_override
+    genrm_batch_client = None
     if judge is None:
         logger.info(f"  GenRM judge on port {args.genrm_port}")
+        # Create batch client for better throughput on 235B model
+        genrm_batch_client = create_genrm_batch_client(
+            base_url=f"http://localhost:{args.genrm_port}/v1",
+            max_concurrent=50,  # Lower for large model
+            batch_size=10,
+            batch_timeout=0.2,
+            temperature=judge_cfg.get('temperature', 0.6),
+            max_tokens=judge_cfg.get('max_tokens', 8192),
+        )
         judge = GenRMJudge(
             base_url=f"http://localhost:{args.genrm_port}/v1",
             model_name=None,  # Auto-detect
             temperature=judge_cfg.get('temperature', 0.6),
             top_p=judge_cfg.get('top_p', 0.95),
             max_tokens=judge_cfg.get('max_tokens', 8192),
+            batch_client=genrm_batch_client,
         )
+        logger.info("  Created batched GenRM client (max_concurrent=50, batch_size=10)")
     else:
         logger.info("  Using provided judge override for tournament selection")
 
@@ -419,11 +433,27 @@ def build_trees(
                 'reference_score': reference_score,
             })
         else:
-            logger.debug(
-                f"Skipping {doc_id}: init prompt too long "
-                f"({prompt_tokens} > {init_prompt_token_limit} tokens)"
-            )
-            skipped_count += 1
+            # Document too long - pre-chunk using langextract-based Chunker
+            # Each chunk becomes a separate segment for tree building
+            chunker = Chunker(max_tokens=init_prompt_token_limit // 2)  # Leave room for rubric/instructions
+            chunks = chunker.chunk(text)
+            if chunks:
+                logger.debug(
+                    f"Pre-chunking {doc_id}: {prompt_tokens} tokens -> {len(chunks)} chunks"
+                )
+                for i, chunk in enumerate(chunks):
+                    chunk_prompt_tokens = _count_prompt_tokens(chunk.text)
+                    if chunk_prompt_tokens <= init_prompt_token_limit:
+                        segments.append({
+                            'text': chunk.text,
+                            'doc_id': f"{doc_id}_chunk{i}",
+                            'reference_score': reference_score,  # Inherit from parent
+                        })
+                    else:
+                        logger.debug(f"Skipping chunk {doc_id}_chunk{i}: still too long ({chunk_prompt_tokens} tokens)")
+            else:
+                logger.debug(f"Skipping {doc_id}: chunking produced no valid chunks")
+                skipped_count += 1
 
     if not segments:
         logger.warning(
@@ -459,42 +489,67 @@ def build_trees(
     all_demos = []
     all_preferences = PreferenceDataset()
 
-    for i, segment in enumerate(samples):
+    # Build all trees CONCURRENTLY for maximum GPU utilization
+    async def build_single_tree(segment: dict, tree_builder: TreeBuilder) -> tuple:
+        """Build a single tree asynchronously."""
         try:
-            # Build tree using new unified API
-            result = builder.build_sync(segment['text'], rubric)
+            result = await tree_builder.build(segment['text'], rubric)
             tree = result.tree
-
-            # Store metadata for tracking
             tree.metadata['doc_id'] = segment['doc_id']
             tree.metadata['reference_score'] = segment['reference_score']
-
-            trees.append(tree)
-            for pref in result.preferences:
-                pref.source_example_id = segment['doc_id']
-                pref.reference_score = segment['reference_score']
-            all_preferences.add_pairs(result.preferences)
-
-            # Create demos: pair leaves with final summary
-            for leaf in tree.leaves:
-                all_demos.append(dspy.Example(
-                    content=leaf.raw_text_span,
-                    rubric=rubric,
-                    summary=tree.final_summary,
-                ).with_inputs("content", "rubric"))
-
-            logger.debug(f"  Tree {i+1}/{len(samples)}: {tree}")
-
-            # Reset preferences for next tree
-            builder.reset()
-
+            return (segment, tree, result.preferences, None)
         except Exception as e:
-            logger.warning(f"  Failed to build tree for {segment['doc_id']}: {e}")
+            return (segment, None, [], str(e))
+
+    async def build_all_trees_concurrent():
+        """Build all trees concurrently using asyncio.gather."""
+        # Create separate builder instances for each tree to avoid shared state
+        tasks = []
+        for segment in samples:
+            # Each tree needs its own builder instance
+            tree_builder = TreeBuilder(strategy=tournament_strategy, config=config)
+            tasks.append(build_single_tree(segment, tree_builder))
+
+        logger.info(f"  Launching {len(tasks)} concurrent tree builds...")
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            return results
+        finally:
+            # Clean up GenRM batch client to prevent broken pipe errors
+            if genrm_batch_client is not None:
+                await genrm_batch_client.close()
+
+    # Run all trees concurrently
+    loop_results = asyncio.run(build_all_trees_concurrent())
+
+    # Process results
+    for i, result in enumerate(loop_results):
+        if isinstance(result, Exception):
+            logger.warning(f"  Tree {i+1} failed with exception: {result}")
             continue
 
-        # Progress logging
-        if (i + 1) % 5 == 0 or (i + 1) == len(samples):
-            logger.info(f"  Progress: {i+1}/{len(samples)} trees, {len(all_preferences)} preferences")
+        segment, tree, preferences, error = result
+        if error:
+            logger.warning(f"  Failed to build tree for {segment['doc_id']}: {error}")
+            continue
+
+        trees.append(tree)
+        for pref in preferences:
+            pref.source_example_id = segment['doc_id']
+            pref.reference_score = segment['reference_score']
+        all_preferences.add_pairs(preferences)
+
+        # Create demos: pair leaves with final summary
+        for leaf in tree.leaves:
+            all_demos.append(dspy.Example(
+                content=leaf.raw_text_span,
+                rubric=rubric,
+                summary=tree.final_summary,
+            ).with_inputs("content", "rubric"))
+
+        logger.debug(f"  Tree {i+1}/{len(samples)}: {tree}")
+
+    logger.info(f"  Completed: {len(trees)}/{len(samples)} trees, {len(all_preferences)} preferences")
 
     # Save preferences if output_dir provided
     if output_dir:
@@ -683,7 +738,7 @@ def run_optimization(
     Returns:
         Tuple of (optimization statistics dict, trained scorer module)
     """
-    from src.training.core import OptimizationConfig
+    from src.training.config import OptimizationConfig
     from src.training.optimization import get_optimizer
     from src.core.scoring import UNIT_SCALE
 
