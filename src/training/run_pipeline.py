@@ -17,7 +17,9 @@ Example:
 """
 
 import asyncio
+import inspect
 import os
+import warnings
 
 # Set NumExpr thread limit before any imports that might load it
 # This avoids the "detected N cores but limiting to M" warnings
@@ -35,7 +37,16 @@ import dspy
 
 from src.config.constants import DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS
 from src.config.dspy_config import configure_dspy
+from src.config.context_window import ContextWindowManager, create_manager_for_task
+from src.core.model_detection import get_context_window_from_port
 from src.preprocessing.chunker import Chunker
+
+# Optional: GPU orchestrator for dynamic allocation
+try:
+    from src.core.gpu_orchestrator import GPUOrchestrator, OrchestratorConfig
+    GPU_ORCHESTRATOR_AVAILABLE = True
+except ImportError:
+    GPU_ORCHESTRATOR_AVAILABLE = False
 
 # Configure logging early
 logging.basicConfig(
@@ -44,6 +55,14 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# Suppress DSPy's noisy warning about calling .forward() directly
+# This happens in DSPy's optimizers internally and is harmless
+class DSPyForwardFilter(logging.Filter):
+    def filter(self, record):
+        return "Calling module.forward" not in record.getMessage()
+
+logging.getLogger("dspy.primitives.module").addFilter(DSPyForwardFilter())
 
 
 def parse_args() -> argparse.Namespace:
@@ -147,6 +166,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--output-dir', type=str, required=True,
                         help='Output directory for results')
 
+    # Dynamic GPU allocation (sleep mode for efficient multi-model serving)
+    parser.add_argument('--dynamic-gpu', action='store_true', default=True,
+                        help='Enable dynamic GPU allocation with sleep mode (default)')
+    parser.add_argument('--no-dynamic-gpu', dest='dynamic_gpu', action='store_false',
+                        help='Disable dynamic GPU allocation (use traditional server management)')
+
     # Inference mode (skip training, use pre-trained scorer)
     parser.add_argument('--load-scorer-path', type=str, default=None,
                         help='Path to pre-trained scorer module (skips optimization)')
@@ -206,9 +231,14 @@ def resolve_task_and_dataset(args: argparse.Namespace) -> Tuple[str, str, dict]:
     return task_name, dataset_name, {"settings": settings, "task": task_config, "dataset": dataset_config}
 
 
-def setup_dspy(args: argparse.Namespace) -> None:
-    """Configure DSPy with the vLLM server."""
+def setup_dspy(args: argparse.Namespace) -> ContextWindowManager:
+    """Configure DSPy with the vLLM server.
+
+    Returns:
+        ContextWindowManager for the configured model
+    """
     model_url = f"http://localhost:{args.port}/v1"
+    from src.config.settings import load_settings
 
     # Get model name from server
     try:
@@ -222,16 +252,31 @@ def setup_dspy(args: argparse.Namespace) -> None:
 
     logger.info(f"Configuring DSPy with model: {model_name}")
 
-    # Configure DSPy LM
-    # Nemotron/GenRM models support 32768+ tokens, use 16384 for output to leave room for input
+    # Get context window and create manager for scorer task
+    context_window = get_context_window_from_port(port=args.port)
+    context_manager = create_manager_for_task(context_window=context_window, task="scorer")
+    logger.info(f"Context window: {context_window}, max_output_tokens: {context_manager.max_output_tokens}")
+
+    settings = load_settings()
+    gen_cfg = settings.get('generation', {})
+    oracle_cfg = gen_cfg.get('oracle', {})
+    scorer_temperature = oracle_cfg.get('temperature', DEFAULT_TEMPERATURE)
+
+    # Use context-aware max_tokens instead of hardcoded value
+    # This ensures we never exceed the model's context window
+    scorer_max_tokens = context_manager.max_output_tokens
+
+    # Configure DSPy LM with context-aware max_tokens
     lm = dspy.LM(
         model=f"openai/{model_name}",
         api_base=model_url,
         api_key="EMPTY",
-        temperature=DEFAULT_TEMPERATURE,
-        max_tokens=DEFAULT_MAX_TOKENS,
+        temperature=scorer_temperature,
+        max_tokens=scorer_max_tokens,
     )
     configure_dspy(lm=lm)
+
+    return context_manager
 
 
 def create_prompt_lm(args: argparse.Namespace) -> tuple[Optional[dspy.LM], Optional[str]]:
@@ -342,16 +387,19 @@ def build_trees(
     summarizer_cfg = gen_cfg.get('summarizer', {})
     judge_cfg = gen_cfg.get('genrm_judge', {})
 
-    # Configure summarizer LM (main model on args.port)
+    # Configure summarizer LM with context-aware max_tokens
     summarizer_model_name = detect_model_from_port(port=args.port)
+    summarizer_context_window = get_context_window_from_port(port=args.port)
+    summarizer_manager = create_manager_for_task(context_window=summarizer_context_window, task="summarizer")
     logger.info(f"  Summarizer model: {summarizer_model_name}")
+    logger.info(f"  Summarizer context: {summarizer_context_window}, max_output: {summarizer_manager.max_output_tokens}")
 
     summarizer_lm = dspy.LM(
         model=f"openai/{summarizer_model_name}",
         api_base=f"http://localhost:{args.port}/v1",
         api_key="EMPTY",
         temperature=summarizer_cfg.get('temperature', 0.5),
-        max_tokens=summarizer_cfg.get('max_tokens', 8192),
+        max_tokens=summarizer_manager.max_output_tokens,
     )
     configure_dspy(lm=summarizer_lm)
 
@@ -511,13 +559,10 @@ def build_trees(
             tasks.append(build_single_tree(segment, tree_builder))
 
         logger.info(f"  Launching {len(tasks)} concurrent tree builds...")
-        try:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            return results
-        finally:
-            # Clean up GenRM batch client to prevent broken pipe errors
-            if genrm_batch_client is not None:
-                await genrm_batch_client.close()
+        if genrm_batch_client is not None:
+            async with genrm_batch_client:
+                return await asyncio.gather(*tasks, return_exceptions=True)
+        return await asyncio.gather(*tasks, return_exceptions=True)
 
     # Run all trees concurrently
     loop_results = asyncio.run(build_all_trees_concurrent())
@@ -669,11 +714,45 @@ def normalize_result_scores(results: List[Any], task: Any) -> None:
             metadata["score_normalized"] = True
 
 
+def build_scorer_kwargs(scorer: Any, example: Any) -> Dict[str, Any]:
+    """Build scorer kwargs with original content when supported."""
+    kwargs = {
+        "text": example.summary,
+        "task_context": example.rubric,
+    }
+
+    original_content = getattr(example, "original_content", None)
+    if not original_content:
+        return kwargs
+
+    forward = getattr(scorer, "forward", None)
+    if forward is None:
+        kwargs["original_content"] = original_content
+        return kwargs
+
+    try:
+        params = inspect.signature(forward).parameters
+    except (TypeError, ValueError):
+        kwargs["original_content"] = original_content
+        return kwargs
+
+    supports_kwargs = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()
+    )
+    if "original_content" in params or supports_kwargs:
+        kwargs["original_content"] = original_content
+    elif "original_text" in params:
+        kwargs["original_text"] = original_content
+
+    return kwargs
+
+
 def process_docs(
     samples: List[Any],
     args: argparse.Namespace,
     task: Any,
-    desc: str = "Processing"
+    desc: str = "Processing",
+    task_ports: Optional[List[int]] = None,
 ) -> List[Any]:
     """Process document samples through the batched OPS pipeline.
 
@@ -681,26 +760,51 @@ def process_docs(
     - Multiple documents processed concurrently
     - Level-wise batching for optimal GPU utilization
     - All LLM requests pooled and batched
+
+    Args:
+        samples: Document samples to process
+        args: Command-line arguments
+        task: Task instance
+        desc: Description for logging
+        task_ports: Optional list of task model ports for DP=2 mode
     """
     import time
     from src.pipelines.batched import BatchedDocPipeline, BatchedPipelineConfig
 
     logger.info(f"{desc} {len(samples)} documents (batched mode)...")
     logger.info(f"  Concurrent docs: {args.concurrent_docs}, Concurrent requests: {args.concurrent_requests}")
+    if task_ports and len(task_ports) > 1:
+        logger.info(f"  Using DP={len(task_ports)} mode with ports: {task_ports}")
     start_time = time.time()
 
     # Create batched pipeline config
     prompt_builders = task.create_prompt_builders()
-    pipeline_config = BatchedPipelineConfig(
-        task_model_url=f"http://localhost:{args.port}/v1",
-        max_concurrent_documents=args.concurrent_docs,
-        max_concurrent_requests=args.concurrent_requests,
-        show_progress=True,
-        rubric=task.create_rubric(),
-        task_context=task.get_task_context(),
-        prompt_builders=prompt_builders,
-        score_parser=task.parse_score,
-    )
+
+    # Build URL list for multi-port mode (DP=2)
+    if task_ports and len(task_ports) > 1:
+        task_model_urls = [f"http://localhost:{p}/v1" for p in task_ports]
+        pipeline_config = BatchedPipelineConfig(
+            task_model_url=task_model_urls[0],  # Primary URL
+            task_model_urls=task_model_urls,     # All URLs for load balancing
+            max_concurrent_documents=args.concurrent_docs,
+            max_concurrent_requests=args.concurrent_requests,
+            show_progress=True,
+            rubric=task.create_rubric(),
+            task_context=task.get_task_context(),
+            prompt_builders=prompt_builders,
+            score_parser=task.parse_score,
+        )
+    else:
+        pipeline_config = BatchedPipelineConfig(
+            task_model_url=f"http://localhost:{args.port}/v1",
+            max_concurrent_documents=args.concurrent_docs,
+            max_concurrent_requests=args.concurrent_requests,
+            show_progress=True,
+            rubric=task.create_rubric(),
+            task_context=task.get_task_context(),
+            prompt_builders=prompt_builders,
+            score_parser=task.parse_score,
+        )
 
     # Create batched pipeline
     pipeline = BatchedDocPipeline(config=pipeline_config)
@@ -743,6 +847,12 @@ def run_optimization(
     from src.core.scoring import UNIT_SCALE
 
     logger.info("Starting optimization...")
+    # Tree-building phases can reconfigure DSPy to the summarizer LM. Reset to
+    # oracle settings before optimization to avoid oversized max_tokens.
+    try:
+        setup_dspy(args)
+    except Exception as e:
+        logger.warning(f"Could not reset DSPy configuration for optimization: {e}")
 
     logger.info(f"Using task: {task.name}")
 
@@ -758,12 +868,23 @@ def run_optimization(
             opt_model_name = opt_model_info['data'][0]['id'] if opt_model_info.get('data') else 'default'
             logger.info(f"Optimization model: {opt_model_name}")
 
+            # Use context-aware max_tokens for optimization model
+            opt_context_window = get_context_window_from_port(port=opt_port)
+            opt_context_manager = create_manager_for_task(context_window=opt_context_window, task="scorer")
+            logger.info(f"Opt model context window: {opt_context_window}, max_output: {opt_context_manager.max_output_tokens}")
+
+            from src.config.settings import load_settings
+            settings = load_settings()
+            gen_cfg = settings.get('generation', {})
+            oracle_cfg = gen_cfg.get('oracle', {})
+            scorer_temperature = oracle_cfg.get('temperature', DEFAULT_TEMPERATURE)
+
             opt_lm = dspy.LM(
                 model=f"openai/{opt_model_name}",
                 api_base=opt_model_url,
                 api_key="EMPTY",
-                temperature=DEFAULT_TEMPERATURE,
-                max_tokens=DEFAULT_MAX_TOKENS,
+                temperature=scorer_temperature,
+                max_tokens=opt_context_manager.max_output_tokens,
             )
             dspy.configure(lm=opt_lm)
         except Exception as e:
@@ -888,7 +1009,7 @@ def run_optimization(
                 metric_before_count = 0
                 for ex in val_examples[:min(10, len(val_examples))]:
                     try:
-                        pred = scorer(text=ex.summary, task_context=ex.rubric)
+                        pred = scorer(**build_scorer_kwargs(scorer, ex))
                         metric_before += score_prediction_metric(ex, pred)
                         metric_before_count += 1
                     except Exception as e:
@@ -910,7 +1031,7 @@ def run_optimization(
                 metric_after_count = 0
                 for ex in val_examples[:min(10, len(val_examples))]:
                     try:
-                        pred = scorer(text=ex.summary, task_context=ex.rubric)
+                        pred = scorer(**build_scorer_kwargs(scorer, ex))
                         metric_after += score_prediction_metric(ex, pred)
                         metric_after_count += 1
                     except Exception as e:
@@ -989,7 +1110,7 @@ def evaluate_on_test(
 
     for idx, ex in enumerate(test_examples):
         try:
-            result = scorer(text=ex.summary, task_context=ex.rubric)
+            result = scorer(**build_scorer_kwargs(scorer, ex))
             pred_score = float(result.get(task.output_field_name, result.get('score', 0)))
             true_score = float(ex.reference_score)
             error = abs(pred_score - true_score)
@@ -1257,6 +1378,23 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
     preference_dataset = None
     ops_trees = None
 
+    # Initialize GPU orchestrator if dynamic allocation enabled
+    orchestrator = None
+    if getattr(args, 'dynamic_gpu', False) and GPU_ORCHESTRATOR_AVAILABLE:
+        logger.info("\n" + "=" * 60)
+        logger.info("Initializing GPU Orchestrator (Dynamic GPU Allocation)")
+        logger.info("=" * 60)
+        try:
+            orchestrator = GPUOrchestrator()
+            # Initialize and enter task_dp2 mode for Phase 1 (DP=2 throughput)
+            asyncio.run(orchestrator.initialize())
+            logger.info(f"Orchestrator initialized in {orchestrator.mode.value} mode")
+            logger.info(f"Active task ports: {orchestrator.get_active_task_ports()}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize GPU orchestrator: {e}")
+            logger.warning("Falling back to static server configuration")
+            orchestrator = None
+
     try:
         # Phase 1: Process documents
         if args.resume and phase1_checkpoint.exists() and phase1_data_checkpoint.exists():
@@ -1275,8 +1413,10 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
             logger.info("PHASE 1: Processing Documents")
             logger.info("=" * 60)
 
-            train_results = process_docs(train_samples, args, task, "Train")
-            val_results = process_docs(val_samples, args, task, "Val")
+            # Get active task ports from orchestrator (DP=2 mode if available)
+            task_ports = orchestrator.get_active_task_ports() if orchestrator else None
+            train_results = process_docs(train_samples, args, task, "Train", task_ports=task_ports)
+            val_results = process_docs(val_samples, args, task, "Val", task_ports=task_ports)
             normalize_result_scores(train_results, task)
             normalize_result_scores(val_results, task)
 
@@ -1298,6 +1438,11 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         comparison_module = None
 
         if args.enable_genrm:
+            # Switch to dual_model mode (task + GenRM) if orchestrator is active
+            if orchestrator:
+                logger.info("Switching to dual_model mode for GenRM phase...")
+                asyncio.run(orchestrator.enter_dual_model_mode())
+                logger.info(f"GPU mode: {orchestrator.mode.value}")
             # Check for resume from Phase 1.5
             if args.resume and phase1_5_checkpoint.exists() and phase1_5_data_checkpoint.exists():
                 logger.info("\n" + "=" * 60)
@@ -1379,19 +1524,22 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
             logger.info("PHASE 1.6: Tournament of Tournaments (Full Iterative Loop)")
             logger.info("=" * 60)
 
-            # Create summarizer for tree building
+            # Create summarizer for tree building with context-aware max_tokens
             settings = load_settings()
             gen_cfg = settings.get('generation', {})
             summarizer_cfg = gen_cfg.get('summarizer', {})
             judge_cfg = gen_cfg.get('genrm_judge', {})
 
             summarizer_model_name = detect_model_from_port(port=args.port)
+            tot_summarizer_context = get_context_window_from_port(port=args.port)
+            tot_summarizer_manager = create_manager_for_task(context_window=tot_summarizer_context, task="summarizer")
+
             summarizer_lm = dspy.LM(
                 model=f"openai/{summarizer_model_name}",
                 api_base=f"http://localhost:{args.port}/v1",
                 api_key="EMPTY",
                 temperature=summarizer_cfg.get('temperature', 0.5),
-                max_tokens=summarizer_cfg.get('max_tokens', 8192),
+                max_tokens=tot_summarizer_manager.max_output_tokens,
             )
             configure_dspy(lm=summarizer_lm)
 
@@ -1636,6 +1784,12 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                     logger.info(f"  Prompt context saved to: {prompt_path}")
 
         # Phase 2: Optimization (or load pre-trained scorer)
+        # Switch back to task_dp2 mode (DP=2 throughput) if orchestrator is active
+        if orchestrator:
+            logger.info("Switching back to task_dp2 mode for optimization...")
+            asyncio.run(orchestrator.enter_task_dp2_mode())
+            logger.info(f"GPU mode: {orchestrator.mode.value}")
+
         logger.info("\n" + "=" * 60)
 
         if args.load_scorer_path:
@@ -1715,7 +1869,9 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 logger.error("Train evaluation error: %s", train_eval.get('error'))
 
             if test_samples:
-                test_results = process_docs(test_samples, args, task, "Test")
+                # Get active task ports from orchestrator (DP=2 mode if available)
+                task_ports = orchestrator.get_active_task_ports() if orchestrator else None
+                test_results = process_docs(test_samples, args, task, "Test", task_ports=task_ports)
                 normalize_result_scores(test_results, task)
                 test_eval = evaluate_on_test(
                     test_results,
@@ -1754,7 +1910,9 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 stats['test'] = {'processed': 0, 'evaluated': False}
         elif test_samples:
             logger.warning("Skipping train/test evaluation: no trained scorer available")
-            test_results = process_docs(test_samples, args, task, "Test")
+            # Get active task ports from orchestrator (DP=2 mode if available)
+            task_ports = orchestrator.get_active_task_ports() if orchestrator else None
+            test_results = process_docs(test_samples, args, task, "Test", task_ports=task_ports)
             normalize_result_scores(test_results, task)
             stats['test'] = {'processed': len(test_results), 'evaluated': False}
 
@@ -1765,6 +1923,15 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         logger.exception(f"Pipeline failed: {e}")
         stats['error'] = str(e)
         stats['success'] = False
+    finally:
+        # Shutdown GPU orchestrator if initialized
+        if orchestrator:
+            logger.info("Shutting down GPU orchestrator...")
+            try:
+                asyncio.run(orchestrator.shutdown())
+                logger.info("GPU orchestrator shutdown complete")
+            except Exception as e:
+                logger.warning(f"Error shutting down GPU orchestrator: {e}")
 
     # Save results
     save_results(stats, output_dir)

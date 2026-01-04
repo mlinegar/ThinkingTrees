@@ -1,0 +1,52 @@
+==========================================
+ThinkingTrees Dual Server Launcher
+==========================================
+
+Starting Small Model (FP8 Nemotron 30B)...
+  GPUs: 0,1 | Port: 8000
+  PID: 141471
+  Log: logs/small_model.log
+
+Starting Large Model (GenRM NVFP4 235B)...
+  GPUs: 2,3 | Port: 8001
+  PID: 141472
+  Log: logs/large_model.log
+
+==========================================
+Servers starting in background...
+==========================================
+Waiting for Small model server (port 8000) to be ready...
+Waiting for Large model server (port 8001) to be ready...
+  Still waiting... (5 seconds)
+  Still waiting... (5 seconds)
+  Still waiting... (10 seconds)
+  Still waiting... (10 seconds)
+  Still waiting... (15 seconds)
+  Still waiting... (15 seconds)
+  Still waiting... (20 seconds)
+  Still waiting... (20 seconds)
+  Still waiting... (25 seconds)
+  Still waiting... (25 seconds)
+  Still waiting... (30 seconds)
+  Still waiting... (30 seconds)
+Small model server is ready!
+  Still waiting... (35 seconds)
+  Still waiting... (40 seconds)
+Large model server is ready!
+
+==========================================
+All servers ready!
+==========================================
+
+Test with:
+  curl http://localhost:8000/v1/models
+  curl http://localhost:8001/v1/models
+
+Run OPS tree test:
+  python main.py --input data/raw/manifesto_project_full/texts/33220_199603.txt --port 8000 -v
+
+To stop servers:
+  kill 141471  # Small model
+  kill 141472  # Large model
+
+Press Ctrl+C to stop all servers...

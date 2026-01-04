@@ -109,8 +109,8 @@ class ManifestoDataset:
             require_text: Only include manifestos with text files
         """
         if data_dir is None:
-            # Default path
-            data_dir = Path(__file__).parent.parent.parent / "data" / "raw" / "manifesto_project_full"
+            # Default path - go from src/tasks/manifesto to project root (4 levels up)
+            data_dir = Path(__file__).parent.parent.parent.parent / "data" / "raw" / "manifesto_project_full"
 
         self.data_dir = Path(data_dir)
         self.countries = countries
@@ -128,7 +128,7 @@ class ManifestoDataset:
     def _load_metadata(self) -> None:
         """Load the main dataset CSV and apply filters."""
         # Load CSV
-        self.metadata_df = pd.read_csv(self.csv_path)
+        self.metadata_df = pd.read_csv(self.csv_path, low_memory=False)
 
         # Create manifesto_id column
         self.metadata_df["manifesto_id"] = (

@@ -44,9 +44,10 @@ def _get_encoding_for_model(model_name: str):
     try:
         return tiktoken.encoding_for_model(model_name)
     except KeyError:
-        # Default to cl100k_base for unknown models
-        logger.warning(
-            f"Unknown model '{model_name}', using cl100k_base encoding"
+        # Default to cl100k_base for unknown models (standard for modern LLMs)
+        # This is expected for local models with full paths (Nemotron, Qwen, etc.)
+        logger.debug(
+            f"Model '{model_name}' not in tiktoken registry, using cl100k_base encoding"
         )
         return tiktoken.get_encoding("cl100k_base")
 

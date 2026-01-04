@@ -1,0 +1,12 @@
+{
+  "n_trees": 1,
+  "n_demos": 5,
+  "n_preferences": 9,
+  "tree_summaries": [
+    {
+      "doc_id": "21420_196103_chunk0",
+      "height": 3,
+      "nodes": 9
+    }
+  ]
+}

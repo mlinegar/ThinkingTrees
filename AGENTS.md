@@ -78,7 +78,8 @@ src/
 │   ├── strategy.py         # SummarizationStrategy, DSPyStrategy, CallableStrategy
 │   ├── scoring.py          # OracleScore, ScoringOracle
 │   ├── ops_checks.py       # CheckType, CheckConfig, CheckResult
-│   ├── batch_processor.py  # Batch processing utilities
+│   ├── batch_processor.py  # Async batched LLM client + request pooling
+│   ├── batch_orchestrator.py  # Global pipelined tree batching across documents
 │   └── output_parser.py    # Case-insensitive LLM output parsing
 │
 ├── tree/

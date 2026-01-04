@@ -322,11 +322,11 @@ summary = await strategy.summarize(content, rubric)
 
 ### 5. Batch Processing (`src/core/batch_processor.py`, `src/core/batch_orchestrator.py`)
 
-Level-wise batch processing for efficient tree construction.
+Global pipelined batching for efficient tree construction.
 
 ```python
 class BatchTreeOrchestrator:
-    """Orchestrate tree building across multiple documents with level-wise batching."""
+    """Orchestrate tree building across multiple documents with global pipelined batching."""
 
     async def process_documents(
         self,

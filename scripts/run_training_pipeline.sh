@@ -73,6 +73,12 @@ MAX_INIT_PROMPT_TOKENS=${MAX_INIT_PROMPT_TOKENS:-${MAX_INIT_DOC_CHARS:-4000}}
 # Resume from checkpoint
 RESUME=${RESUME:-false}
 
+# Dynamic GPU Allocation (vLLM sleep mode for efficient multi-model serving)
+# When enabled, Python orchestrator manages servers with sleep/wake for ~6-12s transitions
+# Uses all 4 GPUs in DP=2 mode for ~2x throughput during document processing
+# Disable with --no-dynamic-gpu to use shell-managed single server
+DYNAMIC_GPU=${DYNAMIC_GPU:-true}
+
 # GenRM OPS Tree Building settings
 # Builds trees with tournament selection, collecting demos and preferences
 START_GENRM=${START_GENRM:-false}
@@ -342,6 +348,14 @@ while [[ $# -gt 0 ]]; do
             GENRM_INIT_CANDIDATES="$2"
             shift 2
             ;;
+        --dynamic-gpu)
+            DYNAMIC_GPU="true"
+            shift
+            ;;
+        --no-dynamic-gpu)
+            DYNAMIC_GPU="false"
+            shift
+            ;;
         *)
             EXTRA_ARGS+=("$1")
             shift
@@ -419,6 +433,7 @@ echo "    Max Metric Calls: ${MAX_METRIC_CALLS} (overrides budget)"
 fi
 echo "    Threads:         ${NUM_THREADS}"
 echo "    Start Server:    ${START_SERVER}"
+echo "    Dynamic GPU:     ${DYNAMIC_GPU} (use --dynamic-gpu to enable sleep mode)"
 if [[ "${START_SERVER}" == "true" ]]; then
 echo "    Model:           ${MODEL}"
 fi
@@ -458,11 +473,22 @@ export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
 
 # ============================================================================
 # Auto-start vLLM server (optional)
+# When DYNAMIC_GPU=true, Python orchestrator handles server lifecycle
 # ============================================================================
 VLLM_PID=""
 ORIGINAL_MODEL=""
 
-if [[ "${START_SERVER}" == "true" ]]; then
+if [[ "${DYNAMIC_GPU}" == "true" ]]; then
+    log ""
+    log "========================================================================"
+    log "Dynamic GPU Allocation Enabled"
+    log "========================================================================"
+    log "Python orchestrator will manage vLLM servers with sleep mode."
+    log "Servers will be started/stopped dynamically between phases."
+    log "This provides ~6-12 second transitions (vs 60-120s disk reload)."
+    log ""
+    # Skip shell-based server startup - Python handles it
+elif [[ "${START_SERVER}" == "true" ]]; then
     log ""
     log "========================================================================"
     log "Starting vLLM server: ${MODEL}"
@@ -576,11 +602,15 @@ else
 fi
 
 # ============================================================================
-# Start GenRM Server (if enabled)
+# Start GenRM Server (if enabled and DYNAMIC_GPU=false)
+# When DYNAMIC_GPU=true, Python orchestrator handles GenRM server
 # ============================================================================
 GENRM_PID=""
 
-if [[ "${START_GENRM}" == "true" ]]; then
+if [[ "${DYNAMIC_GPU}" == "true" ]]; then
+    # GenRM server managed by Python orchestrator
+    log "GenRM server will be managed by Python orchestrator (dynamic GPU mode)"
+elif [[ "${START_GENRM}" == "true" ]]; then
     log ""
     log "========================================================================"
     log "Starting GenRM Server: ${GENRM_MODEL} (port ${GENRM_PORT})"
@@ -636,7 +666,6 @@ CMD=(
     --train-samples ${TRAIN_SAMPLES}
     --val-samples ${VAL_SAMPLES}
     --test-samples ${TEST_SAMPLES}
-    --rounds ${ROUNDS}
     --concurrent-docs ${CONCURRENT_DOCS}
     --concurrent-requests ${CONCURRENT_REQUESTS}
     --optimizer ${OPTIMIZER}
@@ -647,6 +676,13 @@ CMD=(
     --convergence-patience ${CONVERGENCE_PATIENCE}
     --output-dir "${OUTPUT_DIR}"
 )
+
+# Add dynamic GPU allocation flag
+if [[ "${DYNAMIC_GPU}" == "true" ]]; then
+    CMD+=(--dynamic-gpu)
+else
+    CMD+=(--no-dynamic-gpu)
+fi
 
 # Add optional arguments
 if [[ -n "${OPT_MODEL_PORT}" ]]; then
@@ -685,8 +721,8 @@ if [[ "${RESUME}" == "true" ]]; then
     CMD+=(--resume)
 fi
 
-# Add GenRM OPS tree building arguments if server is available
-if [[ "${START_GENRM}" == "true" ]] || curl -s "http://localhost:${GENRM_PORT}/v1/models" > /dev/null 2>&1; then
+# Add GenRM OPS tree building arguments if server is available or dynamic GPU manages it
+if [[ "${DYNAMIC_GPU}" == "true" ]] || [[ "${START_GENRM}" == "true" ]] || curl -s "http://localhost:${GENRM_PORT}/v1/models" > /dev/null 2>&1; then
     CMD+=(--enable-genrm --genrm-port ${GENRM_PORT})
     CMD+=(--genrm-init-samples ${GENRM_INIT_SAMPLES})
     CMD+=(--genrm-init-candidates ${GENRM_INIT_CANDIDATES})

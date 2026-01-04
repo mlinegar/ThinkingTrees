@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 import random
 
 from src.core.documents import DocumentSample
-from src.tasks.manifesto.data_loader import DocDataset
+from src.tasks.manifesto.data_loader import ManifestoDataset as DocDataset, ManifestoSample
 
 from .base import DatasetInfo, register_dataset
 
@@ -63,9 +63,9 @@ class ManifestoDataset:
 
         return [
             DocumentSample(
-                doc_id=sample.doc_id,
+                doc_id=sample.manifesto_id,
                 text=sample.text,
-                reference_score=sample.score,
+                reference_score=sample.rile,
                 metadata={
                     "party_id": sample.party_id,
                     "party_name": sample.party_name,

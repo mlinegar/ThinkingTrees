@@ -1,0 +1,51 @@
+{
+  "n_trees": 7,
+  "n_preferences": 420,
+  "n_demos": 14,
+  "init_prompt_token_limit": 4000,
+  "k_candidates": 4,
+  "tree_summaries": [
+    {
+      "doc_id": "14223_199503",
+      "height": 2,
+      "node_count": 5,
+      "leaf_count": 3
+    },
+    {
+      "doc_id": "33902_200803",
+      "height": 0,
+      "node_count": 1,
+      "leaf_count": 1
+    },
+    {
+      "doc_id": "55430_201105",
+      "height": 0,
+      "node_count": 1,
+      "leaf_count": 1
+    },
+    {
+      "doc_id": "42320_197003",
+      "height": 3,
+      "node_count": 11,
+      "leaf_count": 6
+    },
+    {
+      "doc_id": "72533_200301",
+      "height": 0,
+      "node_count": 1,
+      "leaf_count": 1
+    },
+    {
+      "doc_id": "14620_201904",
+      "height": 0,
+      "node_count": 1,
+      "leaf_count": 1
+    },
+    {
+      "doc_id": "95021_202312",
+      "height": 0,
+      "node_count": 1,
+      "leaf_count": 1
+    }
+  ]
+}

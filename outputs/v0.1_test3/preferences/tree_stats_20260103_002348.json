@@ -1,0 +1,15 @@
+{
+  "n_trees": 1,
+  "n_preferences": 3,
+  "n_demos": 1,
+  "init_prompt_token_limit": 4000,
+  "k_candidates": 4,
+  "tree_summaries": [
+    {
+      "doc_id": "33902_200803",
+      "height": 0,
+      "node_count": 1,
+      "leaf_count": 1
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "n_trees": 4,
+  "n_preferences": 456,
+  "n_demos": 21,
+  "init_prompt_token_limit": 4000,
+  "k_candidates": 4,
+  "tree_summaries": [
+    {
+      "doc_id": "42320_197003",
+      "height": 3,
+      "node_count": 11,
+      "leaf_count": 6
+    },
+    {
+      "doc_id": "42320_197905_chunk3",
+      "height": 3,
+      "node_count": 9,
+      "leaf_count": 5
+    },
+    {
+      "doc_id": "53620_199706_chunk18",
+      "height": 3,
+      "node_count": 9,
+      "leaf_count": 5
+    },
+    {
+      "doc_id": "53620_199706_chunk14",
+      "height": 3,
+      "node_count": 9,
+      "leaf_count": 5
+    }
+  ]
+}

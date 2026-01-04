@@ -25,6 +25,7 @@ class DocumentSample:
 class DocumentResult:
     """Result of processing a single document."""
     doc_id: str
+    original_content: Optional[str] = None
     reference_score: Optional[float] = None
     estimated_score: Optional[float] = None
     baseline_score: Optional[float] = None

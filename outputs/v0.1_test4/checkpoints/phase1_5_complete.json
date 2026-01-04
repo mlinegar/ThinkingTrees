@@ -1,0 +1,37 @@
+{
+  "n_trees": 6,
+  "n_demos": 8,
+  "n_preferences": 15,
+  "tree_summaries": [
+    {
+      "doc_id": "14223_199503",
+      "height": 2,
+      "nodes": 5
+    },
+    {
+      "doc_id": "33902_200803",
+      "height": 0,
+      "nodes": 1
+    },
+    {
+      "doc_id": "55430_201105",
+      "height": 0,
+      "nodes": 1
+    },
+    {
+      "doc_id": "72533_200301",
+      "height": 0,
+      "nodes": 1
+    },
+    {
+      "doc_id": "14620_201904",
+      "height": 0,
+      "nodes": 1
+    },
+    {
+      "doc_id": "95021_202312",
+      "height": 0,
+      "nodes": 1
+    }
+  ]
+}

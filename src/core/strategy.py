@@ -50,6 +50,8 @@ if TYPE_CHECKING:
     from src.training.preference import PreferencePair
 
 from src.core.prompting import default_merge_prompt, default_summarize_prompt
+from src.config.concurrency import get_concurrency_config
+
 logger = logging.getLogger(__name__)
 
 # Context for routing tournament preferences (e.g., batch doc IDs).
@@ -502,6 +504,7 @@ class TournamentConfig:
     """Configuration for tournament-based candidate selection."""
     k: int = 4  # Number of candidates to generate
     temperature: float = 0.9  # Temperature for candidate generation
+    pipelined: bool = True  # Use pipelined execution (submits matches as ready)
 
 
 class TournamentStrategy:
@@ -549,6 +552,56 @@ class TournamentStrategy:
         self._preferences: List["PreferencePair"] = []
         self._segment_counter = 0
 
+    def _extract_preference_fields(
+        self,
+        result: Any,
+        is_dspy_module: bool,
+        match_label: Optional[str] = None,
+    ) -> tuple[str, str, float, Optional[float], Optional[float]]:
+        """Normalize judge result into (preferred, reasoning, confidence, score_a, score_b)."""
+        if result is None:
+            return "tie", "", 0.0, None, None
+
+        if is_dspy_module:
+            preferred = getattr(result, "preference", getattr(result, "preferred", "tie"))
+        else:
+            preferred = getattr(result, "preferred", None)
+            if preferred is None:
+                error_message = getattr(result, "error_message", None)
+                if error_message:
+                    logger.warning(
+                        "Tournament match %s returned error: %s",
+                        match_label or "unknown",
+                        error_message,
+                    )
+                    return "tie", f"Error: {error_message}", 0.0, None, None
+                logger.warning(
+                    "Tournament match %s returned result without preference",
+                    match_label or "unknown",
+                )
+                return "tie", "", 0.0, None, None
+
+        preferred = str(preferred).strip().upper()
+        if preferred not in ("A", "B", "TIE"):
+            logger.warning(
+                "Tournament match %s returned invalid preference: %s",
+                match_label or "unknown",
+                preferred,
+            )
+            preferred = "TIE"
+        preferred = "tie" if preferred == "TIE" else preferred
+
+        reasoning = getattr(result, "reasoning", "")
+        confidence = getattr(result, "confidence", 0.5)
+        score_a = getattr(result, "helpfulness_a", None)
+        score_b = getattr(result, "helpfulness_b", None)
+        if score_a is None:
+            score_a = getattr(result, "score_estimate_a", None)
+        if score_b is None:
+            score_b = getattr(result, "score_estimate_b", None)
+
+        return preferred, reasoning, confidence, score_a, score_b
+
     async def summarize(
         self, content: str, rubric: str, temperature: float = 0.7
     ) -> str:
@@ -572,9 +625,14 @@ class TournamentStrategy:
             return candidates[0] if candidates else ""
 
         # Run tournament and collect preferences
-        winner, prefs = await self._run_tournament(
-            candidates, content, rubric, segment_id, law_type="sufficiency"
-        )
+        if self.config.pipelined:
+            winner, prefs = await self._run_tournament_pipelined(
+                candidates, content, rubric, segment_id, law_type="sufficiency"
+            )
+        else:
+            winner, prefs = await self._run_tournament(
+                candidates, content, rubric, segment_id, law_type="sufficiency"
+            )
         self._preferences.extend(prefs)
 
         return winner
@@ -603,9 +661,14 @@ class TournamentStrategy:
         original_text = f"{left}\n\n{right}"
 
         # Run tournament and collect preferences
-        winner, prefs = await self._run_tournament(
-            candidates, original_text, rubric, segment_id, law_type="merge"
-        )
+        if self.config.pipelined:
+            winner, prefs = await self._run_tournament_pipelined(
+                candidates, original_text, rubric, segment_id, law_type="merge"
+            )
+        else:
+            winner, prefs = await self._run_tournament(
+                candidates, original_text, rubric, segment_id, law_type="merge"
+            )
         self._preferences.extend(prefs)
 
         return winner
@@ -730,13 +793,14 @@ class TournamentStrategy:
                 # Handle exceptions from gather
                 if isinstance(result, Exception):
                     logger.warning(f"Tournament match failed: {result}, treating as tie")
-                    preferred = "tie"
+                    preferred, reasoning, confidence, score_a, score_b = "tie", str(result), 0.0, None, None
                     result = None  # No result object available
-                elif is_dspy_module:
-                    # DSPy Prediction uses .preference instead of .preferred
-                    preferred = getattr(result, 'preference', getattr(result, 'preferred', 'tie'))
                 else:
-                    preferred = result.preferred
+                    preferred, reasoning, confidence, score_a, score_b = self._extract_preference_fields(
+                        result,
+                        is_dspy_module,
+                        match_label=f"{segment_tag}_r{round_num}_m{match_num}",
+                    )
 
                 # Capture preference pair (FREE - no extra cost!)
                 pair = PreferencePair(
@@ -748,11 +812,11 @@ class TournamentStrategy:
                     summary_a=summary_a,
                     summary_b=summary_b,
                     preferred=preferred,
-                    reasoning=getattr(result, 'reasoning', "") if result else "",
-                    confidence=getattr(result, 'confidence', 0.5) if result else 0.5,
+                    reasoning=reasoning,
+                    confidence=confidence,
                     law_type=law_type,
-                    score_estimate_a=getattr(result, 'helpfulness_a', None) if result else None,
-                    score_estimate_b=getattr(result, 'helpfulness_b', None) if result else None,
+                    score_estimate_a=score_a,
+                    score_estimate_b=score_b,
                     judge_model=judge_model,
                 )
                 preferences.append(pair)
@@ -774,6 +838,279 @@ class TournamentStrategy:
             round_num += 1
 
         return remaining[0], preferences
+
+    async def _run_tournament_pipelined(
+        self,
+        candidates: List[str],
+        original_text: str,
+        rubric: str,
+        segment_id: str,
+        law_type: str = "sufficiency",
+    ) -> tuple[str, List["PreferencePair"]]:
+        """
+        Run elimination tournament with pipelined execution.
+
+        Unlike _run_tournament which waits for all round-N matches to complete
+        before starting round-N+1, this version submits new matches as soon as
+        their prerequisites (parent matches) complete.
+
+        For k=4 candidates:
+        - Round 1: Match0 (A vs B), Match1 (C vs D)
+        - Round 2: Match2 (winner0 vs winner1) - starts when BOTH Match0 and Match1 complete
+
+        For k=8 candidates:
+        - Round 1: Match0-3
+        - Round 2: Match4 starts when Match0 AND Match1 complete (don't wait for Match2,3)
+                   Match5 starts when Match2 AND Match3 complete
+        - Round 3: Match6 starts when Match4 AND Match5 complete
+        """
+        from src.training.preference import PreferencePair
+
+        if len(candidates) == 0:
+            raise ValueError("No candidates provided")
+        if len(candidates) == 1:
+            return candidates[0], []
+
+        # Build match structure upfront
+        @dataclass
+        class Match:
+            id: int
+            round: int
+            left_idx: int  # Index into candidates (round 0) or match ID (later rounds)
+            right_idx: int
+            left_is_match: bool = False  # True if left_idx refers to a match result
+            right_is_match: bool = False
+            result: Optional[str] = None  # Winner summary when complete
+
+        # Build tournament bracket
+        matches: Dict[int, Match] = {}
+        match_id = 0
+        n = len(candidates)
+
+        # Round 1: pair up candidates
+        round_matches = []
+        for i in range(0, n, 2):
+            if i + 1 < n:
+                matches[match_id] = Match(
+                    id=match_id, round=1,
+                    left_idx=i, right_idx=i + 1,
+                    left_is_match=False, right_is_match=False
+                )
+                round_matches.append(match_id)
+                match_id += 1
+
+        # Handle odd candidate - it gets a "bye" (auto-advance to next round)
+        bye_candidate_idx = n - 1 if n % 2 == 1 else None
+
+        # Build subsequent rounds
+        prev_round_matches = round_matches
+        prev_bye = bye_candidate_idx
+        round_num = 1
+
+        while len(prev_round_matches) + (1 if prev_bye is not None else 0) > 1:
+            round_num += 1
+            round_matches = []
+
+            # Pair up matches from previous round
+            available = list(prev_round_matches)
+            if prev_bye is not None:
+                # Bye from previous round creates a "fake" match result
+                # We'll handle this specially during execution
+                pass
+
+            for i in range(0, len(available), 2):
+                if i + 1 < len(available):
+                    matches[match_id] = Match(
+                        id=match_id, round=round_num,
+                        left_idx=available[i], right_idx=available[i + 1],
+                        left_is_match=True, right_is_match=True
+                    )
+                    round_matches.append(match_id)
+                    match_id += 1
+
+            # New bye if odd number of matches
+            if len(available) % 2 == 1:
+                prev_bye = available[-1]  # Last match result is bye
+            else:
+                prev_bye = None
+
+            prev_round_matches = round_matches
+
+        # Track which matches are ready and completed
+        preferences: List[PreferencePair] = []
+        completed: Dict[int, str] = {}  # match_id -> winner
+        pending: Dict[int, asyncio.Task] = {}  # match_id -> task
+
+        doc_id = tournament_doc_id.get()
+        segment_tag = f"{doc_id}:{segment_id}" if doc_id is not None else segment_id
+
+        # Determine judge type
+        is_dspy_module = hasattr(self.judge, 'forward') and hasattr(self.judge, 'use_dspy_predictor')
+        if is_dspy_module:
+            if getattr(self.judge, 'use_dspy_prompt', False):
+                judge_model = "genrm-prompt-tuned"
+            elif self.judge.use_dspy_predictor:
+                judge_model = "dspy-optimizable"
+            else:
+                judge_model = "genrm-via-dspy"
+        else:
+            judge_model = "qwen3-nemotron-genrm"
+
+        async def execute_match(m: Match) -> tuple[int, str, Any]:
+            """Execute a single match and return (match_id, winner, result)."""
+            # Get summaries for this match
+            if m.left_is_match:
+                summary_a = completed[m.left_idx]
+            else:
+                summary_a = candidates[m.left_idx]
+
+            if m.right_is_match:
+                summary_b = completed[m.right_idx]
+            else:
+                summary_b = candidates[m.right_idx]
+
+            # Execute comparison
+            if is_dspy_module:
+                result = await asyncio.to_thread(
+                    self.judge.forward,
+                    context=rubric,
+                    original_text=original_text,
+                    summary_a=summary_a,
+                    summary_b=summary_b,
+                    law_type=law_type,
+                )
+            elif hasattr(self.judge, 'compare_async'):
+                result = await self.judge.compare_async(
+                    context=rubric,
+                    original_text=original_text,
+                    summary_a=summary_a,
+                    summary_b=summary_b,
+                    law_type=law_type,
+                )
+            else:
+                result = await asyncio.to_thread(
+                    self.judge.compare,
+                    context=rubric,
+                    original_text=original_text,
+                    summary_a=summary_a,
+                    summary_b=summary_b,
+                    law_type=law_type,
+                )
+
+            # Determine winner
+            preferred, reasoning, confidence, score_a, score_b = self._extract_preference_fields(
+                result,
+                is_dspy_module,
+                match_label=f"{segment_tag}_m{m.id}",
+            )
+
+            if preferred == "A":
+                winner = summary_a
+            elif preferred == "B":
+                winner = summary_b
+            else:
+                winner = summary_a if random.random() < 0.5 else summary_b
+
+            return m.id, winner, result, summary_a, summary_b, preferred, reasoning, confidence, score_a, score_b
+
+        def is_ready(m: Match) -> bool:
+            """Check if a match's prerequisites are satisfied."""
+            if m.left_is_match and m.left_idx not in completed:
+                return False
+            if m.right_is_match and m.right_idx not in completed:
+                return False
+            return True
+
+        # Submit all ready matches (round 1)
+        for m in matches.values():
+            if is_ready(m) and m.id not in pending and m.id not in completed:
+                pending[m.id] = asyncio.create_task(execute_match(m))
+
+        try:
+            # Process matches as they complete
+            while pending:
+                done, _ = await asyncio.wait(
+                    pending.values(),
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                for task in done:
+                    try:
+                        match_id, winner, result, summary_a, summary_b, preferred, reasoning, confidence, score_a, score_b = await task
+                    except Exception as e:
+                        # Find which match failed
+                        for mid, t in list(pending.items()):
+                            if t is task:
+                                logger.warning(f"Tournament match {mid} failed: {e}")
+                                # Treat as tie, pick randomly
+                                m = matches[mid]
+                                if m.left_is_match:
+                                    summary_a = completed[m.left_idx]
+                                else:
+                                    summary_a = candidates[m.left_idx]
+                                winner = summary_a
+                                completed[mid] = winner
+                                del pending[mid]
+                                break
+                        continue
+
+                    # Record completion
+                    completed[match_id] = winner
+                    del pending[match_id]
+
+                    # Record preference
+                    m = matches[match_id]
+                    pair = PreferencePair(
+                        pair_id=f"tournament_{segment_tag}_m{match_id}",
+                        source_example_id=segment_tag,
+                        original_text=original_text,
+                        rubric=rubric,
+                        reference_score=None,
+                        summary_a=summary_a,
+                        summary_b=summary_b,
+                        preferred=preferred,
+                        reasoning=reasoning,
+                        confidence=confidence,
+                        law_type=law_type,
+                        score_estimate_a=score_a,
+                        score_estimate_b=score_b,
+                        judge_model=judge_model,
+                    )
+                    preferences.append(pair)
+
+                    # Check for newly ready matches
+                    for m in matches.values():
+                        if is_ready(m) and m.id not in pending and m.id not in completed:
+                            pending[m.id] = asyncio.create_task(execute_match(m))
+
+        finally:
+            # CRITICAL: Cancel any remaining tasks on exception or early exit
+            # This prevents orphaned tasks from continuing to run and slowing down the system
+            if pending:
+                config = get_concurrency_config()
+                logger.debug(f"Cleaning up {len(pending)} pending tournament tasks...")
+                for task in pending.values():
+                    if not task.done():
+                        task.cancel()
+                # Wait for cancellation to complete (with configurable timeout)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*pending.values(), return_exceptions=True),
+                        timeout=config.task_cancel_timeout
+                    )
+                except asyncio.TimeoutError:
+                    remaining = sum(1 for t in pending.values() if not t.done())
+                    logger.warning(
+                        f"Timeout ({config.task_cancel_timeout}s) waiting for "
+                        f"{remaining}/{len(pending)} tournament tasks to cancel"
+                    )
+
+        # Find final winner
+        if completed:
+            final_match_id = max(completed.keys())
+            return completed[final_match_id], preferences
+        else:
+            return candidates[0], preferences
 
     def get_preferences(self) -> List["PreferencePair"]:
         """Get all collected preference pairs."""

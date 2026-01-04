@@ -1,0 +1,101 @@
+Pipeline completed at Fri Jan  2 11:37:03 PM UTC 2026
+2026-01-02 22:59:22 | INFO | src.core.batch_orchestrator |     Completed 43 merges
+2026-01-02 22:59:22 | INFO | src.core.batch_orchestrator |   Level 2: Merging for 4 documents...
+2026-01-02 22:59:32 | INFO | src.core.batch_orchestrator |     Completed 21 merges
+2026-01-02 22:59:32 | INFO | src.core.batch_orchestrator |   Level 3: Merging for 3 documents...
+2026-01-02 22:59:42 | INFO | src.core.batch_orchestrator |     Completed 11 merges
+2026-01-02 22:59:42 | INFO | src.core.batch_orchestrator |   Level 4: Merging for 2 documents...
+2026-01-02 22:59:51 | INFO | src.core.batch_orchestrator |     Completed 5 merges
+2026-01-02 22:59:51 | INFO | src.core.batch_orchestrator |   Level 5: Merging for 2 documents...
+2026-01-02 23:00:00 | INFO | src.core.batch_orchestrator |     Completed 3 merges
+2026-01-02 23:00:00 | INFO | src.core.batch_orchestrator |   Level 6: Merging for 1 documents...
+2026-01-02 23:00:09 | INFO | src.core.batch_orchestrator |     Completed 1 merges
+2026-01-02 23:00:09 | INFO | src.core.batch_orchestrator | Batch processing complete: 10 trees built
+2026-01-02 23:00:09 | INFO | src.pipelines.batched | Phase 4: Scoring 10 documents...
+2026-01-02 23:00:09 | INFO | src.pipelines.batched |   Submitted 10 score requests...
+2026-01-02 23:00:13 | INFO | src.pipelines.batched | Phase 5: Computing baseline scores...
+2026-01-02 23:00:13 | INFO | src.pipelines.batched |   Submitted 10 baseline requests...
+2026-01-02 23:00:18 | INFO | src.pipelines.batched | Level-wise processing complete: 10/10 in 89.5s (0.1 samples/sec)
+
+         Level-Wise Batch Summary         
+┏━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┓
+┃ Metric               ┃           Value ┃
+┡━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━┩
+│ Total Tokens         │         336,033 │
+│ Prompt Tokens        │         246,678 │
+│ Completion Tokens    │          89,355 │
+│                      │                 │
+│ Wall Clock Time      │           89.5s │
+│                      │                 │
+│ Overall tok/s        │            3753 │
+│ Read tok/s           │            2755 │
+│ Write tok/s          │             998 │
+│                      │                 │
+│ Requests             │         197/198 │
+│ Failed               │               1 │
+│ Avg Latency          │          9801ms │
+└──────────────────────┴─────────────────┘
+
+2026-01-02 23:00:18 | INFO | src.core.batch_processor | Batch client stopped. Stats: BatchStats(reqs=197/198, tokens=336,033, tok/s=3753 [r:2755, w:998])
+2026-01-02 23:00:18 | INFO | __main__ | Train complete: 10/10 successful in 89.5s
+2026-01-02 23:00:18 | INFO | __main__ |   Throughput: 0.11 docs/sec
+2026-01-02 23:00:18 | INFO | __main__ | Val 5 documents (batched mode)...
+2026-01-02 23:00:18 | INFO | __main__ |   Concurrent docs: 20, Concurrent requests: 200
+2026-01-02 23:00:18 | INFO | src.pipelines.batched | Starting LEVEL-WISE batched processing of 5 documents
+2026-01-02 23:00:18 | INFO | src.core.model_detection | Auto-detected model: /mnt/data/models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8
+2026-01-02 23:00:18 | INFO | src.core.batch_orchestrator | Phase 1: Chunking 5 documents...
+2026-01-02 23:00:18 | INFO | src.core.batch_orchestrator |   Chunked 5 documents into 22 total chunks
+2026-01-02 23:00:18 | INFO | src.core.batch_orchestrator | Phase 2: Building leaf summaries...
+2026-01-02 23:00:18 | INFO | src.core.batch_orchestrator |   Submitting 22 leaf summarization tasks...
+2026-01-02 23:00:28 | INFO | src.core.batch_orchestrator |   Completed 22 leaf summaries
+2026-01-02 23:00:28 | INFO | src.core.batch_orchestrator | Phase 3: Building trees level-by-level...
+2026-01-02 23:00:28 | INFO | src.core.batch_orchestrator |   Level 1: Merging for 2 documents...
+2026-01-02 23:00:37 | INFO | src.core.batch_orchestrator |     Completed 9 merges
+2026-01-02 23:00:37 | INFO | src.core.batch_orchestrator |   Level 2: Merging for 2 documents...
+2026-01-02 23:00:47 | INFO | src.core.batch_orchestrator |     Completed 5 merges
+2026-01-02 23:00:47 | INFO | src.core.batch_orchestrator |   Level 3: Merging for 1 documents...
+2026-01-02 23:00:56 | INFO | src.core.batch_orchestrator |     Completed 2 merges
+2026-01-02 23:00:56 | INFO | src.core.batch_orchestrator |   Level 4: Merging for 1 documents...
+2026-01-02 23:01:05 | INFO | src.core.batch_orchestrator |     Completed 1 merges
+2026-01-02 23:01:05 | INFO | src.core.batch_orchestrator | Batch processing complete: 5 trees built
+2026-01-02 23:01:05 | INFO | src.pipelines.batched | Phase 4: Scoring 5 documents...
+2026-01-02 23:01:05 | INFO | src.pipelines.batched |   Submitted 5 score requests...
+2026-01-02 23:01:09 | INFO | src.pipelines.batched | Phase 5: Computing baseline scores...
+2026-01-02 23:01:09 | INFO | src.pipelines.batched |   Submitted 5 baseline requests...
+2026-01-02 23:01:13 | INFO | src.pipelines.batched | Level-wise processing complete: 5/5 in 55.3s (0.1 samples/sec)
+
+         Level-Wise Batch Summary         
+┏━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┓
+┃ Metric               ┃           Value ┃
+┡━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━┩
+│ Total Tokens         │          83,781 │
+│ Prompt Tokens        │          63,038 │
+│ Completion Tokens    │          20,743 │
+│                      │                 │
+│ Wall Clock Time      │           55.3s │
+│                      │                 │
+│ Overall tok/s        │            1516 │
+│ Read tok/s           │            1140 │
+│ Write tok/s          │             375 │
+│                      │                 │
+│ Requests             │           49/49 │
+│ Avg Latency          │          8324ms │
+└──────────────────────┴─────────────────┘
+
+2026-01-02 23:01:13 | INFO | src.core.batch_processor | Batch client stopped. Stats: BatchStats(reqs=49/49, tokens=83,781, tok/s=1516 [r:1140, w:375])
+2026-01-02 23:01:13 | INFO | __main__ | Val complete: 5/5 successful in 55.3s
+2026-01-02 23:01:13 | INFO | __main__ |   Throughput: 0.09 docs/sec
+2026-01-02 23:01:13 | INFO | __main__ | 
+============================================================
+2026-01-02 23:01:13 | INFO | __main__ | PHASE 1.5: OPS Tree Building with GenRM
+2026-01-02 23:01:13 | INFO | __main__ | ============================================================
+2026-01-02 23:01:13 | INFO | __main__ | Using task: document_analysis
+2026-01-02 23:01:13 | INFO | __main__ | Building OPS trees with GenRM validation...
+2026-01-02 23:01:13 | INFO | __main__ |   Summarizer model: /mnt/data/models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8
+2026-01-02 23:01:13 | INFO | __main__ |   GenRM judge on port 8001
+2026-01-02 23:01:13 | INFO | src.training.preference.genrm | Auto-detected GenRM model: /mnt/data/models/nvidia/Qwen3-Nemotron-235B-A22B-GenRM-NVFP4
+2026-01-02 23:01:13 | WARNING | src.preprocessing.tokenizer | Unknown model '/mnt/data/models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8', using cl100k_base encoding
+2026-01-02 23:01:13 | INFO | __main__ | Using 7 segments for tree building (skipped 3 unsuitable)
+2026-01-02 23:01:13 | INFO | __main__ |   Init prompt budget: 4000 tokens (doc + rubric + instructions)
+2026-01-02 23:01:13 | INFO | __main__ |   Building 7 init trees
+2026-01-02 23:01:13 | INFO | __main__ |   K candidates: 4

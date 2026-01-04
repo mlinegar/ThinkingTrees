@@ -251,30 +251,32 @@ class PreservationScorer(dspy.Module):
 
 
 def _build_preservation_score_prompt(
-    original_text: str,
     summary: str,
     task_context: str
 ):
-    """Build a prompt to score content preservation via pairwise comparison."""
+    """Build a prompt to score content preservation quality.
+
+    Note: For scoring the final summary without the original text, we evaluate
+    based on how well the summary appears to capture key information according
+    to the task context/rubric.
+    """
     return [
         {
             "role": "system",
             "content": (
-                "You are a content preservation evaluator for summarization systems. "
-                "Compare the original text against the summary to assess how well "
-                "key information has been preserved."
+                "You are a content quality evaluator for summarization systems. "
+                "Evaluate how well the summary captures key information based on "
+                "the task requirements."
             ),
         },
         {
             "role": "user",
             "content": (
                 f"{task_context}\n\n"
-                f"ORIGINAL TEXT:\n{original_text}\n\n"
                 f"SUMMARY:\n{summary}\n\n"
-                "Compare the summary against the original and provide:\n"
-                "SCORE: <0.0 to 1.0>\n"
-                "KEY_PRESERVED: <list key info preserved>\n"
-                "KEY_LOST: <list key info lost or distorted>\n"
+                "Evaluate this summary's quality and provide:\n"
+                "SCORE: <0.0 to 1.0> (1.0 = excellent quality)\n"
+                "KEY_ELEMENTS: <list key elements present>\n"
                 "REASONING: <detailed assessment>"
             ),
         },
@@ -301,6 +303,7 @@ class DocumentAnalysisTask(AbstractTask):
         self,
         error_threshold_high: float = 0.3,
         error_threshold_low: float = 0.1,
+        max_preservation_scorer_text_length: Optional[int] = None,
     ):
         """
         Initialize document analysis domain.
@@ -312,6 +315,7 @@ class DocumentAnalysisTask(AbstractTask):
         super().__init__()
         self.error_threshold_high = error_threshold_high
         self.error_threshold_low = error_threshold_low
+        self.max_preservation_scorer_text_length = max_preservation_scorer_text_length
 
         # Set up task configuration
         self._config = TaskConfig(
@@ -380,6 +384,64 @@ class DocumentAnalysisTask(AbstractTask):
         if with_feedback:
             return oracle_as_metric_with_feedback
         return oracle_as_metric
+
+    def create_trainset(self, results: List[Any]) -> List['dspy.Example']:
+        """
+        Create a DSPy trainset, optionally filtering to short documents.
+
+        Preservation scoring requires original text. To avoid context overflow,
+        we can subset to shorter originals based on a configurable token limit.
+        """
+        max_length = self.max_preservation_scorer_text_length
+        if not max_length:
+            return super().create_trainset(results)
+
+        from src.config.settings import load_settings
+        from src.preprocessing.tokenizer import TokenCounter
+
+        settings = load_settings()
+        chunking_cfg = settings.get("chunking", {})
+        model_name = chunking_cfg.get("model", "gpt-4")
+        counter = TokenCounter(model=model_name)
+
+        filtered_results = []
+        skipped = 0
+        total = len(results)
+
+        for result in results:
+            if result is None or getattr(result, "error", None):
+                continue
+
+            original_content = getattr(result, "original_content", None)
+            if not original_content:
+                metadata = getattr(result, "metadata", None)
+                if isinstance(metadata, dict):
+                    original_content = metadata.get("original_content")
+
+            if not original_content:
+                skipped += 1
+                continue
+
+            try:
+                token_count = counter.count(original_content)
+            except Exception:
+                token_count = len(original_content)
+
+            if token_count <= max_length:
+                filtered_results.append(result)
+            else:
+                skipped += 1
+
+        if skipped:
+            logger.info(
+                "DocumentAnalysisTask: skipped %d/%d results for preservation scoring "
+                "(max_tokens=%d)",
+                skipped,
+                total,
+                max_length,
+            )
+
+        return super().create_trainset(filtered_results)
 
     def create_prompt_builders(self) -> PromptBuilders:
         """Create prompt builders for document analysis tasks."""

@@ -2,14 +2,18 @@
 Document chunking for OPS tree construction.
 
 Thin wrapper around langextract's chunking with tiktoken token counting.
+Supports context-window-aware chunking via ContextWindowManager.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Iterator
+from typing import List, Iterator, Optional, Union, TYPE_CHECKING
 from pathlib import Path
 
 from langextract.chunking import ChunkIterator
 from langextract.core.tokenizer import RegexTokenizer
+
+if TYPE_CHECKING:
+    from src.config.context_window import ContextWindowManager
 
 
 @dataclass
@@ -46,29 +50,54 @@ class Chunker:
     """
     Chunks documents using langextract's sentence-aware chunking with tiktoken.
 
+    Supports two modes:
+    1. Direct max_tokens: Pass a specific token limit
+    2. Context-aware: Pass a ContextWindowManager to automatically calculate
+       safe chunk sizes based on context window allocation
+
     Example:
+        >>> # Direct mode
         >>> chunker = Chunker(max_tokens=2000)
         >>> chunks = chunker.chunk("Long document...")
-        >>> for chunk in chunks:
-        ...     print(f"Tokens: {chunk.token_count}")
+
+        >>> # Context-aware mode (recommended)
+        >>> from src.config.context_window import ContextWindowManager
+        >>> manager = ContextWindowManager(context_window=32768)
+        >>> chunker = Chunker(context_manager=manager)
+        >>> chunks = chunker.chunk("Long document...")
     """
 
     def __init__(
         self,
-        max_tokens: int = 2000,
+        max_tokens: Optional[int] = None,
         model: str = "gpt-4",
+        context_manager: Optional["ContextWindowManager"] = None,
+        reserved_for_output: Optional[int] = None,
     ):
         """
         Initialize the chunker.
 
         Args:
-            max_tokens: Maximum tokens per chunk
+            max_tokens: Maximum tokens per chunk. If None and context_manager
+                       is provided, calculated automatically.
             model: Model name for token counting (e.g., "gpt-4", "qwen3")
+            context_manager: Optional ContextWindowManager for context-aware
+                            chunk sizing. Takes precedence over max_tokens.
+            reserved_for_output: When using context_manager, tokens to reserve
+                                for output. Defaults to manager.max_output_tokens.
         """
-        self.max_tokens = max_tokens
         self.model = model
         self._token_counter = None
         self._tokenizer = RegexTokenizer()
+        self.context_manager = context_manager
+
+        # Calculate max_tokens from context_manager if provided
+        if context_manager is not None:
+            self.max_tokens = context_manager.get_chunk_size(reserved_for_output)
+        elif max_tokens is not None:
+            self.max_tokens = max_tokens
+        else:
+            self.max_tokens = 2000  # Default
 
     def _get_token_counter(self):
         """Lazy load token counter."""
@@ -186,52 +215,50 @@ def chunk_for_ops(
     if not text or not text.strip():
         return []
 
-    # Simple sentence-based chunking
-    # Split on sentence boundaries and group up to max_chars
+    # Sentence/paragraph-aware chunking with accurate character offsets
     import re
 
     if strategy == "paragraph":
-        # Split on double newlines
-        segments = re.split(r'\n\n+', text)
+        pattern = r'(?:[^\n]|\n(?!\n))+'
     else:
-        # Split on sentence endings
-        segments = re.split(r'(?<=[.!?])\s+', text)
+        pattern = r'[^.!?]+[.!?]?(?:\s+|$)'
+
+    segments = [
+        (match.start(), match.end())
+        for match in re.finditer(pattern, text)
+        if match.group(0).strip()
+    ]
 
     chunks = []
-    current_chunk = []
-    current_length = 0
-    current_start = 0
+    current_start = None
+    current_end = None
 
-    for segment in segments:
-        segment = segment.strip()
-        if not segment:
+    for start, end in segments:
+        if current_start is None:
+            current_start = start
+            current_end = end
             continue
 
-        segment_length = len(segment)
-
-        if current_length + segment_length + 1 > max_chars and current_chunk:
-            # Finalize current chunk
-            chunk_text = ' '.join(current_chunk)
+        if end - current_start > max_chars:
+            # Finalize current chunk using original text slice
+            chunk_text = text[current_start:current_end]
             chunks.append(TextChunk(
                 text=chunk_text,
                 start_char=current_start,
-                end_char=current_start + len(chunk_text),
+                end_char=current_end,
                 chunk_index=len(chunks),
             ))
-            current_start = current_start + len(chunk_text) + 1
-            current_chunk = []
-            current_length = 0
+            current_start = start
+            current_end = end
+        else:
+            current_end = end
 
-        current_chunk.append(segment)
-        current_length += segment_length + 1
-
-    # Don't forget the last chunk
-    if current_chunk:
-        chunk_text = ' '.join(current_chunk)
+    if current_start is not None and current_end is not None:
+        chunk_text = text[current_start:current_end]
         chunks.append(TextChunk(
             text=chunk_text,
             start_char=current_start,
-            end_char=current_start + len(chunk_text),
+            end_char=current_end,
             chunk_index=len(chunks),
         ))
 
@@ -243,5 +270,4 @@ def chunk_for_ops(
 # =============================================================================
 DocumentChunker = Chunker
 ParagraphChunker = Chunker  # Legacy name, Chunker handles paragraphs
-
 

@@ -1,0 +1,48 @@
+{
+  "evaluate.predict": {
+    "traces": [],
+    "train": [],
+    "demos": [],
+    "signature": {
+      "instructions": "Compare original vs summary to measure information preservation.\n\nEvaluates how well a summary preserves key information from the original,\naligned with OPS laws (sufficiency, merge consistency, idempotence).\nUses pairwise comparison between original and summary for accurate assessment.",
+      "fields": [
+        {
+          "prefix": "Original Text:",
+          "description": "Original document content to compare against"
+        },
+        {
+          "prefix": "Summary:",
+          "description": "Summary to evaluate for preservation quality"
+        },
+        {
+          "prefix": "Task Context:",
+          "description": "Evaluation criteria and domain context"
+        },
+        {
+          "prefix": "Reasoning:",
+          "description": "Detailed preservation assessment"
+        },
+        {
+          "prefix": "Score:",
+          "description": "Preservation score from 0.0 (info lost) to 1.0 (fully preserved)"
+        },
+        {
+          "prefix": "Key Preserved:",
+          "description": "Key information preserved in the summary"
+        },
+        {
+          "prefix": "Key Lost:",
+          "description": "Key information lost or distorted in the summary"
+        }
+      ]
+    },
+    "lm": null
+  },
+  "metadata": {
+    "dependency_versions": {
+      "python": "3.12",
+      "dspy": "3.0.4",
+      "cloudpickle": "3.1"
+    }
+  }
+}

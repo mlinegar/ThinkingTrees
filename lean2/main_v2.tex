@@ -1,0 +1,877 @@
+\documentclass[11pt]{article}
+
+% =============================================================================
+% Oracle-Preserving Hierarchical Summarization: Formalized Version
+% =============================================================================
+% This document presents the theory in a Lean-formalizable format.
+% All definitions use explicit type signatures; all proofs are term-style.
+
+% -----------------------------------------------------------------------------
+% Packages
+% -----------------------------------------------------------------------------
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{xcolor}
+\usepackage{stmaryrd}  % for \llbracket, \rrbracket
+
+% -----------------------------------------------------------------------------
+% Lean-like colors
+% -----------------------------------------------------------------------------
+\definecolor{keyword}{RGB}{133,89,191}
+\definecolor{type}{RGB}{56,127,175}
+\definecolor{comment}{RGB}{100,100,100}
+
+% -----------------------------------------------------------------------------
+% Theorem environments
+% -----------------------------------------------------------------------------
+\theoremstyle{definition}
+\newtheorem{axiomenv}{Axiom}
+\newtheorem{defnenv}{Definition}
+\newtheorem{exampleenv}{Example}
+
+\theoremstyle{plain}
+\newtheorem{lemenv}{Lemma}
+\newtheorem{thmenv}{Theorem}
+\newtheorem{corenv}{Corollary}
+\newtheorem{propenv}{Proposition}
+
+% -----------------------------------------------------------------------------
+% Lean-like macros
+% -----------------------------------------------------------------------------
+\newcommand{\kw}[1]{\textcolor{keyword}{\textbf{#1}}}
+\newcommand{\ty}[1]{\textcolor{type}{\mathsf{#1}}}
+\newcommand{\fn}[1]{\mathrm{#1}}
+\newcommand{\cmt}[1]{\textcolor{comment}{\text{-- #1}}}
+
+\newcommand{\lam}{\lambda\,}
+\newcommand{\all}{\forall\,}
+\newcommand{\ex}{\exists\,}
+\newcommand{\arr}{\to}
+\newcommand{\Arr}{\Rightarrow}
+\newcommand{\defeq}{:=}
+\newcommand{\pf}{:=\;}
+
+% Type shortcuts
+\newcommand{\Strings}{\ty{Strings}}
+\newcommand{\Y}{\ty{Y}}
+\newcommand{\A}{\ty{A}}
+\newcommand{\Rnn}{\mathbb{R}_{\geq 0}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\Prop}{\ty{Prop}}
+\newcommand{\Type}{\ty{Type}}
+\newcommand{\Dist}[1]{\ty{Dist}(#1)}
+
+% Function notation
+\newcommand{\fstar}{f^*}
+\newcommand{\dY}{d_{\Y}}
+\newcommand{\concat}{\oplus}
+\newcommand{\emptystr}{\varnothing}
+\newcommand{\Eg}{\mathbb{E}_g}
+\newcommand{\Egu}[1]{\mathbb{E}_g^{\downarrow #1}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Prob}{\mathbb{P}}
+
+% Reduction
+\newcommand{\reduce}{\fn{Reduce}_g}
+\newcommand{\ZR}{Z^{(R)}}
+
+% Semantic brackets for formal terms
+\newcommand{\sem}[1]{\llbracket #1 \rrbracket}
+
+\title{Oracle-Preserving Hierarchical Summarization\\[0.3em]
+\large Formalized for Lean}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+\newpage
+
+% =============================================================================
+\section{Primitive Types}
+\label{sec:types}
+% =============================================================================
+
+\begin{axiomenv}[String Space]
+\label{ax:strings}
+\begin{align*}
+&\Strings : \Type \\
+&\cmt{Countable type: Kleene closure over an alphabet}
+\end{align*}
+\end{axiomenv}
+
+\begin{axiomenv}[Oracle Output Space]
+\label{ax:Y}
+\begin{align*}
+&\Y : \Type \\
+&\cmt{Target space for task values}
+\end{align*}
+\end{axiomenv}
+
+\begin{axiomenv}[Action Space]
+\label{ax:A}
+\begin{align*}
+&\A : \Type \\
+&\cmt{Space of policy actions}
+\end{align*}
+\end{axiomenv}
+
+\begin{axiomenv}[Concatenation]
+\label{ax:concat}
+\begin{align*}
+&\concat : \Strings \arr \Strings \arr \Strings \\
+&\emptystr : \Strings \\[6pt]
+&\cmt{Free monoid structure:} \\
+&\fn{assoc} : \all (a\, b\, c : \Strings),\; (a \concat b) \concat c = a \concat (b \concat c) \\
+&\fn{left\_id} : \all (a : \Strings),\; \emptystr \concat a = a \\
+&\fn{right\_id} : \all (a : \Strings),\; a \concat \emptystr = a
+\end{align*}
+\end{axiomenv}
+
+\begin{axiomenv}[Task Metric]
+\label{ax:metric}
+\begin{align*}
+&\dY : \Y \arr \Y \arr \Rnn \\[6pt]
+&\cmt{Pseudometric axioms:} \\
+&\fn{refl} : \all (y : \Y),\; \dY(y, y) = 0 \\
+&\fn{symm} : \all (y_1\, y_2 : \Y),\; \dY(y_1, y_2) = \dY(y_2, y_1) \\
+&\fn{triangle} : \all (y_1\, y_2\, y_3 : \Y),\; \dY(y_1, y_3) \leq \dY(y_1, y_2) + \dY(y_2, y_3)
+\end{align*}
+\end{axiomenv}
+
+\begin{axiomenv}[Oracle Function]
+\label{ax:oracle}
+\begin{align*}
+&\fstar : \Strings \arr \Y \\
+&\cmt{Deterministic map from documents to task values}
+\end{align*}
+\end{axiomenv}
+
+% =============================================================================
+\section{Summarizers and Distortion}
+\label{sec:summarizer}
+% =============================================================================
+
+\begin{defnenv}[Summarizer]
+\label{def:summarizer}
+\begin{align*}
+&\ty{Summarizer} \defeq \Strings \arr \Dist{\Strings} \\[6pt]
+&\cmt{A summarizer is a stochastic map from strings to strings.} \\
+&\cmt{In discrete setting: finite support distribution over } \Strings
+\end{align*}
+\end{defnenv}
+
+\begin{defnenv}[Summarizer Expectation]
+\label{def:Eg}
+For $g : \ty{Summarizer}$ and $f : \Strings \arr \R$:
+\begin{align*}
+&\Eg[f(g(x))] \defeq \sum_{z \in \fn{support}(g(x))} \Prob_g[g(x) = z] \cdot f(z) \\[6pt]
+&\cmt{Expectation over $g$'s internal randomness, holding $x$ fixed}
+\end{align*}
+\end{defnenv}
+
+\begin{defnenv}[Oracle Distortion]
+\label{def:distortion}
+\begin{align*}
+&D : \Strings \arr \Strings \arr \Rnn \\
+&D(z, x) \defeq \dY(\fstar(z), \fstar(x)) \\[6pt]
+&\cmt{Task-space distance between oracle at $z$ and oracle at $x$}
+\end{align*}
+\end{defnenv}
+
+% =============================================================================
+\section{Reduction Trees}
+\label{sec:trees}
+% =============================================================================
+
+\begin{defnenv}[Binary Tree]
+\label{def:bintree}
+\begin{align*}
+&\kw{inductive}\; \ty{BinTree}\; (\alpha : \Type) : \Type \\
+&\quad | \; \fn{leaf} : \alpha \arr \ty{BinTree}\;\alpha \\
+&\quad | \; \fn{node} : \ty{BinTree}\;\alpha \arr \ty{BinTree}\;\alpha \arr \ty{BinTree}\;\alpha
+\end{align*}
+\end{defnenv}
+
+\begin{defnenv}[Realized String]
+\label{def:realized}
+\begin{align*}
+&S : \ty{BinTree}\;\Strings \arr \Strings \\
+&S(\fn{leaf}\; b) \defeq b \\
+&S(\fn{node}\; T_L\; T_R) \defeq S(T_L) \concat S(T_R) \\[6pt]
+&\cmt{Concatenates all leaves left-to-right}
+\end{align*}
+\end{defnenv}
+
+\begin{defnenv}[Hierarchical Reduction]
+\label{def:reduce}
+Given $g : \ty{Summarizer}$:
+\begin{align*}
+&\reduce : \ty{BinTree}\;\Strings \arr \Dist{\Strings} \\
+&\reduce(\fn{leaf}\; b) \defeq g(b) \\
+&\reduce(\fn{node}\; T_L\; T_R) \defeq g\big(\reduce(T_L) \concat \reduce(T_R)\big) \\[6pt]
+&\cmt{Recursively reduce children, concatenate, summarize}
+\end{align*}
+\end{defnenv}
+
+\begin{defnenv}[Multi-Round Reduction]
+\label{def:multiround}
+\begin{align*}
+&\ZR : \Strings \arr \N \arr \ty{BinTree}\;\Strings \arr \Dist{\Strings} \\
+&\ZR(x, 1, T) \defeq \reduce(\fn{root}(T)) \\
+&\ZR(x, R+1, T) \defeq g(\ZR(x, R, T)) \\[6pt]
+&\cmt{$R$ rounds of summarization; first reduces tree, then re-summarizes $R-1$ times}
+\end{align*}
+\end{defnenv}
+
+\begin{defnenv}[Tree Accessors]
+\label{def:accessors}
+\begin{align*}
+&\fn{root} : \ty{BinTree}\;\alpha \arr \ty{BinTree}\;\alpha \\
+&\fn{root}(T) \defeq T \\[6pt]
+&\fn{leaves} : \ty{BinTree}\;\alpha \arr \ty{List}\;\alpha \\
+&\fn{leaves}(\fn{leaf}\; b) \defeq [b] \\
+&\fn{leaves}(\fn{node}\; T_L\; T_R) \defeq \fn{leaves}(T_L) \mathbin{++} \fn{leaves}(T_R) \\[6pt]
+&\fn{internal\_nodes} : \ty{BinTree}\;\alpha \arr \ty{List}\;(\ty{BinTree}\;\alpha \times \ty{BinTree}\;\alpha) \\
+&\fn{internal\_nodes}(\fn{leaf}\; b) \defeq [] \\
+&\fn{internal\_nodes}(\fn{node}\; T_L\; T_R) \defeq [(T_L, T_R)] \mathbin{++} \fn{internal\_nodes}(T_L) \mathbin{++} \fn{internal\_nodes}(T_R)
+\end{align*}
+\end{defnenv}
+
+% =============================================================================
+\section{Local Laws}
+\label{sec:local_laws}
+% =============================================================================
+
+\begin{defnenv}[L1: Leaf Sufficiency]
+\label{def:L1}
+\begin{align*}
+&\fn{L1} : \ty{Summarizer} \arr \ty{BinTree}\;\Strings \arr \Prop \\
+&\fn{L1}(g, T) \defeq \all (b : \Strings),\; b \in \fn{leaves}(T) \Arr \Eg[\dY(\fstar(g(b)), \fstar(b))] = 0 \\[6pt]
+&\cmt{Single-pass summarization preserves oracle at each realized leaf}
+\end{align*}
+\end{defnenv}
+
+\begin{defnenv}[L2: Parentwise Compatibility]
+\label{def:L2}
+\begin{align*}
+&\fn{L2} : \ty{Summarizer} \arr \ty{BinTree}\;\Strings \arr \Prop \\
+&\fn{L2}(g, T) \defeq \all (T_L, T_R) \in \fn{internal\_nodes}(T),\; \\
+&\quad\quad \Egu{(T_L,T_R)}\Big[\dY\big(\fstar(g(\reduce(T_L) \concat \reduce(T_R))),\; \fstar(S(T_L) \concat S(T_R))\big)\Big] = 0 \\[6pt]
+&\cmt{Two routes to parent oracle agree: reduce-concat-summarize vs oracle of concat}
+\end{align*}
+\end{defnenv}
+
+\begin{defnenv}[L3: On-Range Idempotence]
+\label{def:L3}
+\begin{align*}
+&\fn{L3} : \ty{Summarizer} \arr \Prop \\
+&\fn{L3}(g) \defeq \all (Z : \Strings),\; Z \in \fn{range}(g) \Arr \Eg[\dY(\fstar(g(Z)), \fstar(Z)) \mid Z] = 0 \\[6pt]
+&\cmt{Re-summarizing on-range strings preserves oracle}
+\end{align*}
+\end{defnenv}
+
+% =============================================================================
+\section{Core Theorems}
+\label{sec:core}
+% =============================================================================
+
+\begin{lemenv}[Nodewise Preservation]
+\label{lem:nodewise}
+\begin{align*}
+&\fn{nodewise\_preservation} : \\
+&\quad \all (g : \ty{Summarizer})\; (T : \ty{BinTree}\;\Strings)\; (u : \ty{BinTree}\;\Strings), \\
+&\quad u \in \fn{subtrees}(T) \Arr \fn{L1}(g, T) \Arr \fn{L2}(g, T) \Arr \\
+&\quad \Egu{u}[D(\reduce(u), S(u))] = 0
+\end{align*}
+
+\textbf{Proof term:}
+\begin{align*}
+&\pf \lam g\; T\; u\; h_{\text{sub}}\; h_1\; h_2 \mapsto \\
+&\quad \ty{BinTree}.\fn{rec} \\
+&\quad\quad (\fn{leaf} := \lam b \mapsto h_1\; b\; (\fn{leaf\_in\_subtrees}\; h_{\text{sub}})) \\
+&\quad\quad (\fn{node} := \lam T_L\; T_R\; ih_L\; ih_R \mapsto \\
+&\quad\quad\quad \kw{calc}\; \Egu{(T_L,T_R)}[D(\reduce(\fn{node}\; T_L\; T_R), S(\fn{node}\; T_L\; T_R))] \\
+&\quad\quad\quad\quad = \Egu{(T_L,T_R)}[D(g(\reduce(T_L) \concat \reduce(T_R)), S(T_L) \concat S(T_R))] \\
+&\quad\quad\quad\quad\quad \cmt{by definition of $\reduce$} \\
+&\quad\quad\quad\quad = 0 \\
+&\quad\quad\quad\quad\quad \cmt{by $h_2$ applied at $(T_L, T_R)$}) \\
+&\quad\quad u
+\end{align*}
+\end{lemenv}
+
+\begin{thmenv}[One-Pass Preservation]
+\label{thm:onepass}
+\begin{align*}
+&\fn{one\_pass} : \\
+&\quad \all (g : \ty{Summarizer})\; (T : \ty{BinTree}\;\Strings)\; (x : \Strings), \\
+&\quad S(T) = x \Arr \fn{L1}(g, T) \Arr \fn{L2}(g, T) \Arr \\
+&\quad \Eg[D(\reduce(\fn{root}(T)), x)] = 0
+\end{align*}
+
+\textbf{Proof term:}
+\begin{align*}
+&\pf \lam g\; T\; x\; h_p\; h_1\; h_2 \mapsto \\
+&\quad \kw{have}\; h_{\text{root}} : \fn{root}(T) \in \fn{subtrees}(T) := \fn{root\_in\_subtrees} \\
+&\quad \kw{have}\; h_S : S(\fn{root}(T)) = x := h_p \\
+&\quad h_S \triangleright \fn{nodewise\_preservation}\; g\; T\; (\fn{root}(T))\; h_{\text{root}}\; h_1\; h_2
+\end{align*}
+\end{thmenv}
+
+\begin{corenv}[Schedule Invariance]
+\label{cor:schedule}
+\begin{align*}
+&\fn{schedule\_invariance} : \\
+&\quad \all (g : \ty{Summarizer})\; (T\; T' : \ty{BinTree}\;\Strings), \\
+&\quad \fn{leaves}(T) = \fn{leaves}(T') \Arr \\
+&\quad \fn{L1}(g, T) \Arr \fn{L2}(g, T) \Arr \fn{L1}(g, T') \Arr \fn{L2}(g, T') \Arr \\
+&\quad \Eg[D(\reduce(\fn{root}(T)), S(T))] = \Eg[D(\reduce(\fn{root}(T')), S(T'))]
+\end{align*}
+
+\textbf{Proof term:}
+\begin{align*}
+&\pf \lam g\; T\; T'\; h_l\; h_1\; h_2\; h_1'\; h_2' \mapsto \\
+&\quad \kw{have}\; h_S : S(T) = S(T') := \fn{leaves\_eq\_impl\_S\_eq}\; h_l \\
+&\quad \kw{calc}\; \Eg[D(\reduce(\fn{root}(T)), S(T))] \\
+&\quad\quad = 0 \quad\cmt{by $\fn{one\_pass}$} \\
+&\quad\quad = \Eg[D(\reduce(\fn{root}(T')), S(T'))] \quad\cmt{by $\fn{one\_pass}$ and $h_S$}
+\end{align*}
+\end{corenv}
+
+\begin{corenv}[Fold-of-Folds Invariance]
+\label{cor:folds}
+\begin{align*}
+&\fn{fold\_of\_folds} : \\
+&\quad \all (g : \ty{Summarizer})\; (T_{\text{comp}} : \ty{BinTree}\;\Strings)\; (x : \Strings), \\
+&\quad S(T_{\text{comp}}) = x \Arr \\
+&\quad \fn{L1}(g, T_{\text{comp}}) \Arr \fn{L2}(g, T_{\text{comp}}) \Arr \fn{L3}(g) \Arr \\
+&\quad \Eg[D(\reduce(\fn{root}(T_{\text{comp}})), x)] = 0
+\end{align*}
+
+\textbf{Proof term:}
+\begin{align*}
+&\pf \lam g\; T_{\text{comp}}\; x\; h_p\; h_1\; h_2\; h_3 \mapsto \\
+&\quad \fn{one\_pass}\; g\; T_{\text{comp}}\; x\; h_p\; h_1\; h_2
+\end{align*}
+\end{corenv}
+
+\begin{thmenv}[Multi-Round Preservation]
+\label{thm:multiround}
+\begin{align*}
+&\fn{multi\_round} : \\
+&\quad \all (g : \ty{Summarizer})\; (T : \ty{BinTree}\;\Strings)\; (x : \Strings)\; (R : \N), \\
+&\quad S(T) = x \Arr \fn{L1}(g, T) \Arr \fn{L2}(g, T) \Arr \fn{L3}(g) \Arr R \geq 1 \Arr \\
+&\quad \Eg[D(\ZR(x, R, T), x)] = 0
+\end{align*}
+
+\textbf{Proof term:}
+\begin{align*}
+&\pf \lam g\; T\; x\; R\; h_p\; h_1\; h_2\; h_3\; h_R \mapsto \\
+&\quad \N.\fn{rec} \\
+&\quad\quad (\fn{zero} := \fn{absurd}\; h_R\; (\fn{Nat.not\_succ\_le\_zero}\; 0)) \\
+&\quad\quad (\fn{succ} := \lam R'\; ih \mapsto \\
+&\quad\quad\quad \kw{calc}\; \Eg[D(\ZR(x, R'+1, T), x)] \\
+&\quad\quad\quad\quad = \Eg[D(g(\ZR(x, R', T)), x)] \quad\cmt{by definition} \\
+&\quad\quad\quad\quad \leq \Eg[D(g(\ZR(x, R', T)), \ZR(x, R', T))] \\
+&\quad\quad\quad\quad\quad + \Eg[D(\ZR(x, R', T), x)] \quad\cmt{triangle inequality} \\
+&\quad\quad\quad\quad = 0 + 0 \quad\cmt{by $h_3$ (on-range) and $ih$} \\
+&\quad\quad\quad\quad = 0) \\
+&\quad\quad R
+\end{align*}
+\end{thmenv}
+
+% =============================================================================
+\section{Score Transport}
+\label{sec:transport}
+% =============================================================================
+
+\begin{axiomenv}[Supervision Score]
+\label{ax:supervision}
+\begin{align*}
+&S^* : \Strings \times \A \arr \R \\
+&\cmt{Score function evaluating actions on documents}
+\end{align*}
+\end{axiomenv}
+
+\begin{axiomenv}[Conditional Factorization (CF)]
+\label{ax:CF}
+\begin{align*}
+&\fn{CF} : \ex (\bar{Q} : \Y \times \A \arr \R),\; \all (a : \A),\; \\
+&\quad \E[S^*(X, a) \mid X] = \bar{Q}(\fstar(X), a) \quad \text{a.s.} \\[6pt]
+&\cmt{Supervision depends on document only through oracle value}
+\end{align*}
+\end{axiomenv}
+
+\begin{defnenv}[Summary-Indexed Score]
+\label{def:SZ}
+\begin{align*}
+&S_Z : \Strings \times \A \arr \R \\
+&S_Z(Z, a) \defeq \E[S^*(X, a) \mid Z] \\[6pt]
+&\cmt{Conditional expectation of score given summary}
+\end{align*}
+\end{defnenv}
+
+\begin{lemenv}[Blackwell/Doob-Dynkin Score Transport]
+\label{lem:blackwell}
+\begin{align*}
+&\fn{blackwell\_transport} : \\
+&\quad \all (Z : \Strings)\; (a : \A), \\
+&\quad \sigma(\fstar(X)) \subseteq \sigma(Z) \Arr \\
+&\quad \E[S^*(X, a)] = \E[S_Z(Z, a)] = \E[\bar{Q}(\fstar(X), a)]
+\end{align*}
+
+\textbf{Proof term:}
+\begin{align*}
+&\pf \lam Z\; a\; h_\sigma \mapsto \\
+&\quad \kw{have}\; h_1 : \E[S^*(X, a)] = \E[\E[S^*(X, a) \mid X]] := \fn{tower\_property} \\
+&\quad \kw{have}\; h_2 : \E[\E[S^*(X, a) \mid X]] = \E[\bar{Q}(\fstar(X), a)] := \fn{CF}.\fn{choose\_spec} \\
+&\quad \kw{have}\; h_3 : \E[S_Z(Z, a)] = \E[\E[S^*(X, a) \mid Z]] = \E[S^*(X, a)] := \fn{tower\_property} \\
+&\quad \langle h_1.\fn{trans}\; h_2,\; h_3.\fn{symm} \rangle
+\end{align*}
+\end{lemenv}
+
+% =============================================================================
+\section{Direct Preference Optimization}
+\label{sec:dpo}
+% =============================================================================
+
+\begin{defnenv}[Logistic Function]
+\label{def:sigmoid}
+\begin{align*}
+&\sigma : \R \arr (0, 1) \\
+&\sigma(t) \defeq \frac{1}{1 + e^{-t}}
+\end{align*}
+\end{defnenv}
+
+\begin{axiomenv}[Bradley-Terry-Luce Preferences]
+\label{ax:BTL}
+\begin{align*}
+&\fn{BTL} : \all (x : \Strings)\; (a_w\; a_\ell : \A), \\
+&\quad \Prob(a_w \succ a_\ell \mid X = x) = \sigma\big(\beta \cdot (R_{\fstar(x)}(a_w) - R_{\fstar(x)}(a_\ell))\big) \\[6pt]
+&\cmt{Preference probability depends on document only through $\fstar(x)$} \\
+&\cmt{$R_y : \A \arr \R$ is per-oracle reward family; $\beta > 0$ is temperature}
+\end{align*}
+\end{axiomenv}
+
+\begin{defnenv}[Policy Type]
+\label{def:policy}
+\begin{align*}
+&\ty{Policy} \defeq \A \arr \Strings \arr [0, 1] \\
+&\cmt{$\pi(a \mid x)$ is probability of action $a$ given input $x$}
+\end{align*}
+\end{defnenv}
+
+\begin{defnenv}[DPO Loss]
+\label{def:dpo_loss}
+\begin{align*}
+&\mathcal{L}_{\text{DPO}} : \ty{Policy} \arr \ty{Policy} \arr \R \\
+&\mathcal{L}_{\text{DPO}}(\pi, \pi_{\text{ref}}) \defeq \\
+&\quad -\E_{(X, a_w, a_\ell)}\Big[\log \sigma\Big(\beta \cdot \Big(\log\frac{\pi(a_w \mid X)}{\pi_{\text{ref}}(a_w \mid X)} - \log\frac{\pi(a_\ell \mid X)}{\pi_{\text{ref}}(a_\ell \mid X)}\Big)\Big)\Big]
+\end{align*}
+\end{defnenv}
+
+\begin{defnenv}[Oracle-Measurable Policy]
+\label{def:oracle_meas}
+\begin{align*}
+&\fn{OracleMeasurable} : \ty{Policy} \arr \Prop \\
+&\fn{OracleMeasurable}(\pi) \defeq \all (x\; x' : \Strings), \\
+&\quad \dY(\fstar(x), \fstar(x')) = 0 \Arr \all (a : \A),\; \pi(a \mid x) = \pi(a \mid x')
+\end{align*}
+\end{defnenv}
+
+\begin{defnenv}[Policy-Lipschitz Log-Ratio]
+\label{def:policy_lip}
+\begin{align*}
+&\fn{PolicyLipschitz} : \ty{Policy} \arr \ty{Policy} \arr \Rnn \arr \Prop \\
+&\fn{PolicyLipschitz}(\pi, \pi_{\text{ref}}, L) \defeq \all (a : \A)\; (y\; y' : \Y), \\
+&\quad \Big|\log\frac{\pi(a \mid y)}{\pi_{\text{ref}}(a \mid y)} - \log\frac{\pi(a \mid y')}{\pi_{\text{ref}}(a \mid y')}\Big| \leq L \cdot \dY(y, y')
+\end{align*}
+\end{defnenv}
+
+\begin{defnenv}[Reward-Lipschitz]
+\label{def:reward_lip}
+\begin{align*}
+&\fn{RewardLipschitz} : (\Y \arr \A \arr \R) \arr \Rnn \arr \Prop \\
+&\fn{RewardLipschitz}(R, L) \defeq \all (a : \A)\; (y\; y' : \Y), \\
+&\quad |R(y, a) - R(y', a)| \leq L \cdot \dY(y, y')
+\end{align*}
+\end{defnenv}
+
+\begin{defnenv}[Oracle-Indexed Pair Generator]
+\label{def:pair_gen}
+\begin{align*}
+&\fn{OracleIndexedPairGen} : \Prop \\
+&\fn{OracleIndexedPairGen} \defeq \\
+&\quad \all (x\; x' : \Strings),\; \dY(\fstar(x), \fstar(x')) = 0 \Arr \\
+&\quad\quad \fn{Law}(a_w, a_\ell \mid X = x) = \fn{Law}(a_w, a_\ell \mid X = x')
+\end{align*}
+\end{defnenv}
+
+\begin{thmenv}[Exact DPO Equivalence]
+\label{thm:dpo_exact}
+\begin{align*}
+&\fn{dpo\_exact} : \\
+&\quad \all (\pi_{\text{ref}} : \ty{Policy})\; (R : \N)\; (T : \ty{BinTree}\;\Strings), \\
+&\quad (\all X,\; D(\ZR(X, R, T), X) = 0) \Arr \\
+&\quad \fn{OracleMeasurable}(\pi_{\text{ref}}) \Arr \\
+&\quad \fn{OracleIndexedPairGen} \Arr \\
+&\quad \fn{argmin}_\pi\; \mathcal{L}_{\text{DPO}}^X(\pi, \pi_{\text{ref}}) = \fn{argmin}_\pi\; \mathcal{L}_{\text{DPO}}^Z(\pi, \pi_{\text{ref}})
+\end{align*}
+
+\textbf{Proof term:}
+\begin{align*}
+&\pf \lam \pi_{\text{ref}}\; R\; T\; h_{\text{pres}}\; h_{\text{meas}}\; h_{\text{pair}} \mapsto \\
+&\quad \kw{have}\; h_Y : \fstar(\ZR(X, R, T)) = \fstar(X) \;\text{a.s.} := \\
+&\quad\quad \fn{zero\_dist\_impl\_eq}\; h_{\text{pres}} \\
+&\quad \kw{have}\; h_{\text{same\_law}} : \all Y\; a_w\; a_\ell,\; \\
+&\quad\quad \fn{Law}^X(Y, a_w, a_\ell) = \fn{Law}^Z(Y, a_w, a_\ell) := \\
+&\quad\quad \lam Y\; a_w\; a_\ell \mapsto h_{\text{pres}}.\fn{trans}\; h_{\text{pair}} \\
+&\quad \kw{have}\; h_{\text{logit}} : \all \pi,\; \fn{OracleMeasurable}(\pi) \Arr \\
+&\quad\quad \Lambda(X; a_w, a_\ell) = \Lambda(\fstar(X); a_w, a_\ell) := \\
+&\quad\quad \lam \pi\; h_m \mapsto h_{\text{meas}}.\fn{trans}\; h_m \\
+&\quad \fn{funext}\; (\lam \pi \mapsto h_{\text{same\_law}}.\fn{trans}\; h_{\text{logit}})
+\end{align*}
+\end{thmenv}
+
+\begin{thmenv}[DPO Gap Bound]
+\label{thm:dpo_gap}
+\begin{align*}
+&\fn{dpo\_gap} : \\
+&\quad \all (\pi\; \pi_{\text{ref}} : \ty{Policy})\; (R : \N)\; (\Delta_R : \Rnn)\; (T : \ty{BinTree}\;\Strings), \\
+&\quad \Delta_R = \E[D(\ZR(X, R, T), X)] \Arr \\
+&\quad \fn{OracleMeasurable}(\pi) \Arr \fn{OracleMeasurable}(\pi_{\text{ref}}) \Arr \\[6pt]
+&\quad \big(\fn{PolicyLipschitz}(\pi, \pi_{\text{ref}}, L_\pi) \Arr |\mathcal{L}^X(\pi) - \mathcal{L}^Z(\pi)| \leq 2 \cdot \beta \cdot L_\pi \cdot \Delta_R\big) \\
+&\quad \land \\
+&\quad \big(\fn{RewardLipschitz}(R, L_R) \Arr |\mathcal{L}^X(\pi) - \mathcal{L}^Z(\pi)| \leq 2 \cdot L_R \cdot \Delta_R\big)
+\end{align*}
+
+\textbf{Proof term:}
+\begin{align*}
+&\pf \lam \pi\; \pi_{\text{ref}}\; R\; \Delta_R\; T\; h_\Delta\; h_{m\pi}\; h_{m\text{ref}} \mapsto \\
+&\quad \kw{have}\; h_{\text{log\_lip}} : \all t,\; |\sigma'(t)| \leq 1 := \fn{logistic\_derivative\_bound} \\
+&\quad \langle \\
+&\quad\quad \lam h_{L\pi} \mapsto \\
+&\quad\quad\quad \kw{calc}\; |\mathcal{L}^X - \mathcal{L}^Z| \\
+&\quad\quad\quad\quad \leq \E[|\varphi(\Lambda^X) - \varphi(\Lambda^Z)|] \quad\cmt{by Jensen} \\
+&\quad\quad\quad\quad \leq \E[|\Lambda^X - \Lambda^Z|] \quad\cmt{by $h_{\text{log\_lip}}$} \\
+&\quad\quad\quad\quad \leq \E[\beta \cdot L_\pi \cdot (\dY(y, y') + \dY(y, y'))] \quad\cmt{by $h_{L\pi}$ twice} \\
+&\quad\quad\quad\quad = 2 \cdot \beta \cdot L_\pi \cdot \E[\dY(\fstar(X), \fstar(Z))] \\
+&\quad\quad\quad\quad = 2 \cdot \beta \cdot L_\pi \cdot \Delta_R \quad\cmt{by $h_\Delta$}, \\
+&\quad\quad \lam h_{LR} \mapsto \\
+&\quad\quad\quad \kw{calc}\; |\mathcal{L}^X - \mathcal{L}^Z| \\
+&\quad\quad\quad\quad \leq \E[|\Lambda^X - \Lambda^Z|] \quad\cmt{as above} \\
+&\quad\quad\quad\quad \leq \E[2 \cdot L_R \cdot \dY(y, y')] \quad\cmt{by $h_{LR}$} \\
+&\quad\quad\quad\quad = 2 \cdot L_R \cdot \Delta_R \quad\cmt{by $h_\Delta$} \\
+&\quad \rangle
+\end{align*}
+\end{thmenv}
+
+% =============================================================================
+\section{Audit Bounds}
+\label{sec:audit}
+% =============================================================================
+
+\begin{defnenv}[Violation Rates]
+\label{def:violation}
+Given tree $T$ with $N$ leaves and $M = N - 1$ internal nodes:
+\begin{align*}
+&p_{\text{leaf}} : \Rnn \\
+&p_{\text{leaf}} \defeq \Eg[\mathbf{1}\{\dY(\fstar(g(B)), \fstar(B)) > 0\}] \\[6pt]
+&p_{\text{merge}} : \Rnn \\
+&p_{\text{merge}} \defeq \Egu{u}[\mathbf{1}\{\dY(\fstar(g(\reduce(T_L) \concat \reduce(T_R))), \fstar(S(T_L) \concat S(T_R))) > 0\}] \\[6pt]
+&p_{\text{idemp}} : \Rnn \quad\cmt{only for $R \geq 2$} \\
+&p_{\text{idemp}} \defeq \Eg[\mathbf{1}\{\dY(\fstar(g(\ZR(x, 1, T))), \fstar(\ZR(x, 1, T))) > 0\}]
+\end{align*}
+\end{defnenv}
+
+\begin{defnenv}[Deviation Event]
+\label{def:deviation}
+\begin{align*}
+&\mathcal{E}_R : \ty{Event} \\
+&\mathcal{E}_R \defeq \{\dY(\fstar(\ZR(X, R, T)), \fstar(X)) > 0\}
+\end{align*}
+\end{defnenv}
+
+\begin{thmenv}[Union Bound for Distortion]
+\label{thm:union}
+\begin{align*}
+&\fn{union\_bound} : \\
+&\quad \all (N\; M\; R : \N)\; (T : \ty{BinTree}\;\Strings), \\
+&\quad |\fn{leaves}(T)| = N \Arr |\fn{internal\_nodes}(T)| = M \Arr M = N - 1 \Arr \\[6pt]
+&\quad \Delta_1 \leq N \cdot p_{\text{leaf}} + M \cdot p_{\text{merge}} \\
+&\quad \land \\
+&\quad (R \geq 2 \Arr \Delta_R \leq N \cdot p_{\text{leaf}} + M \cdot p_{\text{merge}} + (R - 1) \cdot p_{\text{idemp}})
+\end{align*}
+
+\textbf{Proof term:}
+\begin{align*}
+&\pf \lam N\; M\; R\; T\; h_N\; h_M\; h_{NM} \mapsto \\
+&\quad \kw{have}\; h_{\text{contain}} : \mathcal{E}_R \subseteq \\
+&\quad\quad \bigcup_{b \in \fn{leaves}(T)} \{\dY(\fstar(g(b)), \fstar(b)) > 0\} \\
+&\quad\quad \cup \bigcup_{u \in \fn{internal}(T)} \{\dY(\fstar(g(\reduce(T_L) \concat \reduce(T_R))), \fstar(S(u))) > 0\} \\
+&\quad\quad \cup \bigcup_{t=1}^{R-1} \{\dY(\fstar(g(\ZR(x, t, T))), \fstar(\ZR(x, t, T))) > 0\} := \\
+&\quad\quad \fn{contrapositive\_of\_theorems\_1\_and\_2} \\
+&\quad \kw{have}\; h_{\text{union}} : \Prob(\mathcal{E}_R) \leq \\
+&\quad\quad N \cdot p_{\text{leaf}} + M \cdot p_{\text{merge}} + (R-1) \cdot p_{\text{idemp}} := \\
+&\quad\quad \fn{union\_bound\_applied}\; h_{\text{contain}} \\
+&\quad \kw{have}\; h_{\text{Delta}} : \Delta_R = \E[\dY(\cdot, \cdot)] \leq \Prob(\mathcal{E}_R) := \\
+&\quad\quad \fn{indicator\_dominates\_bounded\_metric} \\
+&\quad \langle h_{\text{Delta}}.\fn{trans}\; h_{\text{union}},\; \lam h_{R2} \mapsto h_{\text{Delta}}.\fn{trans}\; h_{\text{union}} \rangle
+\end{align*}
+\end{thmenv}
+
+% =============================================================================
+\section{Global Variant}
+\label{sec:global}
+% =============================================================================
+
+\begin{axiomenv}[A1: Global Sufficiency]
+\label{ax:A1}
+\begin{align*}
+&\fn{A1} : \all (z : \Strings),\; \dY(\fstar(g(z)), \fstar(z)) = 0 \\[6pt]
+&\cmt{Stronger than L1: holds for all strings, not just realized leaves}
+\end{align*}
+\end{axiomenv}
+
+\begin{axiomenv}[A2: Global Compatibility]
+\label{ax:A2}
+\begin{align*}
+&\fn{A2} : \all (u\; v : \Strings),\; \dY(\fstar(u \concat v), \fstar(g(g(u) \concat g(v)))) = 0 \\[6pt]
+&\cmt{Two-route identity holds for all pairs}
+\end{align*}
+\end{axiomenv}
+
+\begin{axiomenv}[A3: Merge Depends on Oracle]
+\label{ax:A3}
+\begin{align*}
+&\fn{A3} : \ex (M : \Y \arr \Y \arr \Y), \\
+&\quad (\all (u\; v : \Strings),\; \dY(\fstar(g(g(u) \concat g(v))), M(\fstar(g(u)), \fstar(g(v)))) = 0) \\
+&\quad \land \\
+&\quad (\all (y_1\; y_1'\; y_2\; y_2' : \Y), \\
+&\quad\quad \dY(y_1, y_1') = 0 \Arr \dY(y_2, y_2') = 0 \Arr \dY(M(y_1, y_2), M(y_1', y_2')) = 0)
+\end{align*}
+\end{axiomenv}
+
+\begin{propenv}[Concatenation Congruence]
+\label{prop:congruence}
+\begin{align*}
+&\fn{congruence} : \\
+&\quad \all (a\; a'\; b\; b' : \Strings), \\
+&\quad \dY(\fstar(a), \fstar(a')) = 0 \Arr \dY(\fstar(b), \fstar(b')) = 0 \Arr \\
+&\quad \dY(\fstar(a \concat b), \fstar(a' \concat b')) = 0
+\end{align*}
+
+\textbf{Proof term:}
+\begin{align*}
+&\pf \lam a\; a'\; b\; b'\; h_a\; h_b \mapsto \\
+&\quad \kw{let}\; U := g(g(a) \concat g(b)) \\
+&\quad \kw{let}\; U' := g(g(a') \concat g(b')) \\
+&\quad \kw{calc}\; \dY(\fstar(a \concat b), \fstar(a' \concat b')) \\
+&\quad\quad \leq \dY(\fstar(a \concat b), \fstar(U)) \\
+&\quad\quad\quad + \dY(\fstar(U), \fstar(U')) \\
+&\quad\quad\quad + \dY(\fstar(U'), \fstar(a' \concat b')) \quad\cmt{triangle$_3$} \\
+&\quad\quad = 0 + 0 + 0 \quad\cmt{by:} \\
+&\quad\quad\quad \kw{have}\; h_I : \dY(\fstar(a \concat b), \fstar(U)) = 0 := \fn{A2}\; a\; b \\
+&\quad\quad\quad \kw{have}\; h_{III} : \dY(\fstar(U'), \fstar(a' \concat b')) = 0 := (\fn{A2}\; a'\; b').\fn{symm} \\
+&\quad\quad\quad \kw{have}\; h_{ga} : \dY(\fstar(g(a)), \fstar(g(a'))) = 0 := \\
+&\quad\quad\quad\quad \kw{calc}\; \dY(\fstar(g(a)), \fstar(g(a'))) \\
+&\quad\quad\quad\quad\quad \leq \dY(\fstar(g(a)), \fstar(a)) + \dY(\fstar(a), \fstar(a')) + \dY(\fstar(a'), \fstar(g(a'))) \\
+&\quad\quad\quad\quad\quad = 0 + 0 + 0 \quad\cmt{by A1, $h_a$, A1} \\
+&\quad\quad\quad \kw{have}\; h_{gb} : \dY(\fstar(g(b)), \fstar(g(b'))) = 0 := \text{analogous} \\
+&\quad\quad\quad \kw{have}\; h_{II} : \dY(\fstar(U), \fstar(U')) = 0 := \\
+&\quad\quad\quad\quad \fn{A3}.\fn{choose\_spec}.2\; h_{ga}\; h_{gb} \\
+&\quad\quad\quad \langle h_I, h_{II}, h_{III} \rangle \\
+&\quad\quad = 0
+\end{align*}
+\end{propenv}
+
+\begin{defnenv}[Oracle Merge Operation]
+\label{def:odot}
+\begin{align*}
+&(\odot) : \Y \arr \Y \arr \Y \\
+&y_1 \odot y_2 \defeq \fn{A3}.\fn{choose}\; y_1\; y_2
+\end{align*}
+\end{defnenv}
+
+\begin{propenv}[Merge Associativity]
+\label{prop:assoc}
+\begin{align*}
+&\fn{merge\_assoc} : \\
+&\quad \all (y_1\; y_2\; y_3 : \Y), \\
+&\quad y_1 \in \fstar(\fn{range}(g)) \Arr y_2 \in \fstar(\fn{range}(g)) \Arr y_3 \in \fstar(\fn{range}(g)) \Arr \\
+&\quad \dY((y_1 \odot y_2) \odot y_3,\; y_1 \odot (y_2 \odot y_3)) = 0
+\end{align*}
+
+\textbf{Proof term:}
+\begin{align*}
+&\pf \lam y_1\; y_2\; y_3\; \langle a, h_a \rangle\; \langle b, h_b \rangle\; \langle c, h_c \rangle \mapsto \\
+&\quad \kw{have}\; h_1 : y_1 = \fstar(g(a)) := h_a \\
+&\quad \kw{have}\; h_2 : y_2 = \fstar(g(b)) := h_b \\
+&\quad \kw{have}\; h_3 : y_3 = \fstar(g(c)) := h_c \\
+&\quad \kw{have}\; h_{\text{lhs}} : \dY((y_1 \odot y_2) \odot y_3, \fstar((a \concat b) \concat c)) = 0 := \\
+&\quad\quad \fn{A3\_and\_A2\_applied} \\
+&\quad \kw{have}\; h_{\text{rhs}} : \dY(y_1 \odot (y_2 \odot y_3), \fstar(a \concat (b \concat c))) = 0 := \\
+&\quad\quad \fn{A3\_and\_A2\_applied} \\
+&\quad \kw{have}\; h_{\text{assoc}} : (a \concat b) \concat c = a \concat (b \concat c) := \Strings.\fn{concat\_assoc} \\
+&\quad \kw{calc}\; \dY((y_1 \odot y_2) \odot y_3, y_1 \odot (y_2 \odot y_3)) \\
+&\quad\quad \leq \dY((y_1 \odot y_2) \odot y_3, \fstar((a \concat b) \concat c)) \\
+&\quad\quad\quad + \dY(\fstar(a \concat (b \concat c)), y_1 \odot (y_2 \odot y_3)) \\
+&\quad\quad = 0 + 0 \quad\cmt{by $h_{\text{lhs}}$, $h_{\text{assoc}} \triangleright h_{\text{rhs}}$} \\
+&\quad\quad = 0
+\end{align*}
+\end{propenv}
+
+\begin{propenv}[Merge Identity]
+\label{prop:identity}
+\begin{align*}
+&\fn{identity} : \\
+&\quad \all (y : \Y),\; y \in \fstar(\fn{range}(g)) \Arr \\
+&\quad \dY(\fstar(g(\emptystr)) \odot y, y) = 0 \;\land\; \dY(y \odot \fstar(g(\emptystr)), y) = 0
+\end{align*}
+
+\textbf{Proof term:}
+\begin{align*}
+&\pf \lam y\; \langle a, h_a \rangle \mapsto \\
+&\quad \kw{have}\; h_L : \emptystr \concat a = a := \Strings.\fn{empty\_concat} \\
+&\quad \kw{have}\; h_R : a \concat \emptystr = a := \Strings.\fn{concat\_empty} \\
+&\quad \langle \fn{A2\_A3\_applied}\; h_L\; h_a,\; \fn{A2\_A3\_applied}\; h_R\; h_a \rangle
+\end{align*}
+\end{propenv}
+
+% =============================================================================
+\section{Existence Results}
+\label{sec:existence}
+% =============================================================================
+
+\begin{propenv}[Canonical Representative]
+\label{prop:canonical}
+\begin{align*}
+&\fn{canonical\_rep} : \\
+&\quad \ex (g_{\text{can}} : \Strings \arr \Strings), \\
+&\quad (\all (x : \Strings),\; \dY(\fstar(g_{\text{can}}(x)), \fstar(x)) = 0) \\
+&\quad \land \\
+&\quad (\all (z : \Strings),\; z \in \fn{range}(g_{\text{can}}) \Arr g_{\text{can}}(z) = z)
+\end{align*}
+
+\textbf{Proof term:}
+\begin{align*}
+&\pf \\
+&\quad \kw{have}\; h_{\text{ord}} : \fn{TotalOrder}(\Strings) := \Strings.\fn{countable\_impl\_well\_orderable} \\
+&\quad \kw{let}\; c : \Y \arr \Strings := \lam y \mapsto \fn{min}_{\leq}\{x \mid \fstar(x) = y\} \\
+&\quad \kw{let}\; g_{\text{can}} := \lam x \mapsto c(\fstar(x)) \\
+&\quad \langle g_{\text{can}}, \\
+&\quad\quad \langle \lam x \mapsto \\
+&\quad\quad\quad \kw{have} : \fstar(c(\fstar(x))) = \fstar(x) := \fn{min\_in\_fiber} \\
+&\quad\quad\quad \fn{eq\_impl\_zero\_dist}\; \kw{this}, \\
+&\quad\quad\quad \lam z\; \langle x, h_x \rangle \mapsto \\
+&\quad\quad\quad\quad \kw{have} : z = c(\fstar(x)) := h_x \\
+&\quad\quad\quad\quad \kw{have} : g_{\text{can}}(z) = c(\fstar(z)) = c(\fstar(c(\fstar(x)))) := \fn{rfl} \\
+&\quad\quad\quad\quad \kw{have} : \fstar(c(\fstar(x))) = \fstar(x) := \fn{min\_in\_fiber} \\
+&\quad\quad\quad\quad \kw{have} : c(\fstar(c(\fstar(x)))) = c(\fstar(x)) := \fn{congr\_arg}\; c\; \kw{this} \\
+&\quad\quad\quad\quad \kw{this}.\fn{trans}\; h_x.\fn{symm} \rangle \rangle
+\end{align*}
+\end{propenv}
+
+\begin{propenv}[Compact Encoding]
+\label{prop:encoding}
+\begin{align*}
+&\fn{compact\_encoding} : \\
+&\quad (\ex (\fn{enc} : \Y \arr \Strings), \\
+&\quad\quad \fn{Injective}(\fn{enc}) \land \fn{BoundedLength}(\fn{enc}) \land (\all (y : \Y),\; \fstar(\fn{enc}(y)) = y)) \\
+&\quad \Arr \\
+&\quad \ex (g_{\text{enc}} : \Strings \arr \Strings), \\
+&\quad\quad (\all (x : \Strings),\; \dY(\fstar(g_{\text{enc}}(x)), \fstar(x)) = 0) \\
+&\quad\quad \land \\
+&\quad\quad (\all (z : \Strings),\; z \in \fn{range}(g_{\text{enc}}) \Arr g_{\text{enc}}(z) = z)
+\end{align*}
+
+\textbf{Proof term:}
+\begin{align*}
+&\pf \lam \langle \fn{enc}, h_{\text{inj}}, h_{\text{bnd}}, h_{\text{dec}} \rangle \mapsto \\
+&\quad \kw{let}\; g_{\text{enc}} := \lam x \mapsto \fn{enc}(\fstar(x)) \\
+&\quad \langle g_{\text{enc}}, \\
+&\quad\quad \langle \lam x \mapsto \\
+&\quad\quad\quad \kw{calc}\; \dY(\fstar(g_{\text{enc}}(x)), \fstar(x)) \\
+&\quad\quad\quad\quad = \dY(\fstar(\fn{enc}(\fstar(x))), \fstar(x)) \quad\cmt{by definition} \\
+&\quad\quad\quad\quad = \dY(\fstar(x), \fstar(x)) \quad\cmt{by $h_{\text{dec}}$} \\
+&\quad\quad\quad\quad = 0 \quad\cmt{by reflexivity}, \\
+&\quad\quad\quad \lam z\; \langle x, h_x \rangle \mapsto \\
+&\quad\quad\quad\quad \kw{have}\; h_z : z = \fn{enc}(\fstar(x)) := h_x \\
+&\quad\quad\quad\quad \kw{have}\; h_{\text{fz}} : \fstar(z) = \fstar(x) := h_{\text{dec}}(\fstar(x)) \triangleright h_z.\fn{subst} \\
+&\quad\quad\quad\quad \kw{calc}\; g_{\text{enc}}(z) \\
+&\quad\quad\quad\quad\quad = \fn{enc}(\fstar(z)) \quad\cmt{by definition} \\
+&\quad\quad\quad\quad\quad = \fn{enc}(\fstar(x)) \quad\cmt{by $h_{\text{fz}}$} \\
+&\quad\quad\quad\quad\quad = z \quad\cmt{by $h_z.\fn{symm}$} \rangle \rangle
+\end{align*}
+\end{propenv}
+
+% =============================================================================
+\section{Counterexample: Stability is Substantive}
+\label{sec:counterexample}
+% =============================================================================
+
+\begin{axiomenv}[Special Tokens]
+\label{ax:tokens}
+\begin{align*}
+&\fn{POS} : \Strings \\
+&\fn{NEG} : \Strings \\
+&h_{\text{pos}} : \fstar(\fn{POS}) = 1 \\
+&h_{\text{neg}} : \fstar(\fn{NEG}) = 0 \\
+&h_{\text{distinct}} : \fn{POS} \neq \fn{NEG}
+\end{align*}
+\end{axiomenv}
+
+\begin{defnenv}[Bad Summarizer]
+\label{def:g_bad}
+\begin{align*}
+&g_{\text{bad}} : \Strings \arr \Strings \\
+&g_{\text{bad}}(x) \defeq \\
+&\quad \kw{if}\; x = \fn{POS} \lor x = \fn{NEG}\; \kw{then}\; \fn{NEG} \\
+&\quad \kw{else if}\; \fstar(x) = 1\; \kw{then}\; \fn{POS} \\
+&\quad \kw{else}\; \fn{NEG}
+\end{align*}
+\end{defnenv}
+
+\begin{exampleenv}[Stability Counterexample]
+\label{ex:stability}
+\begin{align*}
+&\fn{stability\_counterexample} : \\
+&\quad (\all (b : \Strings),\; b \neq \fn{POS} \Arr b \neq \fn{NEG} \Arr \dY(\fstar(g_{\text{bad}}(b)), \fstar(b)) = 0) \\
+&\quad \land \\
+&\quad \dY(\fstar(g_{\text{bad}}(\fn{POS})), \fstar(\fn{POS})) > 0
+\end{align*}
+
+\textbf{Proof term:}
+\begin{align*}
+&\pf \langle \\
+&\quad \lam b\; h_{\text{ne\_pos}}\; h_{\text{ne\_neg}} \mapsto \\
+&\quad\quad \kw{cases}\; \fn{Classical.em}\; (\fstar(b) = 1) \\
+&\quad\quad | \fn{inl}\; h_1 \Rightarrow \\
+&\quad\quad\quad \kw{have} : g_{\text{bad}}(b) = \fn{POS} := \fn{if\_neg\_then\_if\_pos}\; h_{\text{ne\_pos}}\; h_{\text{ne\_neg}}\; h_1 \\
+&\quad\quad\quad \kw{calc}\; \dY(\fstar(g_{\text{bad}}(b)), \fstar(b)) \\
+&\quad\quad\quad\quad = \dY(\fstar(\fn{POS}), \fstar(b)) \quad\cmt{by above} \\
+&\quad\quad\quad\quad = \dY(1, 1) \quad\cmt{by $h_{\text{pos}}$, $h_1$} \\
+&\quad\quad\quad\quad = 0 \\
+&\quad\quad | \fn{inr}\; h_0 \Rightarrow \\
+&\quad\quad\quad \kw{have}\; h_{\text{fstar}} : \fstar(b) = 0 := \fn{binary\_dichotomy}\; h_0 \\
+&\quad\quad\quad \kw{have} : g_{\text{bad}}(b) = \fn{NEG} := \fn{if\_neg\_then\_if\_neg}\; h_{\text{ne\_pos}}\; h_{\text{ne\_neg}}\; h_0 \\
+&\quad\quad\quad \kw{calc}\; \dY(\fstar(g_{\text{bad}}(b)), \fstar(b)) \\
+&\quad\quad\quad\quad = \dY(\fstar(\fn{NEG}), \fstar(b)) \quad\cmt{by above} \\
+&\quad\quad\quad\quad = \dY(0, 0) \quad\cmt{by $h_{\text{neg}}$, $h_{\text{fstar}}$} \\
+&\quad\quad\quad\quad = 0, \\
+&\quad \kw{calc}\; \dY(\fstar(g_{\text{bad}}(\fn{POS})), \fstar(\fn{POS})) \\
+&\quad\quad = \dY(\fstar(\fn{NEG}), \fstar(\fn{POS})) \quad\cmt{by definition, $\fn{POS} = \fn{POS}$} \\
+&\quad\quad = \dY(0, 1) \quad\cmt{by $h_{\text{neg}}$, $h_{\text{pos}}$} \\
+&\quad\quad = 1 \quad\cmt{Hamming distance} \\
+&\quad\quad > 0 \quad\cmt{by $\N.\fn{succ\_pos}$} \\
+&\rangle
+\end{align*}
+\end{exampleenv}
+
+\vspace{1em}
+\noindent\textbf{Interpretation.} This example shows that $g_{\text{bad}}$ satisfies L1 on all leaves $b \notin \{\fn{POS}, \fn{NEG}\}$, but fails L3 (on-range idempotence) because $\fn{POS} \in \fn{range}(g_{\text{bad}})$ yet $g_{\text{bad}}(\fn{POS}) = \fn{NEG}$, which has different oracle value. Consequently, multiple rounds of summarization can flip the task label even when single-pass preservation holds.
+
+\end{document}

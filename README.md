@@ -53,7 +53,8 @@ ThinkingTrees/
 │   │   ├── strategy.py            # SummarizationStrategy protocol + registry
 │   │   ├── scoring.py             # OracleScore, ScoringOracle
 │   │   ├── ops_checks.py          # CheckType, CheckConfig
-│   │   ├── batch_processor.py     # Level-wise batch processing
+│   │   ├── batch_processor.py     # Async batched LLM client + request pooling
+│   │   ├── batch_orchestrator.py  # Global pipelined tree batching across documents
 │   │   └── output_parser.py       # Case-insensitive LLM output parsing
 │   │
 │   ├── tree/                      # Tree building and verification

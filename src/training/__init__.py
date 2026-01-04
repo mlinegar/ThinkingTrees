@@ -19,53 +19,52 @@ Preference Collection:
     - PreferenceCollectionConfig: Configuration dataclasses
 """
 
-# Pipeline entry points
-from src.training.run_pipeline import run_training_pipeline, main
+from importlib import import_module
+from typing import Any
 
-# Judge optimization (single pass)
-from src.training.judge_optimization import (
-    JudgeOptimizer,
-    JudgeOptimizationConfig,
-    create_judge_trainset,
-    SkippedReasons,
-    optimize_judge_from_preferences,
-    load_optimized_judge,
-)
+_LAZY_ATTRS = {
+    "run_training_pipeline": ("src.training.run_pipeline", "run_training_pipeline"),
+    "main": ("src.training.run_pipeline", "main"),
+    "JudgeOptimizer": ("src.training.judge_optimization", "JudgeOptimizer"),
+    "JudgeOptimizationConfig": ("src.training.judge_optimization", "JudgeOptimizationConfig"),
+    "create_judge_trainset": ("src.training.judge_optimization", "create_judge_trainset"),
+    "SkippedReasons": ("src.training.judge_optimization", "SkippedReasons"),
+    "optimize_judge_from_preferences": ("src.training.judge_optimization", "optimize_judge_from_preferences"),
+    "load_optimized_judge": ("src.training.judge_optimization", "load_optimized_judge"),
+    "TournamentOfTournamentsTrainer": ("src.training.tournament_loop", "TournamentOfTournamentsTrainer"),
+    "ToTConfig": ("src.training.tournament_loop", "ToTConfig"),
+    "ToTResult": ("src.training.tournament_loop", "ToTResult"),
+    "run_tournament_of_tournaments": ("src.training.tournament_loop", "run_tournament_of_tournaments"),
+    "collect_preferences": ("src.training.collect_preferences", "main"),
+    "collect_preferences_main": ("src.training.collect_preferences", "main"),
+    "PreferenceDataSource": ("src.training.data_sources", "PreferenceDataSource"),
+    "DirectDocumentSource": ("src.training.data_sources", "DirectDocumentSource"),
+    "LabeledTreeSource": ("src.training.data_sources", "LabeledTreeSource"),
+    "SyntheticDataSource": ("src.training.data_sources", "SyntheticDataSource"),
+    "DataSourceExample": ("src.training.data_sources", "DataSourceExample"),
+    "create_data_source": ("src.training.data_sources", "create_data_source"),
+    "PreferenceCollectionConfig": ("src.training.preference_config", "PreferenceCollectionConfig"),
+    "JudgeType": ("src.training.preference_config", "JudgeType"),
+    "DataSourceType": ("src.training.preference_config", "DataSourceType"),
+    "ServerConfig": ("src.training.preference_config", "ServerConfig"),
+    "GenerationSettings": ("src.training.preference_config", "GenerationSettings"),
+    "JudgeSettings": ("src.training.preference_config", "JudgeSettings"),
+    "DataSourceSettings": ("src.training.preference_config", "DataSourceSettings"),
+}
 
-# Tournament of Tournaments (full iterative loop)
-from src.training.tournament_loop import (
-    TournamentOfTournamentsTrainer,
-    ToTConfig,
-    ToTResult,
-    run_tournament_of_tournaments,
-)
 
-# Unified preference collection
-from src.training.collect_preferences import main as collect_preferences_main
+def __getattr__(name: str) -> Any:
+    """Lazily import training symbols to avoid side-effect imports."""
+    module_info = _LAZY_ATTRS.get(name)
+    if module_info is None:
+        raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
+    module_path, attr_name = module_info
+    module = import_module(module_path)
+    return getattr(module, attr_name)
 
-# Alias for backward compatibility
-collect_preferences = collect_preferences_main
 
-# Data sources
-from src.training.data_sources import (
-    PreferenceDataSource,
-    DirectDocumentSource,
-    LabeledTreeSource,
-    SyntheticDataSource,
-    DataSourceExample,
-    create_data_source,
-)
-
-# Preference config
-from src.training.preference_config import (
-    PreferenceCollectionConfig,
-    JudgeType,
-    DataSourceType,
-    ServerConfig,
-    GenerationSettings,
-    JudgeSettings,
-    DataSourceSettings,
-)
+def __dir__() -> list[str]:
+    return sorted(set(globals()).union(_LAZY_ATTRS))
 
 __all__ = [
     'run_training_pipeline',

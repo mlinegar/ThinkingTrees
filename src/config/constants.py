@@ -32,6 +32,16 @@ DEFAULT_MAX_TOKENS = 16384
 DEFAULT_CHUNK_TOKENS = 2000
 DEFAULT_MAX_INIT_PROMPT_TOKENS = 4000
 
+# =============================================================================
+# CONTEXT WINDOW ALLOCATION
+# =============================================================================
+# Percentages of context window for input/output/safety margin.
+# These ensure input + output never exceeds the model's context window.
+DEFAULT_CONTEXT_WINDOW = 32768
+DEFAULT_INPUT_FRACTION = 0.60       # 60% for input (prompts, content)
+DEFAULT_OUTPUT_FRACTION = 0.35      # 35% for output (generation)
+DEFAULT_SAFETY_MARGIN = 0.05        # 5% buffer for safety
+
 
 # =============================================================================
 # TIMEOUTS (in seconds)

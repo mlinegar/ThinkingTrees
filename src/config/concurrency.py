@@ -88,7 +88,7 @@ class ConcurrencyConfig:
     precache_max_workers: int = 256
 
     # ==========================================================================
-    # Timeouts
+    # Timeouts - Operational
     # ==========================================================================
 
     # Base timeout for leaf summarization (5 minutes).
@@ -111,6 +111,42 @@ class ConcurrencyConfig:
 
     # Timeout per document processing (seconds)
     document_timeout: float = 600.0  # 10 minutes
+
+    # ==========================================================================
+    # Timeouts - Async Cleanup
+    # These control how async tasks are cleaned up to prevent task pileup
+    # ==========================================================================
+
+    # Timeout for waiting on task cancellation during cleanup
+    # Used when close() is called on async clients
+    task_cancel_timeout: float = 30.0
+
+    # Timeout for waiting on session cleanup (aiohttp)
+    session_close_timeout: float = 10.0
+
+    # Timeout for awaiting response after submit()
+    # Used by AsyncBatchLLMClient.await_response() and similar
+    await_response_timeout: float = 600.0  # 10 minutes
+
+    # Timeout for GenRM requests (larger model = slower)
+    genrm_request_timeout: float = 600.0  # 10 minutes
+
+    # Batch fill timeout (how long to wait for batch to fill before sending)
+    # Lower values = lower latency, higher values = better batching
+    batch_fill_timeout: float = 0.1  # 100ms
+
+    # ==========================================================================
+    # Retry Settings
+    # These control automatic retry behavior for failed documents
+    # ==========================================================================
+
+    # Maximum number of retry attempts for failed documents
+    # Set to 0 to disable retries
+    document_max_retries: int = 2
+
+    # Delay in seconds between retry attempts
+    # Helps avoid hammering the server when errors are transient
+    document_retry_delay: float = 1.0
 
     # ==========================================================================
     # Computed properties

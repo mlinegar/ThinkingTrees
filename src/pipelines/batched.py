@@ -176,14 +176,19 @@ class BatchedPipelineConfig:
                     score=None,
                     audit=None,
                 )
+        if self.use_levelwise_batching is not None:
+            self.use_global_batching = self.use_levelwise_batching
 
     # DSPy module support (for training/optimization mode)
     # When set, uses DSPy modules instead of raw prompts
     use_dspy_modules: bool = False
 
-    # Level-wise batching (recommended for maximum throughput)
-    # When True, processes all documents level-by-level for better batching
-    use_levelwise_batching: bool = True
+    # Global pipelined batching (recommended for maximum throughput)
+    # When True, processes all documents with a global dependency-aware pipeline
+    use_global_batching: bool = True
+
+    # Legacy alias (deprecated) - set this to override use_global_batching
+    use_levelwise_batching: Optional[bool] = None
 
 
 # =============================================================================
@@ -267,6 +272,7 @@ class BatchedDocPipeline:
 
         result = DocumentResult(
             doc_id=doc_id,
+            original_content=sample.text,
             reference_score=_extract_reference_score(sample),
             original_length=len(sample.text),
             metadata=_extract_metadata(sample),
@@ -349,6 +355,7 @@ class BatchedDocPipeline:
                     # Create error result
                     results[idx] = DocumentResult(
                         doc_id=sample.doc_id,
+                        original_content=sample.text,
                         error="Timeout after 600s"
                     )
                 except Exception as e:
@@ -356,6 +363,7 @@ class BatchedDocPipeline:
                     logger.error(f"Error processing {sample.doc_id}: {e} (failed {failed}/{len(samples)})")
                     results[idx] = DocumentResult(
                         doc_id=sample.doc_id,
+                        original_content=sample.text,
                         error=str(e)
                     )
 
@@ -385,6 +393,7 @@ class BatchedDocPipeline:
 
         result = DocumentResult(
             doc_id=doc_id,
+            original_content=sample.text,
             reference_score=_extract_reference_score(sample),
             original_length=len(sample.text),
             metadata=_extract_metadata(sample),
@@ -487,6 +496,7 @@ class BatchedDocPipeline:
 
         result = DocumentResult(
             doc_id=doc_id,
+            original_content=sample.text,
             reference_score=_extract_reference_score(sample),
             original_length=len(sample.text),
             metadata=_extract_metadata(sample),
@@ -557,8 +567,8 @@ class BatchedDocPipeline:
         """
         Process multiple documents with full batching.
 
-        By default uses level-wise batching for maximum throughput.
-        Set config.use_levelwise_batching=False for per-document processing.
+        By default uses global pipelined batching for maximum throughput.
+        Set config.use_global_batching=False for per-document processing.
 
         Args:
             samples: List of document samples
@@ -568,8 +578,8 @@ class BatchedDocPipeline:
         Returns:
             List of DocumentResults
         """
-        # Use level-wise batching by default for better throughput
-        if self.config.use_levelwise_batching:
+        # Use global pipelined batching by default for better throughput
+        if self.config.use_global_batching:
             # Convert simple callback to phase-aware callback
             phase_callback = None
             if progress_callback:
@@ -578,7 +588,7 @@ class BatchedDocPipeline:
                     if phase == "chunk":
                         progress_callback(completed, total)
 
-            return await self.process_batch_levelwise_async(
+            return await self.process_batch_global_async(
                 samples, phase_callback, show_progress
             )
 
@@ -685,24 +695,22 @@ class BatchedDocPipeline:
         """Get all processed results."""
         return self._results
 
-    async def process_batch_levelwise_async(
+    async def process_batch_global_async(
         self,
         samples: List[DocumentSample],
         progress_callback: Optional[Callable[[str, int, int], None]] = None,
         show_progress: Optional[bool] = None,
     ) -> List[DocumentResult]:
         """
-        Process documents using level-wise batching for maximum throughput.
+        Process documents using global pipelined batching for maximum throughput.
 
-        This method processes ALL documents level-by-level:
+        This method processes ALL documents together:
         1. Chunks ALL documents
         2. Submits ALL leaf summaries together
-        3. Awaits ALL responses
-        4. Submits ALL level-1 merges together
-        5. Continues until all trees are complete
-        6. Scores ALL documents together
+        3. Schedules merges globally as soon as dependencies are ready
+        4. Scores ALL documents together
 
-        This ensures vLLM sees the largest possible batches at each tree level.
+        This keeps the LLM server fed with ready work across docs and levels.
 
         Args:
             samples: List of document samples
@@ -712,7 +720,7 @@ class BatchedDocPipeline:
         Returns:
             List of DocumentResults
         """
-        logger.info(f"Starting LEVEL-WISE batched processing of {len(samples)} documents")
+        logger.info(f"Starting GLOBAL pipelined processing of {len(samples)} documents")
         start_time = time.time()
 
         use_progress = show_progress if show_progress is not None else self.config.show_progress
@@ -743,14 +751,20 @@ class BatchedDocPipeline:
         sample_by_id = {get_doc_id(s): s for s in samples}
 
         async with client:
-            # Phase 1: Build all trees level-wise using BatchTreeOrchestrator
+            # Phase 1: Build all trees using global pipelined BatchTreeOrchestrator
             strategy = BatchedStrategy(
                 client=client,
                 summarize_prompt_fn=self.config.prompt_builders.summarize,
                 merge_prompt_fn=self.config.prompt_builders.merge,
                 max_tokens=self.config.max_tokens_summary,
             )
-            config = BuildConfig(max_chunk_chars=self.config.max_chunk_chars)
+            config = BuildConfig(
+                max_chunk_chars=self.config.max_chunk_chars,
+                pipelined=True,
+                max_concurrent_requests=self.config.max_concurrent_requests,
+                task_cancel_timeout=self.config.concurrency.task_cancel_timeout,
+                document_retry_delay=self.config.concurrency.document_retry_delay,
+            )
             orchestrator = BatchTreeOrchestrator(strategy=strategy, config=config)
 
             build_results = await orchestrator.process_documents(
@@ -843,8 +857,13 @@ class BatchedDocPipeline:
                 original_length = len(sample.text) if sample else 0
                 final_summary = build_result.tree.final_summary or ""
 
+                metadata = _extract_metadata(sample) if sample else {}
+                if build_result.tree.metadata.get("tree_plan"):
+                    metadata["tree_plan"] = build_result.tree.metadata["tree_plan"]
+
                 result = DocumentResult(
                     doc_id=doc_id,
+                    original_content=sample.text if sample else None,
                     reference_score=_extract_reference_score(sample) if sample else None,
                     original_length=original_length,
                     tree_height=build_result.tree.height,
@@ -858,23 +877,36 @@ class BatchedDocPipeline:
                     chunks=build_result.chunks_created,
                     leaf_summaries=leaf_summaries,
                     level_history=None,  # Not available from BuildResult
-                    metadata=_extract_metadata(sample) if sample else {},
+                    metadata=metadata,
                 )
                 results.append(result)
 
             elapsed = time.time() - start_time
             logger.info(
-                f"Level-wise processing complete: {len(results)}/{len(samples)} in "
+                f"Global pipelined processing complete: {len(results)}/{len(samples)} in "
                 f"{elapsed:.1f}s ({len(samples)/elapsed:.1f} samples/sec)"
             )
 
             if use_progress:
-                display_batch_summary(client.stats, title="Level-Wise Batch Summary")
+                display_batch_summary(client.stats, title="Global Pipelined Batch Summary")
             else:
                 logger.info(f"LLM stats: {client.stats}")
 
             self._results.extend(results)
             return results
+
+    async def process_batch_levelwise_async(
+        self,
+        samples: List[DocumentSample],
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
+        show_progress: Optional[bool] = None,
+    ) -> List[DocumentResult]:
+        """
+        Backward-compatible alias for process_batch_global_async().
+
+        Note: Despite the name, this uses global pipelined batching by default.
+        """
+        return await self.process_batch_global_async(samples, progress_callback, show_progress)
 
 
 # =============================================================================

@@ -1,0 +1,6 @@
+{
+  "round": 1,
+  "metric_before": 0.5,
+  "metric_after": 0.5,
+  "optimizer_used": "labeled_fewshot"
+}

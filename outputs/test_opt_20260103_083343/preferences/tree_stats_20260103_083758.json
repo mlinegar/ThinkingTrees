@@ -1,0 +1,57 @@
+{
+  "n_trees": 8,
+  "n_preferences": 0,
+  "n_demos": 32,
+  "init_prompt_token_limit": 4000,
+  "k_candidates": 4,
+  "tree_summaries": [
+    {
+      "doc_id": "42320_197905_chunk3",
+      "height": 3,
+      "node_count": 9,
+      "leaf_count": 5
+    },
+    {
+      "doc_id": "42320_197905_chunk0",
+      "height": 3,
+      "node_count": 9,
+      "leaf_count": 5
+    },
+    {
+      "doc_id": "21420_196103_chunk1",
+      "height": 3,
+      "node_count": 9,
+      "leaf_count": 5
+    },
+    {
+      "doc_id": "42320_197905_chunk4",
+      "height": 3,
+      "node_count": 9,
+      "leaf_count": 5
+    },
+    {
+      "doc_id": "14620_201904",
+      "height": 0,
+      "node_count": 1,
+      "leaf_count": 1
+    },
+    {
+      "doc_id": "95021_202312",
+      "height": 0,
+      "node_count": 1,
+      "leaf_count": 1
+    },
+    {
+      "doc_id": "42320_197905_chunk2",
+      "height": 3,
+      "node_count": 9,
+      "leaf_count": 5
+    },
+    {
+      "doc_id": "42320_197905_chunk1",
+      "height": 3,
+      "node_count": 9,
+      "leaf_count": 5
+    }
+  ]
+}

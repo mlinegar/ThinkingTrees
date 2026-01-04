@@ -48,6 +48,14 @@ from src.training.preference.genrm import (
     is_genrm_error,
 )
 
+# GenRM Batching
+from src.training.preference.genrm_batch import (
+    AsyncBatchGenRMClient,
+    GenRMComparisonRequest,
+    GenRMBatchStats,
+    create_genrm_batch_client,
+)
+
 __all__ = [
     # Types
     "PreferenceDerivationResult",
@@ -77,4 +85,9 @@ __all__ = [
     "GenRMJudge",
     "GenRMResult",
     "is_genrm_error",
+    # GenRM Batching
+    "AsyncBatchGenRMClient",
+    "GenRMComparisonRequest",
+    "GenRMBatchStats",
+    "create_genrm_batch_client",
 ]

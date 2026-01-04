@@ -28,6 +28,7 @@ from src.core.data_models import (
 from src.preprocessing.chunker import TextChunk, DocumentChunker, chunk_for_ops as chunk
 from src.core.strategy import SummarizationStrategy, TournamentStrategy
 from src.core.protocols import format_merge_input, Summarizer
+from src.core.async_utils import gather_with_cleanup
 
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,14 @@ class BuildConfig:
     # Tournament settings (used by TournamentStrategy)
     k: int = 4  # Number of candidates for tournament selection
 
+    # Execution mode
+    pipelined: bool = True  # Use pipelined execution (submit merges as dependencies complete)
+
+    # Concurrency and cleanup
+    max_concurrent_requests: int = 200
+    task_cancel_timeout: float = 30.0
+    document_retry_delay: float = 1.0
+
     # Debug settings
     verbose: bool = False
 
@@ -269,8 +278,11 @@ class TreeBuilder:
         if not leaves:
             raise ValueError("No leaf nodes created")
 
-        # Build tree bottom-up
-        tree = await self._build_tree_from_leaves(leaves, rubric, errors)
+        # Build tree bottom-up (pipelined or level-wise based on config)
+        if self.config.pipelined:
+            tree = await self._build_tree_pipelined(leaves, rubric, errors)
+        else:
+            tree = await self._build_tree_from_leaves(leaves, rubric, errors)
 
         # Collect preferences if strategy supports it (e.g., TournamentStrategy)
         preferences = []
@@ -348,8 +360,8 @@ class TreeBuilder:
             for i, chunk_obj in enumerate(chunks)
         ]
 
-        # Await all leaf summarizations in parallel
-        results = await asyncio.gather(*leaf_tasks, return_exceptions=True)
+        # Await all leaf summarizations in parallel (with cleanup on cancellation)
+        results = await gather_with_cleanup(leaf_tasks, return_exceptions=True)
 
         # Sort by index and extract nodes
         valid_results = []
@@ -411,8 +423,8 @@ class TreeBuilder:
                 for idx, left, right in pairs
             ]
 
-            # Await all merges in parallel
-            results = await asyncio.gather(*merge_tasks)
+            # Await all merges in parallel (with cleanup on cancellation)
+            results = await gather_with_cleanup(merge_tasks, return_exceptions=False)
 
             # Sort by index and build next level
             results = sorted(results, key=lambda x: x[0])
@@ -452,6 +464,153 @@ class TreeBuilder:
             summary=summary,
             node_id=node_id
         )
+
+    async def _build_tree_pipelined(
+        self,
+        leaves: List[Node],
+        rubric: str,
+        errors: List[str],
+    ) -> Tree:
+        """
+        Build tree with pipelined execution - submit merges as soon as children ready.
+
+        Unlike _build_tree_from_leaves which waits for each level to complete,
+        this method submits merges as soon as their dependencies are satisfied.
+        This reduces latency by allowing work to overlap.
+
+        Pattern: Uses asyncio.wait(FIRST_COMPLETED) to process completions
+        and submit newly-ready work immediately.
+        """
+        if len(leaves) == 1:
+            return Tree(root=leaves[0], rubric=rubric)
+
+        # Build merge dependency graph upfront
+        @dataclass
+        class MergeTask:
+            id: int
+            level: int
+            left_idx: int   # Index into leaves (level 0) or merge ID (higher levels)
+            right_idx: int
+            left_is_merge: bool = False  # True if left_idx refers to a merge result
+            right_is_merge: bool = False
+
+        # Pre-compute all merges needed
+        merges: Dict[int, MergeTask] = {}
+        merge_id = 0
+
+        # Level 0: pair up leaves
+        current_refs: List[tuple[int, bool]] = [(i, False) for i in range(len(leaves))]  # (idx, is_merge)
+        level = 0
+
+        while len(current_refs) > 1:
+            level += 1
+            next_refs = []
+
+            for i in range(0, len(current_refs), 2):
+                if i + 1 < len(current_refs):
+                    left_idx, left_is_merge = current_refs[i]
+                    right_idx, right_is_merge = current_refs[i + 1]
+
+                    merges[merge_id] = MergeTask(
+                        id=merge_id,
+                        level=level,
+                        left_idx=left_idx,
+                        right_idx=right_idx,
+                        left_is_merge=left_is_merge,
+                        right_is_merge=right_is_merge,
+                    )
+                    next_refs.append((merge_id, True))
+                    merge_id += 1
+                else:
+                    # Odd node carries forward
+                    next_refs.append(current_refs[i])
+
+            current_refs = next_refs
+
+        # Execute with pipelining
+        completed: Dict[int, Node] = {}  # merge_id -> resulting Node
+        pending: Dict[int, asyncio.Task] = {}  # merge_id -> task
+
+        async def execute_merge(m: MergeTask) -> tuple[int, Node]:
+            """Execute a single merge and return (merge_id, result_node)."""
+            # Get left node
+            if m.left_is_merge:
+                left_node = completed[m.left_idx]
+            else:
+                left_node = leaves[m.left_idx]
+
+            # Get right node
+            if m.right_is_merge:
+                right_node = completed[m.right_idx]
+            else:
+                right_node = leaves[m.right_idx]
+
+            try:
+                merged = await self._merge_nodes(left_node, right_node, rubric, m.level)
+                return m.id, merged
+            except Exception as e:
+                error_msg = f"Pipelined merge {m.id} failed: {e}"
+                logger.error(error_msg)
+                errors.append(error_msg)
+                raise
+
+        def is_ready(m: MergeTask) -> bool:
+            """Check if a merge's dependencies are satisfied."""
+            if m.left_is_merge and m.left_idx not in completed:
+                return False
+            if m.right_is_merge and m.right_idx not in completed:
+                return False
+            return True
+
+        # Submit all initially ready merges (level 1 - leaf pairs)
+        for m in merges.values():
+            if is_ready(m) and m.id not in pending:
+                pending[m.id] = asyncio.create_task(execute_merge(m))
+
+        if self.config.verbose:
+            logger.info(f"Pipelined build: {len(merges)} total merges, "
+                       f"{len(pending)} initially ready")
+
+        try:
+            while pending:
+                # Wait for any task to complete
+                done, _ = await asyncio.wait(
+                    pending.values(),
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                for task in done:
+                    merge_id_result, result_node = await task
+                    completed[merge_id_result] = result_node
+                    del pending[merge_id_result]
+
+                    if self.config.verbose:
+                        logger.debug(f"Merge {merge_id_result} complete, "
+                                    f"{len(completed)}/{len(merges)} done")
+
+                    # Check for newly ready merges
+                    for m in merges.values():
+                        if is_ready(m) and m.id not in pending and m.id not in completed:
+                            pending[m.id] = asyncio.create_task(execute_merge(m))
+
+        finally:
+            # Cancel remaining tasks on exception
+            if pending:
+                logger.debug(f"Cleaning up {len(pending)} pending pipelined merge tasks...")
+                for task in pending.values():
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*pending.values(), return_exceptions=True)
+
+        # Get final result - the last merge completed
+        if completed:
+            final_id = max(completed.keys())
+            root = completed[final_id]
+        else:
+            # Shouldn't happen, but handle gracefully
+            root = leaves[0]
+
+        return Tree(root=root, rubric=rubric)
 
     def get_stats(self) -> dict:
         """Get build statistics."""
@@ -583,3 +742,6 @@ def build_test_tree(num_leaves: int = 4) -> Tree:
 
     result = asyncio.run(_build())
     return result.tree
+
+# Backwards compatibility alias
+AsyncTreeBuilder = TreeBuilder

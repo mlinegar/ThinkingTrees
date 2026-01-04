@@ -109,6 +109,9 @@ servers:
 # Available tasks: document_analysis, scoring (+ domain-specific like manifesto_rile)
 tasks:
   default: "document_analysis"
+  document_analysis:
+    # Max original-text tokens for PreservationScorer inputs.
+    max_preservation_scorer_text_length: 4096
 
 # Dataset Configuration
 # Datasets define where documents come from (e.g., manifesto corpus, JSONL)
@@ -134,15 +137,15 @@ llm:
 generation:
   summarizer:
     temperature: 0.5
-    max_tokens: 16384
+    max_tokens: 4096
     candidate_temperatures: [0.3, 0.5, 0.7, 0.9]
   oracle:
-    temperature: 0.3
-    max_tokens: 16384
+    temperature: 0.1
+    max_tokens: 4096
   genrm_judge:
     temperature: 0.6
     top_p: 0.95
-    max_tokens: 16384
+    max_tokens: 4096
   comparison_judge:
     temperature: 0.3
     max_tokens: 16384
@@ -154,12 +157,35 @@ generation:
     temperature: 0.3
     max_tokens: 16384
 
+# DSPy runtime settings
+dspy:
+  max_errors: 50
+  provide_traceback: true
+
 # Document Chunking
 chunking:
   # Maximum tokens per chunk (uses tiktoken)
   max_tokens: 2000
   # Model for token counting
   model: "gpt-4"
+
+# Context Window Allocation
+# Ensures input + output never exceeds model's context window.
+# Values are fractions of the context window (must sum to <= 1.0).
+context_window:
+  # Default allocation percentages
+  input_fraction: 0.60    # 60% for input (prompts, documents, rubrics)
+  output_fraction: 0.35   # 35% for output (generated text)
+  safety_margin: 0.05     # 5% buffer for safety
+
+  # Task-specific overrides (optional)
+  # These adjust the ratio based on task characteristics
+  summarizer:
+    input_fraction: 0.70   # Summaries: more input, moderate output
+    output_fraction: 0.25
+  scorer:
+    input_fraction: 0.70   # Scoring: needs room for chain-of-thought reasoning
+    output_fraction: 0.25
 
 # Tree Building
 tree:
@@ -251,6 +277,36 @@ speculative:
       draft: "qwen-30b-thinking"
       enabled: true
       num_speculative_tokens: 5
+
+# GPU Orchestration
+# Dynamic GPU allocation using vLLM sleep mode for efficient multi-model serving
+# Enabled by default - disable with --no-dynamic-gpu flag
+orchestration:
+  enabled: true
+
+  # Model profiles (from vllm.models section)
+  task_model_profile: "nemotron-30b-fp8"
+  genrm_profile: "genrm-nvfp4"
+
+  # Server ports
+  task_primary_port: 8000   # Task model (always awake)
+  task_replica_port: 8002   # Task model replica (awake in DP=2 mode)
+  genrm_port: 8001          # GenRM judge (awake in dual_model mode)
+
+  # GPU assignments
+  task_primary_gpus: "0,1"
+  task_replica_gpus: "2,3"
+  genrm_gpus: "2,3"
+
+  # vLLM environment
+  venv_path: "/home/mlinegar/vllm-env"
+
+  # Sleep mode settings
+  sleep_timeout: 30.0       # Max seconds for sleep operation
+  wake_timeout: 60.0        # Max seconds for wake operation
+
+  # GenRM-specific settings (235B model needs more memory)
+  genrm_gpu_memory_utilization: 0.95
 
 # Logging
 logging:

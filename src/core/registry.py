@@ -5,6 +5,7 @@ Provides a base class that can be specialized for different
 registration needs (tasks, optimizers, etc.).
 """
 
+import inspect
 import logging
 from typing import Any, Dict, Generic, Optional, Type, TypeVar, Union, Iterable
 
@@ -81,7 +82,43 @@ class GenericRegistry(Generic[T]):
             New instance
         """
         item_class = cls.get_class(name)
-        return item_class(**kwargs)
+        if not kwargs:
+            return item_class()
+
+        try:
+            signature = inspect.signature(item_class.__init__)
+        except (TypeError, ValueError):
+            logger.debug(
+                "Registry %s: unable to inspect __init__ for '%s'; passing kwargs as-is",
+                cls._item_type,
+                name,
+            )
+            return item_class(**kwargs)
+
+        params = signature.parameters
+        accepts_var_kw = any(
+            param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()
+        )
+        if accepts_var_kw:
+            return item_class(**kwargs)
+
+        allowed = {
+            param_name
+            for param_name, param in params.items()
+            if param_name != "self"
+            and param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        filtered = {key: value for key, value in kwargs.items() if key in allowed}
+        unknown = sorted(set(kwargs) - set(filtered))
+        if unknown:
+            logger.warning(
+                "Ignoring unknown %s config keys for '%s': %s",
+                cls._item_type,
+                name,
+                ", ".join(unknown),
+            )
+
+        return item_class(**filtered)
 
     @classmethod
     def get_singleton(cls, name: str, **kwargs) -> T:

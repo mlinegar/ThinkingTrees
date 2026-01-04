@@ -278,9 +278,14 @@ tree = await builder.build(text)
 **Multi-Document (Optimal Batching)**:
 ```python
 from src.core.batch_orchestrator import BatchTreeOrchestrator
+from src.core.strategy import BatchedStrategy
+from src.tree.builder import BuildConfig
 
-orchestrator = BatchTreeOrchestrator(client=batch_client, rubric=rubric)
-trees = await orchestrator.build_trees(documents)
+# Global pipelined batching across docs/levels (default)
+strategy = BatchedStrategy(client=batch_client)
+config = BuildConfig(pipelined=True)
+orchestrator = BatchTreeOrchestrator(strategy=strategy, config=config)
+results = await orchestrator.process_documents(documents, rubric)
 ```
 
 Note: Use these canonical builders. Legacy builders have been removed.

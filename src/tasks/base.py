@@ -819,8 +819,16 @@ class AbstractTask(ABC):
             if not summary or reference is None:
                 continue
 
+            original_content = getattr(result, "original_content", None)
+            if not original_content:
+                metadata = getattr(result, "metadata", None)
+                if isinstance(metadata, dict):
+                    original_content = metadata.get("original_content")
+            if not original_content:
+                original_content = getattr(result, "doc_id", "")
+
             example = dspy.Example(
-                original_content=getattr(result, "doc_id", ""),
+                original_content=original_content,
                 summary=summary,
                 rubric=rubric,
                 reference_score=reference,

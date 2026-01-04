@@ -48,6 +48,11 @@ from .base import BasePreferenceCollector, CandidateInfo, PreferenceResult
 from .collector import GenerationConfig, PreferenceDataset
 from .engine import DEFAULT_GENRM_ENGINE, PreferenceEngine
 
+# Import batch client for type hints (actual import happens in methods to avoid circular imports)
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .genrm_batch import AsyncBatchGenRMClient
+
 logger = logging.getLogger(__name__)
 
 
@@ -106,7 +111,7 @@ class GenRMJudge:
         temperature: float = 0.6,
         top_p: float = 0.95,
         max_tokens: int = 16384,
-        batch_client: Optional[Any] = None,  # AsyncBatchLLMClient (optional)
+        batch_client: Optional["AsyncBatchGenRMClient"] = None,
     ):
         """
         Initialize the GenRM judge.
@@ -117,7 +122,7 @@ class GenRMJudge:
             temperature: Generation temperature
             top_p: Top-p sampling
             max_tokens: Maximum tokens for response
-            batch_client: Optional AsyncBatchLLMClient for batched requests (better performance)
+            batch_client: Optional AsyncBatchGenRMClient for batched requests (better throughput)
         """
         # Auto-detect base URL from config if not provided
         if base_url is None:
@@ -424,6 +429,28 @@ Analyze step by step following the evaluation plan, then provide your judgment a
         # Ensure model name is detected
         self._ensure_model_name()
 
+        # Use batch client if available (better for tournament mode across multiple docs)
+        if self.batch_client is not None:
+            from .genrm_batch import GenRMComparisonRequest
+            import uuid
+
+            # Build the full context string for the batch client
+            full_context = context
+            if extra_context:
+                full_context = f"{context}\n\nAdditional context:\n{extra_context}"
+
+            request = GenRMComparisonRequest(
+                request_id=f"genrm_{uuid.uuid4().hex[:12]}",
+                context=full_context,
+                original_text=original_text,
+                summary_a=summary_a,
+                summary_b=summary_b,
+                law_type=law_type,
+            )
+
+            return await self.batch_client.call(request)
+
+        # Fall back to direct aiohttp call if no batch client
         messages = self._build_messages(
             context=context,
             original_text=original_text,
@@ -433,28 +460,6 @@ Analyze step by step following the evaluation plan, then provide your judgment a
             extra_context=extra_context,
         )
 
-        # Use batch client if available (better for tournament mode across multiple docs)
-        if self.batch_client is not None:
-            from src.core.batch_processor import BatchRequest
-            import uuid
-
-            request = BatchRequest(
-                request_id=f"genrm_{uuid.uuid4().hex}",
-                messages=messages,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                request_type="genrm_compare",
-            )
-
-            response = await self.batch_client.call(request)
-
-            if response.error:
-                logger.error(f"GenRM batch request failed: {response.error}")
-                return self._error_result(response.error)
-
-            return self._parse_genrm_response(response.content)
-
-        # Fall back to direct aiohttp call if no batch client
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -487,10 +492,14 @@ Analyze step by step following the evaluation plan, then provide your judgment a
         comparisons: List[tuple],
     ) -> List[GenRMComparisonResult]:
         """
-        Batch compare multiple summary pairs concurrently.
+        Batch compare multiple summary pairs with true batching when batch_client available.
 
         Each comparison tuple: (context, original_text, summary_a, summary_b, law_type, extra_context)
-        Uses asyncio.gather for concurrent execution within a round.
+
+        With batch_client: Submits all requests to the batch queue, then awaits all responses.
+        This enables true concurrent batching across the entire batch.
+
+        Without batch_client: Falls back to asyncio.gather on individual HTTP calls.
 
         Args:
             comparisons: List of (context, original_text, summary_a, summary_b, law_type, extra_context) tuples
@@ -501,7 +510,39 @@ Analyze step by step following the evaluation plan, then provide your judgment a
         if not comparisons:
             return []
 
-        # Use asyncio.gather to run all comparisons concurrently
+        # True batching with batch client
+        if self.batch_client is not None:
+            from .genrm_batch import GenRMComparisonRequest
+            import uuid
+
+            # Submit all requests to the batch queue
+            requests = []
+            for comp in comparisons:
+                context = comp[0]
+                extra_context = comp[5] if len(comp) > 5 else None
+                if extra_context:
+                    context = f"{context}\n\nAdditional context:\n{extra_context}"
+
+                request = GenRMComparisonRequest(
+                    request_id=f"genrm_{uuid.uuid4().hex[:12]}",
+                    context=context,
+                    original_text=comp[1],
+                    summary_a=comp[2],
+                    summary_b=comp[3],
+                    law_type=comp[4] if len(comp) > 4 else "sufficiency",
+                )
+                await self.batch_client.submit(request)
+                requests.append(request)
+
+            # Await all responses
+            results = []
+            for request in requests:
+                result = await self.batch_client.await_response(request.request_id)
+                results.append(result)
+
+            return results
+
+        # Fallback: Use asyncio.gather to run all comparisons concurrently
         tasks = [
             self.compare_async(
                 context=comp[0],

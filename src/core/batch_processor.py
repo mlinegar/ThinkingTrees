@@ -36,14 +36,16 @@ Architecture:
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Any, Callable, Awaitable, Tuple, Union
+from typing import List, Dict, Optional, Any, Callable, Awaitable, Tuple, Union, Set
 import aiohttp
 
 from src.preprocessing.chunker import chunk_for_ops
 from src.core.data_models import Node
 from src.config.constants import LOG_TRUNCATE_LENGTH
+from src.core.async_utils import cancel_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +200,8 @@ class AsyncBatchLLMClient:
         # State
         self._running = False
         self._worker_task: Optional[asyncio.Task] = None
+        self._active_batch_tasks: Set[asyncio.Task] = set()
+        self._max_inflight_batches = max(1, math.ceil(self.max_concurrent / max(1, self.batch_size)))
 
     @property
     def model(self) -> str:
@@ -264,6 +268,31 @@ class AsyncBatchLLMClient:
                 await self._worker_task
             except asyncio.CancelledError:
                 pass
+
+        # Clean up any pending futures to prevent memory leaks
+        # This handles cases where submit() was called but await_response() was not
+        if self._pending_futures:
+            orphaned = len(self._pending_futures)
+            for request_id, future in list(self._pending_futures.items()):
+                if not future.done():
+                    future.set_result(BatchResponse(
+                        request_id=request_id,
+                        content="",
+                        error="Batch client stopped",
+                    ))
+            self._pending_futures.clear()
+            if orphaned > 0:
+                logger.debug(f"Cleaned up {orphaned} orphaned futures on stop")
+
+        if self._active_batch_tasks:
+            await cancel_tasks(self._active_batch_tasks)
+            self._active_batch_tasks.clear()
+        if self._request_queue:
+            while not self._request_queue.empty():
+                try:
+                    self._request_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
         if self._session:
             await self._session.close()
         logger.info(f"Batch client stopped. Stats: {self.stats}")
@@ -285,7 +314,7 @@ class AsyncBatchLLMClient:
             raise RuntimeError("Batch client not started")
 
         # Create future for response
-        request.future = asyncio.get_event_loop().create_future()
+        request.future = asyncio.get_running_loop().create_future()
         request.submitted_at = time.time()
         self._pending_futures[request.request_id] = request.future
 
@@ -354,8 +383,19 @@ class AsyncBatchLLMClient:
                         break
 
                 if batch:
-                    # Send batch concurrently
-                    await self._send_batch(batch)
+                    # Throttle number of in-flight batches to avoid task buildup
+                    if len(self._active_batch_tasks) >= self._max_inflight_batches:
+                        done, _ = await asyncio.wait(
+                            self._active_batch_tasks,
+                            return_when=asyncio.FIRST_COMPLETED
+                        )
+                        for task in done:
+                            if task.exception():
+                                logger.debug(f"Batch task error: {task.exception()}")
+
+                    task = asyncio.create_task(self._send_batch(batch))
+                    self._active_batch_tasks.add(task)
+                    task.add_done_callback(self._active_batch_tasks.discard)
                     self.stats.batches_sent += 1
 
             except asyncio.CancelledError:
@@ -463,7 +503,7 @@ class MultiServerBatchClient:
         self.servers = servers
         self.clients: List[AsyncBatchLLMClient] = []
         self._counter = 0  # Round-robin counter
-        self._lock = asyncio.Lock() if asyncio else None
+        self._lock: Optional[asyncio.Lock] = None  # Created in start()
         self._request_client_map: Dict[str, AsyncBatchLLMClient] = {}  # request_id -> client (O(1) lookup)
 
         # Create a client for each server
@@ -726,8 +766,12 @@ async def audit_nodes_batched(
 # =============================================================================
 
 def run_batched(coro):
-    """Run an async coroutine from sync code."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """Run an async coroutine from sync code.
+
+    Note: Prefer using asyncio.run() directly in new code.
+    This function exists for backwards compatibility.
+    """
+    return asyncio.run(coro)
 
 
 async def process_samples_batched(

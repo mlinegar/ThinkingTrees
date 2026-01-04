@@ -1,0 +1,15 @@
+{
+  "n_trees": 1,
+  "n_preferences": 9,
+  "n_demos": 5,
+  "init_prompt_token_limit": 4000,
+  "k_candidates": 2,
+  "tree_summaries": [
+    {
+      "doc_id": "21420_196103_chunk0",
+      "height": 3,
+      "node_count": 9,
+      "leaf_count": 5
+    }
+  ]
+}

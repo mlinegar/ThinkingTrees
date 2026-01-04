@@ -13,10 +13,14 @@ from src.tasks.registry import (
     register_task,
 )
 
+# Import task modules to trigger registration
+from src.tasks import document_analysis
+from src.tasks import scoring
+
 # Helper functions using registry
-def get_task(name: str):
+def get_task(name: str, **kwargs):
     """Get a task by name from the registry."""
-    return TaskRegistry.get(name)
+    return TaskRegistry.get(name, **kwargs)
 
 def list_tasks():
     """List all registered tasks."""

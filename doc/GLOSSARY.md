@@ -110,7 +110,7 @@ A preference derived from oracle scores (labels) rather than a judge's opinion. 
 An async client that pools LLM requests and sends them in batches to vLLM for optimal GPU utilization.
 
 ### BatchTreeOrchestrator
-High-level orchestrator for building multiple trees with optimal batching. Processes all documents level-by-level, returning `BuildResult` objects with full tree structures.
+High-level orchestrator for building multiple trees with optimal batching. Processes all documents with global pipelined scheduling, returning `BuildResult` objects with full tree structures.
 
 **Location**: `src/core/batch_orchestrator.py`
 

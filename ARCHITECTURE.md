@@ -69,7 +69,7 @@ Quality control through sampling:
 │  src/core/batch_processor.py                            │
 │    - AsyncBatchLLMClient   (batched LLM calls)          │
 │  src/core/batch_orchestrator.py                         │
-│    - BatchTreeOrchestrator (tree-level batching)        │
+│    - BatchTreeOrchestrator (global pipelined batching)  │
 └─────────────────────────────────────────────────────────┘
                           │
 ┌─────────────────────────────────────────────────────────┐
