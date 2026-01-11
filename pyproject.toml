@@ -54,8 +54,15 @@ manifesto = [
     "pandas>=2.0.0",
     "openpyxl>=3.0.0",
 ]
+trl = [
+    "trl>=0.8.0",
+    "transformers>=4.40.0",
+    "datasets>=2.14.0",
+    "peft>=0.8.0",
+    "bitsandbytes>=0.43.0",
+]
 all = [
-    "thinking-trees[dev,vllm,ui,manifesto]",
+    "thinking-trees[dev,vllm,ui,manifesto,trl]",
 ]
 
 [project.scripts]

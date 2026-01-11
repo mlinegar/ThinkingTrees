@@ -1,0 +1,86 @@
+\documentclass[tikz, border=10pt]{standalone}
+\input{styles.tex}
+
+\begin{document}
+\begin{tikzpicture}[x=1.6cm, y=1.5cm, >=Latex, font=\sffamily]
+  \fixboundingbox
+
+  % =================================================================================
+  % THE GHOST TREE (Background Context)
+  % =================================================================================
+
+  % Level 0: Raw Blocks
+  \foreach \i in {1,...,8} {
+    \node[ghostnode] (b\i) at (\i, 0) {$b_{\i}$};
+  }
+
+  % Level 1: Leaf Summaries
+  \foreach \i in {1,...,8} {
+    \node[ghostnode] (s\i) at (\i, 1.2) {$s_{\i}$};
+    \draw[ghostedge] (b\i) -- (s\i);
+  }
+
+  % Level 2: Merges
+  \foreach \i/\j/\k in {1/2/12, 3/4/34, 5/6/56, 7/8/78} {
+    \node[ghostnode] (s\k) at ($(\i,1.2)!0.5!(\j,1.2) + (0,1.2)$) {$s_{\k}$};
+    \draw[ghostedge] (s\i) -- (s\k);
+    \draw[ghostedge] (s\j) -- (s\k);
+  }
+
+  % Level 3
+  \foreach \i/\j/\k in {12/34/1234, 56/78/5678} {
+    \node[ghostnode] (s\k) at ($(s\i)!0.5!(s\j) + (0,1.2)$) {$s_{\k}$};
+    \draw[ghostedge] (s\i) -- (s\k);
+    \draw[ghostedge] (s\j) -- (s\k);
+  }
+
+  % Root
+  \node[ghostnode] (root) at ($(s1234)!0.5!(s5678) + (0,1.2)$) {$s_{\text{root}}$};
+  \draw[ghostedge] (s1234) -- (root);
+  \draw[ghostedge] (s5678) -- (root);
+
+  % Background Labels
+  \node[text=gray!40, font=\scriptsize] at (4.5, -0.7) {Raw Document Blocks};
+  \node[text=gray!30, font=\scriptsize] at (4.5, 6.0) {Hierarchical Summary};
+
+  % =================================================================================
+  % SPOTLIGHT C: IDEMPOTENCE (Center - s34)
+  % =================================================================================
+
+  % Active Node
+  \node[activenode, draw=purple!80!black] (act_s34) at (s34) {$s_{34}$};
+
+  % Regeneration Node (above)
+  \node[referencenode, draw=purple!80!black] (regen_s34) at ($(act_s34) + (0, 1.3)$) {$s'_{34}$};
+
+  % Dashed regeneration arrow (hypothetical re-run)
+  \draw[arrowdashed, purple!80!black] (act_s34.north) to[out=90, in=-90]
+    node[right, font=\scriptsize, text=purple!90!black, pos=0.5] {$g$}
+    (regen_s34.south);
+
+  % Comparison box
+  \node[comparator, draw=purple!80!black, text=purple!80!black] (comp_C) at ($(act_s34) + (-1.3, 0.65)$) {$\metric \approx 0$?};
+
+  % Dotted comparison arrows
+  \draw[arrowdotted, purple!60!black] (act_s34.west) -- node[below, font=\scriptsize, text=purple!70!black] {$\fstar$} (comp_C.east);
+  \draw[arrowdotted, purple!60!black] (regen_s34.west) to[out=180, in=90] node[left, font=\scriptsize, text=purple!70!black] {$\fstar$} (comp_C.north);
+
+  % Labels
+  \node[lawtitle, text=purple!90!black] (lbl_C) at ($(regen_s34) + (0, 0.8)$)
+    {(C) Idempotence};
+  \node[lawdesc, text=purple!80!black] (desc_C) at ($(lbl_C.south) + (0, -0.05)$)
+    {$\fstar(s) \approx \fstar(g(s))$?};
+
+  % Group Box
+  \begin{scope}[on background layer]
+    \node[groupbox, draw=purple, fill=purple, fit=(act_s34)(regen_s34)(comp_C)(lbl_C)(desc_C)] {};
+  \end{scope}
+
+  % Legend
+  \drawlegend{b4}{b5}
+
+  % Notation legend
+  \drawnotation{b4}{b5}
+
+\end{tikzpicture}
+\end{document}

@@ -1,0 +1,38 @@
+\appendix
+
+\noindent This appendix provides complete technical foundations, detailed proofs, and practical guidance for the hierarchical summarization framework. It is organized to support both theoretical understanding and empirical deployment.
+
+\medskip
+\noindent\textbf{Appendix~\ref{app:notation}: Notation Recap and Local Foundations} collects all notation, definitions, and the foundational Lemma~\ref{lem:nodewise} used throughout. Readers comfortable with the main text may skip to Appendix~\ref{app:proofs-core}.
+
+\noindent\textbf{Appendix~\ref{app:proofs-core}: Proofs of Main Results} establishes schedule invariance (Corollary~\ref{cor:schedule}), fold-of-folds invariance (Corollary~\ref{cor:folds}), and multi-round preservation (Theorem~\ref{thm:multi-round})—the three core guarantees that make hierarchical processing practical.
+
+\noindent\textbf{Appendix~\ref{app:blackwell}: Blackwell-Style Score Transport} shows how supervision signals factor through the oracle $\fstar$ under Assumption~\ref{ass:CF}, enabling training on summaries instead of full documents.
+
+\noindent\textbf{Appendix~\ref{app:practical_audit}: Practical Audit Guidance} provides step-by-step audit procedures for deployed hierarchies, including sample-size calculations and methods for composing leaf-level and merge-level distortions into deployment-level bounds.
+
+\noindent\textbf{Appendix~\ref{app:bootstrap}: Local Consistency Bootstrap} describes the DSPy-style optimization loop that alternates between sampling local checks and updating the prompt parameters until the empirical violation rates fall below a desired threshold.
+
+\noindent\textbf{Appendix~\ref{sec:dpo}: Direct Preference Optimization} connects oracle preservation to preference learning, proving that DPO on summaries recovers the same optimal policies as DPO on full documents when the sufficiency, merge-consistency, and idempotence conditions hold.
+
+\noindent\textbf{Appendix~\ref{sec:global}: Global Compatibility Variant} presents an alternative formulation using global merge-consistency/associativity assumptions, connecting the framework to algebraic structures like monoid congruences and mergeable sketches.
+
+\noindent\textbf{Appendix~\ref{sec:info-sieve}: Information-Theoretic View} (optional) sketches how OPS can be interpreted through an information-decomposition lens akin to the Information Sieve \citep{steeg2016informationsieve}, though this perspective is not required for the main arguments.
+
+\noindent\textbf{Appendix~\ref{app:existence}: Existence of Oracle-Preserving Summaries} establishes that oracle-preserving summarizers always exist (set-theoretically) and can be implemented as compact encodings when the oracle space admits short representations.
+
+\noindent\textbf{Appendix~\ref{sec:examples}: Worked Examples} instantiates the framework for binary event detection, entity extraction, counting aggregates, and provides a counterexample illustrating why stability cannot be omitted.
+
+\medskip
+
+\input{appendix/01_notation_recap.tex}
+\input{appendix/02_main_proofs.tex}
+\input{appendix/03_blackwell_score_transport.tex}
+\input{appendix/04_practical_audit.tex}
+\input{appendix/10_bootstrap_alignment.tex}
+\input{appendix/05_dpo.tex}
+\input{appendix/06_global_variant.tex}
+\input{appendix/11_information_sieve.tex}
+\input{appendix/09_mergeable_relationship.tex}
+\input{appendix/07_existence.tex}
+\input{appendix/08_worked_examples.tex}

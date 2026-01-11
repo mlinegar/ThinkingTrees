@@ -1,13 +1,28 @@
-# lean3
+# FormalProofs (Lean 4)
 
-## GitHub configuration
+Lean formalizations for the ThinkingTrees project. The `FormalProofs/Probability` subtree includes a CLT development via characteristic functions and Lévy continuity.
 
-To set up your new GitHub repository, follow these steps:
+## Build
 
-* Under your repository name, click **Settings**.
-* In the **Actions** section of the sidebar, click "General".
-* Check the box **Allow GitHub Actions to create and approve pull requests**.
-* Click the **Pages** section of the settings sidebar.
-* In the **Source** dropdown menu, select "GitHub Actions".
+```bash
+lake build FormalProofs.Probability
+```
 
-After following the steps above, you can remove this section from the README file.
+For the full library:
+
+```bash
+lake build FormalProofs
+```
+
+## CLT Status
+
+- Bounded and finite-variance i.i.d. CLT are formalized.
+- User-facing theorems live in `FormalProofs/Probability/CLT.lean`:
+  - `central_limit_theorem_iid_finite_variance`
+  - `central_limit_theorem_iid_abs_pow3`
+  - `central_limit_theorem_iid_bounded`
+  - `central_limit_theorem_cdf_iid_bounded`
+  - `central_limit_theorem_iid_of_charFunScale`
+  - `CharFunCLTScale_of_integrable_sq`
+  - `CharFunCLTScale_of_integrable_abs_pow3`
+- Analytic infrastructure is in `FormalProofs/Probability/LevyContinuity.lean`.

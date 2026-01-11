@@ -128,10 +128,18 @@ class GenerationSettings:
     Settings for candidate summary generation.
 
     Controls how many candidates are generated and with what parameters.
+
+    The k_candidates parameter determines how many candidate summaries are
+    generated per input, which affects the number of pairwise comparisons:
+    - k=2 → 1 comparison (fast, minimal coverage)
+    - k=4 → 6 comparisons (default, good coverage)
+    - k=8 → 28 comparisons (thorough, expensive)
+
+    Formula: num_comparisons = k * (k-1) / 2
     """
 
     k_candidates: int = 4
-    """Number of candidate summaries per input."""
+    """Number of candidate summaries per input (must be >= 2)."""
 
     temperatures: List[float] = field(default_factory=lambda: [0.3, 0.5, 0.7, 0.9])
     """Temperatures for diverse generation (one per candidate)."""
@@ -141,6 +149,19 @@ class GenerationSettings:
 
     summarizer_max_tokens: int = 2048
     """Maximum tokens for summary generation."""
+
+    def __post_init__(self):
+        """Validate settings after initialization."""
+        if self.k_candidates < 2:
+            raise ValueError(
+                f"k_candidates must be >= 2 (got {self.k_candidates}). "
+                "At least 2 candidates are needed for pairwise comparison."
+            )
+
+    @property
+    def num_comparisons(self) -> int:
+        """Number of pairwise comparisons for k candidates."""
+        return self.k_candidates * (self.k_candidates - 1) // 2
 
     @classmethod
     def from_settings(cls, settings: Dict[str, Any]) -> "GenerationSettings":
@@ -335,6 +356,17 @@ class PreferenceCollectionConfig:
     verbose: bool = False
     """Enable verbose logging."""
 
+    # Convenience properties for k configuration
+    @property
+    def k_candidates(self) -> int:
+        """Number of candidate summaries per input (convenience accessor)."""
+        return self.generation.k_candidates
+
+    @property
+    def num_comparisons(self) -> int:
+        """Number of pairwise comparisons for current k setting."""
+        return self.generation.num_comparisons
+
     @classmethod
     def from_cli_and_settings(
         cls,
@@ -380,6 +412,7 @@ class PreferenceCollectionConfig:
             },
             "generation": {
                 "k_candidates": self.generation.k_candidates,
+                "num_comparisons": self.generation.num_comparisons,
                 "temperatures": self.generation.temperatures,
                 "summarizer_temperature": self.generation.summarizer_temperature,
                 "summarizer_max_tokens": self.generation.summarizer_max_tokens,

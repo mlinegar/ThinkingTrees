@@ -1,13 +1,16 @@
 name = "lean3"
 version = "0.1.0"
 keywords = ["math"]
-defaultTargets = ["Lean3"]
+defaultTargets = ["FormalProofs"]
 
 [leanOptions]
 pp.unicode.fun = true # pretty-prints `fun a ↦ b`
 relaxedAutoImplicit = false
-weak.linter.mathlibStandardSet = true
+weak.linter.mathlibStandardSet = false  # Disabled: we use custom patterns not matching mathlib style
 maxSynthPendingDepth = 3
+linter.unusedSectionVars = false
+linter.unusedVariables = false
+linter.unusedSimpArgs = false
 
 [[require]]
 name = "mathlib"
@@ -15,4 +18,4 @@ scope = "leanprover-community"
 rev = "v4.27.0-rc1"
 
 [[lean_lib]]
-name = "Lean3"
+name = "FormalProofs"

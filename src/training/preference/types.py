@@ -1,15 +1,37 @@
 """
-Shared preference data types and protocols.
+Shared preference data types and protocols for preference learning.
 
 This module contains data classes shared between preference collectors,
 separated to avoid circular imports between preference.py and base_preference.py.
 
-Also provides the PreferenceDeriver protocol for pluggable preference derivation.
+Preference Learning Framework
+-----------------------------
+The framework is designed to be method-agnostic, supporting modern preference
+learning methods beyond the original DPO (Direct Preference Optimization):
 
-Available derivers:
-    - JudgeDeriver: Uses LLM judge (DSPy PairwiseJudge) for comparison
-    - GenRMDeriver: Uses NVIDIA GenRM model for comparison
-    - OracleDeriver: Uses oracle scores to derive preferences
+- **DPO** (Direct Preference Optimization): Pairwise preferences with sigmoid loss
+- **GRPO** (Group Relative Policy Optimization): Group-wise rankings (DeepSeek style)
+- **PPO** (Proximal Policy Optimization): Reward-based training
+- **RLHF** (Reinforcement Learning from Human Feedback): Reward models
+
+The key abstraction is PreferencePair, which captures pairwise judgments
+that can be converted to various training formats via `to_preference_format()`.
+
+Theoretical Foundation
+----------------------
+The preference learning guarantees are proven in the Lean formalization:
+- PreferenceLearning.lean: Abstract preference learning framework
+- DPO.lean: DPO as a concrete instance of the framework
+
+When the local laws (L1, L2, L3) hold, preference learning on summarized
+data is equivalent to preference learning on original data. This applies
+to ANY preference learning method that satisfies oracle-measurability.
+
+Available Derivers
+------------------
+- JudgeDeriver: Uses LLM judge (DSPy PairwiseJudge) for comparison
+- GenRMDeriver: Uses NVIDIA GenRM model for comparison
+- OracleDeriver: Uses oracle scores to derive preferences
 
 Usage:
     from src.training.preference.types import (
@@ -29,6 +51,11 @@ Usage:
         context="Preserve political position...",
         original_text="...",
     )
+
+    # Export to various preference learning formats
+    dataset = PreferenceDataset(pairs)
+    dpo_data = dataset.to_preference_format(method="dpo")
+    grpo_data = dataset.to_preference_format(method="grpo")
 """
 
 import json
@@ -41,7 +68,38 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Protocol, Tuple
 
 import dspy
 
+from src.core.prompting import default_summarize_prompt
+
 logger = logging.getLogger(__name__)
+
+
+PromptBuilder = Callable[[str, str], Any]
+
+
+def render_prompt(
+    text: str,
+    rubric: str,
+    prompt_builder: Optional[PromptBuilder] = None,
+) -> str:
+    """Render a prompt string using a prompt builder or the default template."""
+    builder = prompt_builder or default_summarize_prompt
+    prompt = builder(text, rubric)
+    if isinstance(prompt, str):
+        return prompt
+    if isinstance(prompt, list):
+        parts = []
+        for msg in prompt:
+            if isinstance(msg, dict):
+                role = msg.get("role")
+                content = msg.get("content", "")
+                if role:
+                    parts.append(f"{role}: {content}")
+                else:
+                    parts.append(str(content))
+            else:
+                parts.append(str(msg))
+        return "\n".join(parts)
+    return str(prompt)
 
 
 # =============================================================================
@@ -555,9 +613,56 @@ class PreferenceDataset:
 
         return examples
 
-    def to_dpo_format(self, law_type: Optional[str] = None) -> List[Dict[str, Any]]:
+    def to_preference_format(
+        self,
+        method: Literal["dpo", "grpo", "rlhf", "general"] = "general",
+        law_type: Optional[str] = None,
+        prompt_builder: Optional[PromptBuilder] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Convert to preference learning format for various methods.
+
+        This is the unified export method for preference learning data.
+        The format depends on the downstream training method.
+
+        Theoretical Foundation
+        ----------------------
+        From PreferenceLearning.lean: Any oracle-measurable preference learning
+        method achieves equivalent results on oracle-preserving summaries.
+        DPO, GRPO, PPO, etc. all satisfy this property when properly configured.
+
+        Args:
+            method: Target training method format
+                - "dpo": Returns prompt/chosen/rejected for DPO-style training
+                - "grpo": Returns group ranking format (placeholder for future)
+                - "rlhf": Returns prompt/response/score for reward model training
+                - "general": Returns full context with all fields
+            law_type: Filter by OPS law type (sufficiency, merge, idempotence)
+            prompt_builder: Optional prompt builder for generating prompts
+
+        Returns:
+            List of preference examples in the requested format
+        """
+        if method == "dpo":
+            return self._to_dpo_format(law_type, prompt_builder)
+        elif method == "grpo":
+            return self._to_grpo_format(law_type, prompt_builder)
+        elif method == "rlhf":
+            return self._to_rlhf_format(law_type, prompt_builder)
+        else:
+            return self._to_general_format(law_type)
+
+    def _to_dpo_format(
+        self,
+        law_type: Optional[str] = None,
+        prompt_builder: Optional[PromptBuilder] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Convert to DPO (Direct Preference Optimization) format.
+
+        DPO format uses pairwise preferences with prompt/chosen/rejected structure.
+        This is the concrete instantiation of the abstract preference learning
+        framework from PreferenceLearning.lean.
 
         Returns:
             List of dicts with prompt, chosen, rejected
@@ -569,11 +674,7 @@ class PreferenceDataset:
             if law_type is not None and pair.law_type != law_type:
                 continue
 
-            prompt = f"""Summarize the following text while preserving: {pair.rubric}
-
-Text: {pair.original_text}
-
-Summary:"""
+            prompt = render_prompt(pair.original_text, pair.rubric, prompt_builder)
 
             if pair.preferred == "A":
                 chosen = pair.summary_a
@@ -595,6 +696,339 @@ Summary:"""
             })
 
         return dpo_data
+
+    def _to_grpo_format(
+        self,
+        law_type: Optional[str] = None,
+        prompt_builder: Optional[PromptBuilder] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Convert to GRPO (Group Relative Policy Optimization) format.
+
+        GRPO uses group-wise comparisons rather than strict pairwise preferences.
+        This format is compatible with DeepSeek-style preference learning.
+
+        Note: GRPO typically works with groups of K responses. For pairwise data,
+        we structure it as a 2-element group with relative ranking.
+
+        Returns:
+            List of dicts with prompt, responses (ranked list), and ranking info
+        """
+        grpo_data = []
+        for pair in self.pairs:
+            if law_type is not None and pair.law_type != law_type:
+                continue
+
+            prompt = render_prompt(pair.original_text, pair.rubric, prompt_builder)
+
+            # For GRPO, we provide ranked responses rather than chosen/rejected
+            if pair.preferred == "A":
+                ranked_responses = [pair.summary_a, pair.summary_b]
+                ranks = [1, 2]
+            elif pair.preferred == "B":
+                ranked_responses = [pair.summary_b, pair.summary_a]
+                ranks = [1, 2]
+            else:  # tie
+                ranked_responses = [pair.summary_a, pair.summary_b]
+                ranks = [1, 1]  # Equal rank for ties
+
+            grpo_data.append({
+                "prompt": prompt,
+                "responses": ranked_responses,
+                "ranks": ranks,
+                "confidence": pair.confidence,
+                "metadata": {
+                    "pair_id": pair.pair_id,
+                    "reference_score": pair.reference_score,
+                    "law_type": pair.law_type,
+                    "original_preferred": pair.preferred,
+                },
+            })
+
+        return grpo_data
+
+    def _to_rlhf_format(
+        self,
+        law_type: Optional[str] = None,
+        prompt_builder: Optional[PromptBuilder] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Convert to RLHF (Reinforcement Learning from Human Feedback) format.
+
+        RLHF format provides responses with scalar scores for reward model training.
+        Confidence is converted to a relative score differential.
+
+        Returns:
+            List of dicts with prompt, response, score
+        """
+        rlhf_data = []
+        for pair in self.pairs:
+            if law_type is not None and pair.law_type != law_type:
+                continue
+
+            prompt = render_prompt(pair.original_text, pair.rubric, prompt_builder)
+
+            # Generate score based on preference and confidence
+            if pair.preferred == "A":
+                score_a = 0.5 + pair.confidence * 0.5
+                score_b = 0.5 - pair.confidence * 0.5
+            elif pair.preferred == "B":
+                score_a = 0.5 - pair.confidence * 0.5
+                score_b = 0.5 + pair.confidence * 0.5
+            else:  # tie
+                score_a = 0.5
+                score_b = 0.5
+
+            rlhf_data.extend([
+                {
+                    "prompt": prompt,
+                    "response": pair.summary_a,
+                    "score": score_a,
+                    "metadata": {
+                        "pair_id": pair.pair_id,
+                        "response_id": "A",
+                        "reference_score": pair.reference_score,
+                        "law_type": pair.law_type,
+                    },
+                },
+                {
+                    "prompt": prompt,
+                    "response": pair.summary_b,
+                    "score": score_b,
+                    "metadata": {
+                        "pair_id": pair.pair_id,
+                        "response_id": "B",
+                        "reference_score": pair.reference_score,
+                        "law_type": pair.law_type,
+                    },
+                },
+            ])
+
+        return rlhf_data
+
+    def _to_general_format(self, law_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Convert to general preference format with all fields.
+
+        This format preserves all information and can be adapted to any
+        preference learning method downstream.
+
+        Returns:
+            List of dicts with full preference pair information
+        """
+        general_data = []
+        for pair in self.pairs:
+            if law_type is not None and pair.law_type != law_type:
+                continue
+
+            general_data.append({
+                "pair_id": pair.pair_id,
+                "rubric": pair.rubric,
+                "original_text": pair.original_text,
+                "summary_a": pair.summary_a,
+                "summary_b": pair.summary_b,
+                "preferred": pair.preferred,
+                "confidence": pair.confidence,
+                "reasoning": pair.reasoning,
+                "reference_score": pair.reference_score,
+                "law_type": pair.law_type,
+            })
+
+        return general_data
+
+    def to_reward_model_format(
+        self,
+        law_type: Optional[str] = None,
+        include_oracle_scores: bool = True,
+        prompt_builder: Optional[PromptBuilder] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Convert to reward model training format.
+
+        This format is optimized for training reward models that approximate
+        the oracle/judge. Each response gets a scalar score derived from
+        the pairwise comparisons.
+
+        The score computation uses:
+        - Oracle estimate scores if available (from GenRM or oracle scorer)
+        - Fallback to preference + confidence-based scoring
+
+        Args:
+            law_type: Optional filter for specific law type
+            include_oracle_scores: Include raw oracle score estimates if available
+            prompt_builder: Optional prompt builder for generating prompts
+
+        Returns:
+            List of dicts with prompt, response, score, and optional oracle_estimate
+        """
+        rm_data = []
+        for pair in self.pairs:
+            if law_type is not None and pair.law_type != law_type:
+                continue
+
+            prompt = render_prompt(pair.original_text, pair.rubric, prompt_builder)
+
+            # Use oracle estimate scores if available, else derive from preference
+            if include_oracle_scores and pair.score_estimate_a is not None:
+                score_a = pair.score_estimate_a
+                score_b = pair.score_estimate_b if pair.score_estimate_b is not None else 0.5
+            else:
+                # Derive scores from preference and confidence
+                if pair.preferred == "A":
+                    score_a = 0.5 + pair.confidence * 0.5
+                    score_b = 0.5 - pair.confidence * 0.5
+                elif pair.preferred == "B":
+                    score_a = 0.5 - pair.confidence * 0.5
+                    score_b = 0.5 + pair.confidence * 0.5
+                else:  # tie
+                    score_a = 0.5
+                    score_b = 0.5
+
+            base_metadata = {
+                "pair_id": pair.pair_id,
+                "reference_score": pair.reference_score,
+                "law_type": pair.law_type,
+                "confidence": pair.confidence,
+                "preferred": pair.preferred,
+            }
+
+            rm_data.append({
+                "prompt": prompt,
+                "response": pair.summary_a,
+                "score": score_a,
+                "oracle_estimate": pair.score_estimate_a,
+                "oracle_error": pair.oracle_error_a,
+                "metadata": {**base_metadata, "response_id": "A"},
+            })
+            rm_data.append({
+                "prompt": prompt,
+                "response": pair.summary_b,
+                "score": score_b,
+                "oracle_estimate": pair.score_estimate_b,
+                "oracle_error": pair.oracle_error_b,
+                "metadata": {**base_metadata, "response_id": "B"},
+            })
+
+        return rm_data
+
+    def to_grouped_grpo_format(
+        self,
+        law_type: Optional[str] = None,
+        min_group_size: int = 2,
+        prompt_builder: Optional[PromptBuilder] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Convert to grouped GRPO format for k-wise rankings.
+
+        Groups multiple responses for the same input (original_text + rubric)
+        and provides rankings across all responses. This supports the
+        Plackett-Luce style k-wise GRPO objective.
+
+        Args:
+            law_type: Optional filter for specific law type
+            min_group_size: Minimum group size to include (default: 2)
+            prompt_builder: Optional prompt builder for generating prompts
+
+        Returns:
+            List of dicts with prompt, responses (k items), and rankings
+        """
+        from collections import defaultdict
+
+        # Group pairs by (original_text, rubric) to collect all responses
+        groups: Dict[tuple, Dict] = defaultdict(lambda: {
+            "responses": {},  # response_text -> best_score
+            "pairs": [],
+        })
+
+        for pair in self.pairs:
+            if law_type is not None and pair.law_type != law_type:
+                continue
+
+            key = (pair.original_text[:500], pair.rubric[:200])  # Truncate for grouping
+
+            # Track all unique responses with their best estimated score
+            for resp_text, score_est in [
+                (pair.summary_a, pair.score_estimate_a),
+                (pair.summary_b, pair.score_estimate_b),
+            ]:
+                existing = groups[key]["responses"].get(resp_text)
+                if score_est is not None:
+                    if existing is None or score_est > existing:
+                        groups[key]["responses"][resp_text] = score_est
+                elif existing is None:
+                    # No score estimate, use preference-based heuristic
+                    if pair.preferred == "A" and resp_text == pair.summary_a:
+                        groups[key]["responses"][resp_text] = 0.5 + pair.confidence * 0.5
+                    elif pair.preferred == "B" and resp_text == pair.summary_b:
+                        groups[key]["responses"][resp_text] = 0.5 + pair.confidence * 0.5
+                    else:
+                        groups[key]["responses"][resp_text] = 0.5 - pair.confidence * 0.5
+
+            groups[key]["pairs"].append(pair)
+            groups[key]["rubric"] = pair.rubric
+            groups[key]["original_text"] = pair.original_text
+            groups[key]["reference_score"] = pair.reference_score
+
+        # Convert groups to GRPO format
+        grpo_data = []
+        for key, group_data in groups.items():
+            responses_with_scores = list(group_data["responses"].items())
+
+            if len(responses_with_scores) < min_group_size:
+                continue
+
+            # Sort by score (highest first) to determine ranks
+            sorted_responses = sorted(responses_with_scores, key=lambda x: x[1] or 0, reverse=True)
+            responses = [r[0] for r in sorted_responses]
+            scores = [r[1] or 0.5 for r in sorted_responses]
+
+            # Compute ranks (1 = best, handle ties)
+            ranks = []
+            current_rank = 1
+            for i, score in enumerate(scores):
+                if i > 0 and score < scores[i - 1]:
+                    current_rank = i + 1
+                ranks.append(current_rank)
+
+            prompt = render_prompt(group_data["original_text"], group_data["rubric"], prompt_builder)
+
+            grpo_data.append({
+                "prompt": prompt,
+                "responses": responses,
+                "ranks": ranks,
+                "scores": scores,
+                "k": len(responses),
+                "metadata": {
+                    "reference_score": group_data["reference_score"],
+                    "law_type": group_data["pairs"][0].law_type if group_data["pairs"] else None,
+                    "num_source_pairs": len(group_data["pairs"]),
+                },
+            })
+
+        return grpo_data
+
+    def to_dpo_format(
+        self,
+        law_type: Optional[str] = None,
+        prompt_builder: Optional[PromptBuilder] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Convert to DPO (Direct Preference Optimization) format.
+
+        .. deprecated::
+            Use `to_preference_format(method='dpo')` instead for consistency
+            with the generalized preference learning framework.
+
+        Returns:
+            List of dicts with prompt, chosen, rejected
+        """
+        import warnings
+        warnings.warn(
+            "to_dpo_format() is deprecated. Use to_preference_format(method='dpo') instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._to_dpo_format(law_type, prompt_builder)
 
     def save(self, path: Path):
         """Save dataset to JSON file."""

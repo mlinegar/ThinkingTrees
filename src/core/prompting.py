@@ -64,6 +64,38 @@ def default_merge_prompt(left: str, right: str, rubric: str) -> List[Dict[str, s
     ]
 
 
+def default_unified_prompt(text: str, rubric: str) -> List[Dict[str, str]]:
+    """
+    Unified summarization prompt for both leaf and merge operations.
+
+    This implements the theory's single g function. The same prompt handles:
+    - Leaf summarization: text is raw document content
+    - Merge summarization: text is format_merge_input(s_L, s_R)
+
+    THEORY CORRESPONDENCE:
+    In Lean: g : Strings -> Strings (single summarizer function)
+    In paper: g applied uniformly to leaves and internal nodes
+    The only difference is the input format, not the function itself.
+    """
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a text summarizer. Compress the input while "
+                "preserving all information relevant to the specified criteria. "
+                "Be concise but complete."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Summarize the following, preserving all information "
+                f"relevant to: {rubric}\n\n{text}"
+            ),
+        },
+    ]
+
+
 def parse_numeric_score(response: str, min_value: Optional[float] = None, max_value: Optional[float] = None) -> Optional[float]:
     """Parse a numeric score from text."""
     if not response:

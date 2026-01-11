@@ -1,0 +1,106 @@
+% Merge Consistency condition spotlight figure
+% Usage: \input{figures/cld/04_merge.tikz} (after loading styles)
+\begin{tikzpicture}[x=1.6cm, y=1.5cm, >=Latex, font=\sffamily]
+  \fixboundingbox
+
+  % =================================================================================
+  % THE GHOST TREE (Background Context)
+  % =================================================================================
+
+  % Level 0: Raw Blocks
+  \foreach \i in {1,...,8} {
+    \node[ghostnode] (b\i) at (\i, 0) {$b_{\i}$};
+  }
+
+  % Level 1: Leaf Summaries
+  \foreach \i in {1,...,8} {
+    \node[ghostnode] (s\i) at (\i, 1.2) {$s_{\i}$};
+    \draw[ghostedge] (b\i) -- (s\i);
+  }
+
+  % Level 2: Merges
+  \foreach \i/\j/\k in {1/2/12, 3/4/34, 5/6/56, 7/8/78} {
+    \node[ghostnode] (s\k) at ($(\i,1.2)!0.5!(\j,1.2) + (0,1.2)$) {$s_{\k}$};
+    \draw[ghostedge] (s\i) -- (s\k);
+    \draw[ghostedge] (s\j) -- (s\k);
+  }
+
+  % Level 3
+  \foreach \i/\j/\k in {12/34/1234, 56/78/5678} {
+    \node[ghostnode] (s\k) at ($(s\i)!0.5!(s\j) + (0,1.2)$) {$s_{\k}$};
+    \draw[ghostedge] (s\i) -- (s\k);
+    \draw[ghostedge] (s\j) -- (s\k);
+  }
+
+  % Root
+  \node[ghostnode] (root) at ($(s1234)!0.5!(s5678) + (0,1.2)$) {$s_{\text{root}}$};
+  \draw[ghostedge] (s1234) -- (root);
+  \draw[ghostedge] (s5678) -- (root);
+
+  % Background Labels
+  \node[text=gray!40, font=\scriptsize] at (4.5, -0.7) {Raw Document Blocks};
+  \node[text=gray!30, font=\scriptsize] at (4.5, 6.0) {Hierarchical Summary};
+
+  % =================================================================================
+  % SPOTLIGHT C: MERGE CONSISTENCY (Center-Right - b5/b6 -> s56)
+  % =================================================================================
+
+  % Active Nodes - Tree Path (solid arrows)
+  \node[activenode, draw=red!80!black] (act_b5) at (b5) {$b_5$};
+  \node[activenode, draw=red!80!black] (act_b6) at (b6) {$b_6$};
+  \node[activenode, draw=red!80!black] (act_s5) at (s5) {$s_5$};
+  \node[activenode, draw=red!80!black] (act_s6) at (s6) {$s_6$};
+  \node[activenode, draw=red!80!black] (act_s56) at (s56) {$s_{56}$};
+
+  % Tree path edges (solid)
+  \draw[arrowsolid, red!80!black] (act_b5) -- node[left, font=\scriptsize, text=red!70!black] {$g$} (act_s5);
+  \draw[arrowsolid, red!80!black] (act_b6) -- node[right, font=\scriptsize, text=red!70!black] {$g$} (act_s6);
+  \draw[arrowsolid, red!80!black] (act_s5) -- (act_s56);
+  \draw[arrowsolid, red!80!black] (act_s6) -- (act_s56);
+
+  % Underbrace below b5, b6 showing concatenation
+  \draw[decorate, decoration={brace, amplitude=4pt, mirror}, red!80!black, thick]
+    ($(act_b5.south west) + (-0.05, -0.02)$) -- ($(act_b6.south east) + (0.05, -0.02)$);
+
+  % Reference node - joint summary (to the right)
+  \node[referencenode, draw=red!80!black] (ref_s56) at ($(act_s56) + (2.0, 0)$) {$s'_{56}$};
+
+  % Concatenated block node (below s'_56) - wider to show concatenation
+  \node[activenode, draw=red!80!black, minimum width=1.8cm] (act_b56) at ($(ref_s56) + (0, -2.4)$) {$b_{56}$};
+
+  % Dashed arrow from underbrace to b_56 (direct path - concat first)
+  \draw[arrowdashed, red!70!black]
+    ($(act_b5)!0.5!(act_b6) + (0, -0.35)$)
+    -- ++(0, -0.3)  % go down
+    -| (act_b56.south);  % corner then up to bottom
+  % Label on the horizontal segment
+  \node[font=\scriptsize, text=red!80!black, above] at ($(act_b5)!0.5!(act_b6)!0.5!(act_b56) + (0, -0.65)$) {$b_5 \concat b_6$};
+
+  % Solid summarization arrow from b_56 to s'_56
+  \draw[arrowsolid, red!80!black] (act_b56.north) -- node[right, font=\scriptsize, text=red!70!black] {$g$} (ref_s56.south);
+
+  % Comparison box
+  \node[comparator, draw=red!80!black, text=red!80!black] (comp_C) at ($(act_s56)!0.5!(ref_s56) + (0, 1.0)$) {$\metric \approx 0$?};
+
+  % Dotted comparison arrows
+  \draw[arrowdotted, red!60!black] (act_s56.north) -- node[left, font=\scriptsize, text=red!70!black] {$\fstar$} (comp_C.south west);
+  \draw[arrowdotted, red!60!black] (ref_s56.north) -- node[right, font=\scriptsize, text=red!70!black, xshift=2pt] {$\fstar$} (comp_C.south east);
+
+  % Labels
+  \node[lawtitle, text=red!90!black, anchor=south] (lbl_C) at ($(comp_C.north) + (0, 0.5)$)
+    {(C) Merge Consistency};
+  \node[lawdesc, text=red!80!black, anchor=north] (desc_C) at (lbl_C.south)
+    {$\fstar(s_{56}) \approx \fstar(s'_{56})$?};
+
+  % Group Box
+  \begin{scope}[on background layer]
+    \node[groupbox, draw=red, fill=red, fit=(act_b5)(act_b6)(act_b56)(ref_s56)(comp_C)(act_s56)(lbl_C)(desc_C)] {};
+  \end{scope}
+
+  % Legend
+  \drawlegend{b4}{b5}
+
+  % Notation legend
+  \drawnotation{b4}{b5}
+
+\end{tikzpicture}

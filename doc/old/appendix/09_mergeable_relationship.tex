@@ -1,0 +1,81 @@
+\section{Relationship to Mergeable Summaries}\label{app:mergeable}
+
+This appendix formalizes the connection between our Oracle-Preserving Summarization (OPS) framework and the theory of \emph{mergeable summaries} developed for streaming and distributed databases \citep{Agarwal2013MergeableTODS}. We show that OPS strictly generalizes mergeable summaries: when the oracle $\fstar$ is symmetric and the summarizer $g$ is deterministic, our Parentwise Compatibility law~\eqref{eq:leaf_compatibility} is identical to the mergeability condition. When $\fstar$ is order-sensitive or $g$ is stochastic, OPS extends the notion of mergeability to the free monoid of strings by replacing hand-designed merge operators with learned semantic merges implemented by an LLM.
+
+\subsection{Formal Setup of Mergeable Summaries}
+
+In the classical setting, data arrives as a collection of items, and the objective is to maintain a compact synopsis that can be merged efficiently. Let $\mathcal{D}$ denote datasets (typically multisets) and $\mathcal{S}$ the sketch space with $|\mathcal{S}|\ll|\mathcal{D}|$.
+\begin{itemize}
+    \item \textbf{Data:} $D_1, D_2 \in \mathcal{D}$.
+    \item \textbf{Operation:} Multiset union $\uplus$, which is associative and commutative.
+    \item \textbf{Summary:} A function $S:\mathcal{D}\to\mathcal{S}$.
+    \item \textbf{Query:} $Q$ maps a sketch to the target statistic, with distortion bounded by $\epsilon$.
+\end{itemize}
+
+\begin{definition}[Mergeable Summary]
+A summary $S$ is mergeable if there exists $\mathcal{M}:\mathcal{S}\times\mathcal{S}\to\mathcal{S}$ such that for all $D_1,D_2$,
+\[
+    d_{\Y}\!\left(Q\!\left(\mathcal{M}(S(D_1),S(D_2))\right),\, Q(D_1\uplus D_2)\right) \le \epsilon.
+\]
+\end{definition}
+
+The guarantee holds uniformly over arbitrary merge trees, allowing sketches to be composed without revisiting the raw inputs.
+
+\subsection{Mapping OPS to Mergeable Summaries}
+
+Table~\ref{tab:mergeable_mapping} aligns the notation used in Section~\ref{sec:mechanism} with the streaming literature. The distinction is that OPS works over the free monoid of strings $(\Strings,\concat)$, where $\concat$ is generally non-commutative, and uses an LLM summarizer $g$ instead of a fixed algebraic operator.
+
+\begin{table}[t]
+    \centering
+    \begin{tabular}{p{0.23\linewidth}p{0.33\linewidth}p{0.33\linewidth}}
+        \toprule
+        \textbf{Component} & \textbf{OPS (this paper)} & \textbf{Mergeable summaries} \\
+        \midrule
+        Input & Strings $u,v\in\Strings$ & Datasets $D_1,D_2\in\mathcal{D}$ \\
+        Combination & Concatenation $\concat$ (non-commutative) & Union $\uplus$ (commutative) \\
+        Summarizer & $g:\Strings\rightsquigarrow\Strings$ & $S:\mathcal{D}\to\mathcal{S}$ \\
+        Task/query & Oracle $\fstar:\Strings\to\Y$ & Query $Q$ \\
+        Merge algorithm & $g(g(u)\concat g(v))$ & $\mathcal{M}(S(D_1),S(D_2))$ \\
+        Consistency law & Parentwise compatibility \eqref{eq:leaf_compatibility} & Mergeability condition \\
+        \bottomrule
+    \end{tabular}
+    \caption{Mapping OPS to the mergeable summaries framework.}
+    \label{tab:mergeable_mapping}
+\end{table}
+
+\subsection{Equivalence in the Commutative Case}
+
+Suppose the task ignores order, such as counting keyword occurrences or extracting the set of unique actors. In this case, $\fstar$ acts as a homomorphism from $(\Strings,\concat)$ to a commutative monoid $(\Y,+)$:
+\[
+    \fstar(u\concat v) = \fstar(u) + \fstar(v),
+\]
+up to the oracle metric $\metric$.
+
+Parentwise compatibility then states that re-summarizing the child summaries is inert at the oracle:
+\[
+    \E\!\Big[\metric\!\Big(\fstar\big(g(g(u)\concat g(v))\big),\, \fstar(g(u)\concat g(v))\Big)\Big]=0.
+\]
+When $g$ is deterministic, the expectation drops and the condition becomes pointwise.
+
+\begin{proposition}[Reduction to Mergeable Sketches]
+\label{prop:mergeable_reduction}
+Let $\fstar$ be commutative so that $\fstar(u\concat v)=\fstar(v\concat u)$, and let $g$ be deterministic. If $g$ satisfies exact Parentwise Compatibility~\eqref{eq:leaf_compatibility} on every realized merge, then $g$ is a mergeable summary for $\fstar$ in the sense of \citet{Agarwal2013MergeableTODS}.
+\end{proposition}
+
+\begin{proof}
+Define the merge algorithm $\mathcal{M}(s_1,s_2)=g(s_1\concat s_2)$, where $s_i=g(u_i)$ are summaries. For any $u,v$ we compare two routes: (i) concatenate the summaries $s_u,s_v$ and apply $\fstar$, yielding $\fstar(g(u)\concat g(v))$; (ii) merge the summaries via $\mathcal{M}$ and apply $\fstar$, yielding $\fstar(g(g(u)\concat g(v)))$. Parentwise compatibility enforces equality between these two values, so the mergeability condition holds with $\epsilon=0$. When the oracle is commutative and Condition~\eqref{eq:leaf_sufficiency} holds on the leaves, the concatenated summaries themselves agree with the concatenated raw text under $\fstar$, recovering the classical guarantee.
+\end{proof}
+
+Note that, unlike classical sketches where data arrive already as sketch inputs, Condition~(C2) in our framework also constrains the \emph{raw} concatenations $u\concat v$ to agree with their summarized counterparts. The parsing step from text to summary is therefore part of the algebra itself, which makes the OPS guarantees strictly stronger than standard mergeability claims.
+
+\begin{remark}[The universal merge]\label{rem:universal_merge}
+Classical sketches design bespoke $\mathcal{M}$ operators (vector addition for Count-Min, rank pruning for quantile sketches). OPS instead uses a universal merge: concatenate the summaries and apply the same summarizer again. The summarizer learns the algebra needed by the downstream oracle during its initial reduction pass, so no task-specific merge code is required.
+\end{remark}
+
+\subsection{Generalization to Non-Commutative Tasks}
+
+The OPS framework extends mergeability to the free monoid where $u\concat v\neq v\concat u$. Narrative queries---``Did the protest in paragraph $A$ trigger the crackdown in paragraph $B$?''---depend on order and context. Standard sketches over multisets cannot express these dependencies because the union operator discards order. Parentwise compatibility enforces a non-commutative analogue: the interaction between summarized blocks mimics the interaction between the original texts when evaluated by $\fstar$. This is precisely the condition audited in Figure~\ref{fig:local_compatibility}.
+
+\subsection{Error Propagation and Bounds}
+
+Mergeable summaries typically admit error bounds that grow logarithmically with tree height. Theorems~\ref{thm:one-pass} and~\ref{thm:multi-round} give an analogous ``zero-error'' propagation: if local merges satisfy Parentwise Compatibility exactly (in expectation), the global error collapses to zero regardless of tree shape. When local failures are bounded by $\epsilon$, our deployment bound~\eqref{eq:error_budget} plays the role of classical error accumulation: the total distortion is controlled by a weighted sum of leaf, merge, and stabilization failure rates. This is the semantic counterpart to bounding sketch errors with respect to the number of merge operations; it justifies the probabilistic audit in Section~\ref{sec:audit}, where random sampling over the summary tree produces a high-confidence certificate for the entire hierarchy.

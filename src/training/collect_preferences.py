@@ -184,9 +184,15 @@ Examples:
     )
     gen_group.add_argument(
         "--k-candidates",
+        "-k",
         type=int,
         default=None,
-        help="Number of candidate summaries (default: 4)",
+        help=(
+            "Number of candidate summaries per input (default: 4). "
+            "Trade-off: k=2 → 1 pairwise comparison (fast), "
+            "k=4 → 6 comparisons (thorough), k=8 → 28 comparisons (exhaustive). "
+            "Formula: k*(k-1)/2 comparisons."
+        ),
     )
     gen_group.add_argument(
         "--temperatures",

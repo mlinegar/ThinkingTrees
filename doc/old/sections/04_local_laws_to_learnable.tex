@@ -1,0 +1,80 @@
+\section{The Probabilistic Audit: Certifying Pipelines at Scale}
+\label{sec:audit}
+
+The theoretical guarantees in Section~\ref{sec:mechanism} and the learning equivalences in Section~\ref{sec:exist-learn-transport} rely on the assumption that the sufficiency, merge-consistency, and idempotence conditions hold. In a real deployment, we cannot simply assume these properties; we must verify them. However, checking every node in a massive tree defeats the purpose of summarization.
+
+We solve this dilemma using a \emph{probabilistic audit}. Because Theorem~\ref{thm:one-pass} guarantees that global fidelity is structurally implied by local fidelity, we do not need to validate the final summary against the full text to monitor quality. Instead, we treat the summarization pipeline as a stochastic process and estimate the \emph{Empirical Violation Rate} of each condition. A fixed sampling budget per audit run suffices to estimate these \emph{rates}; certifying that a specific book is error-free still requires those rates to be extremely small.
+
+Throughout we assume the atomic objects we audit---leaf blocks $b$ and stored child pairs $(s_{u_L},s_{u_R})$---are small enough that both the oracle $\fstar$ and the summarizer $g$ can process them directly. The hierarchy is useful precisely because the root document $X$ may be orders of magnitude larger than this audit budget; we audit the bounded pieces and rely on the structural results to propagate guarantees upward.
+
+The spotlight overlay from Figure~\ref{fig:probabilistic_audit} is therefore both the conceptual map and the literal set of prompts we reuse during auditing: we repeatedly sample windows that look like Panels~(A)--(C) and record whether the oracle agrees.
+
+
+\paragraph{Interpreting the spotlights.}
+Figure~\ref{fig:probabilistic_audit} makes the sampling logic concrete. Panel~(A) draws a random realized leaf (here $b_3$) and invokes $\fstar$ on both $b_3$ and $g(b_3)$ to decide whether that block preserves the oracle, directly contributing to $\hat{p}_{\text{suff}}$. Panel~(B) samples stored summaries (e.g., $s_{34}$), runs $g$ again, and checks $\fstar(g(s_{34}))$ against $\fstar(s_{34})$ to estimate $\hat{p}_{\text{idem}}$. Panel~(C) samples an actual boundary $(b_5,b_6)$, runs both admissible links of Condition~\eqref{eq:leaf_compatibility} that fit in context, and compares the oracle of the raw joint span to the oracle of the disjoint summary path; every agreement reduces $\hat{p}_{\text{assoc}}$. Each spotlight therefore identifies a bounded context in which we can literally run $\fstar$ on both arguments, record a Bernoulli outcome, and keep the rest of the tree ghosted out because guarantees propagate from these audited edges to the unseen portions.
+
+\subsection{The Audit Protocol}
+
+The audit reports three sample means: the sufficiency violation rate ($\hat{p}_{\text{suff}}$), the merge-consistency violation rate ($\hat{p}_{\text{assoc}}$), and the idempotence violation rate ($\hat{p}_{\text{idem}}$).
+
+\paragraph{Sampling Leaves (Sufficiency Condition).}
+We sample $n_\ell$ leaf blocks $\{b_i\}$ uniformly from the corpus. For each block, we generate its summary $g(b_i)$ and compare the oracle values:
+\[
+\hat{p}_{\text{suff}} := \frac{1}{n_\ell} \sum_{i=1}^{n_\ell} \mathbb{I}\left\{ \metric\big(\fstar(g(b_i)), \fstar(b_i)\big) > \tau \right\},
+\]
+where $\tau$ is a tolerance threshold (usually 0). This statistic is the empirical violation rate of Condition~\eqref{eq:leaf_sufficiency}. The check is cheap because leaf blocks are by definition short enough to fit in the model context.
+
+\paragraph{Sampling Merge Consistency (The Structural Check).}
+Condition~\eqref{eq:leaf_compatibility} requires a chain of equivalences, but we rarely have enough context to verify the entire chain at every node. Instead, we audit whichever link fits in memory for the sampled pair, always conditioning on the realized structure.
+\begin{itemize}
+    \item \textbf{Case A: Leaf boundaries (Substitution).} When $u,v$ are adjacent raw blocks, $u\concat v$ fits in context. We compare the joint and disjoint summaries (the second link in Condition~\eqref{eq:leaf_compatibility}):
+    \[
+    I_{\text{bound}} := \mathbb{I}\Big\{ \metric\big(\fstar(g(u\concat v)),\,\fstar(g(g(u)\concat g(v)))\big) > \tau \Big\}.
+    \]
+    \item \textbf{Case B: Internal merges (Compression).} When $u,v$ are stored summaries, they are short. We therefore compare the raw concatenation of the stored strings to the one-shot summary (the first link in Condition~\eqref{eq:leaf_compatibility}, with on-range inputs):
+    \[
+    I_{\text{merge}} := \mathbb{I}\Big\{ \metric\big(\fstar(u\concat v),\,\fstar(g(u\concat v))\big) > \tau \Big\}.
+    \]
+\end{itemize}
+For a batch of sampled leaf boundaries $\mathcal{B}$ and internal merges $\mathcal{M}$, the merge-consistency violation rate is the weighted average
+\[
+\hat{p}_{\text{assoc}} := \frac{\sum_{(u,v)\in\mathcal{B}} I_{\text{bound}}(u,v) + \sum_{(u,v)\in\mathcal{M}} I_{\text{merge}}(u,v)}{|\mathcal{B}| + |\mathcal{M}|}.
+\]
+This estimator covers both parts of Condition~\eqref{eq:leaf_compatibility}; the sampling procedure simply chooses whichever link fits in context, and together the two cases enforce the entire Raw $\sim$ Joint $\sim$ Disjoint chain.
+
+\paragraph{Sampling Stability (Idempotence Condition).}
+If the pipeline includes post-processing rounds, we sample $n_s$ summaries $z_k$ that have already passed through $g$ and check if re-summarization alters the oracle:
+\[
+\hat{p}_{\text{idem}} := \frac{1}{n_s} \sum_{k=1}^{n_s} \mathbb{I}\left\{ \metric\big(\fstar(g(z_k)), \fstar(z_k)\big) > \tau \right\}.
+\]
+This is the empirical violation rate of Condition~\eqref{eq:leaf_idempotence}.
+
+These three sample means provide unbiased estimates of the violation probabilities. Because every check fits in context, teams can run them on demand, streaming new samples until the observed rate and its confidence interval fall below a deployment threshold or batching entire corpora for periodic reviews. The same indicators also drive the optimization loop in Section~\ref{sec:bootstrap-main}: when the audit detects a violation, we immediately know which local objective is being missed. Appendix~\ref{app:practical_audit} shows how to convert the measured rates into worst-case global bounds if needed; otherwise, practitioners simply keep sampling until the empirical error rate is acceptable.
+
+\paragraph{Scaling with tree size.}
+Let a realized hierarchy contain $N$ leaves and $M=N-1$ merges. A transparent union bound (Appendix~\ref{app:practical_audit}) then gives
+\begin{equation}\label{eq:error_budget}
+\Pr\big[\text{root violation}\big]\ \le\ N\,p_{\text{suff}} + M\,p_{\text{assoc}} + (R-1)\,p_{\text{idem}},
+\end{equation}
+where $p_{\text{suff}},p_{\text{assoc}},p_{\text{idem}}$ denote the true per-edge violation probabilities and $R$ counts optional clean-up rounds. This $N\times p$ scaling is the price of safety: even tiny per-edge failure rates accumulate over thousands of nodes. The audit’s job is therefore to drive each $p$ low enough that the product $N\times p$ (and $M\times p$) stays within tolerance, or to change the decomposition until it does. When a target corpus makes this impossible, the framework surfaces that fact explicitly instead of hiding it in asymptotics.
+
+It bears repeating that these statistics describe the \emph{edge failure rates}, not the correctness of a specific document. If a document has $N$ leaves and the sufficiency failure rate is $p_{\text{suff}}$, the probability that every leaf is correct is roughly $(1-p_{\text{suff}})^N \approx e^{-Np_{\text{suff}}}$. For large $N$, the root summary is reliable only when the local error rates are correspondingly tiny. The audit therefore provides continuous process control rather than an end-to-end certificate for any single long document.
+
+\subsection{Connecting the Audit to Downstream Learning}
+
+In practice the most informative number is the empirical leaf violation rate. Each leaf check compares raw text to its first summary, so $\hat{p}_{\text{suff}}$ is a direct estimate of how often the pipeline corrupts ground truth before any merges occur. The merge and stability rates refine this estimate by revealing whether additional deviations are introduced higher in the tree. Teams therefore monitor the trio $(\hat{p}_{\text{suff}},\hat{p}_{\text{assoc}},\hat{p}_{\text{idem}})$, treating them as summaries of pipeline error: if the sufficiency rate is below tolerance and the subsequent stages rarely introduce new violations, the hierarchy can be trusted to preserve $\fstar$.
+
+Recall from Section~\ref{sec:exist-learn-transport} that we wish to train a DPO policy $\pi$ on summaries $Z$ instead of documents $X$. The fundamental risk is that the policy will learn to exploit artifacts of the summarization rather than the true user preferences. Appendix~\ref{sec:dpo} shows that the resulting regret is Lipschitz in the oracle distortion, so any improvement in the empirically estimated rates---especially $\hat{p}_{\text{suff}}$---translates directly into a tighter alignment guarantee. The probabilistic audit therefore doubles as a diagnostic for downstream training: we simply keep sampling leaves and merges until the observed rate of violations falls below the acceptable tolerance, at which point the same estimates justify training on the summaries.
+
+\subsection{Optimizing the Pipeline}
+
+Section~\ref{sec:bootstrap-main} already sketched how the audit doubles as supervision. Here we spell out the deployment loop. We instantiate two promptable modules (leaf and merge), treat their instructions as parameters $\theta$, and update them using any programmatic prompting framework---DSPy \citep{khattab2024dspy} is convenient because it exposes an optimizer over few-shot traces and temperature. This is a form of active learning or hard-negative mining: violations reveal exactly which examples to upweight next. The procedure is as follows:
+\begin{enumerate}
+    \item \textbf{Collect leaf data.} Sample leaves, run the current leaf module, and evaluate Condition~\eqref{eq:leaf_sufficiency}. Successful generations $(b, s_b)$ are appended to the module's context or fine-tuning buffer. When a failure occurs, we may re-generate at higher diversity, manually rewrite the span, or request a human edit. Either way, the comparison produces a labeled example at negligible cost because both arguments fit in context.
+    \item \textbf{Collect merge data.} Using the best available leaf summaries, sample adjacent pairs $(s_{u_L}, s_{u_R})$, run the merge module, and evaluate Condition~\eqref{eq:leaf_compatibility}. Successful merges become demonstrations for future runs. If repeated attempts fail, we flag the edge for escalation to a human or a larger teacher model; those ``hard negatives'' are inserted as mandatory exemplars in the next optimization round.\footnote{In practice we keep a small budget of high-capacity calls (or human hours) for these escalations. They both unblock the pipeline and supply the most informative prompt traces.}
+    \item \textbf{Update and stop.} Re-optimize the prompt parameters (e.g., via DSPy's gradient-free controller) on the accumulated traces and resume sampling. Because the audit statistics are empirical, the loop can be run offline (optimize until the held-out failure rate drops below tolerance) or online (deploy while continuously sampling and updating). The stopping rule is ``continue until the estimated violation rate is acceptable,'' at which point the same estimates justify deployment.
+\end{enumerate}
+This ``consistency bootstrap'' requires no external supervision beyond the oracle already assumed by the audit. Appendix~\ref{app:bootstrap} expands each step into DSPy-ready pseudocode including trace management and temperature search.
+
+\paragraph{Calibration vs.\ deployment.}
+The audit statistics assume the summarizer $g$ is fixed. In practice we therefore separate the \emph{calibration phase}, during which prompts or weights are updated using the bootstrap loop, from the \emph{deployment phase}, during which we freeze $g$ and estimate $(\hat{p}_{\text{suff}},\hat{p}_{\text{assoc}},\hat{p}_{\text{idem}})$ on held-out data. Mixing adaptation and measurement on the same stream breaks the i.i.d.\ assumptions behind the confidence bounds unless additional martingale corrections are applied.

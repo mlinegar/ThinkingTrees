@@ -1,0 +1,13 @@
+\documentclass[tikz,border=5mm]{standalone}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc}
+\tikzset{
+  >=Latex,
+  doc/.style = {draw, rounded corners, inner sep=3pt, align=center, minimum width=1.2cm},
+  sum/.style = {draw, rounded corners, inner sep=3pt, align=center, fill=blue!5},
+  plus/.style={circle, draw, inner sep=0pt, minimum size=14pt, font=\bfseries}
+}
+\newcommand{\concat}{\oplus}
+\begin{document}
+\input{hierarchical_tree.tikz}
+\end{document}

@@ -1,0 +1,37 @@
+\section{Worked Examples and Templates}
+\label{sec:examples}
+
+This section provides instantiation templates for four common task types, showing how to check Conditions~\eqref{eq:leaf_sufficiency}--\eqref{eq:leaf_idempotence} in practice. Each example specifies the oracle space $\Y$, the metric $\metric$, and concrete audit procedures for leaf sufficiency, merge consistency, and on-range idempotence. The first three examples cover standard deployment scenarios (binary event detection, structured entity extraction, and numeric aggregation); the fourth is a minimal counterexample demonstrating that on-range stability (Condition~\eqref{eq:leaf_idempotence}) cannot be omitted without breaking multi-round preservation.
+
+\subsection{Binary event detection (QA/passage-level)}
+\begin{itemize}
+  \item $Y=\{0,1\}$, $\metric(y,y')=\mathbf 1\{y\neq y'\}$.
+  \item Sufficiency check: ask $g$ to emit \texttt{EVENT: YES/NO} for each block; verify $\E[\mathbf 1\{\fstar(g(b))\neq \fstar(b)\}]=0$ within CI.
+  \item Merge-consistency check: for realized $u$, compare $\fstar(g(u_L)\concat g(u_R))$ to $\fstar(g(g(u_L)\concat g(u_R)))$; failures indicate cross‑block evidence interactions not preserved by $g$.
+\end{itemize}
+
+\subsection{Entity extraction (tuple)}
+\begin{itemize}
+  \item $Y\subseteq\mathcal A\times\mathcal{ACT}\times\mathcal T\times\mathcal P$ with weighted Hamming distance on fields.
+  \item Canonicalization: require one actor/action per line in fixed order; idempotence checks use the same schema to keep $g$ on‑range.
+\end{itemize}
+
+\subsection{Counting (numeric aggregation)}
+\begin{itemize}
+  \item $Y=\mathbb N$, $\metric(y,y')=|y-y'|$.
+  \item Global variant instantiates $y_1\odot y_2=y_1\concat y_2$ under exact $\fstar$‑sufficiency; edgewise audits reduce to additivity checks at realized merges.
+\end{itemize}
+
+\subsection{Stability Is Substantive: A Minimal Counterexample}
+\label{app:stability}
+
+Let $\Strings$ contain special tokens \textsc{pos}, \textsc{neg}, and let $\fstar(\textsc{pos})=1$, $\fstar(\textsc{neg})=0$, with general $\fstar(x)\in\{0,1\}$. Define
+\[
+g(x)=
+\begin{cases}
+\textsc{pos},& \fstar(x)=1,\,x\notin\{\textsc{pos},\textsc{neg}\},\\
+\textsc{neg},& \fstar(x)=0,\,x\notin\{\textsc{pos},\textsc{neg}\},\\
+\textsc{neg},& x\in\{\textsc{pos},\textsc{neg}\}.
+\end{cases}
+\]
+Then \ref{eq:leaf_sufficiency} holds on leaves never equal to \{\textsc{pos},\textsc{neg}\}, but $g$ is not on‑range stable since $\fstar(g(\textsc{pos}))=0\neq 1=\fstar(\textsc{pos})$. Thus additional normalization rounds can flip the label; \ref{eq:leaf_idempotence} is required to guarantee Theorem~\ref{thm:multi-round}.

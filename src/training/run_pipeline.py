@@ -192,6 +192,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--dataset-path', type=str, default=None,
                         help='Path for file-based datasets (e.g., jsonl)')
 
+    # Unified Training Loop (Phase 3.5)
+    parser.add_argument('--enable-unified-training', action='store_true',
+                        help='Enable unified judge+generator co-training (Phase 3.5)')
+    parser.add_argument('--generator-method', type=str, default='dpo',
+                        choices=['dpo', 'sft', 'grpo', 'bootstrap_finetune'],
+                        help='Generator training method for unified/standalone training')
+    parser.add_argument('--unified-max-iterations', type=int, default=3,
+                        help='Max iterations for unified training loop')
+    parser.add_argument('--unified-min-preferences', type=int, default=50,
+                        help='Minimum preferences required for generator training')
+
+    # Standalone Generator Training (Phase 3.25)
+    parser.add_argument('--train-generator', action='store_true',
+                        help='Train generator from collected preferences (Phase 3.25)')
+    parser.add_argument('--generator-model', type=str, default=None,
+                        help='Model to fine-tune for generator training')
+    parser.add_argument('--generator-output-dir', type=str, default=None,
+                        help='Output directory for trained generator')
+
     return parser.parse_args()
 
 
@@ -605,8 +624,10 @@ def build_trees(
         pref_file = prefs_dir / f"preferences_ops_tree_{timestamp}.json"
         all_preferences.save(pref_file)
 
-        # Save DPO format
-        dpo_data = all_preferences.to_dpo_format()
+        # Save DPO format using task prompt builder
+        dpo_data = all_preferences.to_dpo_format(
+            prompt_builder=prompt_builders.summarize
+        )
         dpo_file = prefs_dir / f"dpo_ops_tree_{timestamp}.json"
         with open(dpo_file, 'w') as f:
             json.dump(dpo_data, f, indent=2)
@@ -1371,6 +1392,8 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
     phase1_data_checkpoint = checkpoint_dir / 'phase1_data.pkl'
     phase1_5_checkpoint = checkpoint_dir / 'phase1_5_complete.json'
     phase1_5_data_checkpoint = checkpoint_dir / 'phase1_5_data.pkl'
+    phase3_25_checkpoint = checkpoint_dir / 'phase3_25_complete.json'
+    phase3_5_checkpoint = checkpoint_dir / 'phase3_5_complete.json'
 
     train_results = None
     val_results = None
@@ -1727,7 +1750,7 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 )
                 if prompt_path is not None:
                     logger.info(f"  Prompt context saved to: {prompt_path}")
-                # TODO: Wire optimized_judge into tree rebuilding for full tournament-of-tournaments loop
+                # Note: Optimized judge is already wired into tree rebuilding in Phase 1.65
             else:
                 # Optimize judge from preferences
                 judge_config = JudgeOptimizationConfig(
@@ -1915,6 +1938,192 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
             test_results = process_docs(test_samples, args, task, "Test", task_ports=task_ports)
             normalize_result_scores(test_results, task)
             stats['test'] = {'processed': len(test_results), 'evaluated': False}
+
+        # =====================================================================
+        # Phase 3.25: Standalone Generator Training (optional)
+        # =====================================================================
+        if getattr(args, 'train_generator', False):
+            from src.training.generator_trainers import get_trainer
+            from src.training.preference.types import PreferenceDataset
+
+            # Check for resume from Phase 3.25
+            if args.resume and phase3_25_checkpoint.exists():
+                logger.info("\n" + "=" * 60)
+                logger.info("PHASE 3.25: Loading from checkpoint (skipping generator training)")
+                logger.info("=" * 60)
+                with open(phase3_25_checkpoint, 'r') as f:
+                    phase3_25_data = json.load(f)
+                    stats['generator_training'] = phase3_25_data
+                logger.info(f"  Loaded generator training stats from checkpoint")
+            else:
+                logger.info("\n" + "=" * 60)
+                logger.info("PHASE 3.25: Generator Training from Preferences")
+                logger.info("=" * 60)
+
+                # Get preferences from ToT (Phase 1.65) or Phase 1.5
+                prefs_to_use = None
+                if 'opt_preference_dataset' in dir() and opt_preference_dataset and len(opt_preference_dataset) > 0:
+                    prefs_to_use = opt_preference_dataset
+                    logger.info("  Using preferences from optimized judge tree building")
+                elif preference_dataset and len(preference_dataset) > 0:
+                    prefs_to_use = preference_dataset
+                    logger.info("  Using preferences from initial tree building")
+
+                min_prefs = getattr(args, 'unified_min_preferences', 50)
+                if prefs_to_use and len(prefs_to_use) >= min_prefs:
+                    generator_model = getattr(args, 'generator_model', None)
+                    if not generator_model:
+                        # Default to a model based on port config
+                        generator_model = "nvidia/Nemotron-Nano-8B"
+                        logger.info(f"  Using default generator model: {generator_model}")
+
+                    gen_output_dir = Path(getattr(args, 'generator_output_dir', None) or output_dir / 'generator')
+
+                    try:
+                        trainer = get_trainer(args.generator_method)
+                        model_path = trainer.train(
+                            preferences=prefs_to_use,
+                            model_name=generator_model,
+                            output_dir=gen_output_dir,
+                        )
+                        stats['generator_training'] = {
+                            'method': args.generator_method,
+                            'model_path': model_path,
+                            'n_preferences': len(prefs_to_use),
+                        }
+                        logger.info(f"  Generator trained successfully: {model_path}")
+                    except Exception as e:
+                        logger.error(f"  Generator training failed: {e}")
+                        stats['generator_training'] = {'error': str(e)}
+                else:
+                    n_prefs = len(prefs_to_use) if prefs_to_use else 0
+                    logger.warning(f"  Insufficient preferences for generator training ({n_prefs} < {min_prefs})")
+                    stats['generator_training'] = {'skipped': True, 'reason': 'insufficient_preferences', 'n_preferences': n_prefs}
+
+                # Save checkpoint
+                with open(phase3_25_checkpoint, 'w') as f:
+                    json.dump(stats.get('generator_training', {}), f, indent=2)
+
+        # =====================================================================
+        # Phase 3.5: Unified Judge+Generator Co-Training (optional)
+        # =====================================================================
+        if getattr(args, 'enable_unified_training', False):
+            from src.training.unified_trainer import UnifiedTrainer, UnifiedTrainerConfig
+            from src.training.generator_trainers import create_trainer_from_method
+
+            # Check for resume from Phase 3.5
+            if args.resume and phase3_5_checkpoint.exists():
+                logger.info("\n" + "=" * 60)
+                logger.info("PHASE 3.5: Loading from checkpoint (skipping unified training)")
+                logger.info("=" * 60)
+                with open(phase3_5_checkpoint, 'r') as f:
+                    phase3_5_data = json.load(f)
+                    stats['unified_training'] = phase3_5_data
+                logger.info(f"  Loaded unified training stats from checkpoint")
+            else:
+                logger.info("\n" + "=" * 60)
+                logger.info("PHASE 3.5: Unified Judge+Generator Co-Training")
+                logger.info("=" * 60)
+
+                # Use optimized judge from Phase 1.6 if available
+                initial_judge = None
+                if 'optimized_judge' in dir() and optimized_judge is not None:
+                    initial_judge = optimized_judge
+                    logger.info("  Using optimized judge from Tournament of Tournaments")
+                else:
+                    # Create new GenRM judge
+                    from src.training.preference.genrm import GenRMJudge
+                    initial_judge = GenRMJudge(
+                        base_url=f"http://localhost:{args.genrm_port}/v1",
+                        temperature=0.6,
+                        max_tokens=8192,
+                    )
+                    logger.info("  Created new GenRM judge")
+
+                # Create generator trainer
+                generator_trainer = create_trainer_from_method(
+                    method=args.generator_method,
+                    genrm_judge=initial_judge,
+                )
+
+                # Create unified config
+                unified_config = UnifiedTrainerConfig(
+                    max_iterations=getattr(args, 'unified_max_iterations', 3),
+                    min_preferences_for_training=getattr(args, 'unified_min_preferences', 50),
+                    k_candidates=getattr(args, 'genrm_init_candidates', 4),
+                    judge_budget=getattr(args, 'judge_optimization_budget', 'light'),
+                )
+
+                # Build samples for unified training
+                unified_samples = []
+                sample_lookup = {s.doc_id: s for s in train_samples}
+                for result in train_results:
+                    if result is None or getattr(result, 'error', None):
+                        continue
+                    doc_id = getattr(result, 'doc_id', 'unknown')
+                    sample = sample_lookup.get(doc_id)
+                    if sample and hasattr(sample, 'text'):
+                        unified_samples.append({
+                            'text': sample.text,
+                            'doc_id': doc_id,
+                            'reference_score': getattr(result, 'reference_score', None),
+                        })
+
+                # Get rubric and summarizer from task
+                rubric = task.create_rubric() if hasattr(task, 'create_rubric') else ""
+                summarizer_module = task.create_summarizer() if hasattr(task, 'create_summarizer') else None
+
+                def summarizer_fn(content: str, rubric: str) -> str:
+                    if summarizer_module is None:
+                        return content[:1000]  # Fallback: truncate
+                    result = summarizer_module(content=content, rubric=rubric)
+                    return getattr(result, 'summary', str(result))
+
+                # Create oracle scorer
+                oracle_predict = task.create_oracle_scorer() if hasattr(task, 'create_oracle_scorer') else None
+
+                if oracle_predict and unified_samples:
+                    logger.info(f"  Starting unified training with {len(unified_samples)} samples")
+
+                    unified_trainer = UnifiedTrainer(
+                        generator_trainer=generator_trainer,
+                        genrm_judge=initial_judge,
+                        oracle_predict=oracle_predict,
+                        config=unified_config,
+                        output_dir=output_dir / 'unified_training',
+                        summarizer=summarizer_fn,
+                    )
+
+                    try:
+                        unified_result = unified_trainer.train(unified_samples, rubric)
+
+                        stats['unified_training'] = {
+                            'converged': unified_result.converged,
+                            'convergence_reason': unified_result.convergence_reason,
+                            'final_iteration': unified_result.final_iteration,
+                            'final_judge_accuracy': unified_result.final_judge_accuracy,
+                            'final_generator_path': unified_result.final_generator_path,
+                            'accuracy_history': unified_result.accuracy_history,
+                        }
+
+                        logger.info(f"\nUnified Training Complete:")
+                        logger.info(f"  Converged: {unified_result.converged} ({unified_result.convergence_reason})")
+                        logger.info(f"  Final judge accuracy: {unified_result.final_judge_accuracy:.3f}")
+                        if unified_result.final_generator_path:
+                            logger.info(f"  Generator path: {unified_result.final_generator_path}")
+                    except Exception as e:
+                        logger.error(f"  Unified training failed: {e}")
+                        stats['unified_training'] = {'error': str(e)}
+                else:
+                    if not oracle_predict:
+                        logger.warning("  Skipping unified training: no oracle scorer available")
+                    else:
+                        logger.warning("  Skipping unified training: no samples available")
+                    stats['unified_training'] = {'skipped': True, 'reason': 'missing_requirements'}
+
+                # Save checkpoint
+                with open(phase3_5_checkpoint, 'w') as f:
+                    json.dump(stats.get('unified_training', {}), f, indent=2)
 
         stats['completed_at'] = datetime.now().isoformat()
         stats['success'] = True

@@ -1,0 +1,367 @@
+\section{Local Setup and Notation}\label{sec:setup}
+
+We model every document as a finite string of tokens. Formally this is the free monoid $(\Strings,\concat,\emptystr)$ recorded in Appendix~\ref{app:notation}, but in the main text we simply write $x=b_1\concat\cdots\concat b_k$ for the contiguous blocks that make up $x$. The task of interest is represented by a fixed oracle $\fstar:\Strings\to\Y$ whose output space $\Y$ can be another set of strings or an embedding space. Documents are random draws $X\sim\Law$ from some population law on $\Strings$.\footnote{The data-generating process $\Law$ may be a biased sample of the underlying state of the world. For instance, newspapers may selectively report certain types of events, or court opinions may reflect only cases that reach adjudication. Our analysis abstracts from this selection mechanism and takes the observed corpus as given; the oracle $\fstar$ extracts task-relevant information from whatever documents $\Law$ produces. Addressing selection bias in $\Law$ itself is outside the scope of this work.} None of the statements below depend on the specific form of $\Law$.
+
+A summarizer $g:\Strings\rightsquigarrow\Strings$ may be deterministic or may use internal randomness (e.g., sampling temperature). When randomness is present, the statements below are understood after averaging over the seeds/call-counts used by $g$; in deployment, one can approximate these expectations by drawing multiple summaries and averaging their oracle distances. To keep the notation minimal we write $\E[\cdot]$ for all expectations and suppress the inner averaging. The quality of a summary is measured in oracle space: a (pseudo)metric $\metric:\Y\times\Y\to[0,\infty)$ induces the distortion
+\[
+D(z,x):=\metric\big(\fstar(z),\fstar(x)\big),
+\]
+so two strings are indistinguishable for our purposes when $D(z,x)=0$.
+
+Downstream training only cares about the oracle. We formalize this with a simple conditional factorization: there is a population score $\sstar: \Strings\times \A\to\R$ (classification loss, reward, or any other signal) and a measurable $\bar Q$ such that
+
+\begin{assumption}[Conditional Factorization]\label{ass:CF}
+There exists a measurable function $\bar{Q}: \Y \times \A \to \mathbb{R}$ such that for all actions $a \in \A$,
+\[
+\E[\sstar(X, a) \mid \fstar(X)] = \bar{Q}(\fstar(X), a) \quad \text{almost surely}.
+\]
+\end{assumption}
+
+This assumption covers standard classification settings (scores depend on the true label) and preference learning (scores depend on the task semantics), and it tolerates annotator noise because the conditioning is on $X$. Intuitively, once we know the task value $\fstar(X)$ there is no extra reward to be had from raw phrasing: if $\fstar(X)$ records the city, crowd size, and outcome of a protest, reviewers judging a summary care about those fields rather than the specific prose.
+
+Because only $\fstar$ matters for decision making, the right notion of a ``good'' summary is one whose oracle matches that of the source. We separate the one-pass requirement from the ``do no harm when summarizing again'' requirement.
+
+\begin{definition}[Oracle sufficiency in expectation]\label{def:expect-suff}
+A (possibly stochastic) summarizer $g$ is \emph{$\fstar$‑sufficient in expectation}
+if for every $x\in\Strings$,
+\[
+\E\!\big[\,\metric\big(\fstar(g(x)),\,\fstar(x)\big)\,\big]\;=\;0.
+\]
+For deterministic $g$, this reduces to the pointwise condition
+$\metric\big(\fstar(g(x)),\fstar(x)\big)=0$ for all $x$.
+\end{definition}
+
+\begin{definition}[Summary idempotence]\label{def:resum-stable}
+The summarizer $g$ is \emph{summary-idempotent} (stable) if every string that already lies on the range of $g$ keeps its oracle after another call to $g$:
+\[
+\E\big[\metric\big(\fstar(g(Z)),\fstar(Z)\big)\mid Z\big]=0
+\quad\text{for every random $Z$ supported on the range of $g$.}
+\]
+\end{definition}
+
+Exact preservation is the special case in which the distortion is zero almost surely. We collect the corresponding shorthand.
+
+\begin{definition}[Exact classes $\Gstar$ and $\Gstar_{\mathrm{stab}}$]\label{def:exact-suff-stable}
+Write
+\[
+\Gstar:=\{g:\ \metric(\fstar(g(X)),\fstar(X))=0\text{ a.s.}\},
+\qquad
+\Gstar_{\mathrm{stab}}:=\{g\in\Gstar:\ g \text{ also satisfies Definition~\ref{def:resum-stable}}\}.
+\]
+\end{definition}
+
+Doob–Dynkin factorization (Appendix~\ref{app:notation}) states that $g\in\Gstar$ iff the oracle can be recovered as a measurable function of $g(X)$, and stability is an additional property that constrains re-applications of $g$. Figure~\ref{fig:gstar} illustrates the equalities implied by membership in $\Gstar_{\mathrm{stab}}$.
+
+When reasoning about concrete tasks, these conditions can be read literally. For example, if $\fstar$ extracts the set of people named in a multi-document dossier, Definition~\ref{def:expect-suff} says that every summary must yield exactly the same set of names, while Definition~\ref{def:resum-stable} says that repeatedly prompting the dossier with ``rewrite in canonical form'' cannot swap names in or out. The class $\Gstar_{\mathrm{stab}}$ simply collects summarizers that satisfy both properties.
+
+
+
+
+In Figure \ref{fig:gstar} we graphically depict the equality requirements for a summarizer $g$ to be in $\Gstar$, specifically, sufficiency and summary idempotence. When $g\in \Gstar$, three paths yield the same answer: directly applying the oracle $\fstar(X)$, summarizing then applying the oracle $\fstar(g(X))$, and repeatedly summarizing then applying the oracle $\fstar(g(g(X)))$.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[node distance=2cm]
+\node[doc] (X) {$X$};
+\node[sum, right=of X] (gX) {$g(X)$};
+\node[sum, right=of gX] (ggX) {$g(g(X))$};
+
+\node[op, below=of X] (fX) {$\fstar(X)$};
+\node[op, below=of gX] (fgX) {$\fstar(g(X))$};
+\node[op, below=of ggX] (fggX) {$\fstar(g(g(X)))$};
+
+\draw[->, dotted] (X) -- node[above] {} (gX);
+\draw[->, dotted] (gX) -- node[above] {} (ggX);
+\draw[->] (X) -- node[left] {} (fX);
+\draw[->] (gX) -- node[left] {} (fgX);
+\draw[->] (ggX) -- node[left] {} (fggX);
+
+\draw[<->, dashed] (fX) -- node[below] {\tiny $\metric$-equal if $g \in \Gstar$} (fgX);
+\draw[<->, dashed] (fgX) -- node[below] {\tiny $\metric$-equal by idempotence} (fggX);
+\end{tikzpicture}
+\caption{Oracle-preserving normal form: one summarization preserves the task-relevant information, and re-summarizing an already-summarized text leaves it unchanged.}
+\label{fig:gstar}
+\end{figure}
+
+\subsection{Document Decomposition}
+
+Long documents routinely exceed LLM context windows, so we first split $x$ into contiguous blocks $(b_1,\ldots,b_k)$ and then summarize them hierarchically. Any full binary tree whose leaves are $(b_1,\ldots,b_k)$ serves as a \emph{reduction tree}: the two children of an internal node are concatenated and summarized again, and the process repeats until a single top summary remains. This description is deliberately agnostic about the global ``hierarchical summarization'' literature; we only rely on the realized schedule that a deployment actually runs. We denote the one-pass output by $Z^{(1)}(x)$ and write $Z^{(R+1)}(x):=g(Z^{(R)}(x))$ for optional ``normalization'' rounds.
+
+The informal description above already captures most deployed systems. Analysts decide on a block size, specify how to merge blocks (balanced, left-deep, folder-by-folder, etc.), ask an LLM to summarize each leaf, and continue merging until a top summary is produced. The key point for our notation is that every intermediate summary sits on a node of the realized tree $T$; nothing else about the order or batching will matter for the theorems.
+
+We formalize this “summarize, concatenate, summarize again’’ recipe in Algorithm~\ref{alg:las}. The only inputs are the base document $x_0$, the tree $T$ that captures the realized merge schedule, and the desired number of post-processing rounds.
+
+\begin{algorithm}[t]
+\caption{Locally Audited Summarization}\label{alg:las}
+\begin{algorithmic}[1]
+\STATE \textbf{Input:} base document $x_0$, full binary tree $T$ on contiguous blocks $(b_1,\ldots,b_k)$, number of rounds $R$
+\STATE Partition $x_0$ into contiguous blocks $(b_1,\ldots,b_k)$ that each fit a single call to $g$
+\FOR{each leaf $b_i$ of $T$}
+    \STATE Evaluate $g(b_i)$
+\ENDFOR
+\FOR{each internal node $u$ of $T$ traversed bottom-up}
+    \STATE $g(u) \gets g\big(g(u_L)\concat g(u_R)\big)$
+\ENDFOR
+\STATE $Z^{(1)}(x) \gets g(\mathrm{root}(T))$
+\FOR{$r=1$ to $R-1$}
+    \STATE $Z^{(r+1)}(x) \gets g\big(Z^{(r)}(x)\big)$
+\ENDFOR
+\STATE \textbf{return} $Z^{(R)}(x)$
+\end{algorithmic}
+\end{algorithm}
+
+Some deployments also aggregate within larger “folds’’ (e.g., summarize each issue of a magazine and then summarize across issues). If $F_1,\ldots,F_J$ are contiguous folds of $(b_1,\ldots,b_k)$, we may pick arbitrary trees $T_1,\ldots,T_J$ within folds and an arbitrary over-fold tree $\widehat T$; folding each level with the same $g$ fits neatly into the notation developed below and is covered by our guarantees.
+
+Figure \ref{fig:hierarchical_summarization} shows the resulting “summarize, concatenate, summarize again” pipeline, which is the object we audit in the next subsection.
+
+
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[x=1.0cm, y=1.2cm]  % tighten x to keep the full tree within page width
+  % Optional: a style to highlight nodes we sample for oracle checks later.
+  % Usage: replace 'doc' or 'sum' with 'doc,selected' or 'sum,selected' on any node.
+  \tikzset{selected/.style={fill=yellow!30, draw=orange!80!black, very thick}}
+
+  %  --  Bottom row: documents x_1,...,x_8 and their first summaries g(x_i)
+  \foreach \i [evaluate=\i as \xx using 2*(\i-1)] in {1,...,8}{
+    \node[doc] (x\i) at (\xx,0) {$x_{\i}$};                 % e.g., add [selected] here to highlight a leaf
+    \node[sum] (g\i) at (\xx,1.4) {$g(x_{\i})$};
+    \draw[->] (x\i) -- (g\i); % upward "summarize"
+  }
+
+  %  --  Level 1 merges: (1,2), (3,4), (5,6), (7,8)
+  \foreach \a/\b in {1/2,3/4,5/6,7/8}{
+    \node[plus] (p\a\b) at ($ (g\a)!0.5!(g\b) + (0,1.2) $) {$\concat$};
+    \node[sum]  (s\a\b) at ($ (p\a\b) + (0,1.2) $) {$g\big(g(x_{\a}) \concat g(x_{\b})\big)$};
+    \draw[->] (g\a) -- (p\a\b);
+    \draw[->] (g\b) -- (p\a\b);
+    \draw[->] (p\a\b) -- (s\a\b);
+  }
+
+  %  --  Level 2 merges: (12,34) and (56,78)
+  \foreach \L/\R in {12/34,56/78}{
+    \node[plus] (p\L\R) at ($ (s\L)!0.5!(s\R) + (0,1.2) $) {$\concat$};
+    \node[sum]  (s\L\R) at ($ (p\L\R) + (0,1.2) $) {$g\big(s_{\L} \concat s_{\R}\big)$};
+    \draw[->] (s\L) -- (p\L\R);
+    \draw[->] (s\R) -- (p\L\R);
+    \draw[->] (p\L\R) -- (s\L\R);
+  }
+
+  %  --  Top merge: (1234, 5678)
+  \node[plus] (pall) at ($ (s1234)!0.5!(s5678) + (0,1.2) $) {$\concat$};
+  \node[sum]  (sall) at ($ (pall) + (0,1.2) $) {$g\big(s_{1234} \concat s_{5678}\big)$};
+  \draw[->] (s1234) -- (pall);
+  \draw[->] (s5678) -- (pall);
+  \draw[->] (pall) -- (sall);
+
+  % If we later want a visible legend without cluttering edges:
+  % \node[op, anchor=west] at ($(x1.west)+(-0.5,0)$) {\emph{All upward arrows apply $g$; circles mark concatenation.}};
+\end{tikzpicture}
+\caption{Hierarchical summarization as a binary tree. Bottom documents $x_i$ are summarized by $g$; summaries are concatenated and re-summarized up the tree until a single top summary remains. No oracle $\fstar$ evaluations are required except (optionally) as accuracy checks.}
+\label{fig:hierarchical_summarization}
+\end{figure}
+
+\subsection{Local compatibility laws}\label{sec:compatibility}
+
+With the pipeline in place, the key question is: what must hold locally so that the overall reduction keeps the task value intact? The data scientist only gets to inspect actual leaf calls and actual merges, so our laws speak solely about those realized operations. All expectations below average over the randomness of $g$ (if any) along the fixed tree; when $g$ is deterministic the equalities are pointwise.
+
+\paragraph{Realized strings, summaries, and edges.}
+Fix a full binary tree $T$ on the contiguous blocks $(b_1,\ldots,b_k)$ of the original document $x$ (write $x_0:=x$ when we wish to emphasize the unsummarized text). A node $u$ is a \emph{leaf} if it has no children—equivalently, it represents one of the raw substrings $b_i$ carved directly out of $x_0$. All other nodes are \emph{internal nodes} (parents) with exactly two ordered children denoted $u_L$ and $u_R$, whose contents are summaries of their respective subtrees. Each node $u$ carries two strings:
+\[
+S(u)=
+\begin{cases}
+b_i, & u \text{ is the $i$th leaf},\\[2pt]
+S(u_L)\concat S(u_R), & u \text{ is internal with children }u_L,u_R,
+\end{cases}
+\qquad
+g(u)=
+\begin{cases}
+g\big(S(u)\big), & u \text{ is a leaf},\\[2pt]
+g\big(g(u_L)\concat g(u_R)\big), & u \text{ is internal}.
+\end{cases}
+\]
+We overload $g$ so that $g(u)$ denotes the summary stored at node $u$ after the hierarchical reduction, while $g(\cdot)$ on the right-hand side is the original string-to-string summarizer. As we traverse the tree bottom-up from the leaves to the root, each node $u$ accumulates a summary: at leaves, $g(b_i)$ is the summary of block $b_i$; at internal nodes, $g(u)$ is the summary of the concatenation of its children's summaries. Write $r$ for the root of $T$; the one-pass output is $Z^{(1)}(x):=g(r)$, and $Z^{(R+1)}(x):=g(Z^{(R)}(x))$ describes optional extra rounds. For later audits it is convenient to name each realized internal edge $(v,w):=(S(u_L),S(u_R))$ encountered in the tree.
+
+For quick reference we will reuse the following symbols throughout the section:
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Symbol & Meaning \\
+\midrule
+$x_0$ & Base document (all leaves are contiguous substrings of $x_0$) \\
+$b$ & Realized leaf block supplied directly to $g$ \\
+$u$ & Realized internal node with ordered children $u_L,u_R$ \\
+$(v,w)$ & Underlying child strings $(S(u_L),S(u_R))$ on a realized edge \\
+\bottomrule
+\end{tabular}
+\end{center}
+References to “children” and “parents” always mean child/parent nodes in the tree; their raw text is given by $S(\cdot)$ (a substring of $x_0$ for leaves and a concatenation of child strings for parents) and the corresponding summaries by $g(\cdot)$.
+
+\begin{figure}
+    \centering
+    \begin{tikzpicture}[node distance=8.5mm and 10.5mm,scale=0.95, every node/.style={transform shape}]
+% Route 1
+\node[doc] (a1) at (0,0) {$v$};
+\node[doc] (b1) at (1.2,0) {$w$};
+\node[plus] (plus1) at (0.6,1.1) {$\concat$};
+\node[sum] (gab) at (0.6,2.3) {$g(v \concat w)$};
+\node[op] (f1) at (0.6,3.5) {$\fstar(g(v \concat w))$};
+\draw[->] (a1) -- (plus1);
+\draw[->] (b1) -- (plus1);
+\draw[->] (plus1) -- (gab);
+\draw[->] (gab) -- (f1);
+
+% Route 2
+\node[doc] (a2) at (4.6,0) {$v$};
+\node[doc] (b2) at (5.8,0) {$w$};
+\node[sum] (ga) at (4.6,1.1) {$g(v)$};
+\node[sum] (gb) at (5.8,1.1) {$g(w)$};
+\node[plus] (plus2) at (5.2,2.3) {$\concat$};
+\node[sum] (ggab) at (5.2,3.5) {$g(g(v) \concat g(w))$};
+\node[op] (f2) at (5.2,4.7) {$\fstar(g(g(v) \concat g(w)))$};
+\draw[->] (a2) -- (ga);
+\draw[->] (b2) -- (gb);
+\draw[->] (ga) -- (plus2);
+\draw[->] (gb) -- (plus2);
+\draw[->] (plus2) -- (ggab);
+\draw[->] (ggab) -- (f2);
+
+\draw[<->, dashed, thick] (f1) -- node[above, sloped] {\tiny $\E[\metric(\fstar(\cdot),\ \cdot)]=0$} (f2);
+\end{tikzpicture}
+    \caption{Edge-wise compatibility at a realized merge. 
+At an internal node with children $(v,w)$, there are two admissible routes to the parent's oracle: 
+\emph{(left)} concatenate the underlying strings and summarize once, then apply $\fstar$; 
+\emph{(right)} summarize each child, concatenate the summaries, and summarize once more, then apply $\fstar$. 
+Parentwise compatibility \ref{eq:leaf_compatibility} requires these two routes to agree in expectation given the realized subtree, i.e., 
+$\E\big[\,\metric(\fstar(g(g(u_L)\concat g(u_R))),\,\fstar(S(u)) )\,\big]=0$. 
+For audits, the edge-wise probe compares the two routes directly at the realized edge $(v,w)$ by checking 
+$\metric\!\big(\fstar(v\concat w),\,\fstar(g(g(v)\concat g(w)))\big)=0$ (Equation~\ref{eq:edgewise_equivalence}). When both children $v$ and $w$ are on‑range of $g$, the parent’s oracle depends only on the children’s oracle values, and \ref{eq:leaf_compatibility} and \ref{eq:edgewise_equivalence} coincide.}
+    \label{fig:local_compatibility}
+\end{figure}
+
+
+Figure~\ref{fig:local_compatibility} displays the two routes that meet at a single realized internal edge $(v,w)$ in the reduction tree. The left route concatenates the underlying child strings, summarizes once, and then evaluates the oracle; the right route summarizes each child, concatenates the summaries, and summarizes once more before evaluating the oracle. Our compatibility requirement is deliberately local: these two routes must agree at the oracle in expectation with respect to the summarizer's internal randomness, conditional on the realized subtree. This edge‑level picture is the operational unit we can actually audit in deployed hierarchies.
+
+\paragraph{Three local laws.}
+All three laws are stated on the \emph{realized} leaves and internal pairs of $T$. If $g$ is deterministic, expectations can be dropped and equalities are pointwise.
+
+
+% --- Local laws with custom tags L1--L3 ---
+% Leaf sufficiency in expectation
+
+Our first local law is called \textit{Leaf Sufficiency (in expectation)}:
+
+\begin{equation}\tag{L1}\label{eq:leaf_sufficiency}
+\E\!\big[\,\metric\big(\fstar(g(b)),\,\fstar(b)\big)\,\big]\;=\;0
+\quad\text{for every realized leaf $b$.}
+\end{equation}
+
+Next, we have \textit{Parentwise Compatibility}:
+
+% Parentwise compatibility
+\begin{equation}\tag{L2}\label{eq:leaf_compatibility}
+\E\!\Big[
+  \metric\Big(\,\fstar\!\big(g\!\big(g(u_L)\concat g(u_R)\big)\big),\
+                 \fstar\!\big(S(u)\big)\,\Big)\Big]\;=\;0
+\quad\text{for every realized internal node $u$.}
+\end{equation}
+
+In words: along the realized subtree beneath $u$, if we reduce the children exactly as the hierarchy does and then summarize their concatenation at the parent, the expected oracle at the parent matches the ground-truth oracle of $S(u)=S(u_L)\concat S(u_R)$.
+
+
+Finally, we have \textit{On-Range Idempotence}:
+
+% On-range stability (re-summarization idempotence)
+\begin{equation}\tag{L3}\label{eq:leaf_idempotence}
+\E\!\big[\,\metric\big(\fstar(g(Z)),\,\fstar(Z)\big)\,\big|\,Z\big]\;=\;0
+\quad\text{for every random $Z$ supported on the range of $g$.}
+\end{equation}
+
+Equivalently, once a string lies on the range of $g$, re-applying $g$ does not change its oracle in expectation.
+
+
+These conditions are strictly local: they quantify only over the leaves and internal nodes the scheduler \emph{actually} realized on $x$; no claims are made about unobserved pairs in $\Strings\times\Strings$, and no global associativity or commutativity is assumed.
+
+\begin{remark}[Edge-wise compatibility]\label{rem:edgewise_compatibility}
+Some audits might prefer to check a more granular \emph{edge‑wise} two‑route identity at internal edges $(v,w)=\big(S(u_L),S(u_R)\big)$:
+\begin{equation}\tag{E1}\label{eq:edgewise_equivalence}
+% \fstar(v\concat w)\;=\;\E\!\left[\,\fstar\!\Big(g\big(g(v)\ \concat\ g(w)\big)\Big)\,\right].
+\metric\big(\fstar(v\concat w),\,\fstar(g(g(v)\concat g(w)))\big)=0
+\end{equation}
+Eq.\,\eqref{eq:edgewise_equivalence} compares ``summarize–concatenate–re‑summarize'' to the direct oracle on the underlying concatenation \emph{for that edge}. It is easy to audit and can meaningfully complement \eqref{eq:leaf_compatibility}. In general neither \eqref{eq:edgewise_equivalence} nor \eqref{eq:leaf_sufficiency} and \eqref{eq:leaf_compatibility} implies the other without additional structure (unless of course both children are leaves, in which case \eqref{eq:leaf_sufficiency} reduces exactly to \eqref{eq:edgewise_equivalence}); under further assumptions (e.g., when the parent call, given on‑range inputs, depends only on the children's oracle values) the two can be linked. Our invariance results below require only \eqref{eq:leaf_sufficiency}, \eqref{eq:leaf_compatibility}, and \eqref{eq:leaf_idempotence}.
+\end{remark}
+
+With the notation fixed, we can state the main consequence: if every realized leaf and merge passes its local check, then the entire reduction preserves the oracle in expectation. Theorem~\ref{thm:one-pass} makes this precise.
+
+
+\begin{theorem}[One‑pass preservation under leaf sufficiency and parentwise compatibility]\label{thm:one-pass}
+Fix $x=b_1\concat \cdots\concat b_k$ and a full binary tree $T$ on these leaves.
+If \ref{eq:leaf_sufficiency} holds on every realized leaf and \ref{eq:leaf_compatibility} holds at every realized internal node, then
+\[
+\E\!\left[\,\metric\!\Big(\fstar\big(g(\mathrm{root}(T))\big),\ \fstar(x)\Big)\,\right]\;=\;0.
+\]
+\end{theorem}
+
+
+\begin{proof}
+Lemma~\ref{lem:nodewise} in Appendix~\ref{app:notation} carries out the structural induction: applying it to the root $u=\mathrm{root}(T)$ yields the claim because $S(\mathrm{root}(T))=x$.
+\end{proof}
+
+Because the proof only used local equalities at realized internal nodes, the expected oracle is invariant to the merge schedule. This gives the following immediate corollary.
+
+\begin{corollary}[Schedule invariance: chain vs.\ batch]\label{cor:schedule}
+Under the hypotheses of Theorem~\ref{thm:one-pass}, the equality
+$\E\big[\metric\big(\fstar(g(\mathrm{root}(T))),\fstar(x)\big)\big] = 0$
+holds for \emph{every} full binary tree $T$ on the fixed leaf partition $(b_1,\ldots,b_k)$ whose nodes satisfy \eqref{eq:leaf_sufficiency} and \eqref{eq:leaf_compatibility}. In particular, balanced trees and daisy‑chain schedules agree in expected oracle value.
+\end{corollary}
+
+The same argument applies to two‑level pipelines that first reduce within larger contiguous units and then reduce the sequence of fold‑summaries under any binary tree; in practice this covers “fold-of-folds’’ batching for cost or latency.
+
+\begin{corollary}[Fold‑of‑folds invariance]\label{cor:folds}
+Let $(F_1,\ldots,F_J)$ be a contiguous coarsening of the leaves. Reduce each fold $F_j$ by an arbitrary within‑fold tree $T_j$ to obtain $S_j:=g(T_j)$, then reduce $(S_1,\ldots,S_J)$ by any over‑fold tree $\widehat T$. If \eqref{eq:leaf_sufficiency} holds on all realized leaves across both levels and \eqref{eq:leaf_compatibility} holds at every realized internal node, then
+% \[
+% \E\!\big[\ \fstar\big(g(\widehat T)\big)\ \big]\;=\;\fstar(x).
+% \]
+\[
+\E\!\big[\ \metric\big(\fstar\big(g(\widehat T)\big),\ \fstar(x)\big)\big] = 0.
+\]
+\end{corollary}
+
+Finally, the stability law guarantees that extra normalization rounds are inert at the oracle, so repeatedly “cleaning up’’ summaries cannot change the task value.
+
+\begin{theorem}[Multi‑round preservation by on‑range stability]\label{thm:multi-round}
+Assume the hypotheses of Theorem~\ref{thm:one-pass}, so that
+\[
+\E\Big[\metric\big(\fstar(Z^{(1)}(x)),\,\fstar(x)\big)\Big]=0.
+\]
+If, in addition, \ref{eq:leaf_idempotence} holds, then for every $R\ge 1$,
+\[
+\E\Big[\metric\big(\fstar(Z^{(R)}(x)),\,\fstar(x)\big)\Big]=0,
+\qquad
+Z^{(1)}(x):=g(\mathrm{root}(T)),\ \ Z^{(R+1)}(x):=g\!\big(Z^{(R)}(x)\big).
+\]
+\end{theorem}
+
+
+\subsection{Implications for auditing and learning}\label{sec:what-local-buys}
+
+The three laws isolate exactly what deployed systems expose. Leaf sufficiency \eqref{eq:leaf_sufficiency} asks that a single call to $g$ preserve the oracle on the blocks we actually feed it. Parentwise compatibility \eqref{eq:leaf_compatibility} demands that, at each realized internal node, the two routes—reduce the children as scheduled and then summarize their concatenation, versus apply the oracle to the underlying concatenation—match in expectation. Stability \eqref{eq:leaf_idempotence} certifies that further normalization passes are inert at the oracle. All statements tolerate stochastic $g$ and arbitrary parenthesization; no global algebra is assumed. For audits that prefer edge‑level probes, the optional law \eqref{eq:edgewise_equivalence} compares the two routes at a single edge; it can be sampled and tested directly and, in many applications, serves as a convenient stress test alongside \eqref{eq:leaf_compatibility}. In Section \ref{sec:dpo} we discuss how to bound accumulated error when sufficiency is only approximate.
+
+Taken together, leaf sufficiency, parentwise compatibility (or its edgewise variant), and on-range stability deliver four concrete operational consequences:
+
+\begin{enumerate}[wide,label=\textbf{(\alph*)},leftmargin=*]
+
+\item \textbf{Processing invariance without global algebra.} 
+By Theorem~\ref{thm:one-pass}, a single hierarchical pass preserves the oracle in expectation for \emph{any} full binary tree on a fixed partition. Corollary~\ref{cor:schedule} then yields schedule invariance (balanced tree vs.\ daisy chain), and Corollary~\ref{cor:folds} yields fold-of-folds invariance. No associativity or commutativity of a hidden merge operator is assumed; we only require equalities \emph{at the internal merges that actually occurred}.
+
+\item \textbf{Auditability at deployment.}
+Every constraint is stated on realized leaves and realized internal pairs, which is exactly what the pipeline exposes and what we can sample on held-out runs. Section~\ref{sec:audit} composes the resulting empirical rates into an end-to-end bound.
+
+\item \textbf{Tolerance to stochasticity and reprocessing.}
+The equalities are imposed in expectation with respect to $g$'s internal randomness, so stochastic summarizers are admissible. Theorem~\ref{thm:multi-round} shows additional ``normalization'' rounds are inert in expectation if and only if  $g$ is on-range idempotent at the oracle, i.e.\ \eqref{eq:leaf_idempotence} holds.
+
+\item \textbf{Separation of task semantics from string details.}
+What is preserved is $\fstar$, not any particular concrete summary string. This permits supervision to be ``transported'' through the hierarchy (Lemma~\ref{lem:blackwell-transport}), and later allows preference training (e.g., DPO) on summaries to attain the same population optimum as training on full documents under exact preservation; under approximate preservation, the population gap is controlled quantitatively (Theorem~\ref{thm:dpo-gap}).
+
+\end{enumerate}

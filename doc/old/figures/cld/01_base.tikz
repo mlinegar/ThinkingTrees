@@ -1,0 +1,50 @@
+% Base hierarchical tree figure (no spotlights)
+% Usage: \input{figures/cld/01_base.tikz} (after loading styles)
+\begin{tikzpicture}[x=1.6cm, y=1.5cm, >=Latex, font=\sffamily]
+  \fixboundingbox
+
+  % =================================================================================
+  % THE HIERARCHICAL TREE (Full black visibility for base figure)
+  % =================================================================================
+
+  % Level 0: Raw Blocks
+  \foreach \i in {1,...,8} {
+    \node[solidnode] (b\i) at (\i, 0) {$b_{\i}$};
+  }
+
+  % Level 1: Leaf Summaries
+  \foreach \i in {1,...,8} {
+    \node[solidnode] (s\i) at (\i, 1.2) {$s_{\i}$};
+    \draw[solidedge] (b\i) -- (s\i);
+  }
+
+  % Level 2: Merges
+  \foreach \i/\j/\k in {1/2/12, 3/4/34, 5/6/56, 7/8/78} {
+    \node[solidnode] (s\k) at ($(\i,1.2)!0.5!(\j,1.2) + (0,1.2)$) {$s_{\k}$};
+    \draw[solidedge] (s\i) -- (s\k);
+    \draw[solidedge] (s\j) -- (s\k);
+  }
+
+  % Level 3
+  \foreach \i/\j/\k in {12/34/1234, 56/78/5678} {
+    \node[solidnode] (s\k) at ($(s\i)!0.5!(s\j) + (0,1.2)$) {$s_{\k}$};
+    \draw[solidedge] (s\i) -- (s\k);
+    \draw[solidedge] (s\j) -- (s\k);
+  }
+
+  % Root
+  \node[solidnode] (root) at ($(s1234)!0.5!(s5678) + (0,1.2)$) {$s_{\text{root}}$};
+  \draw[solidedge] (s1234) -- (root);
+  \draw[solidedge] (s5678) -- (root);
+
+  % Background Labels
+  \node[text=gray!40, font=\scriptsize] at (4.5, -0.7) {Raw Document Blocks};
+  \node[text=gray!30, font=\scriptsize] at (4.5, 6.0) {Hierarchical Summary};
+
+  % Legend
+  \drawlegend{b4}{b5}
+
+  % Notation legend
+  \drawnotation{b4}{b5}
+
+\end{tikzpicture}

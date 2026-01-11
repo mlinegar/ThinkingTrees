@@ -1,0 +1,151 @@
+\documentclass[tikz,border=10pt,multi]{standalone}
+\usepackage{tikz}
+\usepackage{amsmath}
+\usetikzlibrary{arrows.meta,calc,fit,positioning,backgrounds,shapes.geometric}
+
+\newcommand{\fstar}{f^{\ast}}
+\newcommand{\concat}{\oplus}
+
+\colorlet{suffColor}{blue!80!black}
+\colorlet{mergeColor}{orange!85!black}
+\colorlet{idempColor}{purple!80!black}
+\colorlet{baseEdge}{gray!55}
+\colorlet{baseFill}{gray!15}
+
+\tikzset{
+  rawblock/.style={draw=baseEdge, fill=white, rounded corners=2pt, align=center, minimum width=1.5cm, inner sep=3pt, font=\scriptsize},
+  sumnode/.style={draw=baseEdge, fill=baseFill, rounded corners=2pt, align=center, inner sep=4pt, minimum width=2.7cm, font=\scriptsize},
+  mergeop/.style={circle, draw=baseEdge, fill=white, inner sep=0pt, minimum size=15pt, font=\footnotesize},
+  pipeline/.style={->, draw=baseEdge},
+  scene label/.style={font=\bfseries\small, text=gray!60},
+  law title/.style={font=\bfseries\scriptsize, align=center},
+  law desc/.style={font=\scriptsize, align=center, text width=3.7cm},
+  comparator/.style={diamond, aspect=1.3, inner sep=2pt, font=\scriptsize\bfseries, fill=white}
+}
+
+\tikzset{
+  suff node/.style={rounded corners=2pt, draw=suffColor, fill=suffColor!8, very thick, align=center, inner sep=3pt, font=\scriptsize\bfseries},
+  suff arrow/.style={->, very thick, draw=suffColor},
+  suff box/.style={rounded corners=6pt, draw=suffColor, thick, fill=suffColor!10, fill opacity=0.08, inner sep=7pt},
+  merge node/.style={rounded corners=2pt, draw=mergeColor, fill=mergeColor!9, very thick, align=center, inner sep=3pt, font=\scriptsize\bfseries},
+  merge arrow/.style={->, very thick, draw=mergeColor},
+  merge box/.style={rounded corners=6pt, draw=mergeColor, thick, fill=mergeColor!12, fill opacity=0.08, inner sep=7pt},
+  idemp node/.style={rounded corners=2pt, draw=idempColor, fill=idempColor!10, very thick, align=center, inner sep=3pt, font=\scriptsize\bfseries},
+  idemp arrow/.style={->, very thick, draw=idempColor},
+  idemp box/.style={rounded corners=6pt, draw=idempColor, thick, fill=idempColor!12, fill opacity=0.08, inner sep=7pt}
+}
+
+\newcommand{\HierarchyBackdrop}{%
+  \foreach \i [evaluate=\i as \xx using {1.2 + 2.15*(\i-1)}] in {1,...,8}{
+    \node[rawblock] (x\i) at (\xx,0) {$x_{\i}$};
+    \node[sumnode]  (g\i) at (\xx,1.35) {$s_{\i}=g(x_{\i})$};
+    \draw[pipeline] (x\i) -- (g\i);
+  }
+  \foreach \a/\b in {1/2,3/4,5/6,7/8}{
+    \node[mergeop] (p\a\b) at ($ (g\a)!0.5!(g\b) + (0,1.25) $) {$\concat$};
+    \node[sumnode] (s\a\b) at ($ (p\a\b) + (0,1.25) $) {$s_{\a\b}=g(s_{\a} \concat s_{\b})$};
+    \draw[pipeline] (g\a) -- (p\a\b);
+    \draw[pipeline] (g\b) -- (p\a\b);
+    \draw[pipeline] (p\a\b) -- (s\a\b);
+  }
+  \foreach \L/\R in {12/34,56/78}{
+    \node[mergeop] (p\L\R) at ($ (s\L)!0.5!(s\R) + (0,1.25) $) {$\concat$};
+    \node[sumnode] (s\L\R) at ($ (p\L\R) + (0,1.25) $) {$s_{\L\R}=g(s_{\L} \concat s_{\R})$};
+    \draw[pipeline] (s\L) -- (p\L\R);
+    \draw[pipeline] (s\R) -- (p\L\R);
+    \draw[pipeline] (p\L\R) -- (s\L\R);
+  }
+  \node[mergeop] (proot) at ($ (s1234)!0.5!(s5678) + (0,1.25) $) {$\concat$};
+  \node[sumnode] (sroot) at ($(proot) + (0,1.25)$) {$s_{\text{root}}=g(s_{1234} \concat s_{5678})$};
+  \draw[pipeline] (s1234) -- (proot);
+  \draw[pipeline] (s5678) -- (proot);
+  \draw[pipeline] (proot) -- (sroot);
+}
+
+\newcommand{\SufficiencyOverlay}{%
+  \node[suff node] (suffRaw) at (x1) {$x_{1}$};
+  \node[suff node] (suffSum) at (g1) {$s_{1}$};
+  \draw[suff arrow] (suffRaw) -- (suffSum);
+
+  \node[comparator, draw=suffColor, text=suffColor] (suffComp) at ($(x1)!0.5!(g1) + (-2.1,0.2)$) {$\fstar$\\agree?};
+  \draw[suff arrow] (suffRaw) -- (suffComp);
+  \draw[suff arrow] (suffSum) -- (suffComp);
+
+  \node[law title, text=suffColor] (suffTitle) at ($(suffComp)+(0,1.15)$) {(A) Sufficiency};
+  \node[law desc, text=suffColor]  (suffDesc)  at ($(suffComp)+(0,-1.05)$) {Re-read a raw block and confirm $g$ keeps the oracle label: $\fstar(x_1) = \fstar(s_1)$.};
+
+  \begin{scope}[on background layer]
+    \node[suff box, fit=(suffRaw)(suffSum)(suffComp)(suffTitle)(suffDesc)] {};
+  \end{scope}
+}
+
+\newcommand{\MergeOverlay}{%
+  \node[merge node] (mergeRawSeven) at (x7) {$x_{7}$};
+  \node[merge node] (mergeRawEight) at (x8) {$x_{8}$};
+  \node[merge node] (mergeSumSeven) at (g7) {$s_{7}$};
+  \node[merge node] (mergeSumEight) at (g8) {$s_{8}$};
+  \node[merge node] (mergeTree) at (s78) {$s_{78}$};
+
+  \draw[merge arrow] (mergeRawSeven) -- (mergeSumSeven);
+  \draw[merge arrow] (mergeRawEight) -- (mergeSumEight);
+  \draw[merge arrow] (mergeSumSeven) -- (p78);
+  \draw[merge arrow] (mergeSumEight) -- (p78);
+  \draw[merge arrow] (p78) -- (mergeTree);
+
+  \node[merge node, align=center, text width=2.9cm] (mergeJoint) at ($(s78) + (3.4,0)$) {$s^{\text{joint}}_{78}=g(x_7 \concat x_8)$};
+  \draw[merge arrow, dashed] ($(mergeRawSeven.east)!0.5!(mergeRawEight.east)$) to[out=15,in=-160] (mergeJoint.south);
+
+  \node[comparator, draw=mergeColor, text=mergeColor] (mergeComp) at ($(mergeTree)!0.5!(mergeJoint) + (0,1.2)$) {$d_{\mathcal{Y}} \approx 0?$};
+  \draw[merge arrow] (mergeTree) -- (mergeComp);
+  \draw[merge arrow] (mergeJoint) -- (mergeComp);
+
+  \node[law title, text=mergeColor] (mergeTitle) at ($(mergeComp)+(0,1.2)$) {(B) Merge Consistency};
+  \node[law desc, text=mergeColor]  (mergeDesc)  at ($(mergeComp)+(0,-1.1)$) {Check whether the tree merge $s_{78}$ agrees with a single call on $x_7 \concat x_8$.};
+
+  \begin{scope}[on background layer]
+    \node[merge box, fit=(mergeRawSeven)(mergeRawEight)(mergeSumSeven)(mergeSumEight)(mergeTree)(mergeJoint)(mergeComp)(mergeTitle)(mergeDesc)] {};
+  \end{scope}
+}
+
+\newcommand{\IdempotenceOverlay}{%
+  \node[idemp node] (idempRoot) at (sroot) {$s_{\text{root}}$};
+  \node[idemp node] (idempRepeat) at ($(sroot) + (0,1.9)$) {$g(s_{\text{root}})$};
+  \draw[idemp arrow, dashed] (idempRoot) -- node[right, font=\scriptsize, text=idempColor] {rerun $g$} (idempRepeat);
+
+  \node[comparator, draw=idempColor, text=idempColor] (idempComp) at ($(idempRoot)+(0,-1.2)$) {$d_{\mathcal{Y}} \approx 0?$};
+  \draw[idemp arrow] (idempRoot) -- (idempComp);
+  \draw[idemp arrow] (idempRepeat) -- (idempComp);
+
+  \node[law title, text=idempColor] (idempTitle) at ($(idempRepeat)+(0,0.9)$) {(C) Idempotence};
+  \node[law desc, text=idempColor]  (idempDesc)  at ($(idempComp)+(0,-1.1)$) {Summaries should be stable: re-summarizing $s_{\text{root}}$ must not change $\fstar$.};
+
+  \begin{scope}[on background layer]
+    \node[idemp box, fit=(idempRoot)(idempRepeat)(idempComp)(idempTitle)(idempDesc)] {};
+  \end{scope}
+}
+
+\newcommand{\HierarchyFrame}[4]{%
+  \begin{tikzpicture}[x=1.05cm, y=1.28cm, >=Latex, font=\sffamily]
+    \HierarchyBackdrop
+    \node[scene label, anchor=west] at (-1.2,5.9) {#1};
+    \ifnum#2=1\relax
+      \SufficiencyOverlay
+    \fi
+    \ifnum#3=1\relax
+      \MergeOverlay
+    \fi
+    \ifnum#4=1\relax
+      \IdempotenceOverlay
+    \fi
+  \end{tikzpicture}
+}
+
+\begin{document}
+
+\HierarchyFrame{Fig.~2 baseline: hierarchical summarization tree}{0}{0}{0}
+\HierarchyFrame{Add (A): local sufficiency audit on a leaf}{1}{0}{0}
+\HierarchyFrame{Add (B): merge consistency on the right branch}{0}{1}{0}
+\HierarchyFrame{Add (C): idempotence at the root}{0}{0}{1}
+\HierarchyFrame{Combined (A)+(B)+(C) audit overlays}{1}{1}{1}
+
+\end{document}

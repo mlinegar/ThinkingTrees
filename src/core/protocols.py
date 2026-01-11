@@ -25,20 +25,32 @@ class Summarizer(Protocol):
         ...
 
 
-def format_merge_input(*summaries: str) -> str:
+def format_merge_input(left: str, right: str) -> str:
     """
-    Format merge input by concatenating summaries.
+    Format merge input with labeled parts.
 
-    This is the canonical way to format input for merge operations across the codebase.
+    THEORY CORRESPONDENCE:
+    This function implements the abstract concatenation operator from the paper.
+    In Lean: s_L * s_R (monoid multiplication on Strings)
+    In paper: s_L (concat) s_R
+
+    The unified summarizer g handles both:
+    - Leaf: g(raw_text)
+    - Merge: g(format_merge_input(s_L, s_R))
+
+    The PART labels help the LLM understand it's consolidating two summaries,
+    while still using the same g function as leaf summarization.
+
     Used in:
     - Tree building (merging nodes)
     - Auditing (merge consistency checks)
     - Preference collection (merge candidate generation)
 
     Args:
-        *summaries: Two or more summaries to concatenate
+        left: First summary (left child)
+        right: Second summary (right child)
 
     Returns:
-        Summaries joined with double newlines
+        Formatted merge input with PART labels
     """
-    return "\n\n".join(summaries)
+    return f"PART 1:\n{left}\n\nPART 2:\n{right}"

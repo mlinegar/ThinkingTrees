@@ -179,6 +179,9 @@ class TournamentOfTournamentsTrainer:
         # Track current DSPy-wrapped judge (for optimization)
         self._current_dspy_judge: Optional['GenRMComparisonModule'] = None
 
+        # Track all collected preferences (for export to unified training)
+        self._all_preferences: List['PreferencePair'] = []
+
     def train(
         self,
         samples: List[Dict[str, Any]],
@@ -224,6 +227,9 @@ class TournamentOfTournamentsTrainer:
             if not preferences:
                 logger.warning(f"Iteration {iteration}: No preferences collected, skipping")
                 continue
+
+            # Accumulate preferences for export
+            self._all_preferences.extend(preferences)
 
             # Step 2: Enrich with oracle scores
             enriched = self._enrich_with_oracle(preferences, samples)
@@ -549,6 +555,52 @@ class TournamentOfTournamentsTrainer:
             judge.save(str(path))
         except Exception as e:
             logger.warning(f"Failed to save judge to {path}: {e}")
+
+    # =========================================================================
+    # Export Methods for Unified Training
+    # =========================================================================
+
+    def get_optimized_judge(self) -> Optional['GenRMComparisonModule']:
+        """
+        Return the current optimized judge for use in other pipelines.
+
+        This method allows the tournament-optimized judge to be extracted
+        and used in downstream training (e.g., unified training loop).
+
+        Returns:
+            Current optimized GenRMComparisonModule, or None if not yet optimized
+        """
+        return self._current_dspy_judge
+
+    def get_tournament_winners(self) -> List[tuple]:
+        """
+        Return (content, rubric, winner) tuples from collected preferences.
+
+        Extracts the winning summaries from all tournament comparisons.
+        Useful for SFT training or BootstrapFinetune.
+
+        Returns:
+            List of (original_text, rubric, winning_summary) tuples
+        """
+        winners = []
+        for pref in getattr(self, '_all_preferences', []):
+            winner = pref.get_winner()
+            if winner is not None:
+                winners.append((
+                    pref.original_text,
+                    pref.rubric,
+                    winner,
+                ))
+        return winners
+
+    def get_all_preferences(self) -> List['PreferencePair']:
+        """
+        Return all collected preferences from tournament iterations.
+
+        Returns:
+            List of PreferencePair objects
+        """
+        return getattr(self, '_all_preferences', [])
 
 
 # =============================================================================

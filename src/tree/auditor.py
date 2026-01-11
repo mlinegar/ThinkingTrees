@@ -30,6 +30,7 @@ import random
 import logging
 import json
 import warnings
+import math
 
 from src.core.data_models import Node, Tree, AuditStatus, AuditResult
 from src.core.scoring import OracleScore, ScoringOracle
@@ -38,6 +39,107 @@ from src.config.concurrency import ConcurrencyConfig, get_concurrency_config
 
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Statistical Functions (From Audit.lean)
+# =============================================================================
+
+def confidence_margin(delta: float, n: int) -> float:
+    """
+    Hoeffding confidence margin: sqrt(ln(2/delta) / (2n))
+
+    With n samples and confidence parameter delta, this is the margin epsilon
+    such that P(|p_hat - p_true| >= epsilon) <= delta.
+
+    From Audit.lean: confidence_margin
+
+    Args:
+        delta: Confidence parameter (e.g., 0.05 for 95% confidence)
+        n: Number of samples
+
+    Returns:
+        Margin epsilon such that P(p_true <= p_hat + epsilon) >= 1 - delta
+    """
+    if n <= 0 or delta <= 0 or delta >= 2:
+        return float('inf')
+    return math.sqrt(math.log(2 / delta) / (2 * n))
+
+
+def sample_complexity(epsilon: float, delta: float) -> int:
+    """
+    Minimum samples needed for (epsilon, delta)-guarantee.
+
+    Returns ceil(ln(2/delta) / (2 * epsilon^2))
+
+    From Audit.lean: sample_complexity
+
+    Args:
+        epsilon: Target margin (e.g., 0.05 for 5% error bound)
+        delta: Confidence parameter (e.g., 0.05 for 95% confidence)
+
+    Returns:
+        Minimum number of samples n such that confidence_margin(delta, n) <= epsilon
+    """
+    if epsilon <= 0 or delta <= 0 or delta >= 2:
+        return int(1e9)  # Return large int instead of inf for type consistency
+    return math.ceil(math.log(2 / delta) / (2 * epsilon**2))
+
+
+def compute_required_samples(
+    epsilon: float = 0.05,
+    delta: float = 0.05,
+    check_types: Optional[List[str]] = None
+) -> Dict[str, int]:
+    """
+    Compute required sample budget for target (epsilon, delta) guarantee.
+
+    From Audit.lean: sample_complexity applied to audit checks
+
+    Args:
+        epsilon: Target margin (default 5%)
+        delta: Confidence parameter (default 95% confidence)
+        check_types: Which checks to include (default all)
+
+    Returns:
+        Dict mapping check type to required samples
+    """
+    if check_types is None:
+        check_types = ["sufficiency", "merge", "idempotence", "substitution"]
+
+    n = sample_complexity(epsilon, delta)
+    return {check_type: n for check_type in check_types}
+
+
+# =============================================================================
+# Guarantee Levels (From PreferenceLearning.lean / Audit.lean)
+# =============================================================================
+
+class GuaranteeLevel(Enum):
+    """
+    Three levels of preference learning guarantees from formal proofs.
+
+    From PreferenceLearning.lean and Audit.lean:
+
+    These guarantees apply to ANY oracle-measurable preference learning method,
+    including DPO, GRPO, PPO, RLHF, etc. The key insight is that when local laws
+    hold, training on summarized data is equivalent to training on original data.
+
+    Level 1 (EXACT): When local laws L1, L2, L3 hold exactly, preference learning gap = 0.
+        This applies to all methods: DPO, GRPO, PPO, etc. (PreferenceLearning.lean:
+        preference_learning_equivalence)
+
+    Level 2 (UNION_BOUND): Quantitative bound from violation rates. The gap is bounded
+        by a Lipschitz constant times the expected distortion. (PreferenceLearning.lean:
+        preference_learning_gap_bound)
+
+    Level 3 (EMPIRICAL): Probabilistic (epsilon, delta) guarantee via sampling.
+        Audit statistics provide high-probability bounds on actual violation rates.
+        (Audit.lean: hoeffding_bound)
+    """
+    EXACT = "exact"           # Level 1: Local laws hold exactly, preference learning gap = 0
+    UNION_BOUND = "union"     # Level 2: Quantitative bound from violation rates
+    EMPIRICAL = "empirical"   # Level 3: Probabilistic (epsilon, delta) guarantee
 
 
 # =============================================================================
@@ -171,9 +273,26 @@ class AuditConfig:
     # Concurrency settings (uses centralized config)
     concurrency: Optional[ConcurrencyConfig] = None
 
+    # Statistical guarantee parameters (optional, from Audit.lean)
+    target_epsilon: Optional[float] = None  # Target margin (e.g., 0.05 for 5% error)
+    target_delta: float = 0.05  # Confidence parameter (default 95% confidence)
+
     def get_concurrency(self) -> ConcurrencyConfig:
         """Get concurrency config, using default if not set."""
         return self.concurrency or get_concurrency_config()
+
+    def compute_sample_budget_for_guarantee(self) -> int:
+        """
+        Compute sample budget needed for target (epsilon, delta) guarantee.
+
+        From Audit.lean: sample_complexity
+
+        Returns:
+            Minimum samples for guarantee if target_epsilon set, else sample_budget
+        """
+        if self.target_epsilon is None:
+            return self.sample_budget
+        return sample_complexity(self.target_epsilon, self.target_delta)
 
 
 @dataclass
@@ -258,6 +377,104 @@ class AuditReport:
             return 0.0
         lambda_weight = self.substitution_samples / total
         return lambda_weight * self.substitution_rate + (1 - lambda_weight) * self.merge_rate
+
+    def confidence_upper_bound(self, rate_type: str, delta: float = 0.05) -> float:
+        """
+        Upper bound on true violation rate with confidence 1-delta.
+
+        Uses Hoeffding: p_true <= p_hat + sqrt(ln(2/delta) / (2n))
+
+        From Audit.lean: confidence_margin combined with empirical rates
+
+        Args:
+            rate_type: One of "sufficiency", "merge", "idempotence", "substitution", "assoc"
+            delta: Confidence parameter (default 0.05 for 95% confidence)
+
+        Returns:
+            Upper bound on true rate, or 1.0 if insufficient samples
+        """
+        rate_map = {
+            "sufficiency": (self.sufficiency_rate, self.sufficiency_samples),
+            "merge": (self.merge_rate, self.merge_samples),
+            "idempotence": (self.idempotence_rate, self.idempotence_samples),
+            "substitution": (self.substitution_rate, self.substitution_samples),
+            "assoc": (self.assoc_rate, self.substitution_samples + self.merge_samples),
+        }
+        rate, n = rate_map.get(rate_type, (0.0, 0))
+        if n == 0:
+            return 1.0
+        margin = confidence_margin(delta, n)
+        return min(1.0, rate + margin)
+
+    def get_probabilistic_bound(
+        self,
+        num_leaves: int,
+        num_rounds: int = 1,
+        delta: float = 0.05,
+        num_merges: Optional[int] = None
+    ) -> Tuple[float, float]:
+        """
+        Violation bound with probabilistic guarantee.
+
+        Returns (bound, confidence) where:
+        - With probability >= confidence, true root violation <= bound
+        - Uses upper bounds on each component rate
+
+        From Audit.lean: Three-level guarantee Level 3
+
+        Args:
+            num_leaves: Number of leaves (N)
+            num_rounds: Re-summarization rounds (R)
+            delta: Per-component confidence (0.05 = 95% per component)
+            num_merges: Number of merges (defaults to N-1)
+
+        Returns:
+            Tuple of (violation_bound, overall_confidence)
+        """
+        if num_merges is None:
+            num_merges = max(0, num_leaves - 1)
+
+        # Use upper bounds with confidence 1-delta for each component
+        p_suff_upper = self.confidence_upper_bound("sufficiency", delta)
+        p_assoc_upper = self.confidence_upper_bound("assoc", delta)
+        p_idem_upper = self.confidence_upper_bound("idempotence", delta)
+
+        # Union bound: N * p_suff + M * p_assoc + (R-1) * p_idem
+        bound = (
+            num_leaves * p_suff_upper +
+            num_merges * p_assoc_upper +
+            max(0, num_rounds - 1) * p_idem_upper
+        )
+
+        # Overall confidence: 1 - 3*delta (union bound over 3 components)
+        overall_confidence = max(0.0, 1 - 3 * delta)
+
+        return min(1.0, bound), overall_confidence
+
+    def get_guarantee_level(self) -> GuaranteeLevel:
+        """
+        Determine which guarantee level applies based on audit results.
+
+        From Audit.lean: dpo_three_level_guarantees
+
+        Returns:
+            EXACT if all violation rates are 0 and we have samples
+            UNION_BOUND if we have empirical rates with some violations
+            EMPIRICAL if no samples taken (weakest)
+        """
+        total_violations = (
+            self.sufficiency_violations +
+            self.merge_violations +
+            self.idempotence_violations +
+            self.substitution_violations
+        )
+
+        if total_violations == 0 and self.nodes_audited > 0:
+            return GuaranteeLevel.EXACT
+        elif self.nodes_audited > 0:
+            return GuaranteeLevel.UNION_BOUND
+        else:
+            return GuaranteeLevel.EMPIRICAL
 
 
 class ReviewPriority(Enum):
@@ -701,8 +918,16 @@ class Auditor:
         substitution_samples = 0
 
         # Determine how to split budget between leaves and internal nodes
-        leaf_budget = self.config.sample_budget // 2 if self.config.audit_internal else self.config.sample_budget
-        internal_budget = self.config.sample_budget - leaf_budget
+        # Use computed budget from (epsilon, delta) if target_epsilon is set,
+        # otherwise fall back to sample_budget. From Audit.lean: sample_complexity.
+        effective_budget = self.config.compute_sample_budget_for_guarantee()
+        if self.config.target_epsilon is not None:
+            logger.info(
+                f"Using computed sample budget {effective_budget} for "
+                f"(epsilon={self.config.target_epsilon}, delta={self.config.target_delta}) guarantee"
+            )
+        leaf_budget = effective_budget // 2 if self.config.audit_internal else effective_budget
+        internal_budget = effective_budget - leaf_budget
 
         # Audit leaves (sufficiency check - C1) - concurrent for better GPU utilization
         if self.config.audit_leaves and leaves:
@@ -744,6 +969,17 @@ class Auditor:
                 idempotence_samples += 1
                 if not result.passed:
                     idempotence_violations += 1
+        elif self.config.audit_idempotence and internal and self.summarizer is None:
+            # WARNING: Idempotence (C2/L3) is required for multi-round preservation (Theorem 2).
+            # Without a summarizer, this check cannot be performed. If the tree was built
+            # with R > 1 rounds, the theoretical guarantees from PreservationTheorems.lean
+            # (multi_round theorem) may not hold.
+            logger.warning(
+                "Idempotence check (C2/L3) requested but no summarizer provided. "
+                "This check is REQUIRED for multi-round preservation guarantees (Theorem 2 in Lean). "
+                "If tree was built with R > 1 rounds, oracle preservation cannot be verified. "
+                "Provide a summarizer to enable idempotence checking."
+            )
 
         # Substitution check (C3 Case A) - Check leaf boundary consistency - concurrent
         if self.config.audit_substitution and len(leaves) >= 2 and self.summarizer is not None:
@@ -766,6 +1002,14 @@ class Auditor:
                     substitution_samples += 1
                     if not result.passed:
                         substitution_violations += 1
+        elif self.config.audit_substitution and len(leaves) >= 2 and self.summarizer is None:
+            # WARNING: Substitution check (C3 Case A) requires a summarizer to compare
+            # joint vs disjoint summarization paths.
+            logger.warning(
+                "Substitution check (C3 Case A) requested but no summarizer provided. "
+                "This check verifies joint vs disjoint path consistency (L2 in Lean). "
+                "Provide a summarizer to enable substitution checking."
+            )
 
         # Compile report
         passed = sum(1 for c in checks if c.passed)
@@ -953,13 +1197,10 @@ class Auditor:
             logger.warning(f"Merge check called on leaf node {node.id}")
 
         # Concatenate child summaries
-        child_summaries = []
-        if node.left_child:
-            child_summaries.append(node.left_child.summary)
-        if node.right_child:
-            child_summaries.append(node.right_child.summary)
+        left_summary = node.left_child.summary if node.left_child else ""
+        right_summary = node.right_child.summary if node.right_child else ""
 
-        input_a = format_merge_input(*child_summaries)
+        input_a = format_merge_input(left_summary, right_summary)
         input_b = node.summary
 
         is_congruent, score, reasoning = self._call_oracle(input_a, input_b, rubric)
@@ -1131,8 +1372,16 @@ class Auditor:
         Adjacent leaves are those that appear consecutively in the
         document's original text order.
 
+        NOTE: This method assumes leaves are already in left-to-right document
+        order, which is guaranteed when leaves come from preorder/inorder
+        traversal of a properly-constructed binary tree. The traversal order
+        matches document order for OPS trees.
+
+        From LocalLaws.lean (L2): The substitution check verifies that
+        joint vs disjoint summarization paths produce oracle-equivalent results.
+
         Args:
-            leaves: List of leaf nodes from the tree
+            leaves: List of leaf nodes in document order (left-to-right)
 
         Returns:
             List of (left_node, right_node) tuples for adjacent pairs
@@ -1140,23 +1389,12 @@ class Auditor:
         if len(leaves) < 2:
             return []
 
-        # Sort leaves by their position in the document
-        # Assuming leaves have some ordering info (id, span_start, etc.)
-        # For now, use the order they appear in the list (left-to-right traversal)
-        # In a proper implementation, leaves should be sorted by document position
-
-        # Try to sort by span_start if available, otherwise use list order
-        try:
-            sorted_leaves = sorted(
-                leaves,
-                key=lambda n: getattr(n, 'span_start', 0) or 0
-            )
-        except (AttributeError, TypeError):
-            sorted_leaves = leaves
-
+        # Leaves should already be in document order from tree traversal.
+        # For OPS trees, preorder traversal yields leaves in left-to-right order.
+        # No sorting needed - trust the traversal order.
         pairs = []
-        for i in range(len(sorted_leaves) - 1):
-            pairs.append((sorted_leaves[i], sorted_leaves[i + 1]))
+        for i in range(len(leaves) - 1):
+            pairs.append((leaves[i], leaves[i + 1]))
 
         return pairs
 

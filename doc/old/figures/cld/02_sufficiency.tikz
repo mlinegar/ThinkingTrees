@@ -1,0 +1,79 @@
+% Sufficiency condition spotlight figure
+% Usage: \input{figures/cld/02_sufficiency.tikz} (after loading styles)
+\begin{tikzpicture}[x=1.6cm, y=1.5cm, >=Latex, font=\sffamily]
+  \fixboundingbox
+
+  % =================================================================================
+  % THE GHOST TREE (Background Context)
+  % =================================================================================
+
+  % Level 0: Raw Blocks
+  \foreach \i in {1,...,8} {
+    \node[ghostnode] (b\i) at (\i, 0) {$b_{\i}$};
+  }
+
+  % Level 1: Leaf Summaries
+  \foreach \i in {1,...,8} {
+    \node[ghostnode] (s\i) at (\i, 1.2) {$s_{\i}$};
+    \draw[ghostedge] (b\i) -- (s\i);
+  }
+
+  % Level 2: Merges
+  \foreach \i/\j/\k in {1/2/12, 3/4/34, 5/6/56, 7/8/78} {
+    \node[ghostnode] (s\k) at ($(\i,1.2)!0.5!(\j,1.2) + (0,1.2)$) {$s_{\k}$};
+    \draw[ghostedge] (s\i) -- (s\k);
+    \draw[ghostedge] (s\j) -- (s\k);
+  }
+
+  % Level 3
+  \foreach \i/\j/\k in {12/34/1234, 56/78/5678} {
+    \node[ghostnode] (s\k) at ($(s\i)!0.5!(s\j) + (0,1.2)$) {$s_{\k}$};
+    \draw[ghostedge] (s\i) -- (s\k);
+    \draw[ghostedge] (s\j) -- (s\k);
+  }
+
+  % Root
+  \node[ghostnode] (root) at ($(s1234)!0.5!(s5678) + (0,1.2)$) {$s_{\text{root}}$};
+  \draw[ghostedge] (s1234) -- (root);
+  \draw[ghostedge] (s5678) -- (root);
+
+  % Background Labels
+  \node[text=gray!40, font=\scriptsize] at (4.5, -0.7) {Raw Document Blocks};
+  \node[text=gray!30, font=\scriptsize] at (4.5, 6.0) {Hierarchical Summary};
+
+  % =================================================================================
+  % SPOTLIGHT A: SUFFICIENCY (Left - b1/s1)
+  % =================================================================================
+
+  % Active Nodes
+  \node[activenode, draw=blue!80!black] (act_b1) at (b1) {$b_{1}$};
+  \node[activenode, draw=blue!80!black] (act_s1) at (s1) {$s_{1}$};
+
+  % Solid arrow for summarization
+  \draw[arrowsolid, blue!80!black] (act_b1) -- node[right, font=\scriptsize, text=blue!70!black] {$g$} (act_s1);
+
+  % Comparison box - positioned to have same gap with (C) as (C) has with (B)
+  \node[comparator, draw=blue!80!black, text=blue!80!black] (comp_A) at ($(act_s1) + (-1.0, 0.6)$) {$\metric \approx 0$?};
+
+  % Dotted comparison arrows
+  \draw[arrowdotted, blue!60!black] (act_b1.west) to[out=180, in=-90] node[pos=0.3, left, font=\scriptsize, text=blue!70!black] {$\fstar$} (comp_A.south);
+  \draw[arrowdotted, blue!60!black] (act_s1.north) to[out=90, in=0] node[pos=0.5, right, font=\scriptsize, text=blue!70!black, yshift=2pt, xshift=2pt] {$\fstar$} (comp_A.east);
+
+  % Labels
+  \node[lawtitle, text=blue!90!black] (lbl_A) at ($(comp_A) + (0, 0.9)$)
+    {(A) Sufficiency};
+  \node[lawdesc, text=blue!80!black] (desc_A) at ($(lbl_A.south) + (0, -0.05)$)
+    {$\fstar(b_1) \approx \fstar(s_1)$?};
+
+  % Group Box
+  \begin{scope}[on background layer]
+    \node[groupbox, draw=blue, fill=blue, fit=(act_b1)(act_s1)(comp_A)(lbl_A)(desc_A)] {};
+  \end{scope}
+
+  % Legend
+  \drawlegend{b4}{b5}
+
+  % Notation legend
+  \drawnotation{b4}{b5}
+
+\end{tikzpicture}

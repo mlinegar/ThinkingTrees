@@ -1,0 +1,204 @@
+\section{Practical audit guidance}\label{app:practical_audit}
+
+What matters at deployment is a single number,
+\[
+\Delta_R\ :=\ \E\Big[\,\metric\big(\fstar(Z^{(R)}(X)),\ \fstar(X)\big)\,\Big],
+\]
+the expected \emph{task–space} distortion after one hierarchical pass and $R-1$ optional
+re‑summarization rounds. All statements below assume $\metric\in[0,1]$ (rescale if needed by
+$\mathrm{diam}(Y)$). The audit is local, deployment‑specific, and piggybacks exactly on the two‑route
+merge diagram: a parent can be reached either by “concatenate–summarize’’ or by “summarize
+children–concatenate–summarize again’’ (Figure~\ref{fig:local_compatibility}).%
+
+\paragraph{Exact pass short‑circuit.}
+If the realized leaves satisfy \textnormal{(C1)} exactly and the realized internal nodes satisfy
+\textnormal{(C2)} exactly, Theorem~\ref{thm:one-pass} gives $\Delta_1=0$. If, in addition, \textnormal{(C3)}
+holds, then Theorem~\ref{thm:multi-round} yields $\Delta_R=0$ for all $R\ge2$. In this regime there is
+nothing to bound; the audit reduces to checking that the empirical versions of the three quantities
+below are (within tolerance) zero.
+
+\paragraph{What to estimate (local violation rates).}
+Let a realized reduction tree have $N$ leaves and $M=N-1$ internal nodes. Denote realized
+leaves by $b$ (each $b$ is a contiguous substring of the base document $x_0$ and is never itself a summary), and realized internal nodes by $u$ with children $u_L,u_R$ whose stored summaries are $g(u_L),g(u_R)$. Define the \emph{indicator} violations
+\[
+p_{\text{suff}}\ :=\ \E\,\mathbf{1}\!\left\{\metric\!\big(\fstar(g(B)),\,\fstar(B)\big)>0\right\},
+\]
+\[
+p_{\text{bound}}\ :=\ \E\,\mathbf{1}\!\left\{\metric\!\big(\fstar(g(B_i\concat B_{i+1})),\,\fstar(g(g(B_i)\concat g(B_{i+1})))\big)>0\right\},
+\]
+\[
+p_{\text{merge}}\ :=\ \E\,\mathbf{1}\!\left\{\metric\!\big(\fstar(S_L\concat S_R),\,\fstar(g(S_L\concat S_R))\big)>0\right\},
+\]
+\[
+p_{\text{idem}}\ :=\ \E\,\mathbf{1}\!\left\{\metric\!\big(\fstar(g(Z^{(1)}(x))),\,\fstar(Z^{(1)}(x))\big)>0\right\}\qquad\text{(only if $R\ge2$).}
+\]
+Let $\lambda\in[0,1]$ denote the probability that a merge-consistency sample targets a leaf boundary (so $1-\lambda$ is the probability it targets an internal merge). The aggregate violation rate used by the bounds below is
+\[
+p_{\text{assoc}}\ :=\ \lambda\,p_{\text{bound}} + (1-\lambda)\,p_{\text{merge}}.
+\]
+The two components correspond exactly to the two links in Condition~\eqref{eq:leaf_compatibility}: $p_{\text{bound}}$ measures the joint-vs-disjoint comparison when raw concatenations fit in context, while $p_{\text{merge}}$ measures the raw-vs-summary comparison on stored child strings.
+In code: log each raw leaf $b$ (the substring of $x_0$ that entered the hierarchy), its summary $g(b)$, and, for every internal node, the ordered pair of stored child strings $\big(g(u_L),g(u_R)\big)$ together with the resulting parent summary $g(u)$. Also record the seeds/call counts used by $g$ so runs can be replayed. Then \\emph{sample} leaves and internal nodes, \\emph{replay} the same randomness policy when needed, evaluate the displayed $\metric$-terms via $\fstar$, threshold at $>0$, and average. Conditioning on the realized subtree in the merge term matches \eqref{eq:leaf_compatibility} exactly.
+
+\paragraph{Crude but rigorous aggregation by union bound.}
+Define the event that the root deviates after $R$ rounds by
+\[
+\mathcal{E}_R\ :=\ \left\{\ \metric\!\big(\fstar(Z^{(R)}(X)),\ \fstar(X)\big)>0\ \right\}.
+\]
+If no leaf fails Condition~\eqref{eq:leaf_sufficiency} and no realized internal node fails Condition~\eqref{eq:leaf_compatibility} (and, for $R\ge2$, no on‑range
+re‑summarization fails Condition~\eqref{eq:leaf_idempotence} at the root between rounds), then Theorems~\ref{thm:one-pass}
+and~\ref{thm:multi-round} force $\mathcal{E}_R$ not to occur. Therefore
+
+% \[
+% \mathcal{E}_R\ \subseteq\ \bigcup_{\text{leaves }b}\left\{\metric(\fstar(g(b)),\fstar(b))>0\right\}
+% \ \cup\ \bigcup_{\text{internal }u}\left\{\metric\!\Big(\fstar\!\big(g(g(u_L)\!+\!g(u_R)\big),\ \fstar\!\big(g(u_L)\!+\!g(u_R)\big)\Big)>0\right\}
+% \ \cup\ \bigcup_{t=1}^{R-1}\left\{\metric\!\big(\fstar(g(Z^{(t)}(X))),\fstar(Z^{(t)}(X))\big)>0\right\}.
+% \]
+
+\begin{align*}
+\mathcal{E}_R \subseteq{}& \bigcup_{\text{leaves }b}\left\{\metric(\fstar(g(b)),\fstar(b))>0\right\} \\
+&\cup \bigcup_{\text{internal }u}\left\{\metric\!\Big(\fstar\!\big(g(g(u_L)\!+\!g(u_R)\big),\ \fstar\!\big(g(u_L)\!+\!g(u_R)\big)\Big)>0\right\} \\
+&\cup \bigcup_{t=1}^{R-1}\left\{\metric\!\big(\fstar(g(Z^{(t)}(X))),\fstar(Z^{(t)}(X))\big)>0\right\}.
+\end{align*}
+
+
+Taking probabilities and applying the union bound gives the \emph{crude envelope}
+% \[
+% \Pr(\mathcal{E}_1)\ \le\ N\,p_{\text{suff}}\ +\ M\,p_{\text{assoc}},
+% \qquad
+% \Pr(\mathcal{E}_R)\ \le\ N\,p_{\text{suff}}\ +\ M\,p_{\text{assoc}}\ +\ (R-1)\,p_{\text{idem}}\quad(R\ge2).
+% \]
+
+\begin{align*}
+\Pr(\mathcal{E}_1) &\le N\,p_{\text{suff}} + M\,p_{\text{assoc}}, \\
+\Pr(\mathcal{E}_R) &\le N\,p_{\text{suff}} + M\,p_{\text{assoc}} + (R-1)\,p_{\text{idem}}\quad(R\ge2).
+\end{align*}
+
+Since $\metric\in[0,1]$, we have $\Delta_R=\E[\metric(\cdot,\cdot)]\le \Pr(\mathcal{E}_R)$, hence
+\begin{equation}\label{eq:unionbound}
+\Delta_1\ \le\ N\,p_{\text{suff}}\ +\ M\,p_{\text{assoc}},\qquad
+\Delta_R\ \le\ N\,p_{\text{suff}}\ +\ M\,p_{\text{assoc}}\ +\ (R-1)\,p_{\text{idem}}\quad(R\ge2).
+\end{equation}
+These bounds hold with no assumption beyond the consistency conditions used by Theorems~\ref{thm:one-pass}
+and~\ref{thm:multi-round}. They are intentionally coarse: any single local failure is allowed to
+account for a root deviation. When \eqref{eq:leaf_idempotence} holds, $p_{\text{idem}}=0$ and the
+multi‑round term vanishes.
+
+\paragraph{Plug‑in estimates.}
+In deployment we report the sample plug‑ins
+
+\begin{align*}
+\widehat p_{\text{suff}} &:= \frac{1}{n_\ell}\sum_{i=1}^{n_\ell}\mathbf{1}\!\left\{\metric\!\big(\fstar(g(b_i)),\fstar(b_i)\big)>0\right\}, \\
+\widehat p_{\text{bound}} &:= \frac{1}{n_{\text{bound}}}\sum_{j=1}^{n_{\text{bound}}}\mathbf{1}\!\left\{\metric\!\Big(\fstar\!\big(g(b_{j}\concat b_{j+1})\big),\ \fstar\!\big(g(g(b_{j})\concat g(b_{j+1}))\big)\Big)>0\right\}, \\
+\widehat p_{\text{merge}} &:= \frac{1}{n_{\text{merge}}}\sum_{j=1}^{n_{\text{merge}}}\mathbf{1}\!\left\{\metric\!\Big(\fstar\!\big(s_{L,j}\concat s_{R,j}\big),\ \fstar\!\big(g(s_{L,j}\concat s_{R,j})\big)\Big)>0\right\},
+\end{align*}
+and, if $R\ge2$,
+\begin{align*}
+\widehat p_{\text{idem}} &:= \frac{1}{n_r}\sum_{k=1}^{n_r}\mathbf{1}\!\left\{\metric\!\big(\fstar(g(Z^{(1)}(x_k))),\,\fstar(Z^{(1)}(x_k))\big)>0\right\}.
+\end{align*}
+Setting $\widehat\lambda:=\frac{n_{\text{bound}}}{n_{\text{bound}}+n_{\text{merge}}}$ yields
+\[
+\widehat p_{\text{assoc}}:=\widehat\lambda\,\widehat p_{\text{bound}} + (1-\widehat\lambda)\,\widehat p_{\text{merge}}.
+\]
+The \emph{crude deployment-level bound} is then
+\begin{align*}
+\widehat\Delta_1^{\,\mathrm{ub}} &:= N\,\widehat p_{\text{suff}} + M\,\widehat p_{\text{assoc}}, \\
+\widehat\Delta_R^{\,\mathrm{ub}} &:= N\,\widehat p_{\text{suff}} + M\,\widehat p_{\text{assoc}} + (R-1)\,\widehat p_{\text{idem}}\quad(R\ge2).
+\end{align*}
+% \[
+% \widehat p_{\text{suff}}\ :=\ \frac1{n_\ell}\sum_{i=1}^{n_\ell}\mathbf{1}\!\left\{\metric\!\big(\fstar(g(b_i)),\fstar(b_i)\big)>0\right\},
+% \quad
+% \widehat p_{\text{assoc}}\ :=\ \frac1{n_m}\sum_{j=1}^{n_m}\mathbf{1}\!\left\{\metric\!\Big(\fstar\!\big(g(g(u_{L,j})\!+\!g(u_{R,j})\big),\ \fstar\!\big(g(u_{L,j})\!+\!g(u_{R,j})\big)\Big)>0\right\},
+% \]
+% and, if $R\ge2$,
+% \[
+% \widehat p_{\text{idem}}\ :=\ \frac1{n_r}\sum_{k=1}^{n_r}\mathbf{1}\!\left\{\metric\!\big(\fstar(g(Z^{(1)}(x_k))),\,\fstar(Z^{(1)}(x_k))\big)>0\right\}.
+% \]
+% The \emph{crude deployment‑level bound} is then
+% \[
+% \widehat\Delta_1^{\,\mathrm{ub}}\ :=\ N\,\widehat p_{\text{suff}}\ +\ M\,\widehat p_{\text{assoc}},
+% \qquad
+% \widehat\Delta_R^{\,\mathrm{ub}}\ :=\ N\,\widehat p_{\text{suff}}\ +\ M\,\widehat p_{\text{assoc}}\ +\ (R-1)\,\widehat p_{\text{idem}}\quad(R\ge2),
+% \]
+truncated at $1$ if desired. Sampling should be random over the realized leaves and realized
+internal nodes of the run; if worried about depth or heterogeneity, stratify by depth or by child
+summary length and then aggregate. Labeling is whatever $\fstar$ requires (scripted or human).
+
+\paragraph{Direct root estimation (often simplest).}
+When you do not need a decomposition, estimate $\Delta_R$ directly by sampling documents
+$x_i$ and computing $\widehat\Delta_R=\frac1n\sum_i \metric(\fstar(Z^{(R)}(x_i)),\fstar(x_i))$.
+If $R\ge2$ and \eqref{eq:leaf_idempotence} holds, $\Delta_R=\Delta_1$, so it suffices to measure $R=1$.
+
+% \section{Practical audit guidance}\label{app:practical_audit}
+
+% What matters at deployment is a single number,
+% \[
+% \Delta_R\ :=\ \E\Big[\,\metric\big(\fstar(Z^{(R)}(X)),\ \fstar(X)\big)\,\Big],
+% \]
+% the expected \emph{task–space} distortion after one hierarchical pass and $R-1$ optional re‑summarization rounds. We estimate $\Delta_R$ from the very operations the hierarchy executed: realized leaves, realized internal merges, and (only if we re‑summarize) an on‑range probe at the realized root. The audit is therefore local, deployment‑specific, and reproducible. It piggybacks exactly on the two‑route merge picture: a parent can be reached either by “concatenate–summarize’’ or by “summarize children–concatenate–summarize again’’ (Figure~\ref{fig:local_compatibility}).%
+
+% \paragraph{Exact pass short‑circuit.}
+% If the realized leaves satisfy \eqref{eq:leaf_sufficiency}exactly and the realized internal nodes satisfy \eqref{eq:leaf_compatibility} exactly, then Theorem~\ref{thm:one-pass} gives
+% \[
+% \E\,\metric\!\Big(\fstar\big(g(\mathrm{root}(T))\big),\ \fstar(x)\Big)\;=\;0,
+% \]
+% so $\Delta_1=0$. If, in addition, \eqref{eq:leaf_idempotence} holds, then Theorem~\ref{thm:multi-round} yields $\Delta_R=0$ for every $R\ge2$. In this exact regime there is nothing to bound; the audit reduces to checking that the empirical versions of the three local quantities below are (within tolerance) zero on realized leaves, realized merges, and on‑range re‑summaries.%
+
+% \paragraph{What to estimate (operation‑level probes).}
+% Let a realized reduction tree have $N$ leaves and $M=N-1$ internal nodes. Denote realized leaves by $b$, and realized internal nodes by $u$ with children $u_L,u_R$ and stored summaries $g(u_L),g(u_R)$. Using $\E$ for the internal randomness of $g$ and $\E$ for the conditional expectation over all coin flips used below $u$ and at its parent call, we define three observable quantities and estimate each by simple random sampling over the realized nodes:
+% \[
+% \delta_{\mathrm{leaf}}\ :=\ \E\,\metric\!\big(\fstar(g(B)),\,\fstar(B)\big),
+% \]
+% \[
+% \epsilon_{\mathrm{merge}}\ :=\ \E\ \metric\!\Big(\fstar\!\big(g(g(u_L)\concat g(u_R))\big),\ \fstar\!\big(g(u_L)\concat g(u_R)\big)\Big),
+% \]
+% \[
+% \iota_{\mathrm{root}}\ :=\ \E\,\metric\!\big(\fstar(g(Z^{(1)}(x))),\,\fstar(Z^{(1)}(x))\big)\qquad\text{(only if $R\ge2$).}
+% \]
+% These target, respectively, leaf sufficiency \eqref{eq:leaf_sufficiency}, parentwise compatibility at realized merges \eqref{eq:leaf_compatibility}, and on‑range stability for extra rounds \eqref{eq:leaf_idempotence}. In code: log $S(\cdot)$ and $g(\cdot)$ at every realized node together with the seeds/call‑counts used by $g$; then \emph{sample} leaves and internal nodes, \emph{replay} the same randomness policy when needed, evaluate the displayed $\metric$‑terms via $\fstar$, and average. Conditioning on the realized subtree in the merge term keeps the estimate aligned with the nodewise statement of \eqref{eq:leaf_compatibility}.%
+
+
+% \paragraph{Aggregation.}
+% There are two clean ways to turn the node‑level probes into a deployment‑level number; both are faithful to the realized schedule.
+
+% \noindent\emph{Option A: direct root estimation (no further assumptions).}
+% The most straightforward approach is directly aggregating at the root level. For any fixed $R\ge1$, draw a random sample of documents $x_i$ from the deployment and compute
+% \[
+% \widehat\Delta_R\ :=\ \frac{1}{n}\sum_{i=1}^n \metric\!\big(\fstar(Z^{(R)}(x_i)),\,\fstar(x_i)\big).
+% \]
+% This is an unbiased estimator of $\Delta_R$. When $R\ge2$, \eqref{eq:leaf_idempotence} implies $Z^{(R)}$ is on‑range and additional rounds are inert in expectation (Theorem~\ref{thm:multi-round}), so the direct estimate for $R=1$ already controls all further rounds.
+
+% \noindent\emph{Option B: additive envelope under a testable parent‑stability law.}
+% If a decomposition over realized leaves and internal merges is desired, introduce the following local, on‑range hypothesis at the level of parent (summary) nodes:
+% \begin{assumption}[On‑range determinacy and non‑expansiveness at parents]\label{ass:det-lip}
+% There exists a measurable $M:\Y\times\Y\to\Y$ such that for all on‑range $z_L,z_R$,
+% \[
+% \fstar\!\big(g(z_L\concat z_R)\big)\ =\ M\big(\fstar(z_L),\,\fstar(z_R)\big)\quad\text{almost surely},
+% \]
+% and $M$ is $1$‑Lipschitz in each coordinate:
+% \[
+% \metric\!\big(M(y_1,y_2),\,M(y_1',y_2)\big)\ \le\ \metric(y_1,y_1'),\qquad
+% \metric\!\big(M(y_1,y_2),\,M(y_1,y_2')\big)\ \le\ \metric(y_2,y_2').
+% \]
+% \end{assumption}
+% Assumption~\ref{ass:det-lip} is strictly local to realized, on‑range inputs and is directly testable from deployment logs by holding child oracles fixed while varying their concrete realizations, and by perturbing one child-node's oracle output at a time. Under \eqref{ass:det-lip} one obtains the nodewise recursion
+% \[
+% D(u)\ :=\ \E\,\metric\!\big(\fstar(g(u)),\,\fstar(S(u))\big)\ \le\ D(u_L)\ +\ D(u_R)\ +\ \epsilon(u),
+% \]
+% with $D(b)=\delta_{\mathrm{leaf}}(b)$ at leaves and $\epsilon(u)$ as above at internal nodes. Summing up the realized tree yields the additive envelope for one pass,
+% \[
+% \Delta_1\ \le\ \sum_{\text{leaves }b}\delta_{\mathrm{leaf}}(b)\ +\ \sum_{\text{internal }u}\epsilon(u),
+% \]
+% and, for $R\ge2$,
+% \[
+% \Delta_R\ \le\ \Delta_1\ +\ (R-1)\,\iota_{\mathrm{root}}.
+% \]
+% When \eqref{eq:leaf_idempotence} holds, $\iota_{\mathrm{root}}=0$ and extra rounds are inert in expectation.%
+ 
+% \paragraph{What to report.}
+% Report $(N,M,R)$ for the realized run; report the sampled means $(\hat\delta_{\mathrm{leaf}},\,\hat\epsilon_{\mathrm{merge}},\,\hat\iota_{\mathrm{root}})$ together with either the direct root estimate $\widehat\Delta_R$.
+% (Option~A) or the additive plug‑in summary $\,\widehat\Delta_1:=\sum_b\hat\delta_{\mathrm{leaf}}(b)+\sum_u\hat\epsilon_{\mathrm{merge}}(u)$ and $\widehat\Delta_R:=\widehat\Delta_1+(R-1)\hat\iota_{\mathrm{root}}$ under Assumption~\ref{ass:det-lip} (Option~B). 
+% For uncertainty, add nonparametric bootstrap intervals over the sampled units. 
+% % If $\Y=\{0,1\}$ and $\metric$ is Hamming, the same procedure returns flip shares; no new notation is needed.
+
+% \paragraph{Why $g\in\Gstar$ does not subsume the parent test.}
+% Exact $\fstar$‑sufficiency ($g\in\Gstar$) guarantees $\metric(\fstar(g(z)),\fstar(z))=0$ for every \emph{single} input $z$ and hence makes \eqref{eq:leaf_compatibility} vacuous and \eqref{eq:leaf_idempotence} hold whenever $g$ is idempotent on‑range. It does not constrain how $\fstar$ reacts to \emph{replacing both children by on‑range representatives and then concatenating}. That cross‑child behavior is precisely what \eqref{eq:leaf_compatibility} audits at realized merges. Thus, even with $g\in\Gstar$, you must still check \eqref{eq:leaf_compatibility} on the edges your scheduler actually realized. When \eqref{eq:leaf_sufficiency}–\eqref{eq:leaf_compatibility} (and \eqref{eq:leaf_idempotence} if $R\ge2$) hold exactly, the section’s “Exact pass” short‑circuit applies and yields $\Delta_R=0$; otherwise, use Option~A or, if you are willing to assume and test Assumption~\ref{ass:det-lip}, the additive Option~B.

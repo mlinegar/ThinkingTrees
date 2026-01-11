@@ -1,0 +1,101 @@
+% Shared styles for hierarchical summarization figures
+% Can be used from standalone documents or included in main document preamble
+%
+% Usage in main document:
+%   \input{figures/cld/styles.tex}  % in preamble, after loading tikz
+%   \input{figures/cld/05_full.tikz}  % in document body, inside a figure
+%
+\RequirePackage{tikz}
+\RequirePackage{amsmath, amssymb}
+\usetikzlibrary{calc, shapes.geometric, arrows.meta, positioning, fit, backgrounds, shadows, decorations.pathreplacing}
+
+\makeatletter
+\newcommand{\cld@inputnotation}{%
+  \IfFileExists{notation.tex}{\input{notation.tex}}{%
+    \IfFileExists{../notation.tex}{\input{../notation.tex}}{}%
+  }}
+\cld@inputnotation
+\makeatother
+
+\tikzset{
+  % --- Ghost (Background) Styles ---
+  ghostnode/.style={
+    draw=gray!25, fill=white, text=gray!35,
+    rounded corners=2pt, minimum width=0.9cm, minimum height=0.5cm, font=\scriptsize
+  },
+  ghostedge/.style={->, draw=gray!25, line width=0.5pt},
+  % --- Solid (visible base tree) Styles ---
+  solidnode/.style={
+    draw=black!70, fill=white, text=black!85,
+    rounded corners=2pt, minimum width=0.9cm, minimum height=0.5cm, font=\scriptsize
+  },
+  solidedge/.style={->, draw=black!60, line width=0.6pt},
+  % --- Active (Spotlight) Styles ---
+  activenode/.style={
+    draw=black!70, fill=white, text=black!85, drop shadow,
+    rounded corners=2pt, minimum width=0.9cm, minimum height=0.5cm, font=\small\bfseries
+  },
+  referencenode/.style={
+    activenode, fill=gray!5, text=black!70
+  },
+  % --- Arrow Styles ---
+  % Solid = Summarize / Concatenate / Merge (actual operations)
+  arrowsolid/.style={->, thick},
+  % Dashed = Hypothetical constructs / alternate paths
+  arrowdashed/.style={->, dashed, thick},
+  % Dotted = Metric comparison (the test)
+  arrowdotted/.style={<->, dash pattern=on 2pt off 1.5pt, semithick, {Latex[length=2mm, width=1.5mm]}-{Latex[length=2mm, width=1.5mm]}},
+  % --- Comparator (The "Test" node) ---
+  comparator/.style={
+    draw=black!80, fill=white, rounded corners=2pt,
+    inner sep=3pt, font=\scriptsize\bfseries, align=center, drop shadow
+  },
+  % --- Grouping Boxes ---
+  groupbox/.style={
+    rounded corners=5pt, draw opacity=0.8, fill opacity=0.08, thick, inner sep=6pt
+  },
+  % --- Text Labels ---
+  lawtitle/.style={
+    font=\bfseries\normalsize, align=center
+  },
+  lawdesc/.style={
+    font=\small, align=center, inner sep=2pt, text opacity=0.9
+  },
+  % --- Plus node for concatenation ---
+  plus/.style={circle, draw, inner sep=0pt, minimum size=12pt, font=\bfseries\scriptsize},
+  % --- Legend styles ---
+  legendbox/.style={
+    draw=gray!50, fill=gray!5, rounded corners=3pt, inner sep=5pt
+  }
+}
+
+% Fixed bounding box to ensure consistent scaling across all figures
+% Based on the full Figure 5 extents
+\newcommand{\fixboundingbox}{
+  \useasboundingbox (-1.3, -2.2) rectangle (9.8, 6.3);
+}
+
+% Legend macro - anchored relative to two nodes (use b4 and b5 for consistency)
+\newcommand{\drawlegend}[2]{
+  \node[legendbox, anchor=north] at ($(#1)!0.5!(#2) + (0, -0.9)$) {
+    \begin{tikzpicture}[x=1cm, y=0.4cm]
+      \draw[arrowsolid, black!70] (0,0) -- (0.8,0) node[right, font=\scriptsize] {Summarize/Merge};
+      \draw[arrowdashed, black!70] (3.2,0) -- (4.0,0) node[right, font=\scriptsize] {Direct path};
+      \draw[arrowdotted, black!70] (6.4,0) -- (7.2,0) node[right, font=\scriptsize] {Comparison test};
+    \end{tikzpicture}
+  };
+}
+
+% Notation legend macro - matches arrow legend width (~9.7cm)
+\newcommand{\drawnotation}[2]{
+  \node[legendbox, anchor=north] at ($(#1)!0.5!(#2) + (0, -1.55)$) {
+    \begin{tikzpicture}[x=1cm, y=0.4cm]
+      \node[font=\scriptsize, anchor=west] at (0, 0.4) {$b \in \mathcal{X}$: document blocks};
+      \node[font=\scriptsize, anchor=center] at (4.85, 0.4) {$s$: summaries};
+      \node[font=\scriptsize, anchor=east] at (9.7, 0.4) {$b \concat b'$: concatenation};
+      \node[font=\scriptsize, anchor=west] at (0, -0.4) {$g$: summary function};
+      \node[font=\scriptsize, anchor=center] at (4.85, -0.4) {$\fstar$: oracle (e.g.\ expert)};
+      \node[font=\scriptsize, anchor=east] at (9.7, -0.4) {$\metric$: metric on $\fstar$ outputs};
+    \end{tikzpicture}
+  };
+}

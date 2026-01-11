@@ -474,9 +474,21 @@ class OracleScore:
     metadata: Optional[Dict[str, Any]] = field(default=None)
 
     def __post_init__(self):
-        """Validate and clamp score to [0.0, 1.0] range."""
+        """Validate and clamp score to [0.0, 1.0] range.
+
+        From BoundedMetricSpace.lean: The OPS proofs require bounded metrics
+        where dist(x,y) <= diameterBound. For scores, we require 0 <= score <= 1.
+        """
         if not 0.0 <= self.score <= 1.0:
             clamped = max(0.0, min(1.0, self.score))
+            # Warn user about clamping - this may indicate a bug in their oracle
+            warnings.warn(
+                f"OracleScore.score={self.score} is outside [0.0, 1.0] bounds, "
+                f"clamped to {clamped}. Bounded scores are required for theoretical "
+                "guarantees (see BoundedMetricSpace.lean).",
+                UserWarning,
+                stacklevel=2
+            )
             object.__setattr__(self, 'score', clamped)
 
     def passes_threshold(self, threshold: float = 0.9) -> bool:

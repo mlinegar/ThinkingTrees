@@ -1,0 +1,245 @@
+\section{Framework Overview}\label{sec:overview}
+
+The previous section introduced the oracle $\fstar$ as a stand-in for expensive human judgment and motivated hierarchical summarization as a practical necessity. It also previewed the core claim: that three local consistency conditions---checked at individual nodes of the summary tree---can guarantee that the final output preserves $\fstar$ in expectation. This section makes that claim precise. We begin with the objects and failure modes, then state the conditions informally before turning to the formal development in Section~\ref{sec:mechanism}.
+
+\subsection{The Objects We Audit}
+
+Recall that $\fstar: \Strings \to \Y$ maps any span of text to the task value the researcher cares about. Running $\fstar$ is expensive, so in practice we approximate it with an accessible oracle $f$---expert annotation, a deliberation-grade LLM, or a human-in-the-loop workflow.\footnote{Whenever we write $\fstar$ in the guarantees below, read it as ``the oracle we would like to preserve.'' Any gap between the accessible $f$ and the ideal $\fstar$ becomes measurement error in the audit.}
+
+The summarizer $g: \Strings \to \Strings$ is the compression primitive we audit. Every call to $g$ is \emph{local}: it sees at most a single leaf block or the concatenation of two child summaries. Composing these local calls yields the hierarchical pipeline that shortens a book into a paragraph, yet the entire pipeline is determined by how $g$ behaves on small neighborhoods.
+
+We seek two properties (Figure~\ref{fig:gstar}). First, the oracle should return the same answer on raw text and on its summary: $\fstar(x) = \fstar(g(x))$. This is sufficiency---the left panel. Second, re-summarizing a summary should be inert: $\fstar(g(s)) = \fstar(s)$ whenever $s$ is already a summary. This is idempotence---the right panel. When both hold, we can freely substitute summaries for text and freely re-edit without corrupting $\fstar$.
+
+\begin{figure}[t]
+    \centering
+    \begin{tikzpicture}[node distance=2cm]
+    \node[doc] (X) {$X$};
+    \node[sum, right=of X] (gX) {$g(X)$};
+    \node[sum, right=of gX] (ggX) {$g(g(X))$};
+    \node[op, below=of X] (fX) {$\fstar(X)$};
+    \node[op, below=of gX] (fgX) {$\fstar(g(X))$};
+    \node[op, below=of ggX] (fggX) {$\fstar(g(g(X)))$};
+    \draw[->, dotted] (X) -- (gX);
+    \draw[->, dotted] (gX) -- (ggX);
+    \draw[->] (X) -- (fX);
+    \draw[->] (gX) -- (fgX);
+    \draw[->] (ggX) -- (fggX);
+    \draw[<->, dashed] (fX) -- node[below] {\footnotesize sufficient} (fgX);
+    \draw[<->, dashed] (fgX) -- node[below] {\footnotesize idempotent} (fggX);
+    \end{tikzpicture}
+    \caption{The two properties we seek. \textbf{Left}: Sufficiency requires $\fstar(g(X)) = \fstar(X)$. \textbf{Right}: Idempotence requires $\fstar(g(g(X))) = \fstar(g(X))$.}
+    \label{fig:gstar}
+\end{figure}
+
+\subsection{What Can Go Wrong}\label{sec:what-can-go-wrong}
+
+Three failure modes arise when we examine the local map $g$.
+
+\paragraph{Information loss at leaves.}
+If a paragraph mentions three protest events but the summary records only two, the oracle value is corrupted before any merging occurs. No amount of careful downstream processing can recover the lost event.
+
+\paragraph{Information loss at merges.}
+Even faithful summaries can corrupt information when combined. Two child summaries each stating ``a protest in Paris'' might describe the same event or two different ones. The merge $g(s_A \concat s_B)$ might incorrectly deduplicate, while the joint summary $g(b_A \concat b_B)$ could correctly distinguish them using cross-boundary coreference. The order of summarization and concatenation matters.
+
+\paragraph{Information drift under re-summarization.}
+Optional ``clean-up'' passes can cause drift. After multiple rounds of polishing, three protests become two, then one, then ``civil unrest.''
+
+\subsection{The Hierarchical Pipeline}\label{sec:hierarchy-practice}
+
+Figure~\ref{fig:hierarchical_summarization} shows the structure. A document $x$ is partitioned into contiguous blocks $(b_1, \ldots, b_k)$, each summarized to $s_i = g(b_i)$. Internal nodes recursively set $s_u := g(s_{u_L} \concat s_{u_R})$. Only these summaries are materialized; the raw text underneath a node, written $S(u)$, is bookkeeping for analysis. Because $g$ always sees at most two child summaries, every merge fits in context.
+
+\begin{figure}[t]
+    \centering
+    \input{figures/hierarchical_tree.tikz}
+    \caption{Hierarchical summarization as a binary tree. Leaf blocks $x_i$ are summarized to $s_i = g(x_i)$. Internal nodes summarize the concatenation of children: $s_{12} = g(s_1 \concat s_2)$, and so on to $s_{\mathrm{root}}$.}
+    \label{fig:hierarchical_summarization}
+\end{figure}
+
+Table~\ref{tab:notation-main} collects notation for reference.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{ll}
+\toprule
+Symbol & Meaning \\
+\midrule
+$\Strings$ & Finite token sequences; $(\Strings, \concat, \emptystr)$ is the free monoid \\
+$x_0$ & Base document; each leaf $b_i$ is a contiguous substring \\
+$s_u$ & Stored summary at node $u$; $S(u)$ is the latent raw text below $u$ \\
+$\fstar: \Strings \to \Y$ & Oracle; $\metric: \Y \times \Y \to [0,\infty)$ is the task metric \\
+$g: \Strings \to \Strings$ & Summarizer (possibly stochastic) \\
+$Z^{(R)}(x)$ & $R$th-round output: $Z^{(1)} = s_{\text{root}}$, $Z^{(R+1)} = g(Z^{(R)})$ \\
+\bottomrule
+\end{tabular}
+\caption{Core notation.}
+\label{tab:notation-main}
+\end{table}
+
+\subsection{The Three Conditions (Informal)}\label{sec:conditions-preview}
+
+The motivation section named three conditions; here we state them informally before formalizing in Section~\ref{sec:mechanism}.
+
+\paragraph{Leaf-level sufficiency.}
+Every leaf summary must preserve the oracle: $g(b) \sim b$ for each realized block $b$, where $\sim$ denotes oracle equivalence ($\metric(\fstar(\cdot), \fstar(\cdot)) = 0$).
+
+\paragraph{Merge consistency.}
+Summarization must commute with concatenation:
+\[
+u \concat v \;\sim\; g(u \concat v) \;\sim\; g(g(u) \concat g(v)).
+\]
+The first equivalence says joint summarization preserves the oracle. The second says pre-summarizing the parts is equivalent to processing them together.
+
+\paragraph{On-range idempotence.}
+Re-summarizing a summary must be inert: $g(s) \sim s$ for any $s$ already in the range of $g$.
+
+\subsection{Local Checks, Global Guarantees}\label{sec:local-to-global-preview}
+
+The power of this framework is that local consistency implies global preservation. Theorem~\ref{thm:one-pass} shows that if every leaf and every merge satisfies the conditions, the root summary preserves $\fstar$ in expectation---regardless of tree depth or shape. We therefore need not audit the root against the full document. Instead, Section~\ref{sec:audit} develops a \emph{probabilistic audit}: sample leaves and merges, estimate violation rates, and use those rates to certify (or improve) the pipeline.
+
+\subsection{Beyond Certification}\label{sec:beyond-auditing-preview}
+
+Because the conditions are local, they double as optimization objectives. Rather than training a model to ``summarize well,'' practitioners can train it to satisfy merge consistency: ensure $g(\text{summary}_A \concat \text{summary}_B)$ matches $g(\text{text}_A \concat \text{text}_B)$ at the oracle. Frameworks like DSPy \citep{khattab2024dspy} make prompt parameters optimizable; violation rates become the loss. The same measurements that certify a pipeline also describe how to tune it.
+
+When supervision depends on documents only through $\fstar$ (a factorization covering classification, preference learning, and proper scoring rules), training on oracle-preserving summaries is statistically equivalent to training on full documents. Section~\ref{sec:exist-learn-transport} develops this connection.
+
+
+\section{The Mechanism}\label{sec:mechanism}
+
+We now state the conditions precisely and prove that local satisfaction implies global preservation.
+
+\subsection{Oracle Equivalence}
+
+\begin{definition}[Oracle equivalence]\label{def:oracle-equiv}
+Two strings $u, v \in \Strings$ are \emph{oracle-equivalent}, written $u \sim v$, if $\metric(\fstar(u), \fstar(v)) = 0$.
+\end{definition}
+
+Because $\metric$ is a (pseudo)metric, $\sim$ is an equivalence relation. For equivalence to propagate through concatenation, we assume:
+
+\begin{assumption}[Context compatibility]\label{ass:context}
+If $u \sim v$, then $w \concat u \sim w \concat v$ and $u \concat w \sim v \concat w$ for all $w$.
+\end{assumption}
+
+This makes $\sim$ a congruence on the free monoid.\footnote{Appendix~\ref{sec:global} develops the algebra. We treat Assumption~\ref{ass:context} as falsifiable; the merge checks in Section~\ref{sec:audit} probe it by splicing summaries into fresh contexts.}
+
+\begin{convention}[Expectation]\label{conv:expectation}
+$\E[\cdot]$ averages over the internal randomness of $g$. At node $u$, we condition on realized subtrees below.
+\end{convention}
+
+\subsection{Formal Definitions}
+
+\begin{definition}[Sufficiency]\label{def:oracle-suff}
+$g$ is \emph{$\fstar$-sufficient} if $\E[\metric(\fstar(g(x)), \fstar(x))] = 0$ for all $x$.
+\end{definition}
+
+\begin{definition}[Idempotence]\label{def:idempotence}
+$g$ is \emph{idempotent} if $\E[\metric(\fstar(g(Z)), \fstar(Z)) \mid Z] = 0$ for any $Z$ supported on $\operatorname{range}(g)$.
+\end{definition}
+
+\begin{definition}[The classes $\Gstar$ and $\Gstar_{\mathrm{stab}}$]\label{def:gstar-classes}
+$\Gstar := \{g : \fstar(g(X)) = \fstar(X) \text{ a.s.}\}$; \quad $\Gstar_{\mathrm{stab}} := \{g \in \Gstar : g \text{ is idempotent}\}$.
+\end{definition}
+
+By Doob--Dynkin, $g \in \Gstar$ iff $\fstar(X)$ is a measurable function of $g(X)$---exactly the classical definition of a sufficient statistic.
+
+\subsection{The Three Conditions}
+
+\paragraph{Condition 1: Leaf-level sufficiency.}
+\begin{equation}\tag{C1}\label{eq:leaf_sufficiency}
+\text{For every realized leaf } b: \quad g(b) \sim b.
+\end{equation}
+
+\paragraph{Condition 2: Merge consistency.}
+\begin{equation}\tag{C2}\label{eq:leaf_compatibility}
+\text{For all } u, v: \quad
+u \concat v \;\sim\; g(u \concat v) \;\sim\; g(g(u) \concat g(v)).
+\end{equation}
+
+Figure~\ref{fig:local_compatibility} shows the two computational paths that must agree.
+
+\begin{figure}[t]
+    \centering
+    \begin{tikzpicture}[node distance=8mm and 10mm, scale=0.92, every node/.style={transform shape}]
+\node[doc] (a1) at (0,0) {$u$};
+\node[doc] (b1) at (1.2,0) {$v$};
+\node[plus] (plus1) at (0.6,1) {$\concat$};
+\node[sum] (gab) at (0.6,2.1) {$g(u \concat v)$};
+\draw[->] (a1) -- (plus1);
+\draw[->] (b1) -- (plus1);
+\draw[->] (plus1) -- (gab);
+
+\node[doc] (a2) at (4.2,0) {$u$};
+\node[doc] (b2) at (5.4,0) {$v$};
+\node[sum] (ga) at (4.2,1) {$g(u)$};
+\node[sum] (gb) at (5.4,1) {$g(v)$};
+\node[plus] (plus2) at (4.8,2.1) {$\concat$};
+\node[sum] (ggab) at (4.8,3.2) {$g(g(u) \concat g(v))$};
+\draw[->] (a2) -- (ga);
+\draw[->] (b2) -- (gb);
+\draw[->] (ga) -- (plus2);
+\draw[->] (gb) -- (plus2);
+\draw[->] (plus2) -- (ggab);
+
+\draw[<->, dashed, thick] (gab.east) -- node[above, font=\scriptsize] {$\sim$} (ggab.west);
+    \end{tikzpicture}
+    \caption{Merge consistency: the reference path (left) and hierarchical path (right) must be oracle-equivalent.}
+    \label{fig:local_compatibility}
+\end{figure}
+
+\begin{remark}[Edge-wise checks]\label{rem:edgewise}
+Audits compare $\fstar(u \concat v)$ to $\fstar(g(g(u) \concat g(v)))$ at realized edges---both fit in context.
+\end{remark}
+
+\paragraph{Condition 3: On-range idempotence.}
+\begin{equation}\tag{C3}\label{eq:leaf_idempotence}
+\text{For every } s \in \operatorname{range}(g): \quad g(s) \sim s.
+\end{equation}
+
+Without (C3), clean-up passes can drift the oracle. Appendix~\ref{app:stability} gives an example where (C1) and (C2) hold but repeated summarization corrupts the label.
+
+\subsection{Main Results}
+
+\begin{theorem}[Inductive Preservation]\label{thm:one-pass}
+Fix a partition $x = b_1 \concat \cdots \concat b_k$ and any full binary tree $T$. If \eqref{eq:leaf_sufficiency} holds at every leaf and \eqref{eq:leaf_compatibility} at every internal node, then
+\[
+\E\big[\metric(\fstar(Z^{(1)}), \fstar(x))\big] = 0.
+\]
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+Induction on tree structure. Leaves: (C1) gives $s_i \sim b_i$. Internal node $u$ with children $u_L, u_R$: by hypothesis $s_{u_L} \sim S(u_L)$, $s_{u_R} \sim S(u_R)$. Context compatibility yields $s_{u_L} \concat s_{u_R} \sim S(u_L) \concat S(u_R) = S(u)$. Applying (C2), $s_u = g(s_{u_L} \concat s_{u_R}) \sim S(u)$. At the root, $s_{\text{root}} \sim x$. \hfill (Full proof: Appendix~\ref{app:proofs-core}.)
+\end{proof}
+
+\begin{corollary}[Schedule invariance]\label{cor:schedule}
+Every full binary tree over fixed blocks $(b_1, \ldots, b_k)$ yields the same expected oracle when (C1) and (C2) hold.
+\end{corollary}
+
+\begin{theorem}[Multi-round preservation]\label{thm:multi-round}
+If Theorem~\ref{thm:one-pass} holds and (C3) is satisfied, then $\E[\metric(\fstar(Z^{(R)}), \fstar(x))] = 0$ for all $R \geq 1$.
+\end{theorem}
+
+\begin{corollary}[Fold-of-folds]\label{cor:folds}
+A two-level plan---first reduce contiguous folds, then reduce fold summaries---preserves $\fstar$ in expectation when (C1), (C2), and (C3) hold.
+\end{corollary}
+
+Proofs appear in Appendix~\ref{app:proofs-core}. Together, these results let practitioners choose any reduction schedule without affecting the expected oracle.
+
+\subsection{Downstream Learning}\label{sec:exist-learn-transport}
+
+\begin{assumption}[Conditional factorization]\label{ass:CF}
+The supervision $\sstar: \Strings \times \A \to \mathbb{R}$ factors through the oracle: $\E[\sstar(X, a) \mid \fstar(X)] = \bar{Q}(\fstar(X), a)$ for some $\bar{Q}$.
+\end{assumption}
+
+This covers classification, preference learning, and proper scoring. When the hierarchy satisfies (C1)--(C3), supervision on summaries is statistically indistinguishable from supervision on full documents (Appendix~\ref{app:blackwell}).
+
+\paragraph{Application to preference learning.}
+DPO \citep{RafailovEtAl2023DPO} uses Bradley--Terry likelihoods. If preferences depend only on $\fstar$, training on oracle-preserving summaries achieves the same optimum as training on originals. Appendix~\ref{sec:dpo} shows the gap is Lipschitz in violation rates.
+
+\subsection{Constructive Alignment}\label{sec:bootstrap-main}
+
+The conditions also define an optimization problem. Maintain two modules---\texttt{LeafSummarizer} (tuned for C1) and \texttt{MergeSummarizer} (tuned for C2)---and iterate:
+\begin{enumerate}[label=\roman*.]
+    \item Sample leaves; check $\metric(\fstar(g(b)), \fstar(b))$. Successes become few-shot exemplars; failures trigger re-generation or human escalation.
+    \item Sample merges; check $\metric(\fstar(g(s_L \concat s_R)), \fstar(s_L \concat s_R))$. Successes become demonstrations.
+    \item Repeat until violation rates fall below tolerance.
+\end{enumerate}
+Appendix~\ref{app:bootstrap} provides DSPy-oriented pseudocode. The same comparisons that certify runs act as optimizer objectives---no labels beyond $\fstar$ required.

@@ -49,7 +49,8 @@ if TYPE_CHECKING:
     from src.training.preference.genrm_dspy import GenRMComparisonModule
     from src.training.preference import PreferencePair
 
-from src.core.prompting import default_merge_prompt, default_summarize_prompt
+from src.core.prompting import default_merge_prompt, default_summarize_prompt, default_unified_prompt
+from src.core.protocols import format_merge_input
 from src.config.concurrency import get_concurrency_config
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,9 @@ class BatchedStrategy:
         max_tokens: Maximum tokens for summary responses
         summarize_prompt_fn: Function to build summarize prompts
         merge_prompt_fn: Function to build merge prompts
+        unified_mode: If True, use single g function for both leaf and merge.
+            This aligns with the theory where g : Strings -> Strings handles
+            both cases. For merges, input is format_merge_input(left, right).
     """
 
     def __init__(
@@ -148,19 +152,22 @@ class BatchedStrategy:
         max_tokens: int = 500,
         summarize_prompt_fn=None,
         merge_prompt_fn=None,
+        unified_mode: bool = False,
     ):
         self.client = client
         self.max_tokens = max_tokens
         self._counter = 0
+        self.unified_mode = unified_mode
 
         # Use default prompt builders if not provided
-        if summarize_prompt_fn is None:
-            summarize_prompt_fn = default_summarize_prompt
-        if merge_prompt_fn is None:
-            merge_prompt_fn = default_merge_prompt
-
-        self.summarize_prompt_fn = summarize_prompt_fn
-        self.merge_prompt_fn = merge_prompt_fn
+        if unified_mode:
+            # Single g function for both leaf and merge
+            self.summarize_prompt_fn = summarize_prompt_fn or default_unified_prompt
+            self.merge_prompt_fn = None  # Not used in unified mode
+        else:
+            # Separate prompts (legacy mode)
+            self.summarize_prompt_fn = summarize_prompt_fn or default_summarize_prompt
+            self.merge_prompt_fn = merge_prompt_fn or default_merge_prompt
 
     async def summarize(
         self, content: str, rubric: str, temperature: float = 0.7
@@ -187,9 +194,19 @@ class BatchedStrategy:
         from src.core.batch_processor import BatchRequest
 
         self._counter += 1
+
+        if self.unified_mode:
+            # Use same prompt as leaf, just format input differently
+            # This is the theory's g(s_L * s_R) where * is format_merge_input
+            combined = format_merge_input(left, right)
+            messages = self.summarize_prompt_fn(combined, rubric)
+        else:
+            # Legacy: use separate merge prompt
+            messages = self.merge_prompt_fn(left, right, rubric)
+
         request = BatchRequest(
             request_id=f"strategy_merge_{self._counter}",
-            messages=self.merge_prompt_fn(left, right, rubric),
+            messages=messages,
             max_tokens=self.max_tokens,
             request_type="merge",
             temperature=temperature,
@@ -256,8 +273,15 @@ class BatchedStrategy:
         self, left: str, right: str, rubric: str, k: int = 4, temperature: float = 0.9
     ) -> List[str]:
         """Generate k diverse merge candidates via batched requests at high temperature."""
+        if self.unified_mode:
+            # Use same prompt as leaf, just format input differently
+            combined = format_merge_input(left, right)
+            messages = self.summarize_prompt_fn(combined, rubric)
+        else:
+            messages = self.merge_prompt_fn(left, right, rubric)
+
         return await self._generate_candidates_impl(
-            messages=self.merge_prompt_fn(left, right, rubric),
+            messages=messages,
             request_type="merge_candidate",
             k=k,
             temperature=temperature,
@@ -277,16 +301,29 @@ class DSPyStrategy:
 
     Args:
         leaf_module: DSPy module for leaf summarization (content, rubric) -> str
-        merge_module: DSPy module for merge summarization (left, right, rubric) -> str
+        merge_module: DSPy module for merge summarization (left, right, rubric) -> str.
+            Optional in unified mode.
+        unified_mode: If True, use single module (leaf_module) for both leaf and merge.
+            In this mode, merge operations format input via format_merge_input() and
+            call leaf_module with content=formatted_input. This aligns with the theory
+            where g : Strings -> Strings handles both cases.
     """
 
     def __init__(
         self,
         leaf_module: "dspy.Module",
-        merge_module: "dspy.Module",
+        merge_module: Optional["dspy.Module"] = None,
+        unified_mode: bool = False,
     ):
         self.leaf_module = leaf_module
-        self.merge_module = merge_module
+        self.unified_mode = unified_mode
+
+        if unified_mode:
+            # Use same module for both - merge just formats input differently
+            self.merge_module = leaf_module
+        else:
+            # Legacy mode: separate modules (use leaf as fallback if merge not provided)
+            self.merge_module = merge_module if merge_module is not None else leaf_module
 
     async def summarize(
         self, content: str, rubric: str, temperature: float = 0.7
@@ -303,15 +340,28 @@ class DSPyStrategy:
     async def merge(
         self, left: str, right: str, rubric: str, temperature: float = 0.7
     ) -> str:
-        """Merge summaries using DSPy merge module."""
-        return await asyncio.to_thread(
-            self._call_with_temp,
-            self.merge_module,
-            temperature,
-            left_summary=left,
-            right_summary=right,
-            rubric=rubric,
-        )
+        """Merge summaries using DSPy module."""
+        if self.unified_mode:
+            # Use same module as leaf, just format input differently
+            # This is the theory's g(s_L * s_R) where * is format_merge_input
+            combined = format_merge_input(left, right)
+            return await asyncio.to_thread(
+                self._call_with_temp,
+                self.leaf_module,
+                temperature,
+                content=combined,
+                rubric=rubric,
+            )
+        else:
+            # Legacy: use merge module with separate fields
+            return await asyncio.to_thread(
+                self._call_with_temp,
+                self.merge_module,
+                temperature,
+                left_summary=left,
+                right_summary=right,
+                rubric=rubric,
+            )
 
     async def generate_candidates(
         self, content: str, rubric: str, k: int = 4, temperature: float = 0.9
@@ -340,17 +390,31 @@ class DSPyStrategy:
         """
         Generate k diverse merge candidates using parallel DSPy calls at high temperature.
         """
-        tasks = [
-            asyncio.to_thread(
-                self._call_with_temp,
-                self.merge_module,
-                temperature,
-                left_summary=left,
-                right_summary=right,
-                rubric=rubric,
-            )
-            for _ in range(k)
-        ]
+        if self.unified_mode:
+            # Use same module as leaf, just format input differently
+            combined = format_merge_input(left, right)
+            tasks = [
+                asyncio.to_thread(
+                    self._call_with_temp,
+                    self.leaf_module,
+                    temperature,
+                    content=combined,
+                    rubric=rubric,
+                )
+                for _ in range(k)
+            ]
+        else:
+            tasks = [
+                asyncio.to_thread(
+                    self._call_with_temp,
+                    self.merge_module,
+                    temperature,
+                    left_summary=left,
+                    right_summary=right,
+                    rubric=rubric,
+                )
+                for _ in range(k)
+            ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return _filter_valid_candidates(results, "Merge candidate generation")
@@ -658,7 +722,7 @@ class TournamentStrategy:
             return candidates[0] if candidates else ""
 
         # For merge operations, the "original" is the concatenated child summaries
-        original_text = f"{left}\n\n{right}"
+        original_text = format_merge_input(left, right)
 
         # Run tournament and collect preferences
         if self.config.pipelined:

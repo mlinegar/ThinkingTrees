@@ -1,0 +1,325 @@
+\section{Framework Overview}\label{sec:overview}
+
+\subsection{Preservation Objective}
+
+Consider a researcher who hands us a sprawling report, novel, or code base and wants a short artifact that still supports the questions they care about. They already know how to grade answers when the full text is available---they can run a painstaking rubric, consult a subject-matter expert, or query a deliberation-grade LLM. This grading procedure is the \emph{oracle} we want the hierarchy to preserve. The only reason summarization enters the story is that calling the oracle on every long document is too expensive, so we compress the document into smaller spans that can be checked locally while still behaving like the original text when fed back to the oracle.
+
+Section~\ref{sec:motivation} argued informally that hierarchical summarization is the only scalable route to this goal. We now slow down and make the objects explicit. The researcher specifies the oracle $\fstar: \Strings \to \Y$ and asks the summarizer to act as a faithful, local proxy for $\fstar$ on every span the hierarchy touches. Because $\fstar$ can be prohibitively expensive to evaluate, we typically instantiate it with a high-quality but limited resource $f$ (expert annotations, a trusted LLM, or a human-in-the-loop workflow).\footnote{Whenever we write $\fstar$ in the guarantees below, read it as ``the oracle we would like to preserve.'' In deployments we approximate $\fstar$ with an accessible $f$ that we trust enough to act as the auditing oracle. Any gap between $f$ and $\fstar$ simply becomes measurement error in the audit.}
+
+\begin{definition}[Oracle]\label{def:oracle}
+Let $\Strings$ denote the set of all finite token sequences with concatenation $\concat$ and identity $\emptystr$. An \emph{oracle} is a function $\fstar: \Strings \to \Y$ mapping any document to the task value $\fstar(x)$ that the researcher ultimately cares about.
+\end{definition}
+
+A summarizer $g: \Strings \rightsquigarrow \Strings$ is the compression primitive we audit. Every call to $g$ is \emph{local}: it sees at most a single leaf block or the concatenation of two child summaries. Composing these local calls yields the global hierarchical pipeline that shortens a book into a paragraph, yet the pipeline is entirely determined by how $g$ behaves on small neighborhoods. If the local behavior aligns with what the oracle expects, the entire pipeline can safely swap summaries for raw text. This locality is also what makes the verification procedure introduced below tractable.
+
+\begin{definition}[Summarizer]\label{def:summarizer}
+A \emph{summarizer} is a (possibly stochastic) map $g: \Strings \rightsquigarrow \Strings$. When $g$ uses randomness (temperature, seeds), statements about $g(x)$ are interpreted in expectation over this randomness.
+\end{definition}
+
+Two desiderata drive the theory. First, the oracle should return the same answer on the raw text and on the stored summary, i.e., $\fstar(x) = \fstar(g(x))$ for every realized span. This is the ``left panel'' intuition from Figure~\ref{fig:hierarchical_summarization}: the oracle should not be able to tell whether it was handed the book or the book's summary. Second, extra ``clean-up'' passes should be inert, meaning $\fstar(g(s)) = \fstar(s)$ whenever $s$ is itself a summary. Figure~\ref{fig:gstar} captures this idempotence guarantee on the right. When both desiderata hold, we can freely substitute summaries for text and freely re-edit summaries without corrupting $\fstar$.
+
+\subsection{Hierarchical Pipeline Construction}
+
+Operationally we partition the document into contiguous chunks $(b_1,\dots,b_k)$ that fit inside the model's context window and assign them to the leaves of a full binary tree $T$ (Figure~\ref{fig:hierarchical_summarization}). Each leaf is summarized once to produce $s_i = g(b_i)$, and every internal node $u$ receives the strings from its children, concatenates them, and calls the same summarizer again: $s_u := g(s_{u_L} \concat s_{u_R})$. Traversing the tree bottom-up shrinks an entire book into a single paragraph-width string at the root.
+
+During execution we only store the summaries $s_u$. The raw substrings $S(u)$ underneath a node exist conceptually so that we can compare the pipeline back to the document during a verification pass. Because $g$ always sees at most two child summaries, every operation fits inside a bounded context window, making the ``local'' $g$ literally the function invoked at each node and enabling the sampling-based checks formalized by the probabilistic audit (Definition~\ref{def:prob-audit}).
+
+Table~\ref{tab:notation-main} serves as a concise reference for the objects that appear throughout the paper. It names the realized blocks $(b_i)$, the latent spans $S(u)$, the stored summaries $s_u$, and the multi-round outputs $Z^{(R)}(x)$. With this dictionary in place, the informal description matches Figure~\ref{fig:hierarchical_summarization}: the left panel shows the oracle-equivalent replacements we hope for, while the right panel of Figure~\ref{fig:gstar} encodes the idempotence requirement that prevents drift during clean-up passes.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{ll}
+\toprule
+Symbol & Meaning \\
+\midrule
+$\Strings$ & Set of finite token sequences (free monoid with concatenation $\concat$ and identity $\emptystr$) \\
+$\fstar: \Strings \to \Y$ & Oracle mapping strings to task values; $\metric: \Y \times \Y \to [0,\infty)$ scores discrepancies \\
+$g: \Strings \rightsquigarrow \Strings$ & Local summarizer (possibly stochastic) applied at every node of the hierarchy \\
+$x_0$ & Base document; realized leaves $b_i$ are contiguous substrings of $x_0$ \\
+$u$ & Node of merge tree $T$ with ordered children $u_L,u_R$ and latent span $S(u)$ \\
+$s_u$ & Stored summary at node $u$ ($s_u=g(b)$ at leaves; $s_u=g(s_{u_L}\concat s_{u_R})$ internally) \\
+$r$ & Root node with latent span $S(r)=x$ and stored summary $s_r = Z^{(1)}(x)$ \\
+$Z^{(R)}(x)$ & $R$th-round summary ($Z^{(1)}(x)=s_r$, $Z^{(R+1)}(x)=g(Z^{(R)}(x))$) \\
+$\E$ & Expectation over $g$'s randomness (all equalities are deterministic when $g$ is deterministic) \\
+\bottomrule
+\end{tabular}
+\caption{Notation recap for hierarchical summarization. The table extends Appendix~\ref{app:notation} so the main text can stand alone.}
+\label{tab:notation-main}
+\end{table}
+
+\subsection{From Pipeline to Local Laws}
+
+With the mechanics in place, we can ask what it would take for the hierarchy to behave exactly like the full document. The informal pipeline suggests a natural ``global wish list'': summarizing, concatenating, and re-summarizing should behave like an algebraic sketch whose query answers coincide with the oracle. Classical mergeable summaries in databases \citep{agarwal2013mergeable} realize this wish when the statistics of interest are commutative (counts, heavy hitters). Text is far messier. Concatenation is non-commutative ($u \concat v \neq v \concat u$), the summarizer is stochastic, and the oracle may care about discourse that spans blocks. We therefore cannot assume that a global law such as $\fstar(u \concat v) = \fstar(g(u) \concat g(v))$ holds everywhere. Instead, we ask for a set of \emph{local} laws on the realized leaves and merges. Figure~\ref{fig:local_compatibility} foreshadows these requirements by spotlighting the only three prompts we ever need. Our main theorem shows that these local checks are sufficient: if every call to $g$ behaves, the entire hierarchy behaves, regardless of depth, tree shape, or optional clean-up passes.
+
+\subsection{Local Consistency Requirements}
+
+We now state the three local conditions that, when satisfied, guarantee the final summary preserves the oracle in expectation. Figure~\ref{fig:local_compatibility} is the running picture to keep in mind: the gray tree provides context, and the three colored spotlights show the precise prompts we can pose to the oracle.
+
+\paragraph{Sufficiency.} Panel~(A) of Figure~\ref{fig:local_compatibility} zooms in on a single realized leaf: compare a raw block $b_i$ with its first-pass summary $s_i$. Every leaf summary must therefore already be a trustworthy stand-in for its source span. This is the local analogue of asking whether the snippet still answers the research question. If a paragraph mentions three protest events, the summary must preserve all three; if a paragraph contains no relevant information, both the paragraph and its summary should map to the same neutral element in $\Y$. Formally, $g(b) \sim b$ for every realized leaf $b$, where $\sim$ denotes equivalence under the oracle metric.
+
+\paragraph{Idempotence.} Panel~(B) captures the ``clean-up'' operation practitioners often add after the first pass: re-summarize a stored span $s$ and confirm that the oracle stays put. These edits must be harmless with respect to the oracle: once information has been packed into a summary, rewriting that summary should not change the answer to the research question. Formally, $g(s) \sim s$ for any string $s$ already in the range of $g$.
+
+\paragraph{Merge consistency.} Panel~(C) contrasts the two admissible routes through a realized merge: the tree path that summarizes children before concatenation and the dashed joint path that summarizes the raw span directly. Once individual spans are trustworthy, we need to ensure that merging them does not introduce drift. Summarizing before concatenating must therefore be information-equivalent to concatenating before summarizing. That is, for any two spans $u$ and $v$:
+\[
+u \concat v \;\sim\; g(u \concat v) \;\sim\; g(g(u) \concat g(v)).
+\]
+The first equivalence says that jointly summarizing a span preserves its oracle value. The second says that pre-summarizing the parts before merging yields the same result as processing them together. When both hold, the order of summarization and concatenation becomes irrelevant to the oracle.
+
+\subsection{Verification Strategy and Guarantees}
+
+Once the failure modes are clear, the natural question is whether checking local behavior is enough to trust the whole tree. The answer is affirmative: because we prove that local consistency implies global preservation (Theorem~\ref{thm:one-pass} below), we can verify a hierarchy by inspecting a small number of realized nodes rather than re-running the oracle on the full document. We refer to this sampling-based verification routine as the \emph{probabilistic audit}. Each probe fits inside the context window, yet the resulting failure-rate estimates expose how often the pipeline corrupts task values, decoupling the cost of quality control from document length.
+
+\begin{definition}[Probabilistic audit]\label{def:prob-audit}
+Given a realized hierarchy, a probabilistic audit samples leaves, internal merges, and stored summaries; evaluates Conditions~\eqref{eq:leaf_sufficiency}--\eqref{eq:leaf_idempotence} on those spans using the oracle $f$ that approximates $\fstar$; and reports the empirical violation rates $\hat{p}_{\text{suff}}, \hat{p}_{\text{assoc}}, \hat{p}_{\text{idem}}$.
+\end{definition}
+
+\paragraph{Auditing via sampling.}
+Figure~\ref{fig:probabilistic_audit} overlays the realized tree with the three spotlights we sample. Panel~(A) draws realized leaves to estimate the sufficiency violation rate $\hat{p}_{\text{suff}}$. Panel~(B) re-summarizes an on-range span such as $s_{34}$ to estimate the idempotence failure rate $\hat{p}_{\text{idem}}$. Panel~(C) samples internal edges and checks whether the two admissible merge routes agree, producing $\hat{p}_{\text{assoc}}$. Because every probe fits inside a standard context window, the audit scales by drawing more samples rather than by re-running the entire hierarchy. Section~\ref{sec:audit} formalizes the estimators and ties them directly to the guarantees below.
+
+\subsection{Applications: Optimization and Learning}
+
+These conditions do more than certify existing pipelines. Because the invariants are local, they can serve as objective functions for prompt engineering or fine-tuning. Rather than optimizing a model to ``summarize well''---a vague objective---practitioners can optimize the model to satisfy merge consistency: ensure that $g(\text{summary}_A \concat \text{summary}_B)$ yields the same extracted events as $g(\text{text}_A \concat \text{text}_B)$. Frameworks like DSPy \citep{khattab2024dspy} let us treat the summarization policy as a programmable system whose prompt parameters are updated until violations disappear. Because each constraint operates on a single edge of the tree, gradients or prompt-adjustment heuristics can be estimated via the same sampling procedure used for audits. The measurements that certify a pipeline also describe how to tune it.
+
+Finally, this local view yields a clean connection to downstream learning. When supervision depends on documents only through their oracle values (a common factorization that covers proper scoring rules, coding tasks, and preference models), training on oracle-preserving summaries is information-equivalent to training on full documents. We develop this connection in Section~\ref{sec:exist-learn-transport}, showing that if the hierarchy passes our audit, training a policy on the summaries achieves the same population optimum as training on the originals.
+
+
+\section{The Mechanism: From Algebra to Conditions}\label{sec:mechanism}
+
+To make the guarantees of the previous section precise, we must define what it means for a summary to be ``correct'' in a formal sense. We begin with the mathematical setup, describe the algebraic ideal we strive for, and then state the consistency conditions and their consequences as theorems.
+
+\subsection{Setup: Strings, Oracles, and Metrics}
+
+We treat every document as a finite sequence of tokens. Let $\Strings$ denote the set of such strings, write $u \concat v$ for concatenation, and let $\emptystr$ denote the empty string. The task of interest is represented by a fixed oracle $\fstar: \Strings \to \Y$ that maps strings to task values (labels, structured tuples, embeddings, etc.). In many applications $\Y$ is best viewed as a \emph{state of accumulated evidence}: a running list of actors, claims, or scores that grows as we read more text. We therefore assume (and later audit) that $\fstar$ is well defined on substrings and that $\Y$ carries a neutral element $\emptyset$ representing ``no evidence yet,'' so that leaves with no signal map to $\emptyset$ while informative leaves update the evidence state.
+
+The quality of a summary is measured in the oracle space via a (pseudo)metric $\metric: \Y \times \Y \to [0, \infty)$.
+
+\paragraph{A strong locality assumption.}
+Treating $\Y$ as an accumulated-evidence state is powerful but brittle: it requires every leaf summary to carry the sufficient statistics needed to evaluate any continuation. For narrative tasks the oracle on a substring can be undefined without extra latent variables (e.g., ``Did the bill become law?'' before the court decision is read). We therefore flag this ``oracle on substrings'' premise as an empirical hypothesis rather than an axiom. Section~\ref{sec:audit} spells out the concrete audit we run to stress-test it: we repeatedly probe the merge-consistency condition along realized boundaries and treat persistent violations as evidence that the task cannot be decomposed at the chosen block size. In practice we expect to pair these audits with domain-specific diagnostics and, when necessary, expand the summary format until it truly functions as a sufficient statistic for $\fstar$.
+
+\paragraph{Scope: decomposable tasks.}
+Throughout we restrict attention to \emph{decomposable} objectives where the oracle can be evaluated on bounded spans: coding tuples, structured extraction, counting, and guided abstractive summaries whose rubric specifies the state that must propagate. Open-ended ``summarize this document however you like'' goals fall outside our model because no finite $\Y$ suffices. Whenever practitioners apply the framework to guided summaries, they must pin down the rubric (actors, claims, stance, etc.) so that $\fstar$ is literally the function being preserved.
+
+A summarizer $g: \Strings \rightsquigarrow \Strings$ is a (possibly stochastic) map. When $g$ is stochastic, we evaluate its fidelity in expectation. To keep notation minimal, we write $\E[\cdot]$ to average over the internal randomness of $g$ (seeds, temperature). A summary $z$ is considered a valid substitute for document $x$ if they are indistinguishable under the oracle metric:
+\[
+\metric\big(\fstar(z), \fstar(x)\big) \approx 0.
+\]
+
+\subsection{Supervision and Factorization}
+
+Downstream learning signals depend only on the oracle. Let $\sstar: \Strings \times \A \to \mathbb{R}$ denote an arbitrary supervision signal (a score, reward, or loss) and let $\A$ be the action or label space. We assume this supervision factors through the task value.
+
+\begin{assumption}[Conditional factorization]\label{ass:CF}
+There exists a measurable $\bar{Q}: \Y \times \A \to \mathbb{R}$ such that for every action $a \in \A$,
+\[
+\E\!\left[\sstar(X, a) \mid \fstar(X)\right] = \bar{Q}(\fstar(X), a) \quad \text{almost surely.}
+\]
+\end{assumption}
+
+This assumption covers standard classification (the loss depends only on the latent label), preference learning (the reward depends on the task semantics), and noisy annotators (the conditioning is on $X$). Once $\fstar(X)$ is known, there is no additional supervision signal left in the raw phrasing.
+
+\subsection{Oracle Equivalence}
+
+The next concept lets us reason modulo oracle equivalence. It mirrors the standard ``almost sure equality'' in probability theory but is tailored to the task metric.
+
+\begin{definition}[Oracle equivalence]\label{def:oracle-equivalence}
+Two strings $u, v \in \Strings$ are \emph{equivalent at the oracle}, denoted $u \sim v$, if their oracle outputs are indistinguishable:
+\[
+u \sim v \;\Longleftrightarrow\; \metric\big(\fstar(u), \fstar(v)\big) = 0.
+\]
+All subsequent conditions are stated modulo this relation. Because $\metric$ is a (pseudo)metric, $\sim$ is reflexive, symmetric, and transitive.
+\end{definition}
+
+Propagating $\sim$ through concatenation requires a context-compatibility property of the oracle:
+
+\begin{assumption}[Context-compatible oracle]\label{ass:context}
+For every context $w \in \Strings$, $u \sim v$ implies both $w \concat u \sim w \concat v$ and $u \concat w \sim v \concat w$.
+\end{assumption}
+
+Appendix~\ref{sec:global} records structural conditions on $g$ and $\fstar$ that guarantee Assumption~\ref{ass:context}. We state it here to make the dependency explicit: without context compatibility the equivalence relation would not be a congruence and local checks would fail to propagate. In deployments we treat Assumption~\ref{ass:context} as falsifiable. The merge-consistency checks in Section~\ref{sec:audit} deliberately splice summaries into fresh contexts to detect when oracle values drift under concatenation; persistent failures trigger either larger leaf blocks or richer summary schemas.
+
+\subsection{Sufficiency and Stability}
+
+\begin{definition}[Oracle sufficiency in expectation]\label{def:expect-suff}
+The summarizer $g$ is \emph{$\fstar$-sufficient in expectation} if $\E[\metric(\fstar(g(x)), \fstar(x))] = 0$ for all $x \in \Strings$.
+\end{definition}
+
+\begin{definition}[Summary idempotence]\label{def:resum-stable}
+The summarizer $g$ is \emph{summary-idempotent} if every string already in the range of $g$ keeps its oracle under another call to $g$: for any random $Z$ supported on $\operatorname{range}(g)$,
+\[
+\E\big[\metric(\fstar(g(Z)), \fstar(Z)) \mid Z\big] = 0.
+\]
+\end{definition}
+
+\begin{definition}[Exact classes $\Gstar$ and $\Gstar_{\mathrm{stab}}$]\label{def:exact-suff-stable}
+Let $\Gstar := \{g : \metric(\fstar(g(X)), \fstar(X)) = 0\ \text{a.s.}\}$ and $\Gstar_{\mathrm{stab}} := \{g \in \Gstar : \text{$g$ also satisfies Definition~\ref{def:resum-stable}}\}$.
+\end{definition}
+
+Doob--Dynkin factorization implies $g \in \Gstar$ if and only if the oracle can be recovered as a measurable function of $g(X)$. In classical statistics this is exactly the definition of a sufficient statistic: the summary $g(X)$ captures all information about $\fstar(X)$, so conditioning on $g(X)$ leaves no task signal behind. Stability simply says re-applying $g$ cannot change that oracle. Together they give a two-step ``oracle-preserving normal form'' for any single span: the oracle cannot tell whether it saw the raw text, its first summary, or a cleaned-up version. Figure~\ref{fig:gstar} visualizes the equalities enforced by these requirements.
+
+\begin{figure}[t]
+    \centering
+    \begin{tikzpicture}[node distance=2cm]
+    \node[doc] (X) {$X$};
+    \node[sum, right=of X] (gX) {$g(X)$};
+    \node[sum, right=of gX] (ggX) {$g(g(X))$};
+    \node[op, below=of X] (fX) {$\fstar(X)$};
+    \node[op, below=of gX] (fgX) {$\fstar(g(X))$};
+    \node[op, below=of ggX] (fggX) {$\fstar(g(g(X)))$};
+    \draw[->, dotted] (X) -- (gX);
+    \draw[->, dotted] (gX) -- (ggX);
+    \draw[->] (X) -- (fX);
+    \draw[->] (gX) -- (fgX);
+    \draw[->] (ggX) -- (fggX);
+    \draw[<->, dashed] (fX) -- node[below] {\tiny $\metric$-equal if $g \in \Gstar$} (fgX);
+    \draw[<->, dashed] (fgX) -- node[below] {\tiny $\metric$-equal by idempotence} (fggX);
+    \end{tikzpicture}
+    \caption{Oracle-preserving normal form for a single span. Condition~(C1) forces $\fstar(g(X))$ to equal $\fstar(X)$; Condition~(C2) keeps additional summaries inert so $\fstar(g(g(X)))$ matches as well.}
+    \label{fig:gstar}
+\end{figure}
+
+This normal form already delivers two of our three laws: leaf sufficiency (replace $X$ by $g(X)$ without changing $\fstar$) and idempotence (replace $g(X)$ by $g(g(X))$ without changing $\fstar$). What it does \emph{not} guarantee is that these substitutions commute with the \emph{merge} operations that build a hierarchy. Even if every individual span satisfies Figure~\ref{fig:gstar}, the oracle can still drift when two spans interact unless concatenation respects the same equivalences. The next subsection therefore expands from this single-span picture to the local merge checks that keep the entire tree in an oracle-preserving normal form.
+
+\subsection{Document Decomposition}
+
+Long documents routinely exceed the model's context window, so we cut $x$ into contiguous blocks $(b_1, \ldots, b_k)$ and summarize them along a realized full binary tree $T$. Every leaf stores the raw substring $b_i$ plus its first-pass summary $s_i = g(b_i)$. For any node $u$ we write $S(u)$ for the latent span of raw text underneath it; we only need this symbol when comparing back to the original document in global arguments. Operationally the model never touches $S(u)$ once we leave the leaves.
+
+The only thing that moves up the tree is the stored summary $s_u$. Leaves set $s_u = g(b_i)$, and each internal node $u$ reads the strings from its two children, concatenates them, and runs the summarizer again: $s_u := g(s_{u_L} \concat s_{u_R})$. Traversing $T$ bottom-up produces the one-pass output $Z^{(1)}(x) := g(\text{root}(T))$, and optional clean-up passes apply the same rule recursively via $Z^{(R+1)}(x) := g(Z^{(R)}(x))$.
+
+\begin{figure}[t]
+    \centering
+    \input{figures/cld/01_base.tikz}
+    \caption{Hierarchical summarization as a binary tree. Each leaf block $b_i$ is summarized once to produce $s_i = g(b_i)$. Internal nodes recursively summarize the concatenation of their children's stored strings, e.g., $s_{12} = g(s_1 \concat s_2)$ and $s_{\mathrm{root}} = g(s_{1234} \concat s_{5678})$. The latent raw text under a node is denoted $S(u)$ for analysis, but the system only materializes the summaries $s_u$, making every merge auditable from bounded inputs.}
+    \label{fig:hierarchical_summarization}
+\end{figure}
+
+Figure~\ref{fig:hierarchical_summarization} locks in the notation. Lowercase $b_i$ denotes the raw substrings carved out of the base document $x_0$; their summaries are $s_i = g(b_i)$. Every internal node carries two labels: $S(u)$ for the latent span and $s_u$ for the actual string we store and propagate. The recursion $s_u = g(s_{u_L} \concat s_{u_R})$ means parents only see $(s_{u_L}, s_{u_R})$, so every merge fits inside the context window.
+
+\paragraph{Remark (well-formed blocks).}
+Throughout we assume the partition $(b_1, \ldots, b_k)$ is fixed in advance, consists of contiguous substrings of the underlying document, and respects whatever discourse boundaries the downstream task requires. In practice this means that each block is small enough to fit in context but large enough to carry coherent snippets of evidence (e.g., full sentences or paragraph segments).
+
+\subsection{The Algebraic Ideal}
+
+If we were summarizing simple data structures, the requirements for $g$ would be straightforward. Consider the case where $\fstar$ counts keywords. Concatenating spans simply adds their counts: $\fstar(u \concat v) = \fstar(u) + \fstar(v)$. To preserve this information, a summarizer $g$ (acting as a ``sketch'') would need to support a merge operation that mimics addition. This is the essence of mergeable summaries in database theory \citep{Agarwal2013MergeableTODS}:
+\[
+\fstar(A \cup B) \approx \text{Query}\big(\text{Merge}(S_A, S_B)\big),
+\]
+where $S_A$ denotes the stored sketch of set $A$ and $\text{Merge}(S_A, S_B)$ produces a sketch of $A \cup B$.
+
+For complex semantic tasks---event extraction, narrative summarization, or legal analysis---the merge operation is concatenation, which is non-commutative ($u \concat v \neq v \concat u$). Nevertheless, the algebraic intuition survives. Ideally, we would have
+\[
+\metric\Big(\fstar(u \concat v), \;\fstar\big(g(u) \concat g(v)\big)\Big) = 0 \quad \text{for all } u, v \in \Strings,
+\]
+so that every hierarchy, schedule, or reduction behaves as a homomorphism with respect to $\fstar$. If this global property held, hierarchical summarization would be trivially safe. However, large language models are not naturally associative algebraic operators. They are stochastic, sensitive to phrasing, and prone to drifting when context is segmented. We cannot assume this global structure exists; we must enforce it via local checks that approximate the desired algebra.
+
+\subsection{The Three Conditions: Formal Statement}
+
+Since we cannot verify the global property on massive corpora (which would require running $\fstar$ on the full text, defeating the purpose of summarization), we focus on properties that are local and auditable.
+
+\begin{convention}[Standing expectation convention]
+Expectations $\E[\cdot]$ at a node $u$ are conditional on the realized subtrees below it. They average over the coin flips used to generate the summaries at $u$ and its children.
+\end{convention}
+
+\paragraph{Condition 1: Sufficiency.}
+The summary of every realized leaf must be a valid proxy for the raw block:
+\begin{equation}\tag{C1}\label{eq:leaf_sufficiency}
+\forall \text{ realized leaf } b:\quad g(b) \sim b.
+\end{equation}
+Once this holds, a leaf summary may replace its source block anywhere because the two strings are equivalent at the oracle. If an LLM cannot satisfy this condition even on a single paragraph (e.g., by dropping a name), the hierarchy fails immediately. Panel~(A) of Figure~\ref{fig:local_compatibility} isolates exactly this check: compare a realized block $b_i$ with its summary $s_i$ inside the oracle. Section~\ref{sec:audit} estimates the empirical violation rate of this condition by sampling leaves and checking how often the oracle disagrees.
+
+\paragraph{Condition 2: Idempotence.}
+Hierarchical pipelines often include optional clean-up passes that re-summarize a stored output to smooth the style or reduce length. For this to be safe, the summarizer must be a fixed point on its own range:
+\begin{equation}\tag{C2}\label{eq:leaf_idempotence}
+\forall \text{ summary } s \in \operatorname{range}(g):\quad g(s) \sim s.
+\end{equation}
+Without this condition, repeatedly normalizing a string could cause task information to drift. When it holds, any extra style edit, deduplication sweep, or DSPy controller pass is provably inert at the oracle. Panel~(B) of Figure~\ref{fig:local_compatibility} shows this ``re-summarize and compare'' test as a tangible audit. Appendix~\ref{app:stability} constructs an explicit hierarchy where Conditions~(C1) and (C3) hold but $g$ drifts the label under repeated summarization; Condition~\eqref{eq:leaf_idempotence} rules out exactly this failure mode.
+
+\paragraph{Condition 3: Merge Consistency.}
+The summarization pipeline must commute with concatenation modulo the oracle:
+\begin{equation}\tag{C3}\label{eq:leaf_compatibility}
+\forall u, v \in \Strings:\quad
+\underbrace{u \concat v}_{\text{Raw}} \;\sim\;
+\underbrace{g(u \concat v)}_{\text{Joint}} \;\sim\;
+\underbrace{g\big(g(u) \concat g(v)\big)}_{\text{Disjoint}}.
+\end{equation}
+The first link asserts that jointly summarizing a span preserves its task value. The second link asserts that splitting the inputs before summarization is information-equivalent to processing them together. Panel~(C) of Figure~\ref{fig:local_compatibility} shows how the two admissible routes align at a realized merge: the colored ``tree path'' summarizes children before concatenation while the dashed joint path summarizes the raw concatenation of $b_{56}$.
+
+\begin{figure}[t]
+    \centering
+    \input{figures/cld/05_full.tikz}
+    \caption{Spotlight view of the three local conditions. (A) Leaf sufficiency compares a raw block $b_i$ to its summary $s_i$. (B) Idempotence re-summarizes an internal span $s_{34}$ and checks whether $\fstar(s)$ drifts after calling $g$ again. (C) Merge consistency contrasts the ``tree path'' summaries $s_{56}$ with a direct summary of the joint raw span $b_{56}$. The gray tree anchors the realized hierarchy while the colored panels highlight the local prompts we can audit or optimize.}
+    \label{fig:local_compatibility}
+    \label{fig:probabilistic_audit}
+\end{figure}
+
+\begin{remark}[Edge-wise compatibility]\label{rem:edgewise_compatibility}
+Audits often instantiate Condition~\eqref{eq:leaf_compatibility} at a single realized edge $(v, w)$ by comparing the reference and pipeline routes:
+\begin{equation}\tag{E1}\label{eq:edgewise_equivalence}
+\metric\!\big(\fstar(v \concat w), \fstar(g(g(v) \concat g(w)))\big) = 0.
+\end{equation}
+Equation~\eqref{eq:edgewise_equivalence} probes the right link of the merge-consistency chain using quantities that fit inside the context window.
+\end{remark}
+
+
+\subsection{Failure Modes}
+
+Once the pipeline is laid out, we can describe the most common ways it breaks. Each failure corresponds to a violation of one of the local conditions above and provides intuition for the audits we run later:
+\begin{itemize}
+    \item \textbf{Leaf sufficiency failures.} A leaf summary omits or corrupts information the oracle needs. For example, a paragraph may mention three protest events but the summary records only two, so $g(b)$ no longer preserves $\fstar(b)$.
+    \item \textbf{Idempotence failures.} Optional clean-up passes that re-summarize stored outputs can drift the oracle value, turning precise tuples into vague prose if $g$ does not treat its own outputs as fixed points.
+    \item \textbf{Merge-consistency failures.} Even when leaves are accurate, the pipeline can hallucinate or drop details when it merges them. One route---summarize first, then concatenate---may deduplicate or reorder differently than the ``summarize once at the merged span'' route.
+\end{itemize}
+These modes appear whenever prompts are brittle or the summary schema is too terse. The rest of the section formalizes the checks needed to detect them and build pipelines that avoid them.
+
+\subsection{Consequences: Processing Invariance}
+
+The utility of these conditions is that they allow us to transport trust from the leaves to the root. We do not need to verify the final summary against the whole book; we only need to verify that each station of the assembly line is functioning correctly.
+
+\begin{theorem}[Inductive Preservation]\label{thm:one-pass}
+Fix a document partition $x = b_1 \concat \dots \concat b_k$ and any full binary merge tree $T$. If \ref{eq:leaf_sufficiency} holds on every realized leaf and \ref{eq:leaf_compatibility} holds at every realized internal node, then the final summary preserves the oracle in expectation:
+\[
+\E\left[\metric\big(\fstar(Z^{(1)}), \fstar(x)\big)\right] = 0.
+\]
+Furthermore, if \ref{eq:leaf_idempotence} holds, this preservation is maintained through any number of additional re-summarization rounds $Z^{(R)}$.
+\end{theorem}
+
+\noindent\textit{Proof:} See Appendix~\ref{app:proofs-core}, Proof~\ref{proof:thm-one-pass}.
+
+\begin{corollary}[Schedule invariance]\label{cor:schedule}
+For any fixed partition $(b_1, \ldots, b_k)$, every full binary tree on these leaves yields the same expected oracle whenever Conditions~\eqref{eq:leaf_sufficiency} and \eqref{eq:leaf_compatibility} hold on its realized edges. Balanced reductions and daisy chains are therefore interchangeable.
+\end{corollary}
+
+\noindent\textit{Proof:} See Appendix~\ref{app:proofs-core}, Proof~\ref{proof:cor-schedule}.
+
+\begin{corollary}[Fold-of-folds invariance]\label{cor:folds}
+Consider any two-level plan that first reduces contiguous ``folds'' and then reduces the fold summaries. If Conditions~\eqref{eq:leaf_sufficiency} and \eqref{eq:leaf_compatibility} hold on every realized edge and Condition~\eqref{eq:leaf_idempotence} holds on the intermediate summaries, the composite schedule preserves $\fstar$ in expectation regardless of the within-fold or over-fold parenthesizations.
+\end{corollary}
+
+\noindent\textit{Proof:} See Appendix~\ref{app:proofs-core}, Proof~\ref{proof:cor-folds}.
+
+Together these results ensure that practitioners can pick whatever reduction schedule matches their infrastructure (balanced trees, daisy chains, fold-of-folds pipelines) without changing the expected oracle, provided the three conditions hold in the realized hierarchy.
+
+\begin{theorem}[Multi-round preservation]\label{thm:multi-round}
+Assume Conditions~\eqref{eq:leaf_sufficiency} and \eqref{eq:leaf_compatibility} hold along the realized tree so that Theorem~\ref{thm:one-pass} yields $\E[\metric(\fstar(Z^{(1)}(x)), \fstar(x))] = 0$. If, in addition, on-range stability \eqref{eq:leaf_idempotence} holds, then $\E[\metric(\fstar(Z^{(R)}(x)), \fstar(x))] = 0$ for every $R \geq 1$ with $Z^{(R+1)}(x) := g(Z^{(R)}(x))$.
+\end{theorem}
+
+\noindent\textit{Proof:} See Appendix~\ref{app:proofs-core}, Proof~\ref{proof:thm-multi-round}.
+
+\subsection{Safe Learning on Summaries}\label{sec:exist-learn-transport}
+
+Assumption~\ref{ass:CF} ensures that downstream training signals depend on documents only through $\fstar(X)$. When a hierarchy satisfies the three conditions, the oracle of each realized node matches the oracle of its source text, so any supervision computed on top of the hierarchy is statistically indistinguishable from supervision computed on full documents.
+
+This information-equivalence only holds under Assumption~\ref{ass:CF}; if rewards depend on surface style, summarization can distort the target regardless of the audit. Appendix~\ref{app:blackwell} formalizes the reduction via Blackwell sufficiency, and Appendix~\ref{sec:dpo} explains why we focus on Direct Preference Optimization (DPO) \citep{RafailovEtAl2023DPO}: DPO is a practical way to align models with researcher preferences, its Bradley--Terry backbone matches our oracle-based factorization, and its loss is smooth enough to incorporate the condition checks as optimization objectives.
+
+Once the audit certifies the tree (small $\hat{p}_{\text{suff}}$, $\hat{p}_{\text{assoc}}$, $\hat{p}_{\text{idem}}$), training on summaries achieves the same optimum as training on full text up to a gap controlled by the measured distortion. Because $\fstar$ may encode arbitrary (but expensive) researcher judgments, this route lets us align to those judgments directly; aesthetic or stylistic goals outside $\fstar$ remain out of scope.
+
+\subsection{Constructive Alignment via Local Bootstrapping}\label{sec:bootstrap-main}
+
+The consistency conditions are more than diagnostic tools; they describe an optimization problem. We view the summarization system as a programmable policy $\mathcal{P}_\theta$ whose parameters $\theta$ collect prompt instructions, few-shot exemplars, or DSPy controller settings. Because Conditions~\eqref{eq:leaf_sufficiency} and \eqref{eq:leaf_compatibility} evaluate only the strings already stored at child nodes, each audited edge yields an inexpensive supervision signal: a success certifies $(\text{input}, \text{summary})$ as a valid training pair, and a failure tells us exactly which constraint was violated.
+
+In practice we maintain two lightweight modules. A \texttt{LeafSummarizer} maps raw blocks $b$ to $s_b = g(b)$ and is tuned to satisfy Condition~\eqref{eq:leaf_sufficiency}. A \texttt{MergeSummarizer} maps stored child summaries $(s_{u_L}, s_{u_R})$ to $s_u$ and is tuned to satisfy Condition~\eqref{eq:leaf_compatibility}. A simple ``consistency bootstrap'' alternates between them:
+\begin{enumerate}[label=\roman*.]
+    \item Sample leaves and runs of the merge tree. For each leaf, run \texttt{LeafSummarizer}, evaluate $\metric(\fstar(g(b)), \fstar(b))$, and, when necessary, re-generate or request a human rewrite until the oracle agrees. Certified pairs $(b, s_b)$ become part of the prompt context or fine-tuning buffer for the leaf module.
+    \item Using the improved leaf module, generate child summaries $(s_{u_L}, s_{u_R})$, apply \texttt{MergeSummarizer}, check $\metric(\fstar(g(s_{u_L} \concat s_{u_R})), \fstar(s_{u_L} \concat s_{u_R}))$, and add successful triples to the merge module's training set. Because the check fits in context, we can perform this loop offline or online without touching the raw subtree.
+    \item Continue sampling until the empirical failure rates estimated by the audit fall below the tolerance required for deployment. Additional human examples can be injected at any time; they are especially useful on structures where repeated regeneration never satisfies the oracle.
+\end{enumerate}
+Appendix~\ref{app:bootstrap} provides a DSPy-oriented template for this loop. The main text only needs the structural fact: the same local comparisons that certify past runs also act as objective functions for the optimizer, allowing practitioners to tune $\theta$ with no extra labels beyond the oracle already assumed in our framework. Section~\ref{sec:audit} now turns these ingredients into the probabilistic audit that powers both certification and optimization in practice.

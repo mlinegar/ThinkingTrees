@@ -1,0 +1,205 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{BenoitEtAl2025}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Motivation}{1}{section.1}\protected@file@percent }
+\newlabel{sec:motivation}{{1}{1}{Motivation}{section.1}{}}
+\citation{EgamiEtAl2024}
+\citation{BenoitEtAl2025}
+\citation{EgamiEtAl2024}
+\citation{Blackwell1953}
+\citation{agarwal2013mergeable}
+\citation{khattab2024dspy}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Framework Overview}{3}{section.2}\protected@file@percent }
+\newlabel{sec:overview}{{2}{3}{Framework Overview}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Preservation Objective}{3}{subsection.2.1}\protected@file@percent }
+\citation{agarwal2013mergeable}
+\newlabel{def:oracle}{{1}{4}{Oracle}{definition.1}{}}
+\newlabel{def:summarizer}{{2}{4}{Summarizer}{definition.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Hierarchical Pipeline Construction}{4}{subsection.2.2}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Notation recap for hierarchical summarization. The table extends Appendix~\ref {app:notation} so the main text can stand alone.}}{5}{table.1}\protected@file@percent }
+\newlabel{tab:notation-main}{{1}{5}{Notation recap for hierarchical summarization. The table extends Appendix~\ref {app:notation} so the main text can stand alone}{table.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}From Pipeline to Local Laws}{5}{subsection.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Local Consistency Requirements}{5}{subsection.2.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Sufficiency.}{5}{section*.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Idempotence.}{5}{section*.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Merge consistency.}{5}{section*.3}\protected@file@percent }
+\citation{khattab2024dspy}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5}Verification Strategy and Guarantees}{6}{subsection.2.5}\protected@file@percent }
+\newlabel{def:prob-audit}{{3}{6}{Probabilistic audit}{definition.3}{}}
+\@writefile{toc}{\contentsline {paragraph}{Auditing via sampling.}{6}{section*.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.6}Applications: Optimization and Learning}{6}{subsection.2.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}The Mechanism: From Algebra to Conditions}{7}{section.3}\protected@file@percent }
+\newlabel{sec:mechanism}{{3}{7}{The Mechanism: From Algebra to Conditions}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Setup: Strings, Oracles, and Metrics}{7}{subsection.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{A strong locality assumption.}{7}{section*.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Scope: decomposable tasks.}{7}{section*.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Supervision and Factorization}{7}{subsection.3.2}\protected@file@percent }
+\newlabel{ass:CF}{{1}{7}{Conditional factorization}{assumption.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Oracle Equivalence}{8}{subsection.3.3}\protected@file@percent }
+\newlabel{def:oracle-equivalence}{{4}{8}{Oracle equivalence}{definition.4}{}}
+\newlabel{ass:context}{{2}{8}{Context-compatible oracle}{assumption.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Sufficiency and Stability}{8}{subsection.3.4}\protected@file@percent }
+\newlabel{def:expect-suff}{{5}{8}{Oracle sufficiency in expectation}{definition.5}{}}
+\newlabel{def:resum-stable}{{6}{8}{Summary idempotence}{definition.6}{}}
+\newlabel{def:exact-suff-stable}{{7}{8}{Exact classes $\Gstar $ and $\Gstar _{\mathrm {stab}}$}{definition.7}{}}
+\citation{Agarwal2013MergeableTODS}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Oracle-preserving normal form for a single span. Condition~(C1) forces $f^{\ast }(g(X))$ to equal $f^{\ast }(X)$; Condition~(C2) keeps additional summaries inert so $f^{\ast }(g(g(X)))$ matches as well.}}{9}{figure.1}\protected@file@percent }
+\newlabel{fig:gstar}{{1}{9}{Oracle-preserving normal form for a single span. Condition~(C1) forces $\fstar (g(X))$ to equal $\fstar (X)$; Condition~(C2) keeps additional summaries inert so $\fstar (g(g(X)))$ matches as well}{figure.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}Document Decomposition}{9}{subsection.3.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Remark (well-formed blocks).}{9}{section*.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.6}The Algebraic Ideal}{9}{subsection.3.6}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Hierarchical summarization as a binary tree. Each leaf block $b_i$ is summarized once to produce $s_i = g(b_i)$. Internal nodes recursively summarize the concatenation of their children's stored strings, e.g., $s_{12} = g(s_1 \oplus s_2)$ and $s_{\mathrm  {root}} = g(s_{1234} \oplus s_{5678})$. The latent raw text under a node is denoted $S(u)$ for analysis, but the system only materializes the summaries $s_u$, making every merge auditable from bounded inputs.}}{10}{figure.2}\protected@file@percent }
+\newlabel{fig:hierarchical_summarization}{{2}{10}{Hierarchical summarization as a binary tree. Each leaf block $b_i$ is summarized once to produce $s_i = g(b_i)$. Internal nodes recursively summarize the concatenation of their children's stored strings, e.g., $s_{12} = g(s_1 \concat s_2)$ and $s_{\mathrm {root}} = g(s_{1234} \concat s_{5678})$. The latent raw text under a node is denoted $S(u)$ for analysis, but the system only materializes the summaries $s_u$, making every merge auditable from bounded inputs}{figure.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.7}The Three Conditions: Formal Statement}{10}{subsection.3.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Condition 1: Sufficiency.}{11}{section*.8}\protected@file@percent }
+\newlabel{eq:leaf_sufficiency}{{{C1}}{11}{Condition 1: Sufficiency}{AMS.9}{}}
+\@writefile{toc}{\contentsline {paragraph}{Condition 2: Idempotence.}{11}{section*.10}\protected@file@percent }
+\newlabel{eq:leaf_idempotence}{{{C2}}{11}{Condition 2: Idempotence}{AMS.11}{}}
+\@writefile{toc}{\contentsline {paragraph}{Condition 3: Merge Consistency.}{11}{section*.12}\protected@file@percent }
+\newlabel{eq:leaf_compatibility}{{{C3}}{11}{Condition 3: Merge Consistency}{AMS.13}{}}
+\newlabel{rem:edgewise_compatibility}{{1}{11}{Edge-wise compatibility}{remark.1}{}}
+\newlabel{eq:edgewise_equivalence}{{{E1}}{11}{Edge-wise compatibility}{AMS.14}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.8}Failure Modes}{11}{subsection.3.8}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Spotlight view of the three local conditions. (A) Leaf sufficiency compares a raw block $b_i$ to its summary $s_i$. (B) Idempotence re-summarizes an internal span $s_{34}$ and checks whether $f^{\ast }(s)$ drifts after calling $g$ again. (C) Merge consistency contrasts the ``tree path'' summaries $s_{56}$ with a direct summary of the joint raw span $b_{56}$. The gray tree anchors the realized hierarchy while the colored panels highlight the local prompts we can audit or optimize.}}{12}{figure.3}\protected@file@percent }
+\newlabel{fig:local_compatibility}{{3}{12}{Spotlight view of the three local conditions. (A) Leaf sufficiency compares a raw block $b_i$ to its summary $s_i$. (B) Idempotence re-summarizes an internal span $s_{34}$ and checks whether $\fstar (s)$ drifts after calling $g$ again. (C) Merge consistency contrasts the ``tree path'' summaries $s_{56}$ with a direct summary of the joint raw span $b_{56}$. The gray tree anchors the realized hierarchy while the colored panels highlight the local prompts we can audit or optimize}{figure.3}{}}
+\newlabel{fig:probabilistic_audit}{{3}{12}{Spotlight view of the three local conditions. (A) Leaf sufficiency compares a raw block $b_i$ to its summary $s_i$. (B) Idempotence re-summarizes an internal span $s_{34}$ and checks whether $\fstar (s)$ drifts after calling $g$ again. (C) Merge consistency contrasts the ``tree path'' summaries $s_{56}$ with a direct summary of the joint raw span $b_{56}$. The gray tree anchors the realized hierarchy while the colored panels highlight the local prompts we can audit or optimize}{figure.3}{}}
+\citation{RafailovEtAl2023DPO}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.9}Consequences: Processing Invariance}{13}{subsection.3.9}\protected@file@percent }
+\newlabel{thm:one-pass}{{1}{13}{Inductive Preservation}{theorem.1}{}}
+\newlabel{cor:schedule}{{1}{13}{Schedule invariance}{corollary.1}{}}
+\newlabel{cor:folds}{{2}{13}{Fold-of-folds invariance}{corollary.2}{}}
+\newlabel{thm:multi-round}{{2}{13}{Multi-round preservation}{theorem.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.10}Safe Learning on Summaries}{13}{subsection.3.10}\protected@file@percent }
+\newlabel{sec:exist-learn-transport}{{3.10}{13}{Safe Learning on Summaries}{subsection.3.10}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.11}Constructive Alignment via Local Bootstrapping}{14}{subsection.3.11}\protected@file@percent }
+\newlabel{sec:bootstrap-main}{{3.11}{14}{Constructive Alignment via Local Bootstrapping}{subsection.3.11}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}The Probabilistic Audit: Certifying Pipelines at Scale}{14}{section.4}\protected@file@percent }
+\newlabel{sec:audit}{{4}{14}{The Probabilistic Audit: Certifying Pipelines at Scale}{section.4}{}}
+\@writefile{toc}{\contentsline {paragraph}{Interpreting the spotlights.}{15}{section*.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}The Audit Protocol}{15}{subsection.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Sampling Leaves (Sufficiency Condition).}{15}{section*.16}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Sampling Merge Consistency (The Structural Check).}{15}{section*.17}\protected@file@percent }
+\citation{khattab2024dspy}
+\@writefile{toc}{\contentsline {paragraph}{Sampling Stability (Idempotence Condition).}{16}{section*.18}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Scaling with tree size.}{16}{section*.19}\protected@file@percent }
+\newlabel{eq:error_budget}{{1}{16}{Scaling with tree size}{equation.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Connecting the Audit to Downstream Learning}{16}{subsection.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Optimizing the Pipeline}{17}{subsection.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Calibration vs.\ deployment.}{17}{section*.20}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Conclusion and Outlook}{17}{section.5}\protected@file@percent }
+\newlabel{sec:conclusion}{{5}{17}{Conclusion and Outlook}{section.5}{}}
+\bibstyle{plainnat}
+\bibdata{refs}
+\bibcite{Agarwal2013MergeableTODS}{{1}{2013{a}}{{Agarwal et~al.}}{{Agarwal, Cormode, Huang, Phillips, Wei, and Yi}}}
+\bibcite{agarwal2013mergeable}{{2}{2013{b}}{{Agarwal et~al.}}{{Agarwal, Cormode, Huang, Phillips, Wei, and Yi}}}
+\bibcite{BenoitEtAl2025}{{3}{2025}{{Benoit et~al.}}{{Benoit, Munger, Spirling, et~al.}}}
+\bibcite{Blackwell1953}{{4}{1953}{{Blackwell}}{{}}}
+\bibcite{BleiNgJordan2003}{{5}{2003}{{Blei et~al.}}{{Blei, Ng, and Jordan}}}
+\bibcite{BradleyTerry1952}{{6}{1952}{{Bradley and Terry}}{{}}}
+\bibcite{CormodeMuthukrishnan2005}{{7}{2005}{{Cormode and Muthukrishnan}}{{}}}
+\bibcite{Dawid2007}{{8}{2007}{{Dawid}}{{}}}
+\bibcite{EgamiEtAl2024}{{9}{2024}{{Egami et~al.}}{{Egami, Hinck, Stewart, and Wei}}}
+\bibcite{GneitingRaftery2007}{{10}{2007}{{Gneiting and Raftery}}{{}}}
+\bibcite{khattab2024dspy}{{11}{2024}{{Khattab et~al.}}{{Khattab, Gupta, Burns, Razi, Abbeel, and Re}}}
+\bibcite{RafailovEtAl2023DPO}{{12}{2023}{{Rafailov et~al.}}{{Rafailov, Sharma, Mitchell, Ermon, Manning, and Finn}}}
+\bibcite{RobertsStewartTingley2014}{{13}{2014}{{Roberts et~al.}}{{Roberts, Stewart, and Tingley}}}
+\bibcite{steeg2016informationsieve}{{14}{2016}{{Steeg and Galstyan}}{{}}}
+\bibcite{Torgersen1991}{{15}{1991}{{Torgersen}}{{}}}
+\citation{Agarwal2013MergeableTODS}
+\citation{CormodeMuthukrishnan2005}
+\citation{GneitingRaftery2007,Dawid2007}
+\citation{Blackwell1953,Torgersen1991}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Connections to Related Work}{19}{section.6}\protected@file@percent }
+\newlabel{sec:related}{{6}{19}{Connections to Related Work}{section.6}{}}
+\@writefile{toc}{\contentsline {paragraph}{Mergeable Summaries and Sketches.}{19}{section*.22}\protected@file@percent }
+\citation{steeg2016informationsieve}
+\citation{BradleyTerry1952,RafailovEtAl2023DPO}
+\citation{BleiNgJordan2003,RobertsStewartTingley2014}
+\@writefile{toc}{\contentsline {paragraph}{Decision Theory and Blackwell Sufficiency.}{20}{section*.23}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Information-theoretic parallels.}{20}{section*.24}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Preference Learning and RLHF.}{20}{section*.25}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Global Structure vs. Local Checks.}{20}{section*.26}\protected@file@percent }
+\citation{steeg2016informationsieve}
+\@writefile{toc}{\contentsline {section}{\numberline {A}Notation Recap and Local Foundations}{21}{appendix.A}\protected@file@percent }
+\newlabel{app:notation}{{A}{21}{Notation Recap and Local Foundations}{appendix.A}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.1}Strings, oracle, and metric}{21}{subsection.A.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.2}Summarizers and expectations}{21}{subsection.A.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.3}Partitions, trees, and hierarchical evaluation}{22}{subsection.A.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Summary of symbols and expectations.}{22}{section*.27}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Core notation for hierarchical summarization.}}{22}{table.2}\protected@file@percent }
+\newlabel{tab:notation}{{2}{22}{Core notation for hierarchical summarization}{table.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.4}Consistency conditions}{22}{subsection.A.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Notation snapshot.}{23}{section*.28}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.5}Nodewise preservation and the first theorem}{23}{subsection.A.5}\protected@file@percent }
+\newlabel{lem:nodewise}{{1}{23}{Nodewise preservation under the consistency conditions}{lemma.1}{}}
+\newlabel{proof:thm-one-pass}{{A.5}{23}{Nodewise preservation and the first theorem}{section*.29}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {B}Proofs of Propositions and Theorems in the Main Text}{23}{appendix.B}\protected@file@percent }
+\newlabel{app:proofs-core}{{B}{23}{Proofs of Propositions and Theorems in the Main Text}{appendix.B}{}}
+\newlabel{proof:cor-schedule}{{B}{24}{Proofs of Propositions and Theorems in the Main Text}{section*.30}{}}
+\newlabel{proof:cor-folds}{{B}{24}{Proofs of Propositions and Theorems in the Main Text}{section*.31}{}}
+\newlabel{proof:thm-multi-round}{{B}{24}{Proofs of Propositions and Theorems in the Main Text}{section*.32}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {C}Blackwell–Style Score Transport}{24}{appendix.C}\protected@file@percent }
+\newlabel{app:blackwell}{{C}{24}{Blackwell–Style Score Transport}{appendix.C}{}}
+\newlabel{lem:blackwell-transport-appendix}{{2}{25}{Blackwell/Doob–Dynkin score transport}{lemma.2}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {D}Practical audit guidance}{25}{appendix.D}\protected@file@percent }
+\newlabel{app:practical_audit}{{D}{25}{Practical audit guidance}{appendix.D}{}}
+\@writefile{toc}{\contentsline {paragraph}{Exact pass short‑circuit.}{25}{section*.34}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{What to estimate (local violation rates).}{26}{section*.35}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Crude but rigorous aggregation by union bound.}{26}{section*.36}\protected@file@percent }
+\newlabel{eq:unionbound}{{2}{26}{Crude but rigorous aggregation by union bound}{equation.2}{}}
+\citation{khattab2024dspy}
+\@writefile{toc}{\contentsline {paragraph}{Plug‑in estimates.}{27}{section*.37}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Direct root estimation (often simplest).}{27}{section*.38}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {E}Local Consistency Bootstrap}{27}{appendix.E}\protected@file@percent }
+\newlabel{app:bootstrap}{{E}{27}{Local Consistency Bootstrap}{appendix.E}{}}
+\@writefile{toc}{\contentsline {paragraph}{1. Leaf pass.}{27}{section*.39}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{2. Merge pass.}{28}{section*.40}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{3. Parameter update.}{28}{section*.41}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{4. Stopping rule.}{28}{section*.42}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {F}Direct Preference Optimization (DPO): Equivalence and Gap Bounds}{28}{appendix.F}\protected@file@percent }
+\newlabel{sec:dpo}{{F}{28}{Direct Preference Optimization (DPO): Equivalence and Gap Bounds}{appendix.F}{}}
+\newlabel{thm:dpo-exact}{{3}{29}{Exact DPO equivalence under oracle preservation and oracle–indexed pairs}{theorem.3}{}}
+\newlabel{thm:dpo-gap}{{4}{29}{Quantitative DPO gap under metric distortion}{theorem.4}{}}
+\@writefile{toc}{\contentsline {paragraph}{Remarks.}{30}{section*.43}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {G}Global Compatibility Variant and Algebraic Structure}{30}{appendix.G}\protected@file@percent }
+\newlabel{sec:global}{{G}{30}{Global Compatibility Variant and Algebraic Structure}{appendix.G}{}}
+\@writefile{toc}{\contentsline {paragraph}{Global laws.}{30}{section*.44}\protected@file@percent }
+\newlabel{ass:app1}{{3}{30}{Global $\fstar $–sufficiency}{assumption.3}{}}
+\newlabel{ass:app2}{{4}{30}{Global two-route compatibility}{assumption.4}{}}
+\newlabel{ass:app3}{{5}{30}{On-range merge depends only on child oracles}{assumption.5}{}}
+\newlabel{prop:congruence-strings}{{1}{30}{Concatenation is a congruence for oracle equality on strings}{proposition.1}{}}
+\newlabel{prop:odot}{{2}{31}{A merge law on oracle values (associative up to $\metric $)}{proposition.2}{}}
+\citation{steeg2016informationsieve}
+\citation{steeg2016informationsieve}
+\citation{steeg2016informationsieve}
+\citation{Agarwal2013MergeableTODS}
+\@writefile{toc}{\contentsline {paragraph}{What this variant does \emph  {not} assume.}{32}{section*.45}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {H}Information-Theoretic View of OPS}{32}{appendix.H}\protected@file@percent }
+\newlabel{sec:info-sieve}{{H}{32}{Information-Theoretic View of OPS}{appendix.H}{}}
+\newlabel{thm:info-decomp}{{5}{32}{Oracle information decomposition}{theorem.5}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {I}Relationship to Mergeable Summaries}{32}{appendix.I}\protected@file@percent }
+\newlabel{app:mergeable}{{I}{32}{Relationship to Mergeable Summaries}{appendix.I}{}}
+\citation{Agarwal2013MergeableTODS}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Mapping OPS to the mergeable summaries framework.}}{33}{table.3}\protected@file@percent }
+\newlabel{tab:mergeable_mapping}{{3}{33}{Mapping OPS to the mergeable summaries framework}{table.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {I.1}Formal Setup of Mergeable Summaries}{33}{subsection.I.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {I.2}Mapping OPS to Mergeable Summaries}{33}{subsection.I.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {I.3}Equivalence in the Commutative Case}{33}{subsection.I.3}\protected@file@percent }
+\newlabel{prop:mergeable_reduction}{{3}{33}{Reduction to Mergeable Sketches}{proposition.3}{}}
+\newlabel{rem:universal_merge}{{5}{34}{The universal merge}{remark.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {I.4}Generalization to Non-Commutative Tasks}{34}{subsection.I.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {I.5}Error Propagation and Bounds}{34}{subsection.I.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {J}Existence of Oracle-Preserving Summaries}{34}{appendix.J}\protected@file@percent }
+\newlabel{app:existence}{{J}{34}{Existence of Oracle-Preserving Summaries}{appendix.J}{}}
+\newlabel{prop:canonical}{{4}{34}{Canonical representative map in metric form}{proposition.4}{}}
+\newlabel{prop:encoding}{{5}{35}{Compact encodings}{proposition.5}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {K}Worked Examples and Templates}{35}{appendix.K}\protected@file@percent }
+\newlabel{sec:examples}{{K}{35}{Worked Examples and Templates}{appendix.K}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {K.1}Binary event detection (QA/passage-level)}{35}{subsection.K.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {K.2}Entity extraction (tuple)}{35}{subsection.K.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {K.3}Counting (numeric aggregation)}{35}{subsection.K.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {K.4}Stability Is Substantive: A Minimal Counterexample}{35}{subsection.K.4}\protected@file@percent }
+\newlabel{app:stability}{{K.4}{35}{Stability Is Substantive: A Minimal Counterexample}{subsection.K.4}{}}
+\gdef \@abspage@last{35}

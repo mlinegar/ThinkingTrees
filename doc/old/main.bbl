@@ -1,0 +1,109 @@
+\begin{thebibliography}{15}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Agarwal et~al.(2013{\natexlab{a}})Agarwal, Cormode, Huang, Phillips,
+  Wei, and Yi]{Agarwal2013MergeableTODS}
+Pankaj~K. Agarwal, Graham Cormode, Zengfeng Huang, Jeff~M. Phillips, Zhewei
+  Wei, and Ke~Yi.
+\newblock Mergeable summaries.
+\newblock \emph{{ACM} Transactions on Database Systems}, 38\penalty0
+  (4):\penalty0 28:1--28:40, 2013{\natexlab{a}}.
+
+\bibitem[Agarwal et~al.(2013{\natexlab{b}})Agarwal, Cormode, Huang, Phillips,
+  Wei, and Yi]{agarwal2013mergeable}
+Pankaj~K Agarwal, Graham Cormode, Zengfeng Huang, Jeff~M Phillips, Zhewei Wei,
+  and Ke~Yi.
+\newblock Mergeable summaries.
+\newblock \emph{ACM Transactions on Database Systems}, 38\penalty0
+  (4):\penalty0 1--28, 2013{\natexlab{b}}.
+
+\bibitem[Benoit et~al.(2025)Benoit, Munger, Spirling, et~al.]{BenoitEtAl2025}
+Kenneth Benoit, Kevin Munger, Arthur Spirling, et~al.
+\newblock Scalable methods for interpreting political texts using large
+  language models.
+\newblock \emph{American Journal of Political Science}, 2025.
+\newblock Forthcoming.
+
+\bibitem[Blackwell(1953)]{Blackwell1953}
+David Blackwell.
+\newblock Equivalent comparisons of experiments.
+\newblock \emph{Annals of Mathematical Statistics}, 24\penalty0 (2):\penalty0
+  265--272, 1953.
+
+\bibitem[Blei et~al.(2003)Blei, Ng, and Jordan]{BleiNgJordan2003}
+David~M. Blei, Andrew~Y. Ng, and Michael~I. Jordan.
+\newblock Latent dirichlet allocation.
+\newblock \emph{Journal of Machine Learning Research}, 3:\penalty0 993--1022,
+  2003.
+
+\bibitem[Bradley and Terry(1952)]{BradleyTerry1952}
+Ralph~A. Bradley and Milton~E. Terry.
+\newblock Rank analysis of incomplete block designs: I. the method of paired
+  comparisons.
+\newblock \emph{Biometrika}, 39\penalty0 (3/4):\penalty0 324--345, 1952.
+
+\bibitem[Cormode and Muthukrishnan(2005)]{CormodeMuthukrishnan2005}
+Graham Cormode and S.~Muthukrishnan.
+\newblock An improved data stream summary: The count-min sketch and its
+  applications.
+\newblock In \emph{Journal of Algorithms}, volume~55, pages 58--75, 2005.
+
+\bibitem[Dawid(2007)]{Dawid2007}
+A.~P. Dawid.
+\newblock The geometry of proper scoring rules.
+\newblock \emph{Annals of the Institute of Statistical Mathematics},
+  59:\penalty0 77--93, 2007.
+
+\bibitem[Egami et~al.(2024)Egami, Hinck, Stewart, and Wei]{EgamiEtAl2024}
+Naoki Egami, Musashi Hinck, Brandon~M. Stewart, and Hanying Wei.
+\newblock Using imperfect surrogates for downstream inference: Design-based
+  supervised learning for social science applications of large language models.
+\newblock In \emph{Advances in Neural Information Processing Systems
+  (NeurIPS)}, 2024.
+
+\bibitem[Gneiting and Raftery(2007)]{GneitingRaftery2007}
+Tilmann Gneiting and Adrian~E. Raftery.
+\newblock Strictly proper scoring rules, prediction, and estimation.
+\newblock \emph{Journal of the American Statistical Association}, 102\penalty0
+  (477):\penalty0 359--378, 2007.
+\newblock \doi{10.1198/016214506000001437}.
+
+\bibitem[Khattab et~al.(2024)Khattab, Gupta, Burns, Razi, Abbeel, and
+  Re]{khattab2024dspy}
+Omar Khattab, Keshav Gupta, Colin Burns, Arman~Cohan Razi, Pieter Abbeel, and
+  Christopher Re.
+\newblock Dspy: Compiling declarative language model calls into self-improving
+  pipelines, 2024.
+
+\bibitem[Rafailov et~al.(2023)Rafailov, Sharma, Mitchell, Ermon, Manning, and
+  Finn]{RafailovEtAl2023DPO}
+Rafael Rafailov, Archit Sharma, Eric Mitchell, Stefano Ermon, Christopher~D.
+  Manning, and Chelsea Finn.
+\newblock Direct preference optimization: Your language model is secretly a
+  reward model.
+\newblock In \emph{Advances in Neural Information Processing Systems
+  (NeurIPS)}, 2023.
+
+\bibitem[Roberts et~al.(2014)Roberts, Stewart, and
+  Tingley]{RobertsStewartTingley2014}
+Margaret~E. Roberts, Brandon~M. Stewart, and Dustin Tingley.
+\newblock Structural topic models for open-ended survey responses.
+\newblock \emph{American Journal of Political Science}, 58\penalty0
+  (4):\penalty0 1064--1082, 2014.
+\newblock \doi{10.1111/ajps.12103}.
+
+\bibitem[Steeg and Galstyan(2016)]{steeg2016informationsieve}
+Greg~Ver Steeg and Aram Galstyan.
+\newblock The information sieve, 2016.
+\newblock URL \url{https://arxiv.org/abs/1507.02284}.
+
+\bibitem[Torgersen(1991)]{Torgersen1991}
+Erik Torgersen.
+\newblock \emph{Comparison of Statistical Experiments}.
+\newblock Cambridge University Press, 1991.
+
+\end{thebibliography}
