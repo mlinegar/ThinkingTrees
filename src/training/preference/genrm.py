@@ -534,13 +534,11 @@ Analyze step by step following the evaluation plan, then provide your judgment a
                 await self.batch_client.submit(request)
                 requests.append(request)
 
-            # Await all responses
-            results = []
-            for request in requests:
-                result = await self.batch_client.await_response(request.request_id)
-                results.append(result)
-
-            return results
+            # Await all responses concurrently so one slow request does not
+            # serially delay the rest of the batch.
+            return await asyncio.gather(
+                *(self.batch_client.await_response(request.request_id) for request in requests)
+            )
 
         # Fallback: Use asyncio.gather to run all comparisons concurrently
         tasks = [

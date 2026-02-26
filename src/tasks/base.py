@@ -28,6 +28,7 @@ from src.core.prompting import (
     PromptBuilders,
     default_merge_prompt,
     default_summarize_prompt,
+    clean_summary_text,
     parse_numeric_score,
 )
 logger = logging.getLogger(__name__)
@@ -810,11 +811,12 @@ class AbstractTask(ABC):
         import dspy
 
         rubric = self.create_rubric()
+        task_context = self.get_task_context()
         examples = []
         for result in results:
             if result is None or getattr(result, "error", None):
                 continue
-            summary = getattr(result, "final_summary", "")
+            summary = clean_summary_text(getattr(result, "final_summary", ""))
             reference = getattr(result, "reference_score", None)
             if not summary or reference is None:
                 continue
@@ -826,11 +828,14 @@ class AbstractTask(ABC):
                     original_content = metadata.get("original_content")
             if not original_content:
                 original_content = getattr(result, "doc_id", "")
+            doc_id = getattr(result, "doc_id", None)
 
             example = dspy.Example(
+                doc_id=doc_id,
                 original_content=original_content,
                 summary=summary,
                 rubric=rubric,
+                task_context=task_context,
                 reference_score=reference,
             ).with_inputs("original_content", "summary", "rubric")
             examples.append(example)

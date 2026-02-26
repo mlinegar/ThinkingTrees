@@ -56,12 +56,40 @@ def find_matching_key(
     """
     target_normalized = normalize_key(target_key)
 
-    # Get available keys
+    # Get available keys. Prefer mapping-style keys() when available because
+    # DSPy Prediction objects expose user fields there while __dict__ holds
+    # internal storage metadata only.
+    keys: List[str] = []
+    seen_keys = set()
+
+    def _append_keys(candidate_keys: Any) -> None:
+        for key in candidate_keys:
+            key_str = str(key)
+            if key_str in seen_keys:
+                continue
+            seen_keys.add(key_str)
+            keys.append(key_str)
+
+    if hasattr(obj, 'keys'):
+        try:
+            _append_keys(obj.keys())
+        except Exception:
+            pass
+
     if hasattr(obj, '__dict__'):
-        keys = list(vars(obj).keys())
-    elif hasattr(obj, 'keys'):
-        keys = list(obj.keys())
-    else:
+        try:
+            _append_keys(vars(obj).keys())
+        except Exception:
+            pass
+
+    store = getattr(obj, '_store', None)
+    if hasattr(store, 'keys'):
+        try:
+            _append_keys(store.keys())
+        except Exception:
+            pass
+
+    if not keys:
         return None
 
     # First try exact match
@@ -111,6 +139,17 @@ def get_field(
 
     if hasattr(obj, matching_key):
         return getattr(obj, matching_key)
+
+    # Some prediction-like objects keep user-facing outputs in _store.
+    store = getattr(obj, '_store', None)
+    if hasattr(store, '__getitem__'):
+        try:
+            return store[matching_key]
+        except (KeyError, TypeError):
+            pass
+
+    if hasattr(store, matching_key):
+        return getattr(store, matching_key)
 
     return default
 

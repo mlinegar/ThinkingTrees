@@ -19,6 +19,7 @@ Usage:
 
 import asyncio
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable, Any, Dict, TYPE_CHECKING, Deque, Tuple
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
 
 from src.core.data_models import Node, Tree, leaf, node
 from src.preprocessing.chunker import TextChunk, chunk_for_ops as chunk
+from src.preprocessing.visual_feedback import extract_content_weights_from_chunks
 from src.core.strategy import SummarizationStrategy, TournamentStrategy, tournament_doc_id
 from src.tree.builder import BuildConfig, BuildResult
 from src.core.protocols import format_merge_input
@@ -495,6 +497,12 @@ class BatchTreeOrchestrator:
         self._build_stats['total_levels'] = max(self._build_stats['total_levels'], max_levels)
 
         max_inflight = max(1, self.config.max_concurrent_requests)
+        logger.info(
+            "  Cascading build: leaves=%d merges=%d max_inflight=%d",
+            total_leaves,
+            total_merges,
+            max_inflight,
+        )
 
         async def summarize_leaf(
             doc_idx: int,
@@ -537,6 +545,49 @@ class BatchTreeOrchestrator:
         completed_leaves_count = 0
         completed_merges_count = 0
         prefer_merge = True
+        progress_started = time.monotonic()
+        last_progress_log = progress_started
+        last_progress_completed = 0
+
+        def _maybe_log_progress(force: bool = False) -> None:
+            nonlocal last_progress_log, last_progress_completed
+            completed_total = completed_leaves_count + completed_merges_count
+            now = time.monotonic()
+            should_log = force
+            if not should_log:
+                if (now - last_progress_log) >= 30.0:
+                    should_log = True
+                elif (completed_total - last_progress_completed) >= 250:
+                    should_log = True
+            if not should_log:
+                return
+
+            elapsed = max(1e-6, now - progress_started)
+            rate = completed_total / elapsed
+            total_tasks = total_leaves + total_merges
+            stats = None
+            try:
+                stats = getattr(getattr(self.strategy, "client", None), "stats", None)
+            except Exception:
+                stats = None
+            stats_str = f" stats={stats}" if stats is not None else ""
+
+            logger.info(
+                "  Cascading progress: leaves=%d/%d merges=%d/%d done=%d/%d pending=%d leaf_q=%d merge_q=%d rate=%.2f items/s%s",
+                completed_leaves_count,
+                total_leaves,
+                completed_merges_count,
+                total_merges,
+                completed_total,
+                total_tasks,
+                len(pending),
+                len(leaf_queue),
+                len(ready_merges),
+                rate,
+                stats_str,
+            )
+            last_progress_log = now
+            last_progress_completed = completed_total
 
         def pump_ready_queue() -> None:
             nonlocal prefer_merge
@@ -568,6 +619,7 @@ class BatchTreeOrchestrator:
 
         try:
             while pending:
+                _maybe_log_progress()
                 done, _ = await asyncio.wait(
                     pending.keys(),
                     return_when=asyncio.FIRST_COMPLETED
@@ -674,6 +726,7 @@ class BatchTreeOrchestrator:
                 states[state_idx].current_level = [root_node]
 
         completed_docs = len(docs_to_build) - len(failed_docs)
+        _maybe_log_progress(force=True)
         logger.info(
             f"  Cascading build complete: {completed_docs}/{len(docs_to_build)} documents"
         )
@@ -1089,6 +1142,9 @@ class BatchTreeOrchestrator:
                 or getattr(p, "source_example_id", "").startswith(f"{doc_id}:")
             ] if preferences else []
 
+            # Extract per-leaf info scores for content-weighted audit sampling.
+            content_weights = extract_content_weights_from_chunks(state.chunks)
+
             results.append(BuildResult(
                 tree=tree,
                 chunks_created=len(state.chunks),
@@ -1096,6 +1152,7 @@ class BatchTreeOrchestrator:
                 levels_created=tree.height + 1,
                 errors=[],
                 preferences=doc_preferences,
+                content_weights=content_weights,
             ))
 
         return results

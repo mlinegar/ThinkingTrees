@@ -1353,7 +1353,7 @@ class MetricBuilder:
         # Simple oracle metric
         metric = (MetricBuilder()
             .with_oracle(my_oracle.predict)
-            .with_scale(RILE_SCALE)
+            .with_scale(scale)
             .build())
 
         # With caching and feedback for GEPA

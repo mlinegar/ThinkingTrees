@@ -87,7 +87,7 @@ def train_rile_oracle(args) -> None:
                 normalized_score = max(0.0, min(1.0, normalized_score))
                 training_examples.append(dspy.Example(
                     text=r.get('text', ''),  # Use full text - truncation corrupts training
-                    rile_score=normalized_score,
+                    score=normalized_score,
                 ).with_inputs('text'))
     else:
         # Process new manifestos

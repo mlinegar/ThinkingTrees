@@ -13,6 +13,7 @@ from .base import (
 
 from .manifesto import ManifestoDataset
 from .jsonl import JSONLDataset
+from .pdf import PDFDataset
 
 
 def get_dataset(name: str, **kwargs):
@@ -34,4 +35,5 @@ __all__ = [
     "list_datasets",
     "ManifestoDataset",
     "JSONLDataset",
+    "PDFDataset",
 ]

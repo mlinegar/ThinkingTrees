@@ -185,11 +185,27 @@ class LLMClient:
             except ImportError:
                 raise ImportError("openai package required. Install with: pip install openai")
 
-            self._client = OpenAI(
-                api_key=self.config.api_key,
-                base_url=self.config.base_url,
-                timeout=self.config.timeout
-            )
+            try:
+                self._client = OpenAI(
+                    api_key=self.config.api_key,
+                    base_url=self.config.base_url,
+                    timeout=self.config.timeout,
+                    max_retries=0,
+                )
+            except TypeError:
+                # Older OpenAI client versions may not accept max_retries.
+                self._client = OpenAI(
+                    api_key=self.config.api_key,
+                    base_url=self.config.base_url,
+                    timeout=self.config.timeout,
+                )
+                # Best-effort retry disable for clients that expose with_options.
+                with_options = getattr(self._client, "with_options", None)
+                if callable(with_options):
+                    try:
+                        self._client = with_options(max_retries=0)
+                    except Exception:
+                        logger.debug("OpenAI client with_options(max_retries=0) unavailable")
         return self._client
 
     def __call__(self, prompt: str, **kwargs) -> str:

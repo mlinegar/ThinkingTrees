@@ -37,6 +37,11 @@ RIGHT indicators (positive score contributions):
 
 Score range: -100 (far left) to +100 (far right)
 A score of 0 indicates a centrist position with balanced left/right emphasis.
+
+Output requirements:
+- Return exactly one numeric score in the range [-100, +100].
+- Formatting examples (do not copy; compute the actual score): -12, 0, 37.5
+- Do not return reasoning, labels (e.g., "Score:"), markdown/backticks/code fences, or extra text.
 """
 
 

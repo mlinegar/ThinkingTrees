@@ -15,6 +15,11 @@ from .registry import register_optimizer
 
 logger = logging.getLogger(__name__)
 
+try:
+    from dspy.teleprompt.gepa.gepa_utils import ScoreWithFeedback
+except Exception:  # pragma: no cover
+    ScoreWithFeedback = None  # type: ignore[assignment]
+
 
 @register_optimizer("gepa")
 class GEPAOptimizer(AbstractOptimizer):
@@ -132,7 +137,18 @@ class GEPAOptimizer(AbstractOptimizer):
         def wrapped(gold, pred, trace=None, pred_name=None, pred_trace=None):
             result = metric(gold, pred, trace, pred_name, pred_trace)
             if isinstance(result, dict):
-                return result.get('score', 0.0)
+                score = result.get("score", 0.0)
+                feedback = result.get("feedback", None)
+                if feedback is not None and ScoreWithFeedback is not None:
+                    try:
+                        score_value = float(score)
+                    except (TypeError, ValueError):
+                        score_value = 0.0
+                    return ScoreWithFeedback(score=score_value, feedback=str(feedback))
+                try:
+                    return float(score)
+                except (TypeError, ValueError):
+                    return 0.0
             return result
 
         return wrapped
@@ -147,14 +163,30 @@ class GEPAOptimizer(AbstractOptimizer):
         if self.config is None:
             # Default configuration
             kwargs['auto'] = 'medium'
-            kwargs['num_threads'] = 64
+            kwargs['num_threads'] = 16
+            kwargs['add_format_failure_as_feedback'] = True
             return kwargs
 
         # Configure from config
         kwargs['use_merge'] = getattr(self.config, 'enable_merge', True)
         kwargs['max_merge_invocations'] = getattr(self.config, 'max_merge_invocations', 5)
-        kwargs['num_threads'] = getattr(self.config, 'num_threads', 128)
+        requested_threads = max(1, int(getattr(self.config, 'num_threads', 64)))
+        raw_thread_cap = getattr(self.config, 'gepa_max_threads', None)
+        if raw_thread_cap is None:
+            kwargs['num_threads'] = requested_threads
+        else:
+            thread_cap = max(1, int(raw_thread_cap))
+            kwargs['num_threads'] = min(requested_threads, thread_cap)
+            if kwargs['num_threads'] < requested_threads:
+                logger.info(
+                    "GEPA: Capping num_threads from %d to %d for stability",
+                    requested_threads,
+                    kwargs['num_threads'],
+                )
         kwargs['track_stats'] = getattr(self.config, 'track_stats', True)
+        kwargs['add_format_failure_as_feedback'] = bool(
+            getattr(self.config, 'gepa_add_format_failure_as_feedback', True)
+        )
 
         # Log directory
         log_dir = getattr(self.config, 'log_dir', None)

@@ -25,7 +25,13 @@ if TYPE_CHECKING:
 from src.core.data_models import (
     Node, Tree, leaf, node
 )
-from src.preprocessing.chunker import TextChunk, DocumentChunker, chunk_for_ops as chunk
+from src.preprocessing.chunker import (
+    AdaptiveChunkingConfig,
+    ChunkFeedbackSignal,
+    DocumentChunker,
+    TextChunk,
+    chunk_for_ops as chunk,
+)
 from src.core.strategy import SummarizationStrategy, TournamentStrategy
 from src.core.protocols import format_merge_input, Summarizer
 from src.core.async_utils import gather_with_cleanup
@@ -144,7 +150,9 @@ class BuildConfig:
     # Chunking settings
     max_chunk_chars: int = 2000
     min_chunk_chars: int = 100
-    chunk_strategy: str = "sentence"  # "sentence" or "paragraph"
+    chunk_strategy: str = "axis"  # "axis" (default), "sentence", or "paragraph"
+    adaptive_chunking: Optional[AdaptiveChunkingConfig] = None
+    chunk_feedback_signals: Optional[List[ChunkFeedbackSignal]] = None
 
     # Tree settings
     merge_strategy: str = "binary"  # "binary" for 2-way merge
@@ -173,6 +181,7 @@ class BuildResult:
     levels_created: int
     errors: List[str] = field(default_factory=list)
     preferences: List['PreferencePair'] = field(default_factory=list)
+    content_weights: Optional[Dict[str, float]] = None  # per-leaf info scores for audit sampling
 
 
 # =============================================================================
@@ -244,13 +253,22 @@ class TreeBuilder:
         chunks = chunk(
             text,
             max_chars=self.config.max_chunk_chars,
-            strategy=self.config.chunk_strategy
+            strategy=self.config.chunk_strategy,
+            adaptive_config=self.config.adaptive_chunking,
+            feedback_signals=self.config.chunk_feedback_signals,
         )
 
         if not chunks:
             raise ValueError("Chunking produced no chunks")
 
-        return await self.build_from_chunks(chunks, rubric)
+        # Extract per-leaf info scores for auditor CONTENT_WEIGHTED sampling.
+        from src.preprocessing.visual_feedback import extract_content_weights_from_chunks
+
+        content_weights = extract_content_weights_from_chunks(chunks)
+
+        result = await self.build_from_chunks(chunks, rubric)
+        result.content_weights = content_weights
+        return result
 
     async def build_from_chunks(
         self,
@@ -283,6 +301,32 @@ class TreeBuilder:
             tree = await self._build_tree_pipelined(leaves, rubric, errors)
         else:
             tree = await self._build_tree_from_leaves(leaves, rubric, errors)
+
+        # Preserve explicit chunk-to-leaf lineage for downstream audit/training.
+        tree.metadata.setdefault(
+            "chunk_boundaries",
+            [
+                {
+                    "chunk_index": chunk_obj.chunk_index,
+                    "start_char": chunk_obj.start_char,
+                    "end_char": chunk_obj.end_char,
+                    "char_count": chunk_obj.char_count,
+                    "token_count": chunk_obj.token_count,
+                    "metadata": dict(chunk_obj.metadata or {}),
+                }
+                for chunk_obj in chunks
+            ],
+        )
+        tree.metadata.setdefault(
+            "chunking",
+            {
+                "strategy": self.config.chunk_strategy,
+                "max_chunk_chars": self.config.max_chunk_chars,
+                "adaptive_enabled": bool(
+                    self.config.adaptive_chunking and self.config.adaptive_chunking.enabled
+                ),
+            },
+        )
 
         # Collect preferences if strategy supports it (e.g., TournamentStrategy)
         preferences = []
@@ -689,11 +733,11 @@ def build(
             self._fn = sync_fn
 
         async def summarize(self, content: str, rubric: str) -> str:
-            return await asyncio.to_thread(self._fn, content, rubric)
+            return self._fn(content, rubric)
 
         async def merge(self, left: str, right: str, rubric: str) -> str:
             combined = format_merge_input(left, right)
-            return await asyncio.to_thread(self._fn, combined, rubric)
+            return self._fn(combined, rubric)
 
     adapter = SyncSummarizerAdapter(summarizer)
     config = BuildConfig(max_chunk_chars=max_chars)

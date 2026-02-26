@@ -6,8 +6,10 @@ Supports context-window-aware chunking via ContextWindowManager.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Iterator, Optional, Union, TYPE_CHECKING
+import hashlib
 from pathlib import Path
+import re
+from typing import Any, Dict, Iterator, List, Optional, Sequence, TYPE_CHECKING
 
 from langextract.chunking import ChunkIterator
 from langextract.core.tokenizer import RegexTokenizer
@@ -44,6 +46,252 @@ class TextChunk:
     def __repr__(self) -> str:
         preview = self.text[:50] + "..." if len(self.text) > 50 else self.text
         return f"TextChunk({self.chunk_index}, tokens={self.token_count}, chars={self.char_count})"
+
+
+@dataclass
+class ChunkFeedbackSignal:
+    """
+    Feedback signal attached to a character span for adaptive chunking.
+
+    low_info_probability:
+        0.0 = highly informative, 1.0 = likely low-information.
+    noise_probability:
+        0.0 = low-noise span, 1.0 = likely noisy proxy signal.
+    confidence:
+        Reliability of the feedback source in [0, 1].
+    """
+    start_char: int
+    end_char: int
+    low_info_probability: float
+    noise_probability: float = 0.0
+    confidence: float = 1.0
+    source: str = "unknown"
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    oracle_relevance_probability: Optional[float] = None
+
+    @property
+    def width(self) -> int:
+        """Character width of this feedback span."""
+        return max(0, self.end_char - self.start_char)
+
+
+@dataclass
+class AdaptiveChunkingConfig:
+    """
+    Controls adaptive chunk sizing based on low-information/noise proxies.
+
+    The policy expands chunk targets in low-information/noisy regions and
+    compresses chunk targets in likely high-information regions.
+    """
+    enabled: bool = False
+    min_chars: int = 400
+    max_chars: int = 8000
+    low_info_expansion_weight: float = 0.8
+    noise_expansion_weight: float = 0.3
+    high_info_compression_weight: float = 0.5
+    min_target_scale: float = 0.6
+    max_target_scale: float = 2.0
+    proxy_blend: float = 0.5
+    crossfit_folds: int = 1
+    proxy_model: Optional[str] = None
+    proxy_score_key: Optional[str] = None
+    proxy_fallback_to_baseline: bool = True
+    # Adapter id used for embedding-window scoring (text path defaults to char).
+    window_adapter: str = "text_char"
+    # If true, collapse adjacent low-drift embedding windows before feedback.
+    window_merge_enabled: bool = True
+    # Merge threshold for adjacent-window cosine distance in [0, 2].
+    window_merge_max_cosine_distance: float = 0.03
+    # Optional hard cap for merged windows in axis units (chars for text).
+    window_merge_max_extent: Optional[int] = None
+
+
+@dataclass
+class HonestChunkingPolicy:
+    """
+    Honest split policy for adaptive chunking feedback.
+
+    When enabled, chunk-boundary adaptation should only consume signals from
+    the boundary split; oracle-quality evaluation should use the held-out
+    evaluation split.
+    """
+    enabled: bool = False
+    boundary_fraction: float = 0.5
+    split_seed: int = 17
+    boundary_role: str = "boundary"
+    evaluation_role: str = "evaluation"
+
+
+class AdaptiveChunkMemory:
+    """
+    Lightweight in-memory store for per-document chunk feedback.
+
+    This lets callers update future chunking runs from prior label/prediction
+    outcomes without coupling chunking to any specific oracle implementation.
+    """
+
+    def __init__(self):
+        self._signals_by_doc: Dict[str, List[ChunkFeedbackSignal]] = {}
+
+    def get_signals(
+        self,
+        doc_id: str,
+        *,
+        honest_role: Optional[str] = None,
+    ) -> List[ChunkFeedbackSignal]:
+        """
+        Get cached signals for a document.
+
+        If honest_role is provided, only signals tagged with that role are
+        returned.
+        """
+        all_signals = list(self._signals_by_doc.get(doc_id, []))
+        if honest_role is None:
+            return all_signals
+        return [
+            signal
+            for signal in all_signals
+            if signal.metadata.get("honest_role") == honest_role
+        ]
+
+    def update_signals(
+        self,
+        doc_id: str,
+        signals: Sequence[ChunkFeedbackSignal],
+        *,
+        honest_role: Optional[str] = None,
+        replace_existing: bool = False,
+        max_signals: int = 2048,
+    ) -> None:
+        """Append or replace feedback signals for a document."""
+        updated_signals: List[ChunkFeedbackSignal] = []
+        for signal in signals:
+            if honest_role is not None:
+                signal.metadata["honest_role"] = honest_role
+            updated_signals.append(signal)
+
+        if replace_existing or doc_id not in self._signals_by_doc:
+            merged = updated_signals
+        else:
+            merged = self._signals_by_doc[doc_id] + updated_signals
+        if max_signals > 0 and len(merged) > max_signals:
+            merged = merged[-max_signals:]
+        self._signals_by_doc[doc_id] = merged
+
+    def get_signals_for_chunking(
+        self,
+        doc_id: str,
+        *,
+        honest_policy: Optional[HonestChunkingPolicy] = None,
+    ) -> List[ChunkFeedbackSignal]:
+        """
+        Return signals allowed for chunk-boundary adaptation.
+
+        If honesty is enabled, this filters to boundary-role signals only.
+        """
+        if honest_policy is None or not honest_policy.enabled:
+            return self.get_signals(doc_id)
+        return self.get_signals(doc_id, honest_role=honest_policy.boundary_role)
+
+    def get_signals_for_evaluation(
+        self,
+        doc_id: str,
+        *,
+        honest_policy: Optional[HonestChunkingPolicy] = None,
+    ) -> List[ChunkFeedbackSignal]:
+        """
+        Return signals allowed for oracle evaluation.
+
+        If honesty is enabled, this filters to held-out evaluation-role signals.
+        """
+        if honest_policy is None or not honest_policy.enabled:
+            return self.get_signals(doc_id)
+        return self.get_signals(doc_id, honest_role=honest_policy.evaluation_role)
+
+    def clear(self, doc_id: Optional[str] = None) -> None:
+        """Clear all feedback or only one document's feedback."""
+        if doc_id is None:
+            self._signals_by_doc.clear()
+            return
+        self._signals_by_doc.pop(doc_id, None)
+
+
+def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
+    """Clamp value into [lower, upper]."""
+    return max(lower, min(upper, value))
+
+
+def assign_honest_split(
+    sample_id: str,
+    policy: Optional[HonestChunkingPolicy] = None,
+) -> str:
+    """
+    Deterministically assign a sample to boundary/evaluation split.
+
+    This avoids leakage between boundary adaptation and evaluation while
+    remaining reproducible across runs.
+    """
+    if policy is None or not policy.enabled:
+        return "all"
+
+    frac = _clamp(policy.boundary_fraction)
+    digest = hashlib.sha256(f"{policy.split_seed}:{sample_id}".encode("utf-8")).digest()
+    draw = int.from_bytes(digest[:8], byteorder="big") / float(2**64)
+    if draw < frac:
+        return policy.boundary_role
+    return policy.evaluation_role
+
+
+def feedback_from_prediction_errors(
+    chunks: Sequence[TextChunk],
+    predicted_values: Sequence[float],
+    target_values: Sequence[float],
+    *,
+    scale_min: float,
+    scale_max: float,
+    confidences: Optional[Sequence[float]] = None,
+    honest_role: Optional[str] = None,
+    source: str = "prediction_error",
+) -> List[ChunkFeedbackSignal]:
+    """
+    Convert chunk-level prediction errors into adaptive feedback signals.
+
+    Low-information probability is modeled as normalized absolute error:
+    |pred - target| / (scale_max - scale_min), clipped to [0, 1].
+    Noise probability defaults to (1 - confidence).
+    """
+    if len(chunks) != len(predicted_values) or len(chunks) != len(target_values):
+        raise ValueError("chunks, predicted_values, and target_values must have the same length")
+    if confidences is not None and len(confidences) != len(chunks):
+        raise ValueError("confidences must match the number of chunks")
+
+    scale_span = max(1e-9, scale_max - scale_min)
+    signals: List[ChunkFeedbackSignal] = []
+
+    for idx, chunk in enumerate(chunks):
+        error = abs(float(predicted_values[idx]) - float(target_values[idx]))
+        low_info = _clamp(error / scale_span)
+        confidence = 1.0 if confidences is None else _clamp(float(confidences[idx]))
+        signals.append(
+            ChunkFeedbackSignal(
+                start_char=chunk.start_char,
+                end_char=chunk.end_char,
+                low_info_probability=low_info,
+                noise_probability=_clamp(1.0 - confidence),
+                confidence=confidence,
+                source=source,
+                metadata={
+                    "chunk_index": chunk.chunk_index,
+                    "predicted_value": float(predicted_values[idx]),
+                    "target_value": float(target_values[idx]),
+                    "normalized_error": low_info,
+                },
+            )
+        )
+        if honest_role is not None:
+            signals[-1].metadata["honest_role"] = honest_role
+
+    return signals
 
 
 class Chunker:
@@ -194,20 +442,99 @@ def chunk_text(
     return chunker.chunk(text)
 
 
+def chunk_for_ops_token_budget(
+    text: str,
+    *,
+    max_tokens: int,
+    encoding: str = "cl100k_base",
+    overlap_tokens: int = 0,
+) -> List[TextChunk]:
+    """
+    Chunk text into contiguous windows by token budget.
+
+    This is the simplest way to precommit to a fixed tree structure: the leaf
+    partition is fully determined by (encoding, max_tokens, overlap_tokens)
+    before any summarization happens.
+
+    Notes:
+    - The returned chunks form an exact partition of the input when
+      overlap_tokens=0.
+    - Character offsets are computed deterministically from the tokenization.
+    - This chunker ignores the axis/sentence/paragraph strategies and is
+      intended for token-budget-first workflows (e.g., paper examples).
+    """
+    if not text or not text.strip():
+        return []
+
+    max_tokens = max(1, int(max_tokens))
+    overlap_tokens = max(0, int(overlap_tokens))
+    if overlap_tokens >= max_tokens:
+        raise ValueError("overlap_tokens must be < max_tokens")
+
+    from src.preprocessing.tokenizer import TokenCounter
+
+    counter = TokenCounter(model=None, encoding=str(encoding))
+    token_offsets = counter.encode_with_offsets(text)
+    if not token_offsets:
+        return []
+
+    token_ids = [tok_id for tok_id, _, _ in token_offsets]
+    step = max(1, max_tokens - overlap_tokens)
+
+    chunks: List[TextChunk] = []
+    chunk_idx = 0
+    for start in range(0, len(token_ids), step):
+        end = min(len(token_ids), start + max_tokens)
+        if end <= start:
+            break
+
+        start_char = int(token_offsets[start][1])
+        end_char = int(token_offsets[end - 1][2])
+        if end_char <= start_char:
+            continue
+
+        chunks.append(
+            TextChunk(
+                text=text[start_char:end_char],
+                start_char=start_char,
+                end_char=end_char,
+                chunk_index=chunk_idx,
+                token_count=end - start,
+                metadata={
+                    "token_budget": max_tokens,
+                    "overlap_tokens": overlap_tokens,
+                    "encoding": counter.encoding_name,
+                },
+            )
+        )
+        chunk_idx += 1
+        if end >= len(token_ids):
+            break
+
+    return chunks
+
+
 def chunk_for_ops(
     text: str,
     max_chars: int = 2000,
-    strategy: str = "sentence"
+    strategy: str = "axis",
+    adaptive_config: Optional[AdaptiveChunkingConfig] = None,
+    feedback_signals: Optional[Sequence[ChunkFeedbackSignal]] = None,
 ) -> List[TextChunk]:
     """
     Chunk text for OPS tree construction.
 
-    Simple character-based chunking for OPS, using sentence boundaries.
+    Character-axis chunking for OPS with optional sentence/paragraph modes.
 
     Args:
         text: Text to chunk
         max_chars: Maximum characters per chunk
-        strategy: Chunking strategy ("sentence" or "paragraph")
+        strategy: Chunking strategy:
+            - "axis" (default): fixed-width axis bins without sentence parsing
+            - "sentence": sentence boundary segmentation
+            - "paragraph": paragraph boundary segmentation
+        adaptive_config: Optional adaptive chunk policy configuration
+        feedback_signals: Optional span-level low-info/noise feedback
 
     Returns:
         List of TextChunk objects
@@ -215,23 +542,130 @@ def chunk_for_ops(
     if not text or not text.strip():
         return []
 
-    # Sentence/paragraph-aware chunking with accurate character offsets
-    import re
+    axis_segment_chars = max(128, min(int(max_chars), 1200))
+    segments = _segment_intervals(
+        text,
+        strategy,
+        axis_segment_chars=axis_segment_chars,
+    )
+    if not segments:
+        return []
 
-    if strategy == "paragraph":
-        pattern = r'(?:[^\n]|\n(?!\n))+'
-    else:
-        pattern = r'[^.!?]+[.!?]?(?:\s+|$)'
+    if adaptive_config is None or not adaptive_config.enabled:
+        return _build_fixed_chunks(text, segments, max_chars=max_chars)
 
-    segments = [
-        (match.start(), match.end())
-        for match in re.finditer(pattern, text)
-        if match.group(0).strip()
-    ]
+    return _build_adaptive_chunks(
+        text=text,
+        segments=segments,
+        max_chars=max_chars,
+        config=adaptive_config,
+        feedback_signals=feedback_signals,
+    )
 
-    chunks = []
-    current_start = None
-    current_end = None
+
+def chunk_for_ops_adaptive(
+    text: str,
+    max_chars: int = 2000,
+    strategy: str = "axis",
+    feedback_signals: Optional[Sequence[ChunkFeedbackSignal]] = None,
+    config: Optional[AdaptiveChunkingConfig] = None,
+) -> List[TextChunk]:
+    """Convenience wrapper for adaptive OPS chunking."""
+    adaptive_cfg = config or AdaptiveChunkingConfig(enabled=True)
+    if not adaptive_cfg.enabled:
+        adaptive_cfg = AdaptiveChunkingConfig(
+            enabled=True,
+            min_chars=adaptive_cfg.min_chars,
+            max_chars=adaptive_cfg.max_chars,
+            low_info_expansion_weight=adaptive_cfg.low_info_expansion_weight,
+            noise_expansion_weight=adaptive_cfg.noise_expansion_weight,
+            high_info_compression_weight=adaptive_cfg.high_info_compression_weight,
+            min_target_scale=adaptive_cfg.min_target_scale,
+            max_target_scale=adaptive_cfg.max_target_scale,
+            proxy_blend=adaptive_cfg.proxy_blend,
+            crossfit_folds=adaptive_cfg.crossfit_folds,
+            proxy_model=adaptive_cfg.proxy_model,
+            proxy_score_key=adaptive_cfg.proxy_score_key,
+            proxy_fallback_to_baseline=adaptive_cfg.proxy_fallback_to_baseline,
+        )
+
+    return chunk_for_ops(
+        text=text,
+        max_chars=max_chars,
+        strategy=strategy,
+        adaptive_config=adaptive_cfg,
+        feedback_signals=feedback_signals,
+    )
+
+
+def _axis_segment_intervals(text: str, axis_segment_chars: int) -> List[tuple[int, int]]:
+    """Extract fixed-width axis intervals with light whitespace alignment."""
+    if not text:
+        return []
+
+    n_chars = len(text)
+    target = max(32, int(axis_segment_chars))
+    intervals: List[tuple[int, int]] = []
+    start = 0
+    while start < n_chars:
+        end = min(n_chars, start + target)
+        if end < n_chars:
+            # Favor nearby whitespace so boundaries are less jagged, but never
+            # backtrack too aggressively.
+            min_backtrack = start + max(1, target // 3)
+            left = text.rfind(" ", min_backtrack, end + 1)
+            if left >= min_backtrack:
+                end = left + 1
+            else:
+                search_right = min(n_chars, end + max(16, target // 8))
+                right = text.find(" ", end, search_right)
+                if right != -1 and right > start:
+                    end = right + 1
+        if end <= start:
+            end = min(n_chars, start + target)
+        intervals.append((start, end))
+        start = end
+    return intervals
+
+
+def _segment_intervals(
+    text: str,
+    strategy: str,
+    *,
+    axis_segment_chars: int,
+) -> List[tuple[int, int]]:
+    """Extract chunking segments for the requested strategy."""
+    normalized = str(strategy or "axis").strip().lower()
+
+    if normalized == "paragraph":
+        pattern = r"(?:[^\n]|\n(?!\n))+"
+        return [
+            (match.start(), match.end())
+            for match in re.finditer(pattern, text)
+            if match.group(0).strip()
+        ]
+
+    if normalized == "sentence":
+        pattern = r"[^.!?]+[.!?]?(?:\s+|$)"
+        return [
+            (match.start(), match.end())
+            for match in re.finditer(pattern, text)
+            if match.group(0).strip()
+        ]
+
+    return _axis_segment_intervals(text, axis_segment_chars=axis_segment_chars)
+
+
+def _build_fixed_chunks(
+    text: str,
+    segments: Sequence[tuple[int, int]],
+    *,
+    max_chars: int,
+) -> List[TextChunk]:
+    """Original fixed-size chunking behavior."""
+    chunks: List[TextChunk] = []
+    current_start: Optional[int] = None
+    current_end: Optional[int] = None
 
     for start, end in segments:
         if current_start is None:
@@ -240,14 +674,15 @@ def chunk_for_ops(
             continue
 
         if end - current_start > max_chars:
-            # Finalize current chunk using original text slice
             chunk_text = text[current_start:current_end]
-            chunks.append(TextChunk(
-                text=chunk_text,
-                start_char=current_start,
-                end_char=current_end,
-                chunk_index=len(chunks),
-            ))
+            chunks.append(
+                TextChunk(
+                    text=chunk_text,
+                    start_char=current_start,
+                    end_char=current_end,
+                    chunk_index=len(chunks),
+                )
+            )
             current_start = start
             current_end = end
         else:
@@ -255,13 +690,248 @@ def chunk_for_ops(
 
     if current_start is not None and current_end is not None:
         chunk_text = text[current_start:current_end]
-        chunks.append(TextChunk(
-            text=chunk_text,
-            start_char=current_start,
-            end_char=current_end,
-            chunk_index=len(chunks),
-        ))
+        chunks.append(
+            TextChunk(
+                text=chunk_text,
+                start_char=current_start,
+                end_char=current_end,
+                chunk_index=len(chunks),
+            )
+        )
 
+    return chunks
+
+
+def _segment_low_info_noise_proxy(segment_text: str) -> tuple[float, float]:
+    """
+    Return coarse (low_info, noise) proxies in [0, 1] for a segment.
+
+    This is intentionally lightweight and model-free:
+    - lower lexical diversity + short/simple content -> higher low_info
+    - punctuation-heavy segments -> higher noise
+    """
+    tokens = re.findall(r"[A-Za-z0-9_]+", segment_text.lower())
+    if not tokens:
+        return 1.0, 0.5
+
+    token_count = len(tokens)
+    unique_ratio = len(set(tokens)) / token_count
+    long_token_ratio = sum(1 for tok in tokens if len(tok) >= 7) / token_count
+    digit_ratio = sum(1 for ch in segment_text if ch.isdigit()) / max(1, len(segment_text))
+    punct_ratio = sum(1 for ch in segment_text if ch in ",;:()[]{}<>/\\|") / max(
+        1, len(segment_text)
+    )
+
+    info_proxy = (
+        0.45 * unique_ratio
+        + 0.25 * _clamp(token_count / 30.0)
+        + 0.20 * long_token_ratio
+        + 0.10 * _clamp(digit_ratio * 25.0)
+    )
+    info_proxy = _clamp(info_proxy)
+    low_info_proxy = _clamp(1.0 - info_proxy)
+    noise_proxy = _clamp(punct_ratio * 8.0)
+    return low_info_proxy, noise_proxy
+
+
+def _overlap_width(a_start: int, a_end: int, b_start: int, b_end: int) -> int:
+    """Character overlap width between two half-open intervals."""
+    return max(0, min(a_end, b_end) - max(a_start, b_start))
+
+
+def _aggregate_feedback_for_span(
+    start_char: int,
+    end_char: int,
+    feedback_signals: Optional[Sequence[ChunkFeedbackSignal]],
+) -> tuple[float, float, float, float]:
+    """
+    Aggregate overlapping feedback for a segment.
+
+    Returns:
+        (low_info, noise, weight, oracle_relevance)
+    """
+    if not feedback_signals:
+        return 0.0, 0.0, 0.0, 0.0
+
+    span = max(1, end_char - start_char)
+    low_sum = 0.0
+    noise_sum = 0.0
+    rel_sum = 0.0
+    weight_sum = 0.0
+
+    for signal in feedback_signals:
+        overlap = _overlap_width(start_char, end_char, signal.start_char, signal.end_char)
+        if overlap <= 0:
+            continue
+        weight = (overlap / span) * _clamp(float(signal.confidence))
+        if weight <= 0:
+            continue
+        if signal.oracle_relevance_probability is not None:
+            relevance = _clamp(float(signal.oracle_relevance_probability))
+            low_value = _clamp(1.0 - relevance)
+        else:
+            low_value = _clamp(float(signal.low_info_probability))
+            relevance = _clamp(1.0 - low_value)
+        low_sum += weight * low_value
+        noise_sum += weight * _clamp(float(signal.noise_probability))
+        rel_sum += weight * relevance
+        weight_sum += weight
+
+    if weight_sum <= 0:
+        return 0.0, 0.0, 0.0, 0.0
+
+    return (
+        low_sum / weight_sum,
+        noise_sum / weight_sum,
+        _clamp(weight_sum),
+        rel_sum / weight_sum,
+    )
+
+
+def _adaptive_target_chars(
+    base_chars: int,
+    avg_low_info: float,
+    avg_noise: float,
+    config: AdaptiveChunkingConfig,
+) -> tuple[int, float]:
+    """Compute adaptive target size and scale factor."""
+    low_info = _clamp(avg_low_info)
+    noise = _clamp(avg_noise)
+    info = 1.0 - low_info
+
+    scale = (
+        1.0
+        + config.low_info_expansion_weight * low_info
+        + config.noise_expansion_weight * noise
+        - config.high_info_compression_weight * info
+    )
+    scale = _clamp(scale, config.min_target_scale, config.max_target_scale)
+
+    min_chars = max(1, config.min_chars)
+    max_chars = max(min_chars, config.max_chars)
+    target = int(round(_clamp(base_chars * scale, float(min_chars), float(max_chars))))
+    return target, scale
+
+
+def _build_adaptive_chunks(
+    text: str,
+    segments: Sequence[tuple[int, int]],
+    *,
+    max_chars: int,
+    config: AdaptiveChunkingConfig,
+    feedback_signals: Optional[Sequence[ChunkFeedbackSignal]],
+) -> List[TextChunk]:
+    """Build chunks with adaptive target sizes."""
+    chunks: List[TextChunk] = []
+    current_start: Optional[int] = None
+    current_end: Optional[int] = None
+
+    low_info_weighted_sum = 0.0
+    noise_weighted_sum = 0.0
+    relevance_weighted_sum = 0.0
+    char_weight_sum = 0.0
+    chunk_feedback_weight = 0.0
+    target_chars = max_chars
+    target_scale = 1.0
+
+    def finalize_current() -> None:
+        nonlocal low_info_weighted_sum
+        nonlocal noise_weighted_sum
+        nonlocal relevance_weighted_sum
+        nonlocal char_weight_sum
+        nonlocal chunk_feedback_weight
+        nonlocal target_chars
+        nonlocal target_scale
+        if current_start is None or current_end is None:
+            return
+        avg_low_info = low_info_weighted_sum / max(1.0, char_weight_sum)
+        avg_noise = noise_weighted_sum / max(1.0, char_weight_sum)
+        avg_relevance = relevance_weighted_sum / max(1.0, char_weight_sum)
+        metadata = {
+            "adaptive_policy": "low_info_noise_proxy",
+            "avg_low_info_probability": avg_low_info,
+            "avg_noise_probability": avg_noise,
+            "avg_oracle_relevance_probability": avg_relevance,
+            "adaptive_target_chars": target_chars,
+            "adaptive_target_scale": target_scale,
+            "feedback_weight": _clamp(chunk_feedback_weight),
+        }
+        chunks.append(
+            TextChunk(
+                text=text[current_start:current_end],
+                start_char=current_start,
+                end_char=current_end,
+                chunk_index=len(chunks),
+                metadata=metadata,
+            )
+        )
+
+    for start, end in segments:
+        segment_text = text[start:end]
+        segment_chars = max(1, end - start)
+        proxy_low, proxy_noise = _segment_low_info_noise_proxy(segment_text)
+        fb_low, fb_noise, fb_weight, _fb_rel = _aggregate_feedback_for_span(start, end, feedback_signals)
+
+        if fb_weight > 0:
+            # As feedback coverage/confidence increases, rely more on learned
+            # relevance/noise signals and less on coarse lexical heuristics.
+            base_blend = _clamp(config.proxy_blend)
+            effective_blend = _clamp(base_blend * (1.0 - _clamp(fb_weight)))
+            seg_low = effective_blend * proxy_low + (1.0 - effective_blend) * fb_low
+            seg_noise = effective_blend * proxy_noise + (1.0 - effective_blend) * fb_noise
+            seg_rel = _clamp(1.0 - seg_low)
+        else:
+            seg_low = proxy_low
+            seg_noise = proxy_noise
+            seg_rel = _clamp(1.0 - seg_low)
+
+        if current_start is None:
+            current_start = start
+            current_end = end
+            low_info_weighted_sum = seg_low * segment_chars
+            noise_weighted_sum = seg_noise * segment_chars
+            relevance_weighted_sum = seg_rel * segment_chars
+            char_weight_sum = float(segment_chars)
+            chunk_feedback_weight = fb_weight
+            avg_low = low_info_weighted_sum / char_weight_sum
+            avg_noise = noise_weighted_sum / char_weight_sum
+            target_chars, target_scale = _adaptive_target_chars(max_chars, avg_low, avg_noise, config)
+            continue
+
+        candidate_low_sum = low_info_weighted_sum + seg_low * segment_chars
+        candidate_noise_sum = noise_weighted_sum + seg_noise * segment_chars
+        candidate_rel_sum = relevance_weighted_sum + seg_rel * segment_chars
+        candidate_char_sum = char_weight_sum + segment_chars
+        avg_low = candidate_low_sum / candidate_char_sum
+        avg_noise = candidate_noise_sum / candidate_char_sum
+        candidate_target_chars, candidate_target_scale = _adaptive_target_chars(
+            max_chars, avg_low, avg_noise, config
+        )
+        candidate_span = end - current_start
+
+        if candidate_span > candidate_target_chars and current_end is not None:
+            finalize_current()
+            current_start = start
+            current_end = end
+            low_info_weighted_sum = seg_low * segment_chars
+            noise_weighted_sum = seg_noise * segment_chars
+            relevance_weighted_sum = seg_rel * segment_chars
+            char_weight_sum = float(segment_chars)
+            chunk_feedback_weight = fb_weight
+            avg_low = low_info_weighted_sum / char_weight_sum
+            avg_noise = noise_weighted_sum / char_weight_sum
+            target_chars, target_scale = _adaptive_target_chars(max_chars, avg_low, avg_noise, config)
+        else:
+            current_end = end
+            low_info_weighted_sum = candidate_low_sum
+            noise_weighted_sum = candidate_noise_sum
+            relevance_weighted_sum = candidate_rel_sum
+            char_weight_sum = candidate_char_sum
+            chunk_feedback_weight = _clamp((chunk_feedback_weight + fb_weight) / 2.0)
+            target_chars = candidate_target_chars
+            target_scale = candidate_target_scale
+
+    finalize_current()
     return chunks
 
 
@@ -270,4 +940,3 @@ def chunk_for_ops(
 # =============================================================================
 DocumentChunker = Chunker
 ParagraphChunker = Chunker  # Legacy name, Chunker handles paragraphs
-

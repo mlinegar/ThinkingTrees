@@ -1,0 +1,97 @@
+"""
+Manifesto RILE task plugin registration.
+
+Registers `manifesto_rile` so the training pipeline can target CMP RILE
+scoring directly without relying on document-analysis defaults.
+"""
+
+from typing import Optional
+
+from src.tasks.prompting import (
+    PromptBuilders,
+    default_merge_prompt,
+    default_summarize_prompt,
+)
+
+from .manifesto import (
+    RILE_SCALE,
+    RILE_PRESERVATION_RUBRIC,
+    RILE_TASK_CONTEXT,
+    RILEScorer,
+    GenericSummarizer,
+    MergeSummarizer,
+    create_rile_oracle,
+)
+from .registry import register_task
+from .scoring import ScoringTask
+
+
+def _build_score_prompt(summary: str, task_context: str) -> list[dict[str, str]]:
+    """Prompt the model for a raw CMP RILE score in [-100, +100]."""
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert CMP manifesto coder. "
+                "Return exactly one numeric RILE score between -100 and +100 "
+                "(format examples, do not copy: -12, 0, 37.5)."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"{task_context}\n\n"
+                f"SUMMARY:\n{summary}\n\n"
+                "Output only the numeric RILE score in [-100, +100] (no labels like 'Score:', no extra text, no code fences)."
+            ),
+        },
+    ]
+
+
+@register_task(["manifesto_rile", "rile"])
+class ManifestoRILETask(ScoringTask):
+    """RILE-specific task plugin backed by the generic ScoringTask."""
+
+    def __init__(
+        self,
+        name: str = "manifesto_rile",
+        error_threshold_high: float = 0.15,
+        error_threshold_low: float = 0.05,
+        use_cot_summarizer: bool = False,
+        use_cot_scorer: bool = False,
+        use_cot_merge: Optional[bool] = None,
+        **_: Optional[object],
+    ):
+        if use_cot_merge is None:
+            use_cot_merge = use_cot_summarizer
+        self._use_cot_merge = use_cot_merge
+
+        prompt_builders = PromptBuilders(
+            summarize=default_summarize_prompt,
+            merge=default_merge_prompt,
+            score=_build_score_prompt,
+            audit=None,
+        )
+
+        scorer = create_rile_oracle(task_context=RILE_TASK_CONTEXT)
+
+        super().__init__(
+            name=name,
+            scale=RILE_SCALE,
+            id_field="doc_id",
+            label_field="reference_score",
+            text_field="text",
+            output_field_name="score",
+            error_threshold_high=error_threshold_high,
+            error_threshold_low=error_threshold_low,
+            rubric=RILE_PRESERVATION_RUBRIC.strip(),
+            task_context=RILE_TASK_CONTEXT.strip(),
+            prompt_builders=prompt_builders,
+            predictor_factory=lambda: RILEScorer(use_cot=use_cot_scorer),
+            summarizer_factory=lambda: GenericSummarizer(use_cot=use_cot_summarizer),
+            oracle_scorer_factory=scorer.value_extractor,
+        )
+
+    def create_merge_summarizer(self):
+        """Use a dedicated merge module instead of reusing the leaf summarizer."""
+        return MergeSummarizer(use_cot=self._use_cot_merge)

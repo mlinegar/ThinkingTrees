@@ -26,6 +26,7 @@ Example usage:
     training_source = task.create_training_source(results)
 """
 
+import inspect
 import logging
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
@@ -88,6 +89,7 @@ class ScoringTask(AbstractTask):
         id_field: str = "doc_id",
         label_field: str = "score",
         text_field: str = "text",
+        output_field_name: str = "score",
         error_threshold_high: float = 0.15,
         error_threshold_low: float = 0.05,
         rubric: str = "",
@@ -127,7 +129,7 @@ class ScoringTask(AbstractTask):
             name=name,
             output_type=OutputType.CONTINUOUS_SCORE,
             scale=scale,
-            output_field_name="score",
+            output_field_name=output_field_name,
             rubric_template=rubric,
             task_context_template=task_context,
         )
@@ -165,8 +167,29 @@ class ScoringTask(AbstractTask):
         return self._rubric
 
     def get_task_context(self) -> str:
-        """Return the configured task context."""
-        return self._task_context
+        """Return the configured task context (or a generic scale-aware fallback)."""
+        context = (self._task_context or "").strip()
+        if context:
+            return context
+
+        scale_desc = (self._scale.description or "").strip()
+        if scale_desc:
+            scale_desc = f" {scale_desc}"
+
+        output_field = (
+            self._config.output_field_name
+            if self._config and self._config.output_field_name
+            else "score"
+        )
+
+        return (
+            "Task: assign a numeric score to the provided text using the rubric/context.\n"
+            f"Scale: [{self._scale.min_value:g}, {self._scale.max_value:g}].{scale_desc}\n"
+            "Output requirements:\n"
+            f"- Return exactly one numeric value for `{output_field}`.\n"
+            "- Do not include explanations, extra fields, or alternate scales.\n"
+            "- If uncertain, choose the closest valid value on the defined scale."
+        )
 
     # =========================================================================
     # Prompt Builders
@@ -337,7 +360,28 @@ class ScoringTask(AbstractTask):
             Function(text) -> score
         """
         if self._oracle_scorer_factory:
-            return self._oracle_scorer_factory()
+            factory_or_fn = self._oracle_scorer_factory
+            try:
+                signature = inspect.signature(factory_or_fn)
+                required_positional = [
+                    p for p in signature.parameters.values()
+                    if p.kind in (
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    )
+                    and p.default is inspect.Parameter.empty
+                ]
+            except (TypeError, ValueError):
+                required_positional = []
+
+            # Support both conventions:
+            # 1) zero-arg factory returning scorer fn
+            # 2) scorer fn directly (text -> score)
+            if len(required_positional) == 0:
+                scorer_fn = factory_or_fn()
+                if callable(scorer_fn):
+                    return scorer_fn
+            return factory_or_fn
 
         # Try to create from predictor
         if self._predictor_factory:

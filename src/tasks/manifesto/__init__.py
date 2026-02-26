@@ -38,7 +38,7 @@ from .rubrics import (
 )
 
 # Oracle
-from .oracle import create_rile_scorer
+from .oracle import create_rile_oracle
 
 # Data loading
 from .data_loader import (
@@ -118,7 +118,7 @@ __all__ = [
     "RILE_TASK_CONTEXT",
 
     # Oracle
-    "create_rile_scorer",
+    "create_rile_oracle",
 
     # Data loading
     "ManifestoDataset",

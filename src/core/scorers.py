@@ -29,6 +29,8 @@ from typing import Any, Dict, Optional, Type
 
 import dspy
 
+from src.core.prompting import parse_numeric_score
+
 logger = logging.getLogger(__name__)
 
 
@@ -86,10 +88,14 @@ class ScaleScorer(dspy.Module):
         # Extract score, handling attribute access variations
         score = 0.0
         if hasattr(result, self.score_field):
-            try:
-                score = float(getattr(result, self.score_field))
-            except (ValueError, TypeError):
-                logger.warning(f"Could not convert {self.score_field} to float")
+            parsed = parse_numeric_score(
+                str(getattr(result, self.score_field)),
+                allow_llm_fallback=True,
+            )
+            if parsed is not None:
+                score = parsed
+            else:
+                logger.warning("Could not parse %s as numeric score", self.score_field)
 
         return {
             'score': score,

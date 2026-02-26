@@ -12,6 +12,7 @@ from src.training.preference.types import (
     PreferencePair,
     GenerationConfig,
     PreferenceDataset,
+    compute_propensity_diagnostics,
     get_deriver,
     list_derivers,
     register_deriver,
@@ -63,6 +64,7 @@ __all__ = [
     "PreferencePair",
     "GenerationConfig",
     "PreferenceDataset",
+    "compute_propensity_diagnostics",
     "get_deriver",
     "list_derivers",
     "register_deriver",
@@ -85,9 +87,21 @@ __all__ = [
     "GenRMJudge",
     "GenRMResult",
     "is_genrm_error",
+    # Human (interactive) judge
+    "HumanGenRMJudge",
     # GenRM Batching
     "AsyncBatchGenRMClient",
     "GenRMComparisonRequest",
     "GenRMBatchStats",
     "create_genrm_batch_client",
 ]
+
+
+def __getattr__(name: str):
+    # Lazy import to avoid importing the submodule during package import.
+    # This prevents runpy warnings when running `python -m src.training.preference.human_judge`.
+    if name == "HumanGenRMJudge":
+        from src.training.preference.human_judge import HumanGenRMJudge
+
+        return HumanGenRMJudge
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

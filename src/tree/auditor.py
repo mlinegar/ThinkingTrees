@@ -36,6 +36,10 @@ from src.core.data_models import Node, Tree, AuditStatus, AuditResult
 from src.core.scoring import OracleScore, ScoringOracle
 from src.core.ops_checks import CheckType, CheckConfig, aggregate_check_stats
 from src.config.concurrency import ConcurrencyConfig, get_concurrency_config
+from src.stats.sampling import (
+    pps_inclusion_probabilities,
+    systematic_pps_sample_indices,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -238,6 +242,7 @@ class SamplingStrategy(Enum):
     RANDOM = "random"              # Uniform random sampling
     LEVEL_WEIGHTED = "level_weighted"  # Prefer higher levels (more compression)
     PRIORITY = "priority"          # Use node priority scores
+    CONTENT_WEIGHTED = "content_weighted"  # VLM-derived info scores as PPS weights
 
 
 # Summarizer protocol and utilities imported from shared module
@@ -252,6 +257,11 @@ class AuditConfig:
     sample_budget: int = 10
     sampling_strategy: SamplingStrategy = SamplingStrategy.RANDOM
     sampling_probability: float = 1.0  # For probabilistic sampling
+
+    # Content-weighted sampling (VLM-derived information scores)
+    content_weights: Optional[Dict[str, float]] = None  # node_id → info score
+    content_weight_concentration: float = 2.0  # α exponent: weight_i = info_score_i^α
+    content_weight_propensity_floor: float = 0.01  # minimum inclusion probability
 
     # Thresholds
     discrepancy_threshold: float = 0.1
@@ -308,11 +318,21 @@ class AuditCheckResult:
     # Skipped checks (e.g., no summarizer configured)
     skipped: bool = False
     skip_reason: Optional[str] = None
+    # Inclusion probability under the sampling design that produced this check.
+    inclusion_probability: Optional[float] = None
+    sampling_design: Optional[str] = None
 
     @property
     def was_evaluated(self) -> bool:
         """True if the check was actually performed (not skipped)."""
         return not self.skipped
+
+
+@dataclass(frozen=True)
+class SampledUnit:
+    """Sampled unit with design-time inclusion probability."""
+    item: Any
+    inclusion_probability: float
 
 
 @dataclass
@@ -324,6 +344,7 @@ class AuditReport:
     nodes_passed: int
     nodes_failed: int
     failure_rate: float
+    source_doc_id: Optional[str] = None
     checks: List[AuditCheckResult] = field(default_factory=list)
     failed_node_ids: List[str] = field(default_factory=list)
 
@@ -338,6 +359,18 @@ class AuditReport:
     merge_samples: int = 0
     idempotence_samples: int = 0
     substitution_samples: int = 0
+
+    # Population and sampling metadata for IPW reconstruction
+    leaf_population: int = 0
+    merge_population: int = 0
+    idempotence_population: int = 0
+    substitution_population: int = 0
+    sampling_strategy: str = SamplingStrategy.RANDOM.value
+    sampling_probability: float = 1.0
+
+    # Design-time inclusion probabilities for ALL auditable nodes (not just sampled).
+    # Populated by CONTENT_WEIGHTED and LEVEL_WEIGHTED strategies for downstream use.
+    inclusion_probability_map: Dict[str, float] = field(default_factory=dict)
 
     @property
     def passed(self) -> bool:
@@ -377,6 +410,175 @@ class AuditReport:
             return 0.0
         lambda_weight = self.substitution_samples / total
         return lambda_weight * self.substitution_rate + (1 - lambda_weight) * self.merge_rate
+
+    def _inclusion_probability_for_check(self, check_type: str) -> Optional[float]:
+        """
+        Approximate inclusion probability for a check under the configured design.
+
+        Exact inclusion probabilities are available for uniform random sampling.
+        For level-weighted or custom policies, this method returns None.
+        """
+        if self.sampling_strategy != SamplingStrategy.RANDOM.value:
+            return None
+
+        probability_map = {
+            "sufficiency": (self.sufficiency_samples, self.leaf_population),
+            "merge_consistency": (self.merge_samples, self.merge_population),
+            "idempotence": (self.idempotence_samples, self.idempotence_population),
+            "substitution": (self.substitution_samples, self.substitution_population),
+        }
+        sampled, population = probability_map.get(check_type, (0, 0))
+        if population <= 0 or sampled <= 0:
+            return None
+        base = min(1.0, sampled / population)
+        return max(0.0, min(1.0, base * self.sampling_probability))
+
+    def to_tree_samples(self) -> List["TreeSample"]:
+        """
+        Convert audit checks to TreeSample records for TreeIPW estimators.
+
+        Skipped checks are excluded by construction.
+        """
+        from src.tree.ipw import NodeType, TreePropensity, TreeSample
+
+        check_to_type = {
+            "sufficiency": NodeType.LEAF,
+            "merge_consistency": NodeType.MERGE,
+            "idempotence": NodeType.RESUMMARY,
+            "substitution": NodeType.SUBSTITUTION,
+        }
+
+        samples: List[TreeSample] = []
+        doc_key = str(self.source_doc_id) if self.source_doc_id else self.tree_id
+        for check in self.checks:
+            if check.skipped:
+                continue
+            node_type = check_to_type.get(check.check_type)
+            if node_type is None:
+                continue
+            inclusion_prob = check.inclusion_probability
+            if inclusion_prob is None:
+                inclusion_prob = self._inclusion_probability_for_check(check.check_type) or 1.0
+            samples.append(
+                TreeSample(
+                    doc_id=doc_key,
+                    node_id=check.node_id,
+                    node_type=node_type,
+                    violation=0 if check.passed else 1,
+                    preference_loss=max(0.0, min(1.0, check.discrepancy_score)),
+                    propensity=TreePropensity(doc=1.0, node=inclusion_prob, label=1.0),
+                    metadata={"check_type": check.check_type},
+                )
+            )
+        return samples
+
+    def ipw_violation_rate(self, node_type: Optional[str] = None) -> float:
+        """IPW/Hajek violation rate estimate from audit checks."""
+        from src.tree.ipw import NodeType, ipw_violation_rate
+
+        samples = self.to_tree_samples()
+        parsed_type = None
+        if node_type is not None:
+            alias_map = {
+                "sufficiency": NodeType.LEAF,
+                "leaf": NodeType.LEAF,
+                "merge_consistency": NodeType.MERGE,
+                "merge": NodeType.MERGE,
+                "idempotence": NodeType.RESUMMARY,
+                "resummary": NodeType.RESUMMARY,
+                "substitution": NodeType.SUBSTITUTION,
+            }
+            parsed_type = alias_map.get(str(node_type).lower())
+            if parsed_type is None:
+                parsed_type = NodeType(node_type)
+        return ipw_violation_rate(samples, node_type=parsed_type)
+
+    def ipw_violation_empirical_bernstein_ci(
+        self,
+        delta: float = 0.05,
+        node_type: Optional[str] = None,
+    ) -> Tuple[float, float]:
+        """Empirical-Bernstein confidence interval for IPW violation rate."""
+        from src.tree.ipw import NodeType, ipw_violation_empirical_bernstein_ci
+
+        samples = self.to_tree_samples()
+        parsed_type = None
+        if node_type is not None:
+            alias_map = {
+                "sufficiency": NodeType.LEAF,
+                "leaf": NodeType.LEAF,
+                "merge_consistency": NodeType.MERGE,
+                "merge": NodeType.MERGE,
+                "idempotence": NodeType.RESUMMARY,
+                "resummary": NodeType.RESUMMARY,
+                "substitution": NodeType.SUBSTITUTION,
+            }
+            parsed_type = alias_map.get(str(node_type).lower())
+            if parsed_type is None:
+                parsed_type = NodeType(node_type)
+        return ipw_violation_empirical_bernstein_ci(samples, delta=delta, node_type=parsed_type)
+
+    def ipw_preference_loss(self, node_type: Optional[str] = None) -> float:
+        """IPW/Hajek preference-loss estimate from audit checks."""
+        from src.tree.ipw import NodeType, ipw_preference_loss
+
+        samples = self.to_tree_samples()
+        parsed_type = None
+        if node_type is not None:
+            alias_map = {
+                "sufficiency": NodeType.LEAF,
+                "leaf": NodeType.LEAF,
+                "merge_consistency": NodeType.MERGE,
+                "merge": NodeType.MERGE,
+                "idempotence": NodeType.RESUMMARY,
+                "resummary": NodeType.RESUMMARY,
+                "substitution": NodeType.SUBSTITUTION,
+            }
+            parsed_type = alias_map.get(str(node_type).lower())
+            if parsed_type is None:
+                parsed_type = NodeType(node_type)
+        return ipw_preference_loss(samples, node_type=parsed_type)
+
+    def ipw_preference_empirical_bernstein_ci(
+        self,
+        delta: float = 0.05,
+        node_type: Optional[str] = None,
+    ) -> Tuple[float, float]:
+        """Empirical-Bernstein confidence interval for IPW preference loss."""
+        from src.tree.ipw import NodeType, ipw_preference_empirical_bernstein_ci
+
+        samples = self.to_tree_samples()
+        parsed_type = None
+        if node_type is not None:
+            alias_map = {
+                "sufficiency": NodeType.LEAF,
+                "leaf": NodeType.LEAF,
+                "merge_consistency": NodeType.MERGE,
+                "merge": NodeType.MERGE,
+                "idempotence": NodeType.RESUMMARY,
+                "resummary": NodeType.RESUMMARY,
+                "substitution": NodeType.SUBSTITUTION,
+            }
+            parsed_type = alias_map.get(str(node_type).lower())
+            if parsed_type is None:
+                parsed_type = NodeType(node_type)
+        return ipw_preference_empirical_bernstein_ci(samples, delta=delta, node_type=parsed_type)
+
+    def ipw_union_bound(
+        self,
+        num_leaves: int,
+        num_rounds: int = 1,
+        num_merges: Optional[int] = None,
+    ) -> float:
+        """Union bound computed from IPW-estimated component rates."""
+        from src.tree.ipw import ipw_union_bound
+
+        return ipw_union_bound(
+            self.to_tree_samples(),
+            num_leaves=num_leaves,
+            num_merges=num_merges,
+            num_rounds=num_rounds,
+        )
 
     def confidence_upper_bound(self, rate_type: str, delta: float = 0.05) -> float:
         """
@@ -856,9 +1058,11 @@ class Auditor:
         self.config = config or AuditConfig()
         self.review_queue = review_queue
         self.summarizer = summarizer
+        self._last_inclusion_prob_map: Dict[str, float] = {}
 
-        if self.config.random_seed is not None:
-            random.seed(self.config.random_seed)
+        # Use a per-auditor RNG to avoid clobbering the global random state.
+        # This is important when auditing many trees in parallel.
+        self._rng = random.Random(self.config.random_seed) if self.config.random_seed is not None else random.Random()
 
     def _call_oracle(self, input_a: str, input_b: str, rubric: str) -> Tuple[bool, float, str]:
         """
@@ -897,12 +1101,21 @@ class Auditor:
         Returns:
             AuditReport with results
         """
+        # Reset per-audit inclusion probability map for this tree
+        self._last_inclusion_prob_map = {}
+
         tree_id = tree.root.id if tree.root else "unknown"
         rubric = tree.rubric
+        source_doc_id = None
+        if isinstance(tree.metadata, dict):
+            raw_doc_id = tree.metadata.get("doc_id")
+            if raw_doc_id is not None:
+                source_doc_id = str(raw_doc_id)
 
         all_nodes = list(tree.traverse_preorder())
         leaves = [n for n in all_nodes if n.is_leaf]
         internal = [n for n in all_nodes if not n.is_leaf]
+        substitution_population = max(0, len(leaves) - 1)
 
         checks = []
         audited_ids: Set[str] = set()
@@ -956,13 +1169,18 @@ class Auditor:
         # Idempotence check (C2) - Re-summarize summaries and check oracle stability - concurrent
         if self.config.audit_idempotence and internal and self.summarizer is not None:
             idem_samples = self._sample_nodes(internal, self.config.idempotence_budget)
+            gated_idem_samples = self._apply_probability_gate(idem_samples)
 
-            def check_idempotence(node):
-                return self._check_idempotence(node, rubric)
+            def check_idempotence(sampled: SampledUnit):
+                node = sampled.item
+                result = self._check_idempotence(node, rubric)
+                result.inclusion_probability = sampled.inclusion_probability
+                result.sampling_design = self.config.sampling_strategy.value
+                return result
 
             audit_workers = self.config.get_concurrency().audit_max_workers
             with ThreadPoolExecutor(max_workers=audit_workers) as executor:
-                idem_results = list(executor.map(check_idempotence, idem_samples))
+                idem_results = list(executor.map(check_idempotence, gated_idem_samples))
 
             for result in idem_results:
                 checks.append(result)
@@ -986,18 +1204,20 @@ class Auditor:
             # Get adjacent leaf pairs
             adjacent_pairs = self._get_adjacent_leaf_pairs(leaves)
             if adjacent_pairs:
-                sub_budget = min(self.config.substitution_budget, len(adjacent_pairs))
-                sampled_pairs = random.sample(adjacent_pairs, sub_budget)
+                sampled_pairs = self._sample_adjacent_pairs(adjacent_pairs, self.config.substitution_budget)
+                gated_pairs = self._apply_probability_gate(sampled_pairs)
 
-                def check_substitution(pair):
-                    left_node, right_node = pair
+                def check_substitution(sampled: SampledUnit):
+                    left_node, right_node = sampled.item
                     return self._check_substitution(left_node, right_node, rubric)
 
                 sub_workers = self.config.get_concurrency().audit_max_workers
                 with ThreadPoolExecutor(max_workers=sub_workers) as executor:
-                    sub_results = list(executor.map(check_substitution, sampled_pairs))
+                    sub_results = list(executor.map(check_substitution, gated_pairs))
 
-                for result in sub_results:
+                for sampled, result in zip(gated_pairs, sub_results):
+                    result.inclusion_probability = sampled.inclusion_probability
+                    result.sampling_design = "adjacent_uniform"
                     checks.append(result)
                     substitution_samples += 1
                     if not result.passed:
@@ -1018,6 +1238,7 @@ class Auditor:
 
         return AuditReport(
             tree_id=tree_id,
+            source_doc_id=source_doc_id,
             total_nodes=len(all_nodes),
             nodes_audited=len(checks),
             nodes_passed=passed,
@@ -1032,12 +1253,19 @@ class Auditor:
             sufficiency_samples=sufficiency_samples,
             merge_samples=merge_samples,
             idempotence_samples=idempotence_samples,
-            substitution_samples=substitution_samples
+            substitution_samples=substitution_samples,
+            leaf_population=len(leaves),
+            merge_population=len(internal),
+            idempotence_population=len(internal),
+            substitution_population=substitution_population,
+            sampling_strategy=self.config.sampling_strategy.value,
+            sampling_probability=self.config.sampling_probability,
+            inclusion_probability_map=dict(self._last_inclusion_prob_map),
         )
 
     def _batch_audit_nodes(
         self,
-        nodes: List[Node],
+        sampled_nodes: List[SampledUnit],
         check_fn: Callable,
         rubric: str,
         max_workers: Optional[int] = None
@@ -1046,7 +1274,7 @@ class Auditor:
         Run audit checks on nodes concurrently for better GPU utilization.
 
         Args:
-            nodes: Nodes to audit
+            sampled_nodes: Sampled nodes with inclusion probabilities
             check_fn: Check function (e.g., _check_sufficiency or _check_merge_consistency)
             rubric: Rubric for the oracle
             max_workers: Maximum concurrent workers (uses config default if None)
@@ -1055,93 +1283,199 @@ class Auditor:
             List of (result, full_a, full_b, node) tuples for nodes that were audited
         """
         results = []
+        gated_samples = self._apply_probability_gate(sampled_nodes)
 
-        def check_node(node):
-            if self._should_audit(node):
-                result, full_a, full_b = check_fn(node, rubric)
-                return (result, full_a, full_b, node)
-            return None
+        def check_node(sampled: SampledUnit):
+            node = sampled.item
+            result, full_a, full_b = check_fn(node, rubric)
+            result.inclusion_probability = sampled.inclusion_probability
+            result.sampling_design = self.config.sampling_strategy.value
+            return (result, full_a, full_b, node)
 
         # Use concurrency config if max_workers not explicitly set
         if max_workers is None:
             max_workers = self.config.get_concurrency().audit_max_workers
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(check_node, node) for node in nodes]
+            futures = [executor.submit(check_node, sampled) for sampled in gated_samples]
             for future in as_completed(futures):
                 result = future.result()
-                if result is not None:
-                    results.append(result)
+                results.append(result)
 
         return results
 
-    def _sample_nodes(self, nodes: List[Node], budget: int) -> List[Node]:
+    def _sample_nodes(self, nodes: List[Node], budget: int) -> List[SampledUnit]:
         """
         Sample nodes according to the configured strategy.
+
+        As a side effect, populates ``self._last_inclusion_prob_map`` with
+        design-time inclusion probabilities for ALL nodes (not just sampled).
+        This is used to build ``AuditReport.inclusion_probability_map``.
 
         Args:
             nodes: Nodes to sample from
             budget: Maximum nodes to sample
 
         Returns:
-            List of sampled nodes
+            List of sampled nodes with pre-gate inclusion probabilities.
         """
-        if not nodes:
+        if not nodes or budget <= 0:
             return []
 
         budget = min(budget, len(nodes))
 
         if self.config.sampling_strategy == SamplingStrategy.RANDOM:
-            return random.sample(nodes, budget)
+            sampled = self._rng.sample(nodes, budget)
+            inclusion_prob = (budget / len(nodes)) if nodes else 0.0
+            # Store full map for all nodes
+            self._last_inclusion_prob_map.update(
+                {n.id: inclusion_prob for n in nodes}
+            )
+            return [
+                SampledUnit(item=node, inclusion_probability=inclusion_prob)
+                for node in sampled
+            ]
 
         elif self.config.sampling_strategy == SamplingStrategy.LEVEL_WEIGHTED:
-            # Weight nodes by level (higher levels get more weight)
-            max_level = max(n.level for n in nodes)
-            weights = [(n.level + 1) / (max_level + 1) for n in nodes]
+            weights = self._compute_level_weights(nodes)
+            inclusion_probs = self._pps_inclusion_probabilities(weights, budget)
+            # Store full map for all nodes
+            self._last_inclusion_prob_map.update(
+                {nodes[i].id: inclusion_probs[i] for i in range(len(nodes))}
+            )
+            sampled_indices = self._systematic_pps_indices(inclusion_probs, budget)
+            return [
+                SampledUnit(
+                    item=nodes[index],
+                    inclusion_probability=inclusion_probs[index],
+                )
+                for index in sampled_indices
+            ]
 
-            # Normalize weights
-            total = sum(weights)
-            weights = [w / total for w in weights]
-
-            # Sample without replacement using weights
-            sampled = []
-            available = list(zip(nodes, weights))
-
-            for _ in range(budget):
-                if not available:
-                    break
-                nodes_only = [n for n, _ in available]
-                weights_only = [w for _, w in available]
-
-                # Renormalize
-                total = sum(weights_only)
-                if total == 0:
-                    break
-                weights_only = [w / total for w in weights_only]
-
-                chosen_idx = random.choices(range(len(nodes_only)), weights=weights_only, k=1)[0]
-                sampled.append(nodes_only[chosen_idx])
-                available.pop(chosen_idx)
-
-            return sampled
+        elif self.config.sampling_strategy == SamplingStrategy.CONTENT_WEIGHTED:
+            weights = self._compute_content_weights(nodes)
+            inclusion_probs = self._pps_inclusion_probabilities(weights, budget)
+            # Apply propensity floor — ensures no node has zero draw probability.
+            floor = max(1e-6, self.config.content_weight_propensity_floor)
+            inclusion_probs = [max(floor, p) for p in inclusion_probs]
+            # Store full map for all nodes
+            self._last_inclusion_prob_map.update(
+                {nodes[i].id: inclusion_probs[i] for i in range(len(nodes))}
+            )
+            sampled_indices = self._systematic_pps_indices(inclusion_probs, budget)
+            return [
+                SampledUnit(
+                    item=nodes[index],
+                    inclusion_probability=inclusion_probs[index],
+                )
+                for index in sampled_indices
+            ]
 
         else:
             # Default to random
-            return random.sample(nodes, budget)
+            sampled = self._rng.sample(nodes, budget)
+            inclusion_prob = (budget / len(nodes)) if nodes else 0.0
+            self._last_inclusion_prob_map.update(
+                {n.id: inclusion_prob for n in nodes}
+            )
+            return [
+                SampledUnit(item=node, inclusion_probability=inclusion_prob)
+                for node in sampled
+            ]
 
-    def _should_audit(self, node: Node) -> bool:
+    def _apply_probability_gate(self, sampled_units: List[SampledUnit]) -> List[SampledUnit]:
         """
-        Determine if a node should be audited based on probability.
+        Apply global audit probability as an independent second-stage gate.
 
-        Args:
-            node: Node to consider
-
-        Returns:
-            True if should audit
+        The returned inclusion probabilities are first-stage inclusion
+        probabilities multiplied by `sampling_probability`.
         """
-        if self.config.sampling_probability >= 1.0:
-            return True
-        return random.random() < self.config.sampling_probability
+        if not sampled_units:
+            return []
+
+        gate_prob = max(0.0, min(1.0, float(self.config.sampling_probability)))
+        if gate_prob >= 1.0:
+            return sampled_units
+
+        gated: List[SampledUnit] = []
+        for sampled in sampled_units:
+            if self._rng.random() < gate_prob:
+                gated.append(
+                    SampledUnit(
+                        item=sampled.item,
+                        inclusion_probability=min(1.0, sampled.inclusion_probability * gate_prob),
+                    )
+                )
+        return gated
+
+    def _sample_adjacent_pairs(
+        self,
+        adjacent_pairs: List[Tuple[Node, Node]],
+        budget: int,
+    ) -> List[SampledUnit]:
+        """Uniform sample of adjacent pairs with known first-stage inclusion probabilities."""
+        if not adjacent_pairs or budget <= 0:
+            return []
+        sample_size = min(budget, len(adjacent_pairs))
+        sampled = self._rng.sample(adjacent_pairs, sample_size)
+        inclusion_prob = (sample_size / len(adjacent_pairs)) if adjacent_pairs else 0.0
+        return [
+            SampledUnit(item=pair, inclusion_probability=inclusion_prob)
+            for pair in sampled
+        ]
+
+    @staticmethod
+    def _compute_level_weights(nodes: List[Node]) -> List[float]:
+        """Priority weights that upweight higher-level (more compressed) nodes."""
+        if not nodes:
+            return []
+        max_level = max(node.level for node in nodes)
+        raw = [(node.level + 1) / (max_level + 1) for node in nodes]
+        total = sum(raw)
+        if total <= 0:
+            return [1.0 / len(nodes)] * len(nodes)
+        return [weight / total for weight in raw]
+
+    def _compute_content_weights(self, nodes: List[Node]) -> List[float]:
+        """
+        Compute PPS weights from VLM-derived information scores.
+
+        Uses ``content_weight_concentration`` (α) as power-law exponent::
+
+            weight_i = info_score_i ^ α
+
+        Higher α concentrates budget on high-info segments.
+        α=1 is proportional to info_score (linear).
+        α=2 heavily favors high-info (quadratic).
+        α=0 degenerates to uniform.
+        """
+        if not nodes:
+            return []
+
+        alpha = max(0.0, self.config.content_weight_concentration)
+        raw: List[float] = []
+        for node in nodes:
+            if self.config.content_weights:
+                score = self.config.content_weights.get(node.id, 0.5)
+            else:
+                score = 0.5
+            # Power-law transform: concentrate on high-info.
+            raw.append(max(1e-8, float(score) ** alpha))
+
+        total = sum(raw)
+        if total <= 0:
+            return [1.0 / len(nodes)] * len(nodes)
+        return [w / total for w in raw]
+
+    @staticmethod
+    def _pps_inclusion_probabilities(weights: List[float], sample_size: int) -> List[float]:
+        """Fixed-size PPS first-order inclusion probabilities."""
+        return pps_inclusion_probabilities(weights, sample_size)
+
+    @staticmethod
+    def _systematic_pps_indices(inclusion_probs: List[float], sample_size: int) -> List[int]:
+        """Sample fixed-size without replacement using systematic PPS."""
+        return systematic_pps_sample_indices(inclusion_probs, sample_size)
 
     def _check_sufficiency(
         self, node: Node, rubric: str
@@ -1574,8 +1908,15 @@ def get_audit_statistics(report: AuditReport) -> Dict[str, Any]:
     Returns:
         Dictionary of audit statistics
     """
+    inclusion_probs = [
+        float(check.inclusion_probability)
+        for check in report.checks
+        if check.inclusion_probability is not None
+    ]
+
     return {
         "tree_id": report.tree_id,
+        "source_doc_id": report.source_doc_id,
         "total_nodes": report.total_nodes,
         "nodes_audited": report.nodes_audited,
         "overall_passed": report.passed,
@@ -1598,5 +1939,113 @@ def get_audit_statistics(report: AuditReport) -> Dict[str, Any]:
             "merge": report.merge_violations,
             "idempotence": report.idempotence_violations,
             "substitution": report.substitution_violations,
+        },
+        "ipw": {
+            "violation_rate": report.ipw_violation_rate(),
+            "violation_ci_95": report.ipw_violation_empirical_bernstein_ci(delta=0.05),
+            "preference_loss": report.ipw_preference_loss(),
+            "preference_ci_95": report.ipw_preference_empirical_bernstein_ci(delta=0.05),
+            "sample_count": len(report.to_tree_samples()),
+            "inclusion_probability_summary": {
+                "count": len(inclusion_probs),
+                "mean": (sum(inclusion_probs) / len(inclusion_probs)) if inclusion_probs else 0.0,
+                "min": min(inclusion_probs) if inclusion_probs else 0.0,
+                "max": max(inclusion_probs) if inclusion_probs else 0.0,
+            },
+        },
+    }
+
+
+def get_ipw_statistics(
+    report: AuditReport,
+    num_leaves: int,
+    num_merges: Optional[int] = None,
+    num_rounds: int = 1,
+    delta: float = 0.05,
+    clip_max_weight: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Get TreeIPW statistics derived from an audit report.
+
+    This provides runtime objects that align with the Lean TreeIPW layer:
+    weighted violation rates, empirical-Bernstein confidence intervals,
+    union bounds, and effective sample diagnostics.
+    """
+    from src.tree.ipw import (
+        NodeType,
+        analyze_tree_samples,
+        clipped_hajek_diagnostics,
+        hajek_ht_comparison,
+    )
+
+    samples = report.to_tree_samples()
+    analysis = analyze_tree_samples(
+        samples=samples,
+        num_leaves=num_leaves,
+        num_merges=num_merges,
+        num_rounds=num_rounds,
+    )
+    ht_vs_hajek = {
+        "overall_violation": hajek_ht_comparison(
+            samples,
+            lambda sample: float(sample.violation),
+            population_size=float(len(samples)) if samples else None,
+        ),
+        "by_check_type": {},
+    }
+    by_type = [
+        ("sufficiency", NodeType.LEAF, report.leaf_population),
+        ("merge_consistency", NodeType.MERGE, report.merge_population),
+        ("idempotence", NodeType.RESUMMARY, report.idempotence_population),
+        ("substitution", NodeType.SUBSTITUTION, report.substitution_population),
+    ]
+    for check_name, node_type, population in by_type:
+        node_samples = [sample for sample in samples if sample.node_type == node_type]
+        if not node_samples:
+            continue
+        comparison = hajek_ht_comparison(
+            node_samples,
+            lambda sample: float(sample.violation),
+            population_size=float(population) if population > 0 else None,
+        )
+        comparison["population_size"] = float(population)
+        ht_vs_hajek["by_check_type"][check_name] = comparison
+
+    clipping = None
+    if clip_max_weight is not None and clip_max_weight > 0:
+        clipping = {
+            "max_weight": float(clip_max_weight),
+            "violation": clipped_hajek_diagnostics(
+                samples,
+                lambda sample: float(sample.violation),
+                clip_max_weight,
+                value_min=0.0,
+                value_max=1.0,
+            ),
+            "preference_loss": clipped_hajek_diagnostics(
+                samples,
+                lambda sample: float(sample.preference_loss),
+                clip_max_weight,
+                value_min=0.0,
+                value_max=1.0,
+            ),
         }
+
+    return {
+        "tree_id": report.tree_id,
+        "source_doc_id": report.source_doc_id,
+        "n_samples": analysis.n_samples,
+        "n_docs": analysis.n_docs,
+        "violation_rate": analysis.violation_rate,
+        "violation_ci": report.ipw_violation_empirical_bernstein_ci(delta=delta),
+        "preference_loss": analysis.preference_loss,
+        "preference_ci": report.ipw_preference_empirical_bernstein_ci(delta=delta),
+        "union_bound": analysis.union_bound,
+        "effective_sample_size": analysis.effective_sample_size,
+        "effective_sample_ratio": analysis.effective_sample_ratio,
+        "max_weight": analysis.max_weight,
+        "has_adequate_neff": analysis.has_adequate_neff,
+        "has_adequate_weight_bound": analysis.has_adequate_weight_bound,
+        "ht_vs_hajek": ht_vs_hajek,
+        "clipping": clipping,
     }

@@ -348,11 +348,11 @@ class AdaptiveLabeler:
     Example:
         labeler = AdaptiveLabeler(high_percent=20, low_percent=5)
 
-        # For RILE scale (-100 to +100, range=200):
+        # For a wide scale (range=200):
         # - high_threshold = 200 * 0.20 = 40 points
         # - low_threshold = 200 * 0.05 = 10 points
 
-        # For sentiment scale (-1 to +1, range=2):
+        # For a narrow scale (range=2):
         # - high_threshold = 2 * 0.20 = 0.4 points
         # - low_threshold = 2 * 0.05 = 0.1 points
     """

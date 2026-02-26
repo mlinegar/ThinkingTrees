@@ -15,6 +15,7 @@ from src.tasks.registry import (
 
 # Import task modules to trigger registration
 from src.tasks import document_analysis
+from src.tasks import manifesto_task
 from src.tasks import scoring
 
 # Helper functions using registry

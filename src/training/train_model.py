@@ -97,6 +97,13 @@ def train_ops_comparison(args) -> None:
     if len(dataset) == 0:
         raise ValueError("No preference pairs available after filtering")
 
+    weighted_dataset = dataset
+    if hasattr(dataset, "resample_by_propensity"):
+        weighted_dataset = dataset.resample_by_propensity(
+            target_size=len(dataset),
+            seed=args.seed,
+        )
+
     logger.info(f"Training on {len(dataset)} pairs (law_type={args.law_type})")
 
     # Configure LM
@@ -117,7 +124,7 @@ def train_ops_comparison(args) -> None:
     configure_dspy(lm=lm)
 
     # Split and convert to examples
-    train_set, val_set = dataset.split(train_ratio=args.train_ratio, shuffle=True)
+    train_set, val_set = weighted_dataset.split(train_ratio=args.train_ratio, shuffle=True)
     train_examples = train_set.to_dspy_examples()
     val_examples = val_set.to_dspy_examples()
 
@@ -152,6 +159,7 @@ def train_ops_comparison(args) -> None:
         "type": "ops-comparison",
         "model_path": str(model_path),
         "num_pairs": len(dataset),
+        "effective_pairs_after_resample": len(weighted_dataset),
         "law_type": args.law_type,
         "train_examples": len(train_examples),
         "val_examples": len(val_examples),

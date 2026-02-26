@@ -12,6 +12,7 @@ import yaml
 # Default server URLs
 DEFAULT_TASK_MODEL_URL = "http://localhost:8000/v1"
 DEFAULT_GENRM_URL = "http://localhost:8001/v1"
+DEFAULT_EMBEDDING_URL = "http://localhost:8003/v1"
 
 
 def default_settings_path() -> Path:
@@ -102,6 +103,29 @@ def get_genrm_url(settings: Optional[Dict[str, Any]] = None) -> str:
     return DEFAULT_GENRM_URL
 
 
+def get_embedding_url(settings: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Get the embedding-model server URL.
+
+    Priority:
+    1. EMBEDDING_URL environment variable
+    2. settings.yaml servers.embedding_url
+    3. Default: http://localhost:8003/v1
+    """
+    env_url = os.environ.get("EMBEDDING_URL")
+    if env_url:
+        return env_url.rstrip("/")
+
+    if settings is None:
+        settings = load_settings()
+
+    servers = settings.get("servers", {})
+    if servers.get("embedding_url"):
+        return servers["embedding_url"].rstrip("/")
+
+    return DEFAULT_EMBEDDING_URL
+
+
 def get_server_urls(settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
     """
     Get all server URLs as a dict.
@@ -115,6 +139,7 @@ def get_server_urls(settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]
     return {
         "task_model_url": get_task_model_url(settings),
         "genrm_url": get_genrm_url(settings),
+        "embedding_url": get_embedding_url(settings),
     }
 
 

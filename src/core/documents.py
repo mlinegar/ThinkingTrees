@@ -5,15 +5,25 @@ These models are dataset-agnostic and keep document metadata in a structured for
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
 class DocumentSample:
-    """A single document sample."""
+    """
+    A single dataset-agnostic sample.
+
+    `text` remains the common path for text-only pipelines.
+    Additional optional fields (`pages`, `items`, `segments`) keep axis-window
+    adapters modality-ready without forcing a new sample type.
+    """
     doc_id: str
-    text: str
+    text: str = ""
     reference_score: Optional[float] = None
+    modality: str = "text"
+    pages: Optional[List[str]] = None
+    items: Optional[List[Any]] = None
+    segments: Optional[List[Any]] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def get(self, key: str, default: Any = None) -> Any:

@@ -61,6 +61,7 @@ from src.core.progress import (
 from src.config.concurrency import ConcurrencyConfig, get_concurrency_config
 from src.config import get_task_model_url, get_genrm_url
 from src.core.documents import DocumentSample, DocumentResult
+from src.core.engram_memory import EngramMemoryConfig
 from src.tasks.prompting import PromptBuilders, default_merge_prompt, default_summarize_prompt
 from src.preprocessing.chunker import chunk_for_ops
 
@@ -111,6 +112,51 @@ def _extract_metadata(sample: Any) -> Dict[str, Any]:
     return metadata
 
 
+def build_tree_with_dspy(
+    text: str,
+    doc_id: str,
+    leaf_summarizer: "LeafSummarizer",
+    merge_summarizer: "MergeSummarizer",
+    config: "BatchedPipelineConfig",
+) -> Tree:
+    """
+    Build a tree synchronously using DSPy modules.
+
+    This helper keeps `process_with_dspy()` functional for training workflows
+    that inject DSPy modules into the batched pipeline.
+    """
+    # Use current DSPy LM defaults to avoid silently falling back to 0.7
+    # and/or an overly-large max_tokens budget.
+    dspy_temperature = 0.7
+    dspy_max_tokens = None
+    if DSPY_AVAILABLE and dspy is not None:
+        try:
+            current_lm = dspy.settings.lm
+            if current_lm is not None:
+                if hasattr(current_lm, "temperature"):
+                    dspy_temperature = float(getattr(current_lm, "temperature") or dspy_temperature)
+                elif hasattr(current_lm, "kwargs"):
+                    dspy_temperature = float(getattr(current_lm, "kwargs", {}).get("temperature", dspy_temperature))
+                if hasattr(current_lm, "max_tokens"):
+                    dspy_max_tokens = getattr(current_lm, "max_tokens", None)
+        except Exception:
+            pass
+
+    strategy = DSPyStrategy(
+        leaf_module=leaf_summarizer,
+        merge_module=merge_summarizer,
+        default_temperature=float(dspy_temperature),
+        max_tokens=None if dspy_max_tokens is None else int(dspy_max_tokens),
+    )
+    build_config = BuildConfig(max_chunk_chars=config.max_chunk_chars)
+    builder = AsyncTreeBuilder(strategy=strategy, config=build_config)
+    result = builder.build_sync(text, rubric=config.rubric)
+
+    # Preserve doc id in tree metadata for downstream consumers.
+    result.tree.metadata.setdefault("doc_id", doc_id)
+    return result.tree
+
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -123,6 +169,9 @@ class BatchedPipelineConfig:
     # Defaults are loaded from config/settings.yaml or environment variables
     task_model_url: str = dataclass_field(default_factory=get_task_model_url)
     task_model_urls: Optional[List[str]] = None  # Multiple servers for load balancing
+    # Optional callback(base_url)->bool used for automatic server recovery.
+    task_model_recovery_callback: Optional[Callable[[str], bool]] = None
+    task_model_recovery_cooldown_seconds: float = 120.0
 
     # Batching settings
     max_concurrent_requests: int = 200    # Max concurrent HTTP requests
@@ -150,6 +199,8 @@ class BatchedPipelineConfig:
     task_context: str = ""
     prompt_builders: Optional[PromptBuilders] = None
     score_parser: Optional[Callable[[str], Optional[float]]] = None
+    # Optional Engram-style static memory injection into summarize/merge prompts.
+    engram_memory: EngramMemoryConfig = dataclass_field(default_factory=EngramMemoryConfig)
 
     def __post_init__(self):
         if self.prompt_builders is None:
@@ -176,6 +227,28 @@ class BatchedPipelineConfig:
                     score=None,
                     audit=None,
                 )
+
+        # Wrap prompt builders with Engram-style static memory injection (optional).
+        if getattr(self.engram_memory, "enabled", False) and self.prompt_builders is not None:
+            try:
+                from src.core.engram_prompting import (
+                    wrap_merge_prompt_with_engram_memory,
+                    wrap_summarize_prompt_with_engram_memory,
+                )
+
+                self.prompt_builders = PromptBuilders(
+                    summarize=wrap_summarize_prompt_with_engram_memory(
+                        self.prompt_builders.summarize, self.engram_memory
+                    ),
+                    merge=wrap_merge_prompt_with_engram_memory(
+                        self.prompt_builders.merge, self.engram_memory
+                    ),
+                    score=self.prompt_builders.score,
+                    audit=self.prompt_builders.audit,
+                )
+            except Exception:
+                # Fail open: memory injection is optional and should not block runs.
+                pass
         if self.use_levelwise_batching is not None:
             self.use_global_batching = self.use_levelwise_batching
 
@@ -405,7 +478,8 @@ class BatchedDocPipeline:
                 max_chunk_chars=self.config.max_chunk_chars,
             )
             builder = AsyncTreeBuilder(strategy=strategy, config=build_config)
-            build_result = await builder.build_from_text(sample.text, self.config.rubric)
+            # TreeBuilder exposes build(text, rubric); build_from_text was removed.
+            build_result = await builder.build(sample.text, self.config.rubric)
 
             result.tree_height = build_result.tree.height
             result.tree_leaves = build_result.tree.leaf_count
@@ -414,6 +488,22 @@ class BatchedDocPipeline:
             result.compression_ratio = (
                 result.original_length / max(result.summary_length, 1)
             )
+            # Keep leaf spans/summaries for downstream diagnostics (e.g., leaf-score export).
+            leaves = build_result.tree.leaves
+            result.chunks = [leaf_node.raw_text_span or "" for leaf_node in leaves]
+            result.leaf_summaries = [leaf_node.summary or "" for leaf_node in leaves]
+
+            # Preserve common tree metadata for parity with the global batching path.
+            tree_meta = getattr(build_result.tree, "metadata", None)
+            if isinstance(tree_meta, dict):
+                if tree_meta.get("tree_plan"):
+                    result.metadata["tree_plan"] = tree_meta["tree_plan"]
+                if tree_meta.get("chunk_boundaries"):
+                    result.metadata["chunk_boundaries"] = tree_meta["chunk_boundaries"]
+                if tree_meta.get("chunking"):
+                    result.metadata["chunking"] = tree_meta["chunking"]
+            if getattr(build_result, "content_weights", None) is not None:
+                result.metadata["content_weights"] = build_result.content_weights
 
         except Exception as e:
             logger.error(f"Error processing {doc_id} with strategy: {e}")
@@ -609,6 +699,8 @@ class BatchedDocPipeline:
                 max_concurrent_per_server=self.config.max_concurrent_requests,
                 batch_size=self.config.batch_size,
                 batch_timeout=self.config.batch_timeout,
+                recover_base_url_callback=self.config.task_model_recovery_callback,
+                recovery_cooldown_seconds=self.config.task_model_recovery_cooldown_seconds,
             )
         else:
             client = AsyncBatchLLMClient(
@@ -616,6 +708,8 @@ class BatchedDocPipeline:
                 max_concurrent=self.config.max_concurrent_requests,
                 batch_size=self.config.batch_size,
                 batch_timeout=self.config.batch_timeout,
+                recover_base_url_callback=self.config.task_model_recovery_callback,
+                recovery_cooldown_seconds=self.config.task_model_recovery_cooldown_seconds,
             )
 
         async with client:
@@ -733,6 +827,8 @@ class BatchedDocPipeline:
                 max_concurrent_per_server=self.config.max_concurrent_requests,
                 batch_size=self.config.batch_size,
                 batch_timeout=self.config.batch_timeout,
+                recover_base_url_callback=self.config.task_model_recovery_callback,
+                recovery_cooldown_seconds=self.config.task_model_recovery_cooldown_seconds,
             )
         else:
             client = AsyncBatchLLMClient(
@@ -740,15 +836,38 @@ class BatchedDocPipeline:
                 max_concurrent=self.config.max_concurrent_requests,
                 batch_size=self.config.batch_size,
                 batch_timeout=self.config.batch_timeout,
+                recover_base_url_callback=self.config.task_model_recovery_callback,
+                recovery_cooldown_seconds=self.config.task_model_recovery_cooldown_seconds,
             )
 
         results = []
 
-        # Build doc_id -> sample mapping for later lookup
-        def get_doc_id(s):
-            return getattr(s, "doc_id", "")
+        # Build stable, unique document IDs even when samples do not expose `doc_id`.
+        sample_doc_ids: List[str] = []
+        seen_doc_ids: set[str] = set()
+        for idx, sample in enumerate(samples):
+            raw_doc_id = (
+                getattr(sample, "doc_id", None)
+                or getattr(sample, "manifesto_id", None)
+                or getattr(sample, "id", None)
+            )
+            doc_id = str(raw_doc_id).strip() if raw_doc_id is not None else ""
+            if not doc_id:
+                doc_id = f"doc_{idx}"
+            if doc_id in seen_doc_ids:
+                doc_id = f"{doc_id}_{idx}"
+            seen_doc_ids.add(doc_id)
+            sample_doc_ids.append(doc_id)
 
-        sample_by_id = {get_doc_id(s): s for s in samples}
+        doc_id_by_object_id = {
+            id(sample): sample_doc_ids[idx] for idx, sample in enumerate(samples)
+        }
+        sample_by_id = {
+            sample_doc_ids[idx]: sample for idx, sample in enumerate(samples)
+        }
+
+        def get_doc_id(sample: Any) -> str:
+            return doc_id_by_object_id.get(id(sample), "")
 
         async with client:
             # Phase 1: Build all trees using global pipelined BatchTreeOrchestrator
@@ -852,6 +971,10 @@ class BatchedDocPipeline:
                     leaf_node.summary or ""
                     for leaf_node in build_result.tree.leaves
                 ]
+                leaf_spans = [
+                    leaf_node.raw_text_span or ""
+                    for leaf_node in build_result.tree.leaves
+                ]
 
                 # Get original text length
                 original_length = len(sample.text) if sample else 0
@@ -860,6 +983,12 @@ class BatchedDocPipeline:
                 metadata = _extract_metadata(sample) if sample else {}
                 if build_result.tree.metadata.get("tree_plan"):
                     metadata["tree_plan"] = build_result.tree.metadata["tree_plan"]
+                if build_result.tree.metadata.get("chunk_boundaries"):
+                    metadata["chunk_boundaries"] = build_result.tree.metadata["chunk_boundaries"]
+                if build_result.tree.metadata.get("chunking"):
+                    metadata["chunking"] = build_result.tree.metadata["chunking"]
+                if build_result.content_weights is not None:
+                    metadata["content_weights"] = build_result.content_weights
 
                 result = DocumentResult(
                     doc_id=doc_id,
@@ -874,7 +1003,7 @@ class BatchedDocPipeline:
                     estimated_score=scores.get(result_idx),
                     baseline_score=baselines.get(result_idx),
                     error=build_result.errors[0] if build_result.errors else None,
-                    chunks=build_result.chunks_created,
+                    chunks=leaf_spans,
                     leaf_summaries=leaf_summaries,
                     level_history=None,  # Not available from BuildResult
                     metadata=metadata,

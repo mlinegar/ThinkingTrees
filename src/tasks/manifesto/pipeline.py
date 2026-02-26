@@ -13,6 +13,7 @@ from typing import Optional, TYPE_CHECKING
 import dspy
 
 from src.tree.builder import TreeBuilder, BuildConfig
+from src.core.prompting import parse_numeric_score
 from .rubrics import RILE_PRESERVATION_RUBRIC, RILE_TASK_CONTEXT
 from .constants import RILE_MIN, RILE_MAX
 
@@ -49,7 +50,7 @@ class RILEScoreSignature(dspy.Signature):
     summary: str = dspy.InputField(desc="Summarized political manifesto to score")
 
     reasoning: str = dspy.OutputField(desc="Analysis identifying left vs right indicators and their balance")
-    rile_score: float = dspy.OutputField(desc="RILE score from -100 (far left) to +100 (far right)")
+    score: float = dspy.OutputField(desc="RILE score from -100 (far left) to +100 (far right)")
 
 
 # =============================================================================
@@ -72,9 +73,12 @@ def is_placeholder(text: str) -> bool:
 class ManifestoSummarizer(dspy.Module):
     """DSPy module for summarizing chunks - optimizable by DSPy."""
 
-    def __init__(self):
+    def __init__(self, use_cot: bool = False):
         super().__init__()
-        self.summarize = dspy.ChainOfThought(RILESummarize)
+        if use_cot:
+            self.summarize = dspy.ChainOfThought(RILESummarize)
+        else:
+            self.summarize = dspy.Predict(RILESummarize)
 
     def forward(self, text: str, rubric: str = RILE_PRESERVATION_RUBRIC) -> str:
         result = self.summarize(rubric=rubric, text=text)
@@ -94,9 +98,12 @@ class ManifestoSummarizer(dspy.Module):
 class ManifestoMerger(dspy.Module):
     """DSPy module for merging summaries - optimizable by DSPy."""
 
-    def __init__(self):
+    def __init__(self, use_cot: bool = False):
         super().__init__()
-        self.merge = dspy.ChainOfThought(RILEMerge)
+        if use_cot:
+            self.merge = dspy.ChainOfThought(RILEMerge)
+        else:
+            self.merge = dspy.Predict(RILEMerge)
 
     def forward(self, summary1: str, summary2: str, rubric: str = RILE_PRESERVATION_RUBRIC) -> str:
         result = self.merge(rubric=rubric, summary1=summary1, summary2=summary2)
@@ -115,21 +122,35 @@ class ManifestoMerger(dspy.Module):
 class ManifestoScorer(dspy.Module):
     """DSPy module for scoring - optimizable by DSPy."""
 
-    def __init__(self):
+    def __init__(self, use_cot: bool = False):
         super().__init__()
-        self.score = dspy.ChainOfThought(RILEScoreSignature)
+        if use_cot:
+            self.score = dspy.ChainOfThought(RILEScoreSignature)
+        else:
+            self.score = dspy.Predict(RILEScoreSignature)
 
     def forward(self, summary: str, task_context: str = RILE_TASK_CONTEXT) -> dict:
         result = self.score(task_context=task_context, summary=summary)
-        try:
-            raw_score = float(result.rile_score)
-        except (ValueError, TypeError):
+        raw_score = parse_numeric_score(
+            str(getattr(result, "score", "")),
+            min_value=RILE_MIN,
+            max_value=RILE_MAX,
+            allow_llm_fallback=True,
+        )
+        if raw_score is None:
+            raw_score = parse_numeric_score(
+                str(result),
+                min_value=RILE_MIN,
+                max_value=RILE_MAX,
+                allow_llm_fallback=True,
+            )
+        if raw_score is None:
             raw_score = 0.0
         raw_score = max(RILE_MIN, min(RILE_MAX, raw_score))
         normalized = (raw_score - RILE_MIN) / (RILE_MAX - RILE_MIN)
         normalized = max(0.0, min(1.0, normalized))
         return {
-            'rile_score': normalized,
+            'score': normalized,
             'reasoning': result.reasoning
         }
 
@@ -147,9 +168,9 @@ class StrategyCompatibleSummarizer(dspy.Module):
     - rubric -> rubric (unchanged)
     """
 
-    def __init__(self):
+    def __init__(self, use_cot: bool = False):
         super().__init__()
-        self._inner = ManifestoSummarizer()
+        self._inner = ManifestoSummarizer(use_cot=use_cot)
 
     def forward(self, content: str, rubric: str = RILE_PRESERVATION_RUBRIC) -> str:
         """Forward with DSPyStrategy-compatible parameter names."""
@@ -166,9 +187,9 @@ class StrategyCompatibleMerger(dspy.Module):
     - rubric -> rubric (unchanged)
     """
 
-    def __init__(self):
+    def __init__(self, use_cot: bool = False):
         super().__init__()
-        self._inner = ManifestoMerger()
+        self._inner = ManifestoMerger(use_cot=use_cot)
 
     def forward(self, left_summary: str, right_summary: str, rubric: str = RILE_PRESERVATION_RUBRIC) -> str:
         """Forward with DSPyStrategy-compatible parameter names."""
@@ -186,12 +207,12 @@ class ManifestoPipeline(dspy.Module):
     Uses parallel processing for chunk summarization and merging.
     """
 
-    def __init__(self, chunk_size: int = 2000):
+    def __init__(self, chunk_size: int = 2000, use_cot: bool = False):
         super().__init__()
         self.chunk_size = chunk_size
-        self.summarizer = ManifestoSummarizer()
-        self.merger = ManifestoMerger()
-        self.scorer = ManifestoScorer()
+        self.summarizer = ManifestoSummarizer(use_cot=use_cot)
+        self.merger = ManifestoMerger(use_cot=use_cot)
+        self.scorer = ManifestoScorer(use_cot=use_cot)
 
     def forward(self, text: str, rubric: str = RILE_PRESERVATION_RUBRIC,
                 task_context: str = RILE_TASK_CONTEXT) -> dspy.Prediction:
@@ -199,10 +220,14 @@ class ManifestoPipeline(dspy.Module):
         from src.preprocessing.chunker import chunk_for_ops
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        chunks = chunk_for_ops(text, max_chars=self.chunk_size, strategy="sentence")
+        chunks = chunk_for_ops(text, max_chars=self.chunk_size, strategy="axis")
 
         if not chunks:
-            return dspy.Prediction(rile_score=0.5, reasoning="No text to process", final_summary="")
+            return dspy.Prediction(
+                score=0.5,
+                reasoning="No text to process",
+                final_summary="",
+            )
 
         def summarize_chunk(chunk_text):
             return self.summarizer(text=chunk_text, rubric=rubric)
@@ -255,10 +280,11 @@ class ManifestoPipeline(dspy.Module):
 
         final_summary = summaries[0] if summaries else ""
         score_result = self.scorer(summary=final_summary, task_context=task_context)
+        score_value = score_result.get("score", 0.5)
 
         return dspy.Prediction(
-            rile_score=score_result['rile_score'],
-            reasoning=score_result['reasoning'],
+            score=score_value,
+            reasoning=score_result.get("reasoning", ""),
             final_summary=final_summary
         )
 
@@ -297,6 +323,7 @@ class ManifestoPipelineWithStrategy(dspy.Module):
         leaf_module: Optional[dspy.Module] = None,
         merge_module: Optional[dspy.Module] = None,
         scorer: Optional[dspy.Module] = None,
+        use_cot: bool = False,
     ):
         """
         Initialize the strategy-based pipeline.
@@ -313,9 +340,9 @@ class ManifestoPipelineWithStrategy(dspy.Module):
         super().__init__()
         self.chunk_size = chunk_size
 
-        self.leaf_module = leaf_module or StrategyCompatibleSummarizer()
-        self.merge_module = merge_module or StrategyCompatibleMerger()
-        self.scorer = scorer or ManifestoScorer()
+        self.leaf_module = leaf_module or StrategyCompatibleSummarizer(use_cot=use_cot)
+        self.merge_module = merge_module or StrategyCompatibleMerger(use_cot=use_cot)
+        self.scorer = scorer or ManifestoScorer(use_cot=use_cot)
 
         self._judge = judge
         self._tournament_k = tournament_k
@@ -329,9 +356,25 @@ class ManifestoPipelineWithStrategy(dspy.Module):
         # Lazy import to avoid circular dependency
         from src.core.strategy import DSPyStrategy, TournamentStrategy, TournamentConfig
 
+        dspy_temperature = 0.7
+        dspy_max_tokens = None
+        try:
+            current_lm = dspy.settings.lm
+            if current_lm is not None:
+                if hasattr(current_lm, "temperature"):
+                    dspy_temperature = float(getattr(current_lm, "temperature") or dspy_temperature)
+                elif hasattr(current_lm, "kwargs"):
+                    dspy_temperature = float(getattr(current_lm, "kwargs", {}).get("temperature", dspy_temperature))
+                if hasattr(current_lm, "max_tokens"):
+                    dspy_max_tokens = getattr(current_lm, "max_tokens", None)
+        except Exception:
+            pass
+
         base_strategy = DSPyStrategy(
             leaf_module=self.leaf_module,
             merge_module=self.merge_module,
+            default_temperature=float(dspy_temperature),
+            max_tokens=None if dspy_max_tokens is None else int(dspy_max_tokens),
         )
 
         if self._judge is not None:
@@ -358,11 +401,11 @@ class ManifestoPipelineWithStrategy(dspy.Module):
             task_context: Task context for RILE scoring
 
         Returns:
-            dspy.Prediction with rile_score, reasoning, final_summary
+            dspy.Prediction with score, reasoning, final_summary
         """
         if not text or len(text.strip()) == 0:
             return dspy.Prediction(
-                rile_score=0.5,
+                score=0.5,
                 reasoning="No text to process",
                 final_summary=""
             )
@@ -390,15 +433,11 @@ class ManifestoPipelineWithStrategy(dspy.Module):
         score_value = None
         reasoning = ""
         if isinstance(score_result, dict):
-            if "rile_score" in score_result:
-                score_value = score_result.get("rile_score")
-            elif "score" in score_result:
+            if "score" in score_result:
                 score_value = score_result.get("score")
             reasoning = score_result.get("reasoning", "") or ""
         else:
-            if hasattr(score_result, "rile_score"):
-                score_value = getattr(score_result, "rile_score")
-            elif hasattr(score_result, "score"):
+            if hasattr(score_result, "score"):
                 score_value = getattr(score_result, "score")
             reasoning = getattr(score_result, "reasoning", "") or ""
 
@@ -406,7 +445,7 @@ class ManifestoPipelineWithStrategy(dspy.Module):
             score_value = 0.5
 
         return dspy.Prediction(
-            rile_score=float(score_value),
+            score=float(score_value),
             reasoning=reasoning,
             final_summary=final_summary
         )
@@ -437,7 +476,7 @@ def create_training_examples(samples: list) -> list:
             text=sample.text,
             rubric=RILE_PRESERVATION_RUBRIC,
             task_context=RILE_TASK_CONTEXT,
-            rile_score=normalized_score,
+            score=normalized_score,
         ).with_inputs('text', 'rubric', 'task_context')
         examples.append(example)
     return examples
@@ -449,8 +488,12 @@ def rile_metric(example, prediction, trace=None) -> float:
     Returns 1.0 for perfect, 0.0 for >=1.0 normalized difference.
     """
     try:
-        pred_score = float(prediction.rile_score)
-        true_score = float(example.rile_score)
+        pred_value = getattr(prediction, "score", None)
+        true_value = getattr(example, "score", None)
+        if pred_value is None or true_value is None:
+            return 0.0
+        pred_score = float(pred_value)
+        true_score = float(true_value)
         error = abs(pred_score - true_score)
         return max(0.0, 1.0 - error)
     except (ValueError, TypeError, AttributeError):

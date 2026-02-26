@@ -105,6 +105,15 @@ class GeneratorTrainerConfig:
     logging_steps: int = 10
     save_steps: int = 100
 
+    # Propensity/IPW weighting
+    use_propensity_weighting: bool = True
+    propensity_resample: bool = True
+    propensity_native_loss_weighting: bool = True
+    propensity_weight_clip: Optional[float] = None
+    propensity_random_seed: int = 42
+    propensity_sampling_strategy: str = "pps_systematic"
+    propensity_stratify_by: Optional[str] = "law_type"
+
 
 # =============================================================================
 # Trainer Registry
@@ -196,6 +205,38 @@ class BaseGeneratorTrainer(ABC):
         """Return the method name for logging."""
         ...
 
+    def _prepare_pairs(
+        self,
+        preferences: "PreferenceDataset",
+        law_type: Optional[str] = None,
+    ) -> List[Any]:
+        """
+        Filter and optionally propensity-resample preference pairs.
+
+        The global default propensity is uniform (all ones), so resampling is
+        a no-op in the absence of logged non-uniform propensities.
+        """
+        pairs = [
+            pair for pair in preferences.pairs
+            if pair.preferred != "tie" and (law_type is None or pair.law_type == law_type)
+        ]
+        if not pairs:
+            return []
+
+        if not self.config.use_propensity_weighting or not self.config.propensity_resample:
+            return pairs
+
+        from src.training.preference.types import PreferenceDataset
+
+        sampled = PreferenceDataset(pairs).sample_by_propensity(
+            target_size=len(pairs),
+            seed=self.config.propensity_random_seed,
+            max_weight=self.config.propensity_weight_clip,
+            strategy=self.config.propensity_sampling_strategy,
+            stratify_by=self.config.propensity_stratify_by,
+        )
+        return sampled.pairs
+
 
 # =============================================================================
 # DPO Trainer
@@ -258,6 +299,13 @@ class DPOGeneratorTrainer(BaseGeneratorTrainer):
             bf16=self.config.bf16,
             logging_steps=self.config.logging_steps,
             save_steps=self.config.save_steps,
+            use_propensity_weighting=self.config.use_propensity_weighting,
+            propensity_resample=self.config.propensity_resample,
+            propensity_native_loss_weighting=self.config.propensity_native_loss_weighting,
+            propensity_weight_clip=self.config.propensity_weight_clip,
+            propensity_random_seed=self.config.propensity_random_seed,
+            propensity_sampling_strategy=self.config.propensity_sampling_strategy,
+            propensity_stratify_key=self.config.propensity_stratify_by,
         )
 
         return train_dpo(
@@ -327,11 +375,7 @@ class SFTGeneratorTrainer(BaseGeneratorTrainer):
         from src.training.preference.types import render_prompt
 
         sft_data = []
-        for pair in preferences.pairs:
-            if pair.preferred == "tie":
-                continue
-            if law_type is not None and pair.law_type != law_type:
-                continue
+        for pair in self._prepare_pairs(preferences, law_type=law_type):
 
             winner = pair.get_winner()
             if winner is None:
@@ -504,6 +548,13 @@ class GRPOGeneratorTrainer(BaseGeneratorTrainer):
             bf16=self.config.bf16,
             logging_steps=self.config.logging_steps,
             save_steps=self.config.save_steps,
+            use_propensity_weighting=self.config.use_propensity_weighting,
+            propensity_resample=self.config.propensity_resample,
+            propensity_native_loss_weighting=self.config.propensity_native_loss_weighting,
+            propensity_weight_clip=self.config.propensity_weight_clip,
+            propensity_random_seed=self.config.propensity_random_seed,
+            propensity_sampling_strategy=self.config.propensity_sampling_strategy,
+            propensity_stratify_key=self.config.propensity_stratify_by,
         )
 
         return train_grpo(
@@ -610,11 +661,7 @@ class BootstrapFinetuneTrainer(BaseGeneratorTrainer):
 
         # Build trainset from tournament winners
         trainset = []
-        for pair in preferences.pairs:
-            if pair.preferred == "tie":
-                continue
-            if law_type is not None and pair.law_type != law_type:
-                continue
+        for pair in self._prepare_pairs(preferences, law_type=law_type):
 
             winner = pair.get_winner()
             if winner is None:

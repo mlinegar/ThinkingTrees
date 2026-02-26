@@ -102,7 +102,7 @@ class LeafSummarizer(dspy.Module):
         optimized_summarizer = optimizer.compile(summarizer, trainset=trainset)
     """
 
-    def __init__(self, use_cot: bool = True):
+    def __init__(self, use_cot: bool = False):
         """
         Initialize the leaf summarizer.
 
@@ -153,7 +153,7 @@ class MergeSummarizer(dspy.Module):
         optimized_merger = optimizer.compile(merger, trainset=merge_trainset)
     """
 
-    def __init__(self, use_cot: bool = True):
+    def __init__(self, use_cot: bool = False):
         """
         Initialize the merge summarizer.
 
@@ -193,7 +193,7 @@ class MergeSummarizer(dspy.Module):
 
 def create_summarizers(
     use_rile_specific: bool = True,
-    use_cot: bool = True,
+    use_cot: bool = False,
 ) -> tuple:
     """
     Create leaf and merge summarizer modules.

@@ -22,11 +22,13 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import time
 import yaml
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 
@@ -38,6 +40,7 @@ from src.core.batch_processor import (
     BatchResponse,
     BatchStats,
 )
+from src.core.vllm_runtime import resolve_vllm_runtime_flags
 from src.preprocessing.chunker import chunk_text
 
 # Handle optional rich import gracefully
@@ -551,6 +554,7 @@ def load_model_config(profile: str, config_path: Optional[Path] = None) -> Dict[
         raise ValueError(f"Profile '{profile}' not found. Available: {available}")
 
     model_cfg = models[profile]
+    runtime_args = resolve_vllm_runtime_flags(vllm_cfg=vllm_cfg, profile=profile).to_cli_args()
     return {
         "profile": profile,
         "path": model_cfg["path"],
@@ -558,7 +562,71 @@ def load_model_config(profile: str, config_path: Optional[Path] = None) -> Dict[
         "max_model_len": model_cfg.get("max_model_len", 8192),
         "host": vllm_cfg.get("host", "0.0.0.0"),
         "gpu_memory_utilization": vllm_cfg.get("gpu_memory_utilization", 0.90),
+        "enable_prefix_caching": bool(vllm_cfg.get("enable_prefix_caching", False)),
+        "runtime_args": runtime_args,
     }
+
+
+def _prepend_env_path(env: Dict[str, str], key: str, value: str) -> None:
+    if not value:
+        return
+    current = env.get(key, "")
+    parts = [part for part in current.split(":") if part]
+    if value in parts:
+        return
+    env[key] = f"{value}:{current}" if current else value
+
+
+@lru_cache(maxsize=8)
+def _resolve_venv_site_packages(venv_path: str) -> Optional[Path]:
+    root = Path(venv_path)
+    candidates: List[Path] = []
+    for base in (root / "lib", root / "local" / "lib"):
+        if not base.is_dir():
+            continue
+        candidates.extend(base.glob("python*/site-packages"))
+        candidates.extend(base.glob("python*/dist-packages"))
+    for candidate in sorted(candidates, reverse=True):
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _configure_nvfp4_runtime_env(env: Dict[str, str], venv_path: str, profile: str) -> None:
+    """Ensure NVFP4/FlashInfer runtime dependencies are discoverable."""
+    if "nvfp4" not in str(profile).lower():
+        return
+
+    env.setdefault("VLLM_USE_FLASHINFER_MOE_FP4", "1")
+    env.setdefault("VLLM_FLASHINFER_MOE_BACKEND", "throughput")
+
+    site_packages = _resolve_venv_site_packages(venv_path)
+    if site_packages is None:
+        logger.warning(
+            "Could not locate site-packages for vLLM venv (%s); NVFP4 runtime may fail",
+            venv_path,
+        )
+        return
+
+    cu13_root = site_packages / "nvidia" / "cu13"
+    if cu13_root.is_dir():
+        if not shutil.which("nvcc") and (cu13_root / "bin" / "nvcc").is_file():
+            env.setdefault("CUDA_HOME", str(cu13_root))
+
+        cuda_home = env.get("CUDA_HOME")
+        if cuda_home:
+            _prepend_env_path(env, "PATH", str(Path(cuda_home) / "bin"))
+
+        for lib_dir in (cu13_root / "lib64", cu13_root / "lib"):
+            if lib_dir.is_dir():
+                _prepend_env_path(env, "LD_LIBRARY_PATH", str(lib_dir))
+
+    if Path("/lib/x86_64-linux-gnu").is_dir():
+        _prepend_env_path(env, "LD_LIBRARY_PATH", "/lib/x86_64-linux-gnu")
+
+    curand_include = site_packages / "nvidia" / "curand" / "include"
+    if curand_include.is_dir():
+        _prepend_env_path(env, "CPATH", str(curand_include))
 
 
 class VLLMServerManager:
@@ -639,6 +707,9 @@ class VLLMServerManager:
         logger.info(f"  Model: {self._config['path']}")
         logger.info(f"  Port: {self.port}")
         logger.info(f"  Tensor Parallel: {tensor_parallel}")
+        logger.info(f"  Prefix Cache: {self._config.get('enable_prefix_caching', False)}")
+        if self._config.get("runtime_args"):
+            logger.info(f"  Runtime Args: {' '.join(self._config['runtime_args'])}")
         if self.cuda_devices:
             logger.info(f"  CUDA Devices: {self.cuda_devices}")
 
@@ -654,11 +725,20 @@ class VLLMServerManager:
             "--max-model-len", str(self._config["max_model_len"]),
             "--gpu-memory-utilization", str(self._config["gpu_memory_utilization"]),
             "--trust-remote-code",
-            "--enforce-eager",
         ]
+
+        if self._config.get("enable_prefix_caching", False):
+            cmd.append("--enable-prefix-caching")
+
+        runtime_args = self._config.get("runtime_args") or []
+        if runtime_args:
+            cmd.extend(list(runtime_args))
 
         # Build environment with optional CUDA device isolation
         env = os.environ.copy()
+        venv_bin = os.path.join(self.venv_path, "bin")
+        _prepend_env_path(env, "PATH", venv_bin)
+        _configure_nvfp4_runtime_env(env, venv_path=self.venv_path, profile=self.profile)
         if self.cuda_devices:
             env["CUDA_VISIBLE_DEVICES"] = self.cuda_devices
 
@@ -769,6 +849,245 @@ class VLLMServerManager:
             self._log_file = None
 
     async def __aenter__(self) -> "VLLMServerManager":
+        await self.start()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.stop()
+
+
+def load_sglang_config(profile: str, config_path: Optional[Path] = None) -> Dict[str, Any]:
+    """
+    Load SGLang server configuration from settings.yaml.
+
+    Reuses model profiles from vllm.models (same paths and tensor_parallel),
+    combined with sglang-specific server settings.
+
+    Args:
+        profile: Model profile name (e.g., 'nemotron-30b-nvfp4')
+        config_path: Path to settings.yaml (defaults to config/settings.yaml)
+
+    Returns:
+        Dict with model path, tensor_parallel, max_model_len, SGLang runtime knobs.
+    """
+    if config_path is None:
+        config_path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
+
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+
+    vllm_cfg = cfg.get("vllm", {})
+    models = vllm_cfg.get("models", {})
+    sglang_cfg = cfg.get("sglang", {})
+
+    if profile not in models:
+        available = list(models.keys())
+        raise ValueError(f"Profile '{profile}' not found. Available: {available}")
+
+    model_cfg = models[profile]
+    runtime = sglang_cfg.get("runtime", {})
+
+    return {
+        "profile": profile,
+        "path": model_cfg["path"],
+        "tensor_parallel": model_cfg.get("tensor_parallel", 1),
+        "max_model_len": model_cfg.get("max_model_len", 8192),
+        "host": sglang_cfg.get("host", "0.0.0.0"),
+        "port": sglang_cfg.get("port", 30000),
+        "mem_fraction_static": sglang_cfg.get("mem_fraction_static", 0.88),
+        "enable_torch_compile": bool(runtime.get("enable_torch_compile", False)),
+        "chunked_prefill_size": runtime.get("chunked_prefill_size", 0),
+        "disable_radix_cache": bool(runtime.get("disable_radix_cache", False)),
+    }
+
+
+class SGLangServerManager:
+    """
+    Manage SGLang server lifecycle, parallel to VLLMServerManager.
+
+    SGLang serves the same OpenAI-compatible /v1/chat/completions endpoint,
+    so the same AsyncBatchLLMClient works with both backends.
+
+    Usage:
+        async with SGLangServerManager("nemotron-30b-nvfp4", port=30000) as server:
+            # server.url → "http://localhost:30000/v1"
+            result = await audit.run(documents)
+        # Server is automatically stopped
+
+    Usage (specific GPUs):
+        async with SGLangServerManager("qwen-80b", port=30000, cuda_devices="2,3") as server:
+            ...
+    """
+
+    def __init__(
+        self,
+        profile: str,
+        port: int = 30000,
+        host: str = "0.0.0.0",
+        venv_path: str = "/home/mlinegar/vllm-env",
+        startup_timeout: float = 300.0,
+        health_check_interval: float = 2.0,
+        cuda_devices: Optional[str] = None,
+        tensor_parallel: Optional[int] = None,
+    ):
+        self.profile = profile
+        self.port = port
+        self.host = host
+        self.venv_path = venv_path
+        self.startup_timeout = startup_timeout
+        self.health_check_interval = health_check_interval
+        self.cuda_devices = cuda_devices
+        self.tensor_parallel_override = tensor_parallel
+
+        self._process: Optional[subprocess.Popen] = None
+        self._config: Optional[Dict[str, Any]] = None
+        self._log_file = None
+
+    @property
+    def url(self) -> str:
+        """Get the server URL."""
+        return f"http://localhost:{self.port}/v1"
+
+    @property
+    def model_path(self) -> str:
+        """Get the model path."""
+        return self._config["path"] if self._config else ""
+
+    async def start(self) -> None:
+        """Start the SGLang server and wait for it to be ready."""
+        self._config = load_sglang_config(self.profile)
+
+        tensor_parallel = self.tensor_parallel_override or self._config["tensor_parallel"]
+
+        logger.info(f"Starting SGLang server for {self.profile}")
+        logger.info(f"  Model: {self._config['path']}")
+        logger.info(f"  Port: {self.port}")
+        logger.info(f"  Tensor Parallel: {tensor_parallel}")
+        logger.info(f"  Mem Fraction Static: {self._config['mem_fraction_static']}")
+        if self.cuda_devices:
+            logger.info(f"  CUDA Devices: {self.cuda_devices}")
+
+        python_path = os.path.join(self.venv_path, "bin", "python")
+        cmd = [
+            python_path,
+            "-m", "sglang.launch_server",
+            "--model-path", self._config["path"],
+            "--host", self.host,
+            "--port", str(self.port),
+            "--tp", str(tensor_parallel),
+            "--context-length", str(self._config["max_model_len"]),
+            "--mem-fraction-static", str(self._config["mem_fraction_static"]),
+            "--trust-remote-code",
+        ]
+
+        if self._config.get("enable_torch_compile"):
+            cmd.append("--enable-torch-compile")
+
+        chunked = self._config.get("chunked_prefill_size", 0)
+        if chunked and int(chunked) > 0:
+            cmd.extend(["--chunked-prefill-size", str(chunked)])
+
+        if self._config.get("disable_radix_cache"):
+            cmd.append("--disable-radix-cache")
+
+        # Build environment with optional CUDA device isolation
+        env = os.environ.copy()
+        if self.cuda_devices:
+            env["CUDA_VISIBLE_DEVICES"] = self.cuda_devices
+
+        import tempfile
+        self._log_file = tempfile.NamedTemporaryFile(
+            mode='w', prefix=f'sglang_{self.profile}_', suffix='.log', delete=False
+        )
+        logger.info(f"  Log file: {self._log_file.name}")
+
+        self._process = subprocess.Popen(
+            cmd,
+            stdout=self._log_file,
+            stderr=subprocess.STDOUT,
+            preexec_fn=os.setsid,
+            env=env,
+        )
+
+        logger.info(f"SGLang server process started (PID: {self._process.pid})")
+        await self._wait_for_ready()
+
+    async def _wait_for_ready(self) -> None:
+        """Wait for the server to be ready to accept requests."""
+        start_time = time.time()
+        last_log_time = start_time
+
+        logger.info("Waiting for SGLang server to be ready...")
+
+        async with aiohttp.ClientSession() as session:
+            while time.time() - start_time < self.startup_timeout:
+                if self._process.poll() is not None:
+                    try:
+                        self._log_file.flush()
+                        with open(self._log_file.name, 'r') as f:
+                            output = f.read()
+                    except Exception:
+                        output = "Could not read log file"
+                    raise RuntimeError(
+                        f"SGLang server exited unexpectedly with code {self._process.returncode}. "
+                        f"Output:\n{output[-2000:] if output else 'No output'}"
+                    )
+
+                try:
+                    async with session.get(
+                        f"http://localhost:{self.port}/v1/models",
+                        timeout=aiohttp.ClientTimeout(total=5)
+                    ) as resp:
+                        if resp.status == 200:
+                            elapsed = time.time() - start_time
+                            logger.info(f"SGLang server ready in {elapsed:.1f}s")
+                            return
+                except (aiohttp.ClientError, asyncio.TimeoutError):
+                    pass
+
+                if time.time() - last_log_time > 30:
+                    elapsed = time.time() - start_time
+                    logger.info(f"Still waiting for SGLang server... ({elapsed:.0f}s elapsed)")
+                    last_log_time = time.time()
+
+                await asyncio.sleep(self.health_check_interval)
+
+        self.stop()
+        raise TimeoutError(
+            f"SGLang server did not become ready within {self.startup_timeout}s"
+        )
+
+    def stop(self) -> None:
+        """Stop the SGLang server."""
+        if self._process is None:
+            return
+
+        logger.info(f"Stopping SGLang server (PID: {self._process.pid})")
+
+        try:
+            os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
+            try:
+                self._process.wait(timeout=10)
+                logger.info("SGLang server stopped gracefully")
+            except subprocess.TimeoutExpired:
+                logger.warning("SGLang server did not stop gracefully, forcing kill")
+                os.killpg(os.getpgid(self._process.pid), signal.SIGKILL)
+                self._process.wait()
+        except ProcessLookupError:
+            pass
+        except Exception as e:
+            logger.warning(f"Error stopping SGLang server: {e}")
+
+        self._process = None
+
+        if self._log_file:
+            try:
+                self._log_file.close()
+            except Exception:
+                pass
+            self._log_file = None
+
+    async def __aenter__(self) -> "SGLangServerManager":
         await self.start()
         return self
 

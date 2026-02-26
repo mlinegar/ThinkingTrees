@@ -241,7 +241,7 @@ def generate_labeled_trees(args) -> None:
     import dspy
     from src.config.dspy_config import configure_dspy
     from src.config.settings import load_settings
-    from src.tasks.manifesto import ManifestoDataset, create_rile_scorer
+    from src.tasks.manifesto import ManifestoDataset, create_rile_oracle
     from src.pipelines.batched import chunk_text
     from src.training.tree import (
         LabeledNode,
@@ -271,11 +271,11 @@ def generate_labeled_trees(args) -> None:
     )
     configure_dspy(lm=oracle_lm)
 
-    rile_scorer = create_rile_scorer()
+    rile_oracle = create_rile_oracle()
 
     def oracle_predict(text: str) -> dict:
         try:
-            result = rile_scorer.value_extractor(text)
+            result = rile_oracle.value_extractor(text)
             return {
                 "score": float(result),
                 "reasoning": getattr(result, 'reasoning', ""),

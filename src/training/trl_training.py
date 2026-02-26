@@ -43,11 +43,18 @@ Usage:
 """
 
 import logging
+import random
+import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Union
 
 from src.training.preference.types import render_prompt, PromptBuilder
+from src.stats.sampling import (
+    largest_remainder_allocation as _largest_remainder_allocation,
+    pps_inclusion_probabilities as _pps_inclusion_probabilities,
+    systematic_pps_sample_indices as _systematic_pps_sample_indices,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +101,20 @@ class TRLTrainingConfig:
     reward_margin_source: Literal["score_estimate", "oracle_error"] = "score_estimate"
     reward_margin_scale: Optional[float] = None
 
+    # Propensity/IPW weighting
+    use_propensity_weighting: bool = True
+    propensity_resample: bool = True
+    propensity_native_loss_weighting: bool = True
+    propensity_weight_clip: Optional[float] = None
+    propensity_random_seed: int = 42
+    propensity_sampling_strategy: Literal[
+        "multinomial",
+        "pps_systematic",
+        "stratified_multinomial",
+    ] = "pps_systematic"
+    propensity_stratify_key: Optional[str] = "law_type"
+    propensity_stratify_by: Optional[str] = None  # backwards-compatible alias
+
     # Logging
     logging_steps: int = 10
     save_steps: int = 100
@@ -107,6 +128,144 @@ class TRLTrainingConfig:
 # =============================================================================
 # Dataset Conversion
 # =============================================================================
+
+def _extract_sample_weight(
+    record: Dict[str, Any],
+    default_weight: float = 1.0,
+) -> float:
+    """Extract sample weight from exported preference record."""
+    if "sample_weight" in record:
+        try:
+            value = float(record["sample_weight"])
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+
+    metadata = record.get("metadata") or {}
+    try:
+        value = float(metadata.get("sample_weight", default_weight))
+        if value > 0:
+            return value
+    except (TypeError, ValueError):
+        pass
+
+    treepo = metadata.get("treepo") if isinstance(metadata, dict) else None
+    if isinstance(treepo, dict):
+        try:
+            propensity = float(treepo.get("joint_propensity", 1.0))
+            if propensity > 0:
+                return 1.0 / propensity
+        except (TypeError, ValueError):
+            pass
+
+    return default_weight
+
+
+def _resample_records_by_weight(
+    records: List[Dict[str, Any]],
+    config: TRLTrainingConfig,
+) -> List[Dict[str, Any]]:
+    """
+    Resample records by sample_weight when weighting is enabled.
+
+    This provides weighting support for trainers that do not consume
+    per-example weights natively.
+    """
+    if not config.use_propensity_weighting or not config.propensity_resample or not records:
+        return records
+
+    weights = [
+        min(_extract_sample_weight(record), config.propensity_weight_clip)
+        if config.propensity_weight_clip is not None
+        else _extract_sample_weight(record)
+        for record in records
+    ]
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        return records
+
+    strategy = config.propensity_sampling_strategy
+    rng = random.Random(config.propensity_random_seed)
+    size = len(records)
+
+    if strategy == "multinomial":
+        return rng.choices(records, weights=weights, k=size)
+
+    if strategy == "pps_systematic":
+        sum_w = sum(weights)
+        sum_w_sq = sum(weight * weight for weight in weights)
+        neff = int(round((sum_w * sum_w / sum_w_sq))) if sum_w_sq > 0 else 0
+        base_size = max(1, min(len(records), neff))
+
+        inclusion_probs = _pps_inclusion_probabilities(weights, base_size)
+        sampled_indices = _systematic_pps_sample_indices(inclusion_probs, base_size, rng)
+        sampled = [records[index] for index in sampled_indices]
+
+        if len(sampled) < size:
+            sampled.extend(rng.choices(records, weights=weights, k=size - len(sampled)))
+        return sampled
+
+    if strategy == "stratified_multinomial":
+        stratify_key = config.propensity_stratify_key
+        if stratify_key is None:
+            stratify_key = config.propensity_stratify_by
+        if not stratify_key:
+            return rng.choices(records, weights=weights, k=size)
+
+        groups: Dict[str, List[int]] = {}
+        for index, record in enumerate(records):
+            value = record.get(stratify_key)
+            if value is None and isinstance(record.get("metadata"), dict):
+                value = record["metadata"].get(stratify_key)
+            key = str(value)
+            groups.setdefault(key, []).append(index)
+
+        if not groups:
+            return rng.choices(records, weights=weights, k=size)
+
+        keys = list(groups.keys())
+        group_mass = [sum(weights[index] for index in groups[key]) for key in keys]
+        total_mass = sum(group_mass)
+        if total_mass <= 0:
+            return rng.choices(records, k=size)
+
+        quotas = [size * (mass / total_mass) for mass in group_mass]
+        allocation = _largest_remainder_allocation(size, quotas)
+
+        sampled: List[Dict[str, Any]] = []
+        for key, alloc in zip(keys, allocation):
+            if alloc <= 0:
+                continue
+            group_indices = groups[key]
+            group_records = [records[index] for index in group_indices]
+            group_weights = [weights[index] for index in group_indices]
+            sampled.extend(rng.choices(group_records, weights=group_weights, k=alloc))
+        return sampled
+
+    logger.warning(
+        "Unknown propensity sampling strategy '%s'; falling back to multinomial",
+        strategy,
+    )
+    return rng.choices(records, weights=weights, k=size)
+
+
+def _build_processing_class_kwargs(
+    trainer_cls: Any,
+    processing_class: Any,
+) -> Dict[str, Any]:
+    """
+    Return trainer kwargs for tokenizer/processing_class across TRL versions.
+
+    Newer TRL trainers use `processing_class=...`; older releases used
+    `tokenizer=...`.
+    """
+    init_params = inspect.signature(trainer_cls.__init__).parameters
+    if "processing_class" in init_params:
+        return {"processing_class": processing_class}
+    if "tokenizer" in init_params:
+        return {"tokenizer": processing_class}
+    return {}
 
 def _preference_to_hf_dpo(
     preference_data: List[Dict[str, Any]],
@@ -131,6 +290,7 @@ def _preference_to_hf_dpo(
             "prompt": d["prompt"],
             "chosen": d["chosen"],
             "rejected": d["rejected"],
+            "sample_weight": _extract_sample_weight(d),
         }
         for d in preference_data
         if d.get("chosen") and d.get("rejected")
@@ -183,6 +343,7 @@ def _preference_to_hf_reward(
             "attention_mask_chosen": chosen_enc["attention_mask"],
             "input_ids_rejected": rejected_enc["input_ids"],
             "attention_mask_rejected": rejected_enc["attention_mask"],
+            "sample_weight": float(pair.get("sample_weight", 1.0)),
         }
         if pair.get("margin") is not None:
             entry["margin"] = pair["margin"]
@@ -338,6 +499,472 @@ def _load_model_for_training(
 # Training Functions
 # =============================================================================
 
+def _coerce_sample_weight_tensor(
+    raw_weights: Any,
+    batch_size: int,
+    device: Any,
+):
+    """Convert batch sample weights to a nonnegative tensor or return None."""
+    if raw_weights is None:
+        return None
+
+    import torch
+
+    if torch.is_tensor(raw_weights):
+        weights = raw_weights.to(device=device, dtype=torch.float32)
+    else:
+        try:
+            weights = torch.tensor(raw_weights, dtype=torch.float32, device=device)
+        except Exception:
+            return None
+
+    weights = weights.reshape(-1)
+    if weights.numel() == 1 and batch_size > 1:
+        weights = weights.expand(batch_size)
+    if weights.numel() != batch_size:
+        return None
+    weights = torch.clamp(weights, min=0.0)
+    if float(weights.sum().item()) <= 0:
+        return None
+    return weights
+
+
+def _build_weighted_dpo_trainer(base_cls):
+    """Create a DPOTrainer subclass that applies per-example sample weights."""
+    import torch
+
+    class WeightedDPOTrainer(base_cls):
+        def _weighted_reduce(self, values: torch.Tensor, weights: Optional[torch.Tensor]) -> torch.Tensor:
+            values = self._per_example_mean(values)
+            if weights is None:
+                return values.mean()
+            denom = weights.sum().clamp(min=1e-12)
+            return (values * weights).sum() / denom
+
+        def _per_example_mean(self, values: torch.Tensor) -> torch.Tensor:
+            if values.ndim == 0:
+                return values.reshape(1)
+            if values.ndim <= 1:
+                return values
+            return values.reshape(values.shape[0], -1).mean(dim=1)
+
+        def get_batch_loss_metrics(self, model, batch, train_eval: str = "train"):
+            metrics = {}
+            prefix = "eval_" if train_eval == "eval" else ""
+
+            model_output = self.concatenated_forward(model, batch)
+            if isinstance(model_output, dict):
+                if "ref_chosen_logps" in batch and "ref_rejected_logps" in batch:
+                    reference_chosen_logps = batch["ref_chosen_logps"]
+                    reference_rejected_logps = batch["ref_rejected_logps"]
+                elif "reference_chosen_logps" in batch and "reference_rejected_logps" in batch:
+                    reference_chosen_logps = batch["reference_chosen_logps"]
+                    reference_rejected_logps = batch["reference_rejected_logps"]
+                else:
+                    reference_chosen_logps, reference_rejected_logps = self.compute_ref_log_probs(batch)
+
+                losses = 0
+                chosen_rewards = 0
+                rejected_rewards = 0
+                loss_types = self.loss_type if isinstance(self.loss_type, (list, tuple)) else [self.loss_type]
+                loss_weights = getattr(self, "loss_weights", None)
+                for index, loss_type in enumerate(loss_types):
+                    _losses, _chosen_rewards, _rejected_rewards = self.dpo_loss(
+                        model_output["chosen_logps"],
+                        model_output["rejected_logps"],
+                        reference_chosen_logps,
+                        reference_rejected_logps,
+                        loss_type,
+                        model_output,
+                    )
+                    weight = loss_weights[index] if loss_weights else 1.0
+                    losses = losses + _losses * weight
+                    chosen_rewards = chosen_rewards + _chosen_rewards * weight
+                    rejected_rewards = rejected_rewards + _rejected_rewards * weight
+
+                if getattr(self.args, "rpo_alpha", None) is not None and "nll_loss" in model_output:
+                    losses = losses + self.args.rpo_alpha * model_output["nll_loss"]
+
+                if getattr(self, "use_weighting", False) and "policy_weights" in model_output:
+                    losses = losses * model_output["policy_weights"]
+
+                if getattr(self, "aux_loss_enabled", False) and "aux_loss" in model_output:
+                    losses = losses + self.aux_loss_coef * model_output["aux_loss"]
+
+                batch_size = model_output["chosen_logps"].shape[0]
+                weights = _coerce_sample_weight_tensor(
+                    batch.get("sample_weight"),
+                    batch_size=batch_size,
+                    device=model_output["chosen_logps"].device,
+                )
+                loss = self._weighted_reduce(losses, weights)
+
+                reward_accuracies = (chosen_rewards > rejected_rewards).float()
+
+                metrics[f"{prefix}rewards/chosen"] = float(
+                    self._weighted_reduce(chosen_rewards.detach(), weights).cpu().item()
+                )
+                metrics[f"{prefix}rewards/rejected"] = float(
+                    self._weighted_reduce(rejected_rewards.detach(), weights).cpu().item()
+                )
+                metrics[f"{prefix}rewards/accuracies"] = float(
+                    self._weighted_reduce(reward_accuracies.detach(), weights).cpu().item()
+                )
+                metrics[f"{prefix}rewards/margins"] = float(
+                    self._weighted_reduce((chosen_rewards - rejected_rewards).detach(), weights).cpu().item()
+                )
+                metrics[f"{prefix}logps/chosen"] = float(
+                    self._weighted_reduce(model_output["chosen_logps"].detach(), weights).cpu().item()
+                )
+                metrics[f"{prefix}logps/rejected"] = float(
+                    self._weighted_reduce(model_output["rejected_logps"].detach(), weights).cpu().item()
+                )
+                if "mean_chosen_logits" in model_output:
+                    metrics[f"{prefix}logits/chosen"] = float(
+                        self._weighted_reduce(model_output["mean_chosen_logits"].detach(), weights).cpu().item()
+                    )
+                if "mean_rejected_logits" in model_output:
+                    metrics[f"{prefix}logits/rejected"] = float(
+                        self._weighted_reduce(model_output["mean_rejected_logits"].detach(), weights).cpu().item()
+                    )
+                if getattr(self.args, "rpo_alpha", None) is not None and "nll_loss" in model_output:
+                    metrics[f"{prefix}nll_loss"] = float(
+                        self._weighted_reduce(model_output["nll_loss"].detach(), weights).cpu().item()
+                    )
+                if getattr(self, "aux_loss_enabled", False) and "aux_loss" in model_output:
+                    metrics[f"{prefix}aux_loss"] = float(
+                        self._weighted_reduce(model_output["aux_loss"].detach(), weights).cpu().item()
+                    )
+
+                return loss, metrics
+
+            (
+                policy_chosen_logps,
+                policy_rejected_logps,
+                policy_chosen_logits,
+                policy_rejected_logits,
+            ) = model_output
+
+            if "reference_chosen_logps" in batch and "reference_rejected_logps" in batch:
+                reference_chosen_logps = batch["reference_chosen_logps"]
+                reference_rejected_logps = batch["reference_rejected_logps"]
+            else:
+                with torch.no_grad():
+                    if self.ref_model is None:
+                        with self.null_ref_context():
+                            (
+                                reference_chosen_logps,
+                                reference_rejected_logps,
+                                _,
+                                _,
+                            ) = self.concatenated_forward(self.model, batch)
+                    else:
+                        (
+                            reference_chosen_logps,
+                            reference_rejected_logps,
+                            _,
+                            _,
+                        ) = self.concatenated_forward(self.ref_model, batch)
+
+            losses, chosen_rewards, rejected_rewards = self.dpo_loss(
+                policy_chosen_logps,
+                policy_rejected_logps,
+                reference_chosen_logps,
+                reference_rejected_logps,
+            )
+            weights = _coerce_sample_weight_tensor(
+                batch.get("sample_weight"),
+                batch_size=losses.shape[0],
+                device=losses.device,
+            )
+            loss = self._weighted_reduce(losses, weights)
+
+            reward_accuracies = (chosen_rewards > rejected_rewards).float()
+
+            metrics[f"{prefix}rewards/chosen"] = float(self._weighted_reduce(
+                chosen_rewards.detach(),
+                weights,
+            ).cpu().item())
+            metrics[f"{prefix}rewards/rejected"] = float(self._weighted_reduce(
+                rejected_rewards.detach(),
+                weights,
+            ).cpu().item())
+            metrics[f"{prefix}rewards/accuracies"] = float(self._weighted_reduce(
+                reward_accuracies.detach(),
+                weights,
+            ).cpu().item())
+            metrics[f"{prefix}rewards/margins"] = float(self._weighted_reduce(
+                (chosen_rewards - rejected_rewards).detach(),
+                weights,
+            ).cpu().item())
+            metrics[f"{prefix}logps/rejected"] = float(self._weighted_reduce(
+                policy_rejected_logps.detach(),
+                weights,
+            ).cpu().item())
+            metrics[f"{prefix}logps/chosen"] = float(self._weighted_reduce(
+                policy_chosen_logps.detach(),
+                weights,
+            ).cpu().item())
+            metrics[f"{prefix}logits/rejected"] = float(self._weighted_reduce(
+                self._per_example_mean(policy_rejected_logits.detach()),
+                weights,
+            ).cpu().item())
+            metrics[f"{prefix}logits/chosen"] = float(self._weighted_reduce(
+                self._per_example_mean(policy_chosen_logits.detach()),
+                weights,
+            ).cpu().item())
+
+            return loss, metrics
+
+    return WeightedDPOTrainer
+
+
+def _build_weighted_reward_data_collator(tokenizer: Any, max_length: Optional[int]):
+    """Create a RewardTrainer data collator that preserves sample_weight."""
+    import torch
+    base_collator = None
+    try:
+        from trl.trainer.reward_trainer import DataCollatorForPreference
+
+        base_collator = DataCollatorForPreference(
+            pad_token_id=tokenizer.pad_token_id,
+            return_tensors="pt",
+        )
+    except Exception:
+        base_collator = None
+
+    class WeightedRewardDataCollator:
+        def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+            sample_weights = torch.tensor(
+                [float(feature.get("sample_weight", 1.0)) for feature in features],
+                dtype=torch.float32,
+            )
+
+            # TRL >=0.26 reward format (chosen_input_ids/rejected_input_ids)
+            if "chosen_input_ids" in features[0] and "rejected_input_ids" in features[0]:
+                if base_collator is not None:
+                    batch = base_collator(features)
+                else:
+                    chosen_input_ids = [torch.tensor(feature["chosen_input_ids"]) for feature in features]
+                    rejected_input_ids = [torch.tensor(feature["rejected_input_ids"]) for feature in features]
+                    input_ids = chosen_input_ids + rejected_input_ids
+                    attention_mask = [torch.ones_like(ids) for ids in input_ids]
+                    input_ids = tokenizer.pad(
+                        {"input_ids": input_ids},
+                        padding=True,
+                        max_length=max_length,
+                        return_tensors="pt",
+                    )["input_ids"]
+                    attention_mask = tokenizer.pad(
+                        {"input_ids": attention_mask},
+                        padding=True,
+                        max_length=max_length,
+                        return_tensors="pt",
+                    )["input_ids"]
+                    batch = {
+                        "input_ids": input_ids,
+                        "attention_mask": attention_mask,
+                    }
+                    if "margin" in features[0]:
+                        batch["margin"] = torch.tensor(
+                            [float(feature["margin"]) for feature in features],
+                            dtype=torch.float32,
+                        )
+                batch["sample_weight"] = sample_weights
+                return batch
+
+            # Legacy format (already tokenized chosen/rejected pairs)
+            features_chosen = []
+            features_rejected = []
+            margins: List[float] = []
+
+            has_margin = "margin" in features[0]
+            for feature in features:
+                features_chosen.append(
+                    {
+                        "input_ids": feature["input_ids_chosen"],
+                        "attention_mask": feature["attention_mask_chosen"],
+                    }
+                )
+                features_rejected.append(
+                    {
+                        "input_ids": feature["input_ids_rejected"],
+                        "attention_mask": feature["attention_mask_rejected"],
+                    }
+                )
+                if has_margin:
+                    margins.append(float(feature["margin"]))
+
+            batch_chosen = tokenizer.pad(
+                features_chosen,
+                padding=True,
+                max_length=max_length,
+                return_tensors="pt",
+            )
+            batch_rejected = tokenizer.pad(
+                features_rejected,
+                padding=True,
+                max_length=max_length,
+                return_tensors="pt",
+            )
+
+            batch = {
+                "input_ids_chosen": batch_chosen["input_ids"],
+                "attention_mask_chosen": batch_chosen["attention_mask"],
+                "input_ids_rejected": batch_rejected["input_ids"],
+                "attention_mask_rejected": batch_rejected["attention_mask"],
+                "return_loss": True,
+                "sample_weight": sample_weights,
+            }
+            if has_margin:
+                batch["margin"] = torch.tensor(margins, dtype=torch.float32)
+            return batch
+
+    return WeightedRewardDataCollator()
+
+
+def _build_weighted_reward_trainer(base_cls):
+    """Create a RewardTrainer subclass that applies per-example sample weights."""
+    import torch.nn as nn
+
+    class WeightedRewardTrainer(base_cls):
+        def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+            if "input_ids" in inputs and "attention_mask" in inputs:
+                model_inputs = {key: value for key, value in inputs.items() if key != "sample_weight"}
+                model_inputs["use_cache"] = False
+                outputs = model(**model_inputs)
+                rewards_chosen, rewards_rejected = outputs.logits.squeeze(-1).chunk(2)
+                margin = inputs.get("margin")
+                if margin is not None:
+                    margin = margin.to(device=rewards_chosen.device, dtype=rewards_chosen.dtype)
+                    per_example_loss = -nn.functional.logsigmoid(
+                        rewards_chosen - rewards_rejected - margin
+                    )
+                else:
+                    per_example_loss = -nn.functional.logsigmoid(rewards_chosen - rewards_rejected)
+
+                weights = _coerce_sample_weight_tensor(
+                    inputs.get("sample_weight"),
+                    batch_size=per_example_loss.shape[0],
+                    device=per_example_loss.device,
+                )
+                if weights is None:
+                    loss = per_example_loss.mean()
+                else:
+                    denom = weights.sum().clamp(min=1e-12)
+                    loss = (per_example_loss * weights).sum() / denom
+
+                if getattr(self.args, "center_rewards_coefficient", None) is not None:
+                    loss = loss + self.args.center_rewards_coefficient * torch.mean(
+                        (rewards_chosen + rewards_rejected) ** 2
+                    )
+
+                if return_outputs:
+                    return loss, outputs
+                return loss
+
+            rewards_chosen = model(
+                input_ids=inputs["input_ids_chosen"],
+                attention_mask=inputs["attention_mask_chosen"],
+                return_dict=True,
+            )["logits"].squeeze(-1)
+            rewards_rejected = model(
+                input_ids=inputs["input_ids_rejected"],
+                attention_mask=inputs["attention_mask_rejected"],
+                return_dict=True,
+            )["logits"].squeeze(-1)
+
+            margin = inputs.get("margin")
+            if margin is not None:
+                margin = margin.to(device=rewards_chosen.device, dtype=rewards_chosen.dtype)
+                per_example_loss = -nn.functional.logsigmoid(
+                    rewards_chosen - rewards_rejected - margin
+                )
+            else:
+                per_example_loss = -nn.functional.logsigmoid(rewards_chosen - rewards_rejected)
+
+            weights = _coerce_sample_weight_tensor(
+                inputs.get("sample_weight"),
+                batch_size=per_example_loss.shape[0],
+                device=per_example_loss.device,
+            )
+            if weights is None:
+                loss = per_example_loss.mean()
+            else:
+                denom = weights.sum().clamp(min=1e-12)
+                loss = (per_example_loss * weights).sum() / denom
+
+            if return_outputs:
+                return loss, {
+                    "rewards_chosen": rewards_chosen,
+                    "rewards_rejected": rewards_rejected,
+                }
+            return loss
+
+    return WeightedRewardTrainer
+
+
+def _build_weighted_grpo_trainer(base_cls):
+    """Create a GRPOTrainer subclass that applies per-example sample weights."""
+    import torch
+
+    class WeightedGRPOTrainer(base_cls):
+        @staticmethod
+        def _coerce_local_sample_weights(
+            raw_inputs: List[Dict[str, Any]],
+            device: Any,
+            dtype: Any,
+        ) -> Optional[torch.Tensor]:
+            values: List[float] = []
+            for example in raw_inputs:
+                try:
+                    values.append(max(0.0, float(example.get("sample_weight", 1.0))))
+                except (TypeError, ValueError, AttributeError):
+                    values.append(1.0)
+
+            if not values:
+                return None
+
+            weights = torch.tensor(values, device=device, dtype=dtype)
+            if float(weights.sum().item()) <= 0:
+                return None
+
+            # Keep average scale near one to stabilize optimizer hyperparameters.
+            return weights / weights.mean().clamp(min=1e-12)
+
+        def _generate_and_score_completions(self, inputs):
+            batch = super()._generate_and_score_completions(inputs)
+            advantages = batch.get("advantages")
+            if advantages is None:
+                return batch
+
+            sample_weights = self._coerce_local_sample_weights(
+                raw_inputs=inputs,
+                device=advantages.device,
+                dtype=advantages.dtype,
+            )
+            if sample_weights is None:
+                return batch
+
+            if sample_weights.shape[0] != advantages.shape[0]:
+                logger.warning(
+                    "Skipping GRPO native sample weighting due to shape mismatch "
+                    "(weights=%s, advantages=%s)",
+                    tuple(sample_weights.shape),
+                    tuple(advantages.shape),
+                )
+                return batch
+
+            if advantages.ndim == 1:
+                batch["advantages"] = advantages * sample_weights
+            else:
+                batch["advantages"] = advantages * sample_weights.unsqueeze(-1)
+            batch["sample_weight"] = sample_weights
+            return batch
+
+    return WeightedGRPOTrainer
+
+
 def train_dpo(
     dataset: "PreferenceDataset",
     model_name: str,
@@ -379,6 +1006,12 @@ def train_dpo(
         law_type=law_type,
         prompt_builder=prompt_builder,
     )
+    if (
+        config.use_propensity_weighting
+        and config.propensity_resample
+        and not config.propensity_native_loss_weighting
+    ):
+        dpo_data = _resample_records_by_weight(dpo_data, config)
 
     train_dataset = _preference_to_hf_dpo(dpo_data)
 
@@ -408,12 +1041,16 @@ def train_dpo(
     )
 
     # Create trainer
-    trainer = DPOTrainer(
+    trainer_cls = DPOTrainer
+    if config.use_propensity_weighting and config.propensity_native_loss_weighting:
+        trainer_cls = _build_weighted_dpo_trainer(DPOTrainer)
+
+    trainer = trainer_cls(
         model=model,
         ref_model=ref_model,
         args=training_args,
         train_dataset=train_dataset,
-        tokenizer=tokenizer,
+        **_build_processing_class_kwargs(trainer_cls, tokenizer),
         peft_config=peft_config,
     )
 
@@ -481,19 +1118,46 @@ def train_grpo(
     except ImportError:
         raise ImportError("datasets library required. Install with: pip install datasets")
 
-    prompts = []
-    seen = set()
+    prompt_records = []
     for pair in dataset.pairs:
+        if pair.preferred == "tie":
+            continue
         if law_type is not None and pair.law_type != law_type:
             continue
-        prompt = render_prompt(pair.original_text, pair.rubric, prompt_builder)
-        if prompt in seen:
-            continue
-        seen.add(prompt)
-        prompts.append({"prompt": prompt})
+        prompt_records.append({
+            "prompt": render_prompt(pair.original_text, pair.rubric, prompt_builder),
+            "sample_weight": pair.ipw_weight(max_weight=config.propensity_weight_clip),
+        })
 
-    if not prompts:
+    if not prompt_records:
         raise ValueError("No prompts available for GRPO training after filtering")
+
+    if config.use_propensity_weighting:
+        if config.propensity_native_loss_weighting:
+            logger.info(
+                "Using native GRPO sample-weighted advantages for propensity weighting."
+            )
+        if config.propensity_resample and not config.propensity_native_loss_weighting:
+            logger.info(
+                "Using weighted prompt resampling fallback for GRPO (native weighting disabled)."
+            )
+            prompt_records = _resample_records_by_weight(prompt_records, config)
+        prompts = [
+            {
+                "prompt": record["prompt"],
+                "sample_weight": float(record.get("sample_weight", 1.0)),
+            }
+            for record in prompt_records
+        ]
+    else:
+        seen = set()
+        prompts = []
+        for record in prompt_records:
+            prompt = record["prompt"]
+            if prompt in seen:
+                continue
+            seen.add(prompt)
+            prompts.append({"prompt": prompt, "sample_weight": 1.0})
 
     train_dataset = Dataset.from_list(prompts)
 
@@ -516,7 +1180,11 @@ def train_grpo(
     )
 
     # Create trainer
-    trainer = GRPOTrainer(
+    trainer_cls = GRPOTrainer
+    if config.use_propensity_weighting and config.propensity_native_loss_weighting:
+        trainer_cls = _build_weighted_grpo_trainer(GRPOTrainer)
+
+    trainer = trainer_cls(
         model=model,
         reward_funcs=reward_funcs,
         args=training_args,
@@ -604,27 +1272,49 @@ def train_reward_model(
             config,
         )
 
-        reward_pairs.append({
+        entry = {
             "prompt": prompt,
             "chosen": chosen,
             "rejected": rejected,
-            "margin": margin,
-        })
+            "sample_weight": pair.ipw_weight(max_weight=config.propensity_weight_clip),
+        }
+        if margin is not None:
+            entry["margin"] = margin
+        reward_pairs.append(entry)
 
     if not reward_pairs:
         raise ValueError("No reward pairs available after filtering")
+
+    if (
+        config.use_propensity_weighting
+        and config.propensity_resample
+        and not config.propensity_native_loss_weighting
+    ):
+        reward_pairs = _resample_records_by_weight(reward_pairs, config)
 
     # Load model (as sequence classification model)
     model, tokenizer, peft_config = _load_model_for_training(
         model_name, config, is_reward_model=True
     )
 
-    # Tokenize reward pairs for RewardTrainer
-    train_dataset = _preference_to_hf_reward(
-        reward_pairs,
-        tokenizer=tokenizer,
-        max_length=config.max_length,
-    )
+    # RewardTrainer API compatibility: newer TRL expects raw chosen/rejected text
+    # with `processing_class`, while older paths used pre-tokenized pair fields.
+    trainer_cls = RewardTrainer
+    if config.use_propensity_weighting and config.propensity_native_loss_weighting:
+        trainer_cls = _build_weighted_reward_trainer(RewardTrainer)
+    processing_kwargs = _build_processing_class_kwargs(trainer_cls, tokenizer)
+    uses_processing_class = "processing_class" in processing_kwargs
+
+    if uses_processing_class:
+        from datasets import Dataset
+
+        train_dataset = Dataset.from_list(reward_pairs)
+    else:
+        train_dataset = _preference_to_hf_reward(
+            reward_pairs,
+            tokenizer=tokenizer,
+            max_length=config.max_length,
+        )
 
     # Reward training config
     training_args = RewardConfig(
@@ -642,11 +1332,19 @@ def train_reward_model(
     )
 
     # Create trainer
-    trainer = RewardTrainer(
+    data_collator = None
+    if config.use_propensity_weighting and config.propensity_native_loss_weighting:
+        data_collator = _build_weighted_reward_data_collator(
+            tokenizer=tokenizer,
+            max_length=config.max_length,
+        )
+
+    trainer = trainer_cls(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        tokenizer=tokenizer,
+        **processing_kwargs,
+        data_collator=data_collator,
         peft_config=peft_config,
     )
 

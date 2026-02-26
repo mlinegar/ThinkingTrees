@@ -60,7 +60,9 @@ Usage:
 
 import json
 import logging
+import math
 import random
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -69,8 +71,18 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Protocol, Tuple
 import dspy
 
 from src.core.prompting import default_summarize_prompt
+from src.core.provenance import normalize_truth_label_source
+from src.stats.sampling import (
+    largest_remainder_allocation as _largest_remainder_allocation,
+    pps_inclusion_probabilities as _pps_inclusion_probabilities,
+    systematic_pps_sample_indices as _systematic_pps_sample_indices,
+)
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_GLOBAL_PROPENSITY = 1.0
+MIN_PROPENSITY = 1e-8
+MAX_PROPENSITY = 1.0
 
 
 PromptBuilder = Callable[[str, str], Any]
@@ -100,6 +112,77 @@ def render_prompt(
                 parts.append(str(msg))
         return "\n".join(parts)
     return str(prompt)
+
+
+def compute_propensity_diagnostics(
+    pairs: List["PreferencePair"],
+    *,
+    include_ties: bool = True,
+    min_propensity: float = MIN_PROPENSITY,
+    max_weight: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Compute propensity/IPW diagnostics for a set of preference pairs.
+
+    Used for reporting effective sample size and weight concentration in
+    `final_stats.json` for judge/generator training subsets.
+    """
+    if include_ties:
+        used_pairs = list(pairs)
+    else:
+        used_pairs = [pair for pair in pairs if pair.preferred != "tie"]
+
+    n_total = len(pairs)
+    n_used = len(used_pairs)
+
+    if n_used == 0:
+        return {
+            "n_pairs_total": n_total,
+            "n_pairs_used": 0,
+            "n_ties_excluded": n_total,
+            "include_ties": include_ties,
+            "effective_sample_size": 0.0,
+            "effective_sample_ratio": 0.0,
+            "mean_joint_propensity": 0.0,
+            "min_joint_propensity": 0.0,
+            "max_joint_propensity": 0.0,
+            "mean_sample_weight": 0.0,
+            "min_sample_weight": 0.0,
+            "max_sample_weight": 0.0,
+            "sum_sample_weight": 0.0,
+            "max_weight_clip": max_weight,
+        }
+
+    propensities = [
+        pair.effective_joint_propensity(min_propensity=min_propensity)
+        for pair in used_pairs
+    ]
+    weights = [
+        pair.ipw_weight(min_propensity=min_propensity, max_weight=max_weight)
+        for pair in used_pairs
+    ]
+
+    sum_w = sum(weights)
+    sum_w_sq = sum(weight * weight for weight in weights)
+    neff = (sum_w * sum_w / sum_w_sq) if sum_w_sq > 0 else 0.0
+    neff_ratio = (neff / n_used) if n_used > 0 else 0.0
+
+    return {
+        "n_pairs_total": n_total,
+        "n_pairs_used": n_used,
+        "n_ties_excluded": n_total - n_used,
+        "include_ties": include_ties,
+        "effective_sample_size": neff,
+        "effective_sample_ratio": neff_ratio,
+        "mean_joint_propensity": sum(propensities) / n_used,
+        "min_joint_propensity": min(propensities),
+        "max_joint_propensity": max(propensities),
+        "mean_sample_weight": sum_w / n_used,
+        "min_sample_weight": min(weights),
+        "max_sample_weight": max(weights),
+        "sum_sample_weight": sum_w,
+        "max_weight_clip": max_weight,
+    }
 
 
 # =============================================================================
@@ -439,6 +522,27 @@ class PreferencePair:
 
     # Fields with defaults (must come after required fields)
     law_type: str = "sufficiency"
+    source_doc_id: Optional[str] = None
+    three_layer_roles: Dict[str, str] = field(default_factory=dict)
+    truth_label_source: str = "unknown"
+    oracle_view: Optional[str] = None
+    oracle_proxy_source: Optional[str] = None
+
+    # TreePO/IPW metadata (optional, used for weighted estimation/training)
+    doc_propensity: float = DEFAULT_GLOBAL_PROPENSITY
+    node_propensity: float = DEFAULT_GLOBAL_PROPENSITY
+    label_propensity: float = DEFAULT_GLOBAL_PROPENSITY
+    joint_propensity: Optional[float] = None
+    sampling_scheme: Optional[str] = None
+    node_type: Optional[str] = None
+
+    # Optional audit alignment metadata (Phase 1.5 TreePO audit)
+    audit_tree_id: Optional[str] = None
+    audit_passed: Optional[bool] = None
+    audit_violation_rate: Optional[float] = None
+    audit_union_bound: Optional[float] = None
+    audit_violation_ci_low: Optional[float] = None
+    audit_violation_ci_high: Optional[float] = None
 
     # Score estimates from judge
     score_estimate_a: Optional[float] = None
@@ -456,6 +560,70 @@ class PreferencePair:
         if self.timestamp is None:
             self.timestamp = datetime.now().isoformat()
 
+        self.truth_label_source = normalize_truth_label_source(self.truth_label_source)
+        if self.source_doc_id is not None:
+            self.source_doc_id = str(self.source_doc_id)
+        if self.oracle_view is not None:
+            self.oracle_view = str(self.oracle_view)
+        if self.oracle_proxy_source is not None:
+            self.oracle_proxy_source = str(self.oracle_proxy_source)
+        if self.three_layer_roles is None:
+            self.three_layer_roles = {}
+        elif not isinstance(self.three_layer_roles, dict):
+            self.three_layer_roles = dict(self.three_layer_roles)
+
+        self.doc_propensity = self._normalize_propensity_component(
+            self.doc_propensity, "doc_propensity"
+        )
+        self.node_propensity = self._normalize_propensity_component(
+            self.node_propensity, "node_propensity"
+        )
+        self.label_propensity = self._normalize_propensity_component(
+            self.label_propensity, "label_propensity"
+        )
+
+        if self.joint_propensity is None:
+            self.joint_propensity = (
+                self.doc_propensity * self.node_propensity * self.label_propensity
+            )
+        else:
+            self.joint_propensity = self._normalize_propensity_component(
+                self.joint_propensity, "joint_propensity"
+            )
+
+    @staticmethod
+    def _normalize_propensity_component(value: Any, name: str) -> float:
+        """Normalize propensity value; missing values default to uniform."""
+        if value is None:
+            return DEFAULT_GLOBAL_PROPENSITY
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must be numeric or None, got {value!r}")
+        if not math.isfinite(parsed) or parsed <= 0 or parsed > MAX_PROPENSITY:
+            raise ValueError(
+                f"{name} must be finite and in (0, {MAX_PROPENSITY}], got {parsed!r}"
+            )
+        return parsed
+
+    def effective_joint_propensity(self, min_propensity: float = MIN_PROPENSITY) -> float:
+        """Joint propensity with global-uniform fallback and numerical floor."""
+        joint = self.joint_propensity
+        if joint is None:
+            joint = self.doc_propensity * self.node_propensity * self.label_propensity
+        return max(min_propensity, float(joint))
+
+    def ipw_weight(
+        self,
+        min_propensity: float = MIN_PROPENSITY,
+        max_weight: Optional[float] = None,
+    ) -> float:
+        """Inverse-propensity weight for this preference pair."""
+        weight = 1.0 / self.effective_joint_propensity(min_propensity=min_propensity)
+        if max_weight is not None:
+            weight = min(weight, max_weight)
+        return weight
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
@@ -465,11 +633,28 @@ class PreferencePair:
             "rubric": self.rubric,
             "reference_score": self.reference_score,
             "law_type": self.law_type,
+            "source_doc_id": self.source_doc_id,
+            "three_layer_roles": self.three_layer_roles,
+            "truth_label_source": self.truth_label_source,
+            "oracle_view": self.oracle_view,
+            "oracle_proxy_source": self.oracle_proxy_source,
             "summary_a": self.summary_a,
             "summary_b": self.summary_b,
             "preferred": self.preferred,
             "reasoning": self.reasoning,
             "confidence": self.confidence,
+            "doc_propensity": self.doc_propensity,
+            "node_propensity": self.node_propensity,
+            "label_propensity": self.label_propensity,
+            "joint_propensity": self.joint_propensity,
+            "sampling_scheme": self.sampling_scheme,
+            "node_type": self.node_type,
+            "audit_tree_id": self.audit_tree_id,
+            "audit_passed": self.audit_passed,
+            "audit_violation_rate": self.audit_violation_rate,
+            "audit_union_bound": self.audit_union_bound,
+            "audit_violation_ci_low": self.audit_violation_ci_low,
+            "audit_violation_ci_high": self.audit_violation_ci_high,
             "score_estimate_a": self.score_estimate_a,
             "score_estimate_b": self.score_estimate_b,
             "oracle_error_a": self.oracle_error_a,
@@ -478,12 +663,39 @@ class PreferencePair:
             "timestamp": self.timestamp,
             "generation_config_a": self.generation_config_a,
             "generation_config_b": self.generation_config_b,
+            "sample_weight": self.ipw_weight(),
         }
+
+    def treepo_metadata(self) -> Dict[str, Any]:
+        """Return compact TreePO metadata for downstream export formats."""
+        metadata = {
+            "doc_propensity": self.doc_propensity,
+            "node_propensity": self.node_propensity,
+            "label_propensity": self.label_propensity,
+            "joint_propensity": self.effective_joint_propensity(),
+            "sample_weight": self.ipw_weight(),
+            "sampling_scheme": self.sampling_scheme,
+            "node_type": self.node_type,
+            "audit_tree_id": self.audit_tree_id,
+            "audit_passed": self.audit_passed,
+            "audit_violation_rate": self.audit_violation_rate,
+            "audit_union_bound": self.audit_union_bound,
+            "audit_violation_ci_low": self.audit_violation_ci_low,
+            "audit_violation_ci_high": self.audit_violation_ci_high,
+            "truth_label_source": self.truth_label_source,
+            "oracle_view": self.oracle_view,
+            "oracle_proxy_source": self.oracle_proxy_source,
+            "source_doc_id": self.source_doc_id,
+        }
+        return {key: value for key, value in metadata.items() if value is not None}
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'PreferencePair':
         """Create from dictionary."""
-        return cls(**data)
+        payload = dict(data)
+        # Derived/runtime field; recomputed from propensities.
+        payload.pop("sample_weight", None)
+        return cls(**payload)
 
     def get_winner(self) -> Optional[str]:
         """Return the winning summary, or None for ties."""
@@ -549,6 +761,146 @@ class PreferenceDataset:
     def __getitem__(self, idx: int) -> PreferencePair:
         return self.pairs[idx]
 
+    def get_sample_weights(
+        self,
+        min_propensity: float = MIN_PROPENSITY,
+        max_weight: Optional[float] = None,
+    ) -> List[float]:
+        """Return IPW sample weights for all pairs."""
+        return [
+            pair.ipw_weight(min_propensity=min_propensity, max_weight=max_weight)
+            for pair in self.pairs
+        ]
+
+    def propensity_diagnostics(
+        self,
+        *,
+        include_ties: bool = True,
+        min_propensity: float = MIN_PROPENSITY,
+        max_weight: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Dataset-level wrapper around `compute_propensity_diagnostics`."""
+        return compute_propensity_diagnostics(
+            self.pairs,
+            include_ties=include_ties,
+            min_propensity=min_propensity,
+            max_weight=max_weight,
+        )
+
+    def resample_by_propensity(
+        self,
+        target_size: Optional[int] = None,
+        seed: int = 42,
+        max_weight: Optional[float] = None,
+        min_propensity: float = MIN_PROPENSITY,
+        strategy: Literal["multinomial", "pps_systematic", "stratified_multinomial"] = "pps_systematic",
+        stratify_by: Optional[str] = None,
+    ) -> 'PreferenceDataset':
+        """
+        Backward-compatible wrapper for propensity-based sampling.
+
+        Historically this performed multinomial resampling with replacement.
+        New strategies are available for efficiency and variance control.
+        """
+        return self.sample_by_propensity(
+            target_size=target_size,
+            seed=seed,
+            max_weight=max_weight,
+            min_propensity=min_propensity,
+            strategy=strategy,
+            stratify_by=stratify_by,
+        )
+
+    def sample_by_propensity(
+        self,
+        target_size: Optional[int] = None,
+        seed: int = 42,
+        max_weight: Optional[float] = None,
+        min_propensity: float = MIN_PROPENSITY,
+        strategy: Literal["multinomial", "pps_systematic", "stratified_multinomial"] = "pps_systematic",
+        stratify_by: Optional[str] = None,
+    ) -> 'PreferenceDataset':
+        """
+        Sample pairs according to propensity-derived weights.
+
+        Strategies:
+        - `multinomial`: with-replacement weighted sampling.
+        - `pps_systematic`: fixed-size PPS without replacement when possible.
+        - `stratified_multinomial`: weighted multinomial sampling within strata.
+        """
+        if not self.pairs:
+            return PreferenceDataset([])
+
+        size = int(target_size or len(self.pairs))
+        if size <= 0:
+            return PreferenceDataset([])
+
+        rng = random.Random(seed)
+        weights = self.get_sample_weights(
+            min_propensity=min_propensity,
+            max_weight=max_weight,
+        )
+        total_weight = sum(weights)
+        if total_weight <= 0:
+            return PreferenceDataset(self.pairs.copy())
+
+        if strategy == "multinomial":
+            sampled_pairs = rng.choices(self.pairs, weights=weights, k=size)
+            return PreferenceDataset(sampled_pairs)
+
+        if strategy == "pps_systematic":
+            n = len(self.pairs)
+            if size >= n:
+                full = self.pairs.copy()
+                extra = rng.choices(self.pairs, weights=weights, k=size - n)
+                return PreferenceDataset(full + extra)
+
+            inclusion_probs = _pps_inclusion_probabilities(weights, size)
+            sampled_indices = _systematic_pps_sample_indices(inclusion_probs, size, rng)
+            sampled_pairs = [self.pairs[index] for index in sampled_indices]
+            return PreferenceDataset(sampled_pairs)
+
+        if strategy == "stratified_multinomial":
+            strata_key = stratify_by or "law_type"
+            grouped_indices: Dict[str, List[int]] = defaultdict(list)
+            for index, pair in enumerate(self.pairs):
+                value = getattr(pair, strata_key, None)
+                grouped_indices[str(value)].append(index)
+
+            keys = list(grouped_indices.keys())
+            if not keys:
+                sampled_pairs = rng.choices(self.pairs, weights=weights, k=size)
+                return PreferenceDataset(sampled_pairs)
+
+            group_weight_sums = [
+                sum(weights[index] for index in grouped_indices[key])
+                for key in keys
+            ]
+            total_group_weight = sum(group_weight_sums)
+            if total_group_weight <= 0:
+                sampled_pairs = rng.choices(self.pairs, k=size)
+                return PreferenceDataset(sampled_pairs)
+
+            quotas = [
+                size * (group_weight / total_group_weight)
+                for group_weight in group_weight_sums
+            ]
+            allocation = _largest_remainder_allocation(size, quotas)
+            sampled_pairs: List[PreferencePair] = []
+            for key, group_size in zip(keys, allocation):
+                if group_size <= 0:
+                    continue
+                group_indices = grouped_indices[key]
+                group_pairs = [self.pairs[index] for index in group_indices]
+                group_weights = [weights[index] for index in group_indices]
+                sampled_pairs.extend(rng.choices(group_pairs, weights=group_weights, k=group_size))
+            return PreferenceDataset(sampled_pairs)
+
+        raise ValueError(
+            f"Unknown sampling strategy: {strategy!r}. "
+            "Expected one of {'multinomial', 'pps_systematic', 'stratified_multinomial'}."
+        )
+
     def filter_by_confidence(self, min_confidence: float) -> 'PreferenceDataset':
         """Return new dataset with pairs above confidence threshold."""
         filtered = [p for p in self.pairs if p.confidence >= min_confidence]
@@ -606,6 +958,8 @@ class PreferenceDataset:
                 preferred=pair.preferred,
                 reasoning=pair.reasoning,
                 confidence=pair.confidence,
+                sample_weight=pair.ipw_weight(),
+                joint_propensity=pair.effective_joint_propensity(),
             ).with_inputs(
                 "law_type", "rubric", "original_text", "summary_a", "summary_b", "reference_score"
             )
@@ -683,16 +1037,27 @@ class PreferenceDataset:
                 chosen = pair.summary_b
                 rejected = pair.summary_a
 
+            metadata = {
+                "pair_id": pair.pair_id,
+                "confidence": pair.confidence,
+                "reference_score": pair.reference_score,
+                "law_type": pair.law_type,
+                "truth_label_source": pair.truth_label_source,
+                "oracle_view": pair.oracle_view,
+                "oracle_proxy_source": pair.oracle_proxy_source,
+                "source_doc_id": pair.source_doc_id,
+                "three_layer_roles": pair.three_layer_roles,
+            }
+            treepo_meta = pair.treepo_metadata()
+            if treepo_meta:
+                metadata["treepo"] = treepo_meta
+
             dpo_data.append({
                 "prompt": prompt,
                 "chosen": chosen,
                 "rejected": rejected,
-                "metadata": {
-                    "pair_id": pair.pair_id,
-                    "confidence": pair.confidence,
-                    "reference_score": pair.reference_score,
-                    "law_type": pair.law_type,
-                },
+                "sample_weight": pair.ipw_weight(),
+                "metadata": metadata,
             })
 
         return dpo_data
@@ -737,11 +1102,18 @@ class PreferenceDataset:
                 "responses": ranked_responses,
                 "ranks": ranks,
                 "confidence": pair.confidence,
+                "sample_weight": pair.ipw_weight(),
                 "metadata": {
                     "pair_id": pair.pair_id,
                     "reference_score": pair.reference_score,
                     "law_type": pair.law_type,
                     "original_preferred": pair.preferred,
+                    "truth_label_source": pair.truth_label_source,
+                    "oracle_view": pair.oracle_view,
+                    "oracle_proxy_source": pair.oracle_proxy_source,
+                    "source_doc_id": pair.source_doc_id,
+                    "three_layer_roles": pair.three_layer_roles,
+                    "treepo": pair.treepo_metadata(),
                 },
             })
 
@@ -784,22 +1156,36 @@ class PreferenceDataset:
                     "prompt": prompt,
                     "response": pair.summary_a,
                     "score": score_a,
+                    "sample_weight": pair.ipw_weight(),
                     "metadata": {
                         "pair_id": pair.pair_id,
                         "response_id": "A",
                         "reference_score": pair.reference_score,
                         "law_type": pair.law_type,
+                        "truth_label_source": pair.truth_label_source,
+                        "oracle_view": pair.oracle_view,
+                        "oracle_proxy_source": pair.oracle_proxy_source,
+                        "source_doc_id": pair.source_doc_id,
+                        "three_layer_roles": pair.three_layer_roles,
+                        "treepo": pair.treepo_metadata(),
                     },
                 },
                 {
                     "prompt": prompt,
                     "response": pair.summary_b,
                     "score": score_b,
+                    "sample_weight": pair.ipw_weight(),
                     "metadata": {
                         "pair_id": pair.pair_id,
                         "response_id": "B",
                         "reference_score": pair.reference_score,
                         "law_type": pair.law_type,
+                        "truth_label_source": pair.truth_label_source,
+                        "oracle_view": pair.oracle_view,
+                        "oracle_proxy_source": pair.oracle_proxy_source,
+                        "source_doc_id": pair.source_doc_id,
+                        "three_layer_roles": pair.three_layer_roles,
+                        "treepo": pair.treepo_metadata(),
                     },
                 },
             ])
@@ -832,6 +1218,13 @@ class PreferenceDataset:
                 "reasoning": pair.reasoning,
                 "reference_score": pair.reference_score,
                 "law_type": pair.law_type,
+                "truth_label_source": pair.truth_label_source,
+                "oracle_view": pair.oracle_view,
+                "oracle_proxy_source": pair.oracle_proxy_source,
+                "source_doc_id": pair.source_doc_id,
+                "three_layer_roles": pair.three_layer_roles,
+                "sample_weight": pair.ipw_weight(),
+                "treepo": pair.treepo_metadata(),
             })
 
         return general_data
@@ -890,12 +1283,19 @@ class PreferenceDataset:
                 "law_type": pair.law_type,
                 "confidence": pair.confidence,
                 "preferred": pair.preferred,
+                "truth_label_source": pair.truth_label_source,
+                "oracle_view": pair.oracle_view,
+                "oracle_proxy_source": pair.oracle_proxy_source,
+                "source_doc_id": pair.source_doc_id,
+                "three_layer_roles": pair.three_layer_roles,
+                "treepo": pair.treepo_metadata(),
             }
 
             rm_data.append({
                 "prompt": prompt,
                 "response": pair.summary_a,
                 "score": score_a,
+                "sample_weight": pair.ipw_weight(),
                 "oracle_estimate": pair.score_estimate_a,
                 "oracle_error": pair.oracle_error_a,
                 "metadata": {**base_metadata, "response_id": "A"},
@@ -904,6 +1304,7 @@ class PreferenceDataset:
                 "prompt": prompt,
                 "response": pair.summary_b,
                 "score": score_b,
+                "sample_weight": pair.ipw_weight(),
                 "oracle_estimate": pair.score_estimate_b,
                 "oracle_error": pair.oracle_error_b,
                 "metadata": {**base_metadata, "response_id": "B"},
@@ -1061,6 +1462,12 @@ class PreferenceDataset:
     def summary(self) -> Dict[str, Any]:
         """Return summary statistics about the dataset."""
         non_ties = [p for p in self.pairs if p.preferred != "tie"]
+        with_propensity = self.pairs
+        with_audit_context = [
+            p for p in self.pairs
+            if getattr(p, "audit_tree_id", None) is not None
+        ]
+        propensity_stats = self.propensity_diagnostics(include_ties=True)
 
         return {
             "total_pairs": len(self.pairs),
@@ -1073,4 +1480,11 @@ class PreferenceDataset:
                 if self.pairs else 0
             ),
             "high_confidence_pairs": sum(1 for p in self.pairs if p.confidence >= 0.8),
+            "pairs_with_propensity": len(with_propensity),
+            "pairs_with_audit_context": len(with_audit_context),
+            "mean_joint_propensity": propensity_stats["mean_joint_propensity"],
+            "mean_sample_weight": propensity_stats["mean_sample_weight"],
+            "max_sample_weight": propensity_stats["max_sample_weight"],
+            "effective_sample_size": propensity_stats["effective_sample_size"],
+            "effective_sample_ratio": propensity_stats["effective_sample_ratio"],
         }

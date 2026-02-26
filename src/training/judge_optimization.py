@@ -33,12 +33,24 @@ from typing import Dict, List, Optional, Tuple, Callable
 
 import dspy
 
+from src.core.prompting import clean_summary_text
 from src.training.preference.genrm_dspy import GenRMComparisonModule
 from src.training.preference import PreferencePair
 
 PreferenceLabeler = Callable[[PreferencePair, float], Optional[str]]
 
 logger = logging.getLogger(__name__)
+
+try:
+    from dspy.teleprompt.gepa.gepa_utils import ScoreWithFeedback
+except Exception:  # pragma: no cover
+    ScoreWithFeedback = None  # type: ignore[assignment]
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    cleaned = str(text or "").strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[:max_chars].rstrip() + " ... (truncated)"
 
 
 @dataclass
@@ -205,6 +217,65 @@ def create_judge_trainset(
         else:
             ground_truth = pair.preferred
 
+        judge_reasoning_raw = str(getattr(pair, "reasoning", "") or "").strip()
+        judge_reasoning = clean_summary_text(judge_reasoning_raw)
+        if use_oracle_as_ground_truth:
+            error_a = getattr(pair, "oracle_error_a", None)
+            error_b = getattr(pair, "oracle_error_b", None)
+            oracle_reason: Optional[str] = None
+            if error_a is not None and error_b is not None:
+                try:
+                    error_a_f = float(error_a)
+                    error_b_f = float(error_b)
+                except (TypeError, ValueError):
+                    error_a_f = None
+                    error_b_f = None
+                if error_a_f is not None and error_b_f is not None:
+                    diff = error_a_f - error_b_f
+                    if ground_truth == "tie":
+                        oracle_reason = (
+                            "Oracle label: tie "
+                            f"(oracle_error_a={error_a_f:.4f}, oracle_error_b={error_b_f:.4f}, "
+                            f"diff={diff:+.4f}, tie_margin={tie_margin:.4f})."
+                        )
+                    else:
+                        oracle_reason = (
+                            f"Oracle label: {ground_truth} "
+                            f"(oracle_error_a={error_a_f:.4f}, oracle_error_b={error_b_f:.4f}, "
+                            f"diff={diff:+.4f}, tie_margin={tie_margin:.4f})."
+                        )
+
+            if oracle_reason is None:
+                oracle_reason = f"Gold label: {ground_truth!r} (no oracle errors available)."
+
+        else:
+            oracle_reason = None
+
+        parts: List[str] = []
+        if oracle_reason:
+            parts.append(oracle_reason)
+        if judge_reasoning:
+            judge_pref = getattr(pair, "preferred", None)
+            judge_conf = getattr(pair, "confidence", None)
+            alignment = None
+            if judge_pref in {"A", "B", "tie"} and ground_truth in {"A", "B", "tie"}:
+                alignment = "aligned" if judge_pref == ground_truth else "disagrees"
+            header = "Judge rationale:"
+            if judge_pref in {"A", "B", "tie"}:
+                conf_part = ""
+                if judge_conf is not None:
+                    try:
+                        conf_part = f", confidence={float(judge_conf):.3f}"
+                    except (TypeError, ValueError):
+                        conf_part = ""
+                if alignment:
+                    header = f"Judge said {judge_pref}{conf_part} ({alignment}):"
+                else:
+                    header = f"Judge said {judge_pref}{conf_part}:"
+            parts.append(f"{header} {judge_reasoning}")
+
+        ground_truth_reasoning = _truncate_text("\n".join(parts).strip(), max_chars=2400)
+
         # Use full original_text - no truncation
         example = dspy.Example(
             context=pair.rubric,
@@ -213,6 +284,7 @@ def create_judge_trainset(
             summary_b=pair.summary_b,
             law_type=pair.law_type,
             ground_truth_preference=ground_truth,
+            ground_truth_reasoning=ground_truth_reasoning,
         ).with_inputs('context', 'original_text', 'summary_a', 'summary_b', 'law_type')
 
         examples.append(example)
@@ -233,35 +305,44 @@ def create_judge_trainset(
 # Metrics
 # =============================================================================
 
-def judge_accuracy_metric(example, prediction, trace=None) -> float:
+def judge_accuracy_metric(example, prediction, trace=None, pred_name=None, pred_trace=None) -> float:
     """
     Metric for judge accuracy: does the judge predict the correct preference?
 
     Returns 1.0 for correct, 0.0 for incorrect, 0.5 for tie mismatches.
     """
     try:
-        predicted = getattr(prediction, 'preference', None)
+        predicted = getattr(prediction, "preference", None)
         ground_truth = example.ground_truth_preference
-
-        if predicted == ground_truth:
-            return 1.0
-        elif predicted == 'tie' or ground_truth == 'tie':
-            # Partial credit for tie-related mismatches
-            return 0.5
-        else:
-            return 0.0
-    except (AttributeError, TypeError):
+    except Exception:
         return 0.0
 
+    if predicted == ground_truth:
+        return 1.0
 
-def judge_accuracy_with_confidence(example, prediction, trace=None) -> float:
+    score = 0.5 if (predicted == "tie" or ground_truth == "tie") else 0.0
+
+    if ScoreWithFeedback is None:
+        return float(score)
+
+    gold_reasoning = str(getattr(example, "ground_truth_reasoning", "") or "").strip()
+    pred_reasoning = str(getattr(prediction, "reasoning", "") or "").strip()
+    feedback = f"Incorrect preference: predicted={predicted!r}, expected={ground_truth!r}."
+    if pred_reasoning:
+        feedback = f"{feedback}\nYour rationale: {_truncate_text(pred_reasoning, max_chars=800)}"
+    if gold_reasoning:
+        feedback = f"{feedback}\nGold rationale: {_truncate_text(gold_reasoning, max_chars=1600)}"
+    return ScoreWithFeedback(score=float(score), feedback=feedback)
+
+
+def judge_accuracy_with_confidence(example, prediction, trace=None, pred_name=None, pred_trace=None) -> float:
     """
     Metric that weights accuracy by confidence.
 
     Rewards confident correct predictions, penalizes confident wrong predictions.
     """
     try:
-        predicted = getattr(prediction, 'preference', None)
+        predicted = getattr(prediction, "preference", None)
         ground_truth = example.ground_truth_preference
 
         # Get confidence from ranking_score if available
@@ -276,10 +357,24 @@ def judge_accuracy_with_confidence(example, prediction, trace=None) -> float:
 
         if predicted == ground_truth:
             return 0.5 + 0.5 * confidence  # 0.5 to 1.0
-        elif predicted == 'tie' or ground_truth == 'tie':
-            return 0.5  # Neutral for ties
-        else:
-            return 0.5 - 0.5 * confidence  # 0.0 to 0.5
+
+        score = 0.5 if (predicted == "tie" or ground_truth == "tie") else (0.5 - 0.5 * confidence)
+        score = float(max(0.0, min(1.0, score)))
+
+        if ScoreWithFeedback is None:
+            return score
+
+        gold_reasoning = str(getattr(example, "ground_truth_reasoning", "") or "").strip()
+        pred_reasoning = str(getattr(prediction, "reasoning", "") or "").strip()
+        feedback = (
+            f"Incorrect preference: predicted={predicted!r}, expected={ground_truth!r}. "
+            f"(confidence={confidence:.3f})"
+        )
+        if pred_reasoning:
+            feedback = f"{feedback}\nYour rationale: {_truncate_text(pred_reasoning, max_chars=800)}"
+        if gold_reasoning:
+            feedback = f"{feedback}\nGold rationale: {_truncate_text(gold_reasoning, max_chars=1600)}"
+        return ScoreWithFeedback(score=score, feedback=feedback)
 
     except (AttributeError, TypeError):
         return 0.0
@@ -299,6 +394,9 @@ class JudgeOptimizationConfig:
     use_confidence_metric: bool = False
     checkpoint_dir: Optional[Path] = None
     preference_labeler: Optional[PreferenceLabeler] = None
+    use_propensity_weighting: bool = True
+    propensity_weight_clip: Optional[float] = None
+    propensity_random_seed: int = 42
 
 
 class JudgeOptimizer:
@@ -348,9 +446,28 @@ class JudgeOptimizer:
         Returns:
             Tuple of (optimized_judge, evaluation_results)
         """
+        from src.training.preference.types import compute_propensity_diagnostics
+
+        weighted_pairs = pairs
+        if self.config.use_propensity_weighting and pairs:
+            from src.training.preference.types import PreferenceDataset
+
+            weighted_pairs = PreferenceDataset(pairs).resample_by_propensity(
+                target_size=len(pairs),
+                seed=self.config.propensity_random_seed,
+                max_weight=self.config.propensity_weight_clip,
+            ).pairs
+
+        propensity_input = compute_propensity_diagnostics(
+            pairs, include_ties=False, max_weight=self.config.propensity_weight_clip
+        )
+        propensity_weighted = compute_propensity_diagnostics(
+            weighted_pairs, include_ties=False, max_weight=self.config.propensity_weight_clip
+        )
+
         # Create training examples
         all_examples, skipped_reasons = create_judge_trainset(
-            pairs,
+            weighted_pairs,
             tie_margin=self.config.tie_margin,
             use_oracle_as_ground_truth=use_oracle_as_ground_truth,
             preference_labeler=self.config.preference_labeler,
@@ -368,7 +485,15 @@ class JudgeOptimizer:
 
         if len(all_examples) < 10:
             logger.warning(f"Only {len(all_examples)} examples, returning unoptimized judge")
-            return judge_module, {'error': 'insufficient_data'}
+            return judge_module, {
+                'error': 'insufficient_data',
+                'total_pairs_input': len(pairs),
+                'total_pairs_weighted': len(weighted_pairs),
+                'propensity_diagnostics': {
+                    'input': propensity_input,
+                    'weighted': propensity_weighted,
+                },
+            }
 
         # Split train/test
         import random
@@ -417,6 +542,11 @@ class JudgeOptimizer:
             'budget': self.config.budget,
             'skipped_pairs': skipped_reasons.to_dict(),
             'total_pairs_input': len(pairs),
+            'total_pairs_weighted': len(weighted_pairs),
+            'propensity_diagnostics': {
+                'input': propensity_input,
+                'weighted': propensity_weighted,
+            },
         }
 
         return optimized_judge, results

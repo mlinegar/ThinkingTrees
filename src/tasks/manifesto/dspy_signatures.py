@@ -14,10 +14,12 @@ See src.core.signatures.MetricScore for the generic scoring pattern.
 """
 
 import logging
+import re
 import dspy
-from typing import Optional
+from typing import Any, Optional
 
 from src.core.output_parser import NormalizedOutputAccessor
+from src.core.prompting import parse_numeric_score
 from .constants import RILE_MIN, RILE_MAX
 
 logger = logging.getLogger(__name__)
@@ -36,7 +38,7 @@ class RILEScore(dspy.Signature):
     text: str = dspy.InputField(
         desc="Text to score"
     )
-    rile_score: float = dspy.OutputField(
+    score: float = dspy.OutputField(
         desc="Score on the specified scale. Output a single number."
     )
     left_indicators: str = dspy.OutputField(
@@ -54,8 +56,8 @@ class SimpleScore(dspy.Signature):
     """
     Score text on a bounded numeric scale with minimal output fields.
 
-    A simpler signature with fewer output fields to reduce JSON parsing failures.
-    Use this when model reliability is an issue.
+    A compact signature with a single output field to reduce format drift
+    and truncation during optimization/evaluation loops.
     """
     task_context: str = dspy.InputField(
         desc="Scoring task description and criteria"
@@ -64,10 +66,13 @@ class SimpleScore(dspy.Signature):
         desc="Text to score"
     )
     score: float = dspy.OutputField(
-        desc="Score on the specified scale. Output a single number."
-    )
-    reasoning: str = dspy.OutputField(
-        desc="Brief explanation of the score"
+        desc=(
+            "Numeric score on the exact scale defined in task_context. "
+            "Output a single number only (format examples, do not copy: -12, 0, 37.5; "
+            "no markdown/backticks/code fences, no extra text); "
+            "do not invent an alternate scale; "
+            "do not output multiple numbers, ranges, or lists."
+        )
     )
 
 
@@ -143,14 +148,59 @@ class RILEComparison(dspy.Signature):
     )
 
 
+def _coerce_rile_score(raw_value: Any, raw_result: Any) -> Optional[float]:
+    if raw_value is not None:
+        parsed = parse_numeric_score(
+            str(raw_value),
+            min_value=RILE_MIN,
+            max_value=RILE_MAX,
+            allow_llm_fallback=False,
+        )
+        if parsed is not None:
+            return parsed
+
+    # Fallback: parse the last in-range number from the full (possibly messy)
+    # result representation. This recovers from format drift where the adapter
+    # returns a partial field or different casing/structure.
+    if raw_result is not None:
+        parsed = parse_numeric_score(
+            str(raw_result),
+            min_value=RILE_MIN,
+            max_value=RILE_MAX,
+            allow_llm_fallback=False,
+        )
+        if parsed is not None:
+            return parsed
+
+    return None
+
+
 # Module implementations
 
 class RILEScorer(dspy.Module):
     """DSPy module for RILE scoring."""
 
-    def __init__(self):
+    def __init__(self, use_cot: bool = False):
         super().__init__()
-        self.score = dspy.ChainOfThought(RILEScore)
+        # Default to the compact signature to keep scorer outputs short and
+        # stable during GEPA optimization/evaluation loops.
+        # Also cap completion tokens so the scorer cannot ramble; we only need
+        # a single numeric value.
+        scorer_max_tokens = 32
+        scorer_temperature = 0.0
+        score_signature = SimpleScore
+        if use_cot:
+            self.score = dspy.ChainOfThought(
+                score_signature,
+                max_tokens=scorer_max_tokens,
+                temperature=scorer_temperature,
+            )
+        else:
+            self.score = dspy.Predict(
+                score_signature,
+                max_tokens=scorer_max_tokens,
+                temperature=scorer_temperature,
+            )
 
     def forward(
         self,
@@ -160,6 +210,7 @@ class RILEScorer(dspy.Module):
         summary: str = None,
         rubric: str = None,
         original_content: str = None,  # Accepted but not used for pure scoring
+        dspy_config: Optional[dict[str, Any]] = None,
     ) -> dict:
         """
         Score text on the RILE scale.
@@ -187,28 +238,74 @@ class RILEScorer(dspy.Module):
         if actual_context is None:
             raise ValueError("Either 'task_context' or 'rubric' must be provided")
 
-        result = self.score(task_context=actual_context, text=actual_text)
+        request_config: Optional[dict[str, Any]] = None
+        if isinstance(dspy_config, dict) and dspy_config:
+            request_config = dict(dspy_config)
 
-        # Use normalized accessor to handle key casing variations
-        # (e.g., LLM may output 'RILE_score' or 'riLE_score' instead of 'rile_score')
-        accessor = NormalizedOutputAccessor(result)
+        def _extract_lm_response_from_exception(exc: Exception) -> Optional[str]:
+            message = str(exc or "")
+            if not message:
+                return None
+            match = re.search(
+                r"LM Response:\s*(.*?)(?:\n\nExpected to find|\Z)",
+                message,
+                flags=re.DOTALL,
+            )
+            if not match:
+                return None
+            candidate = match.group(1).strip()
+            return candidate or None
 
-        raw_score = float(accessor.get('rile_score', 0.0))
+        def _score_once(task_ctx: str) -> Optional[float]:
+            try:
+                if request_config is None:
+                    result = self.score(task_context=task_ctx, text=actual_text)
+                else:
+                    result = self.score(
+                        task_context=task_ctx,
+                        text=actual_text,
+                        config=request_config,
+                    )
+            except Exception as exc:
+                lm_response = _extract_lm_response_from_exception(exc)
+                if lm_response:
+                    parsed = parse_numeric_score(
+                        lm_response,
+                        min_value=RILE_MIN,
+                        max_value=RILE_MAX,
+                        allow_llm_fallback=False,
+                    )
+                    if parsed is not None:
+                        return parsed
+                logger.warning("RILEScorer prediction failed; defaulting to neutral. Error: %s", exc)
+                return None
+
+            accessor = NormalizedOutputAccessor(result)
+            return _coerce_rile_score(accessor.get("score", None), result)
+
+        raw_score = _score_once(actual_context)
+
+        if raw_score is None:
+            retry_context = (
+                f"{actual_context}\n\n"
+                "IMPORTANT: Output ONLY the numeric score as plain text. "
+                "No words, labels, units, punctuation (other than a leading '-' and optional decimal point)."
+            )
+            raw_score = _score_once(retry_context)
+
+        if raw_score is None:
+            logger.warning("RILEScorer could not parse score after retry; defaulting to neutral score 0.0")
+            raw_score = 0.0
         normalized = (raw_score - RILE_MIN) / (RILE_MAX - RILE_MIN)
         normalized = max(0.0, min(1.0, normalized))
 
-        return {
-            'rile_score': normalized,
-            'left_indicators': accessor.get('left_indicators', ''),
-            'right_indicators': accessor.get('right_indicators', ''),
-            'reasoning': accessor.get('reasoning', ''),
-        }
+        return {'score': normalized}
 
 
 class RILEComparator(dspy.Module):
     """DSPy module for comparing RILE scores between texts."""
 
-    def __init__(self, threshold: float = 10.0):
+    def __init__(self, threshold: float = 10.0, use_cot: bool = False):
         """
         Initialize comparator.
 
@@ -216,7 +313,10 @@ class RILEComparator(dspy.Module):
             threshold: Maximum acceptable score difference for preservation
         """
         super().__init__()
-        self.compare = dspy.ChainOfThought(RILEComparison)
+        if use_cot:
+            self.compare = dspy.ChainOfThought(RILEComparison)
+        else:
+            self.compare = dspy.Predict(RILEComparison)
         self.threshold = threshold
 
     def forward(self, original_text: str, summary_text: str, task_context: str) -> dict:
@@ -240,8 +340,10 @@ class RILEComparator(dspy.Module):
         # Use normalized accessor to handle key casing variations
         accessor = NormalizedOutputAccessor(result)
 
-        raw_original = float(accessor.get('original_rile', 0.0))
-        raw_summary = float(accessor.get('summary_rile', 0.0))
+        raw_original = _coerce_rile_score(accessor.get('original_rile', None), result)
+        raw_summary = _coerce_rile_score(accessor.get('summary_rile', None), result)
+        raw_original = 0.0 if raw_original is None else raw_original
+        raw_summary = 0.0 if raw_summary is None else raw_summary
 
         norm_original = (raw_original - RILE_MIN) / (RILE_MAX - RILE_MIN)
         norm_summary = (raw_summary - RILE_MIN) / (RILE_MAX - RILE_MIN)

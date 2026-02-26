@@ -78,11 +78,31 @@ class JSONLDataset:
                         continue
                     metadata.setdefault(key, value)
 
+                pages = record.get("pages")
+                if isinstance(pages, list):
+                    pages = [str(page or "") for page in pages]
+                else:
+                    pages = None
+
+                items = record.get("items")
+                if not isinstance(items, list):
+                    items = None
+
+                segments = record.get("segments")
+                if not isinstance(segments, list):
+                    segments = None
+
+                modality = str(record.get("modality") or "text")
+
                 samples.append(
                     DocumentSample(
                         doc_id=str(doc_id),
                         text=text,
                         reference_score=reference_score,
+                        modality=modality,
+                        pages=pages,
+                        items=items,
+                        segments=segments,
                         metadata=metadata,
                     )
                 )

@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from src.training.preference import PreferencePair
 
 from src.core.prompting import default_merge_prompt, default_summarize_prompt, default_unified_prompt
+from src.core.prompting import clean_summary_text
 from src.core.protocols import format_merge_input
 from src.config.concurrency import get_concurrency_config
 
@@ -59,7 +60,12 @@ logger = logging.getLogger(__name__)
 tournament_doc_id: ContextVar[Optional[str]] = ContextVar("tournament_doc_id", default=None)
 
 
-def _filter_valid_candidates(results: List[Any], operation: str = "generation") -> List[str]:
+def _filter_valid_candidates(
+    results: List[Any],
+    operation: str = "generation",
+    *,
+    warn_on_empty: bool = True,
+) -> List[str]:
     """Filter async gather results to valid non-empty string candidates.
 
     Args:
@@ -70,11 +76,52 @@ def _filter_valid_candidates(results: List[Any], operation: str = "generation") 
         List of valid non-empty string candidates
     """
     candidates = []
+    exception_count = 0
+    non_string_count = 0
+    exception_samples: List[str] = []
     for result in results:
         if isinstance(result, str) and result.strip():
             candidates.append(result)
         elif isinstance(result, Exception):
+            exception_count += 1
+            if len(exception_samples) < 3:
+                detail = str(result).replace("\n", " ").strip()
+                if len(detail) > 180:
+                    detail = detail[:177] + "..."
+                exception_samples.append(f"{type(result).__name__}: {detail}")
             logger.debug(f"{operation} failed: {result}")
+        else:
+            non_string_count += 1
+
+    if (not candidates) and warn_on_empty:
+        warn_budget = int(getattr(_filter_valid_candidates, "_warn_budget", 10))
+        message = (
+            "%s produced 0 valid candidates (exceptions=%d non_strings=%d total=%d). "
+            "Downstream tournament preferences will be skipped."
+        )
+        if warn_budget > 0:
+            logger.warning(
+                message,
+                operation,
+                int(exception_count),
+                int(non_string_count),
+                int(len(results)),
+            )
+            if exception_samples:
+                logger.warning(
+                    "%s sample exceptions: %s",
+                    operation,
+                    " | ".join(exception_samples),
+                )
+            setattr(_filter_valid_candidates, "_warn_budget", warn_budget - 1)
+        else:
+            logger.debug(
+                message,
+                operation,
+                int(exception_count),
+                int(non_string_count),
+                int(len(results)),
+            )
     return candidates
 
 
@@ -185,7 +232,7 @@ class BatchedStrategy:
         )
         await self.client.submit(request)
         response = await self.client.await_response(request.request_id)
-        return response.content if not response.error else ""
+        return clean_summary_text(response.content) if not response.error else ""
 
     async def merge(
         self, left: str, right: str, rubric: str, temperature: float = 0.7
@@ -213,7 +260,7 @@ class BatchedStrategy:
         )
         await self.client.submit(request)
         response = await self.client.await_response(request.request_id)
-        return response.content if not response.error else ""
+        return clean_summary_text(response.content) if not response.error else ""
 
     async def _generate_candidates_impl(
         self,
@@ -254,7 +301,9 @@ class BatchedStrategy:
         for request in requests:
             response = await self.client.await_response(request.request_id)
             if response.content and not response.error:
-                candidates.append(response.content)
+                candidate = clean_summary_text(response.content)
+                if candidate:
+                    candidates.append(candidate)
 
         return candidates
 
@@ -314,9 +363,14 @@ class DSPyStrategy:
         leaf_module: "dspy.Module",
         merge_module: Optional["dspy.Module"] = None,
         unified_mode: bool = False,
+        *,
+        default_temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
     ):
         self.leaf_module = leaf_module
         self.unified_mode = unified_mode
+        self.default_temperature = float(default_temperature)
+        self.max_tokens = None if max_tokens is None else int(max_tokens)
 
         if unified_mode:
             # Use same module for both - merge just formats input differently
@@ -329,6 +383,10 @@ class DSPyStrategy:
         self, content: str, rubric: str, temperature: float = 0.7
     ) -> str:
         """Summarize content using DSPy leaf module."""
+        # TreeBuilder calls summarize() without a temperature argument; use the
+        # configured default in that common case.
+        if temperature == 0.7:
+            temperature = self.default_temperature
         return await asyncio.to_thread(
             self._call_with_temp,
             self.leaf_module,
@@ -341,6 +399,8 @@ class DSPyStrategy:
         self, left: str, right: str, rubric: str, temperature: float = 0.7
     ) -> str:
         """Merge summaries using DSPy module."""
+        if temperature == 0.7:
+            temperature = self.default_temperature
         if self.unified_mode:
             # Use same module as leaf, just format input differently
             # This is the theory's g(s_L * s_R) where * is format_merge_input
@@ -382,7 +442,22 @@ class DSPyStrategy:
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        return _filter_valid_candidates(results, "Candidate generation")
+        candidates = _filter_valid_candidates(results, "Candidate generation", warn_on_empty=False)
+        if candidates:
+            return candidates
+
+        # Fallback: try a single low-parallelism call so tree-building can proceed
+        # even if concurrent candidate generation hits timeouts under load.
+        try:
+            summary = await self.summarize(content, rubric, temperature=self.default_temperature)
+        except Exception as exc:
+            _filter_valid_candidates(results + [exc], "Candidate generation")
+            return []
+        if isinstance(summary, str) and summary.strip():
+            return [summary]
+
+        _filter_valid_candidates(results, "Candidate generation")
+        return []
 
     async def generate_merge_candidates(
         self, left: str, right: str, rubric: str, k: int = 4, temperature: float = 0.9
@@ -417,16 +492,52 @@ class DSPyStrategy:
             ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        return _filter_valid_candidates(results, "Merge candidate generation")
+        candidates = _filter_valid_candidates(results, "Merge candidate generation", warn_on_empty=False)
+        if candidates:
+            return candidates
+
+        # Fallback: single merge call to avoid empty merges when the parallel
+        # candidate requests time out.
+        try:
+            merged = await self.merge(left, right, rubric, temperature=self.default_temperature)
+        except Exception as exc:
+            _filter_valid_candidates(results + [exc], "Merge candidate generation")
+            return []
+        if isinstance(merged, str) and merged.strip():
+            return [merged]
+
+        _filter_valid_candidates(results, "Merge candidate generation")
+        return []
 
     def _call_with_temp(self, module, temperature: float, **kwargs) -> str:
         """Call DSPy module with specific temperature (sync, runs in thread)."""
         import dspy
 
         current_lm = dspy.settings.lm
-        with dspy.context(lm=current_lm.copy(temperature=temperature)):
+        copy_kwargs = {"temperature": temperature}
+        if self.max_tokens is not None:
+            try:
+                base_max_tokens = int(getattr(current_lm, "max_tokens", self.max_tokens) or self.max_tokens)
+            except Exception:
+                base_max_tokens = self.max_tokens
+            copy_kwargs["max_tokens"] = int(min(self.max_tokens, base_max_tokens))
+
+        try:
+            lm_copy = current_lm.copy(**copy_kwargs)
+        except TypeError:
+            # Some LM implementations may not accept all copy kwargs; fall back
+            # to temperature-only to preserve existing behavior.
+            lm_copy = current_lm.copy(temperature=temperature)
+
+        with dspy.context(lm=lm_copy):
             result = module(**kwargs)
-            return getattr(result, 'summary', str(result))
+            if isinstance(result, str):
+                return clean_summary_text(result)
+            for attr in ("summary", "merged_summary", "final_summary"):
+                value = getattr(result, attr, None)
+                if isinstance(value, str) and value.strip():
+                    return clean_summary_text(value)
+            return clean_summary_text(str(result))
 
 
 # =============================================================================
@@ -507,7 +618,22 @@ class CallableStrategy:
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        return _filter_valid_candidates(results, "Candidate generation")
+        candidates = _filter_valid_candidates(results, "Candidate generation", warn_on_empty=False)
+        if candidates:
+            return candidates
+
+        # Fallback: try a single low-parallelism call so tree-building can proceed
+        # even if concurrent candidate generation hits timeouts under load.
+        try:
+            summary = await self.summarize(content, rubric, temperature=0.7)
+        except Exception as exc:
+            _filter_valid_candidates(results + [exc], "Candidate generation")
+            return []
+        if isinstance(summary, str) and summary.strip():
+            return [summary]
+
+        _filter_valid_candidates(results, "Candidate generation")
+        return []
 
     async def generate_merge_candidates(
         self, left: str, right: str, rubric: str, k: int = 4, temperature: float = 0.9
@@ -539,7 +665,22 @@ class CallableStrategy:
             ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        return _filter_valid_candidates(results, "Merge candidate generation")
+        candidates = _filter_valid_candidates(results, "Merge candidate generation", warn_on_empty=False)
+        if candidates:
+            return candidates
+
+        # Fallback: single merge call to avoid empty merges when the parallel
+        # candidate requests time out.
+        try:
+            merged = await self.merge(left, right, rubric, temperature=0.7)
+        except Exception as exc:
+            _filter_valid_candidates(results + [exc], "Merge candidate generation")
+            return []
+        if isinstance(merged, str) and merged.strip():
+            return [merged]
+
+        _filter_valid_candidates(results, "Merge candidate generation")
+        return []
 
     def _call_with_temp(self, fn, temperature: float, **kwargs) -> str:
         """Call wrapped function with DSPy temperature context when available."""
@@ -556,7 +697,8 @@ class CallableStrategy:
 
         with dspy.context(lm=current_lm.copy(temperature=temperature)):
             result = fn(**kwargs)
-            return getattr(result, 'summary', str(result))
+            value = getattr(result, 'summary', str(result))
+            return clean_summary_text(value)
 
 
 # =============================================================================
@@ -599,6 +741,7 @@ class TournamentStrategy:
         base: SummarizationStrategy,
         judge: Union["GenRMJudge", "GenRMComparisonModule"],
         config: Optional[TournamentConfig] = None,
+        feedback_collector: Optional[Any] = None,
     ):
         """
         Initialize tournament strategy.
@@ -609,11 +752,21 @@ class TournamentStrategy:
                    GenRMComparisonModule can use optimizable DSPy prompts when
                    initialized with use_dspy_predictor=True (for tournament of tournaments).
             config: Tournament configuration (k candidates, temperature)
+            feedback_collector: Optional FeedbackCollector for enriched feedback.
+                When set, tournament matches also produce FeedbackResponse objects
+                in addition to PreferencePair objects.
         """
         self.base = base
         self.judge = judge
         self.config = config or TournamentConfig()
         self._preferences: List["PreferencePair"] = []
+        self._feedback_responses: List[Any] = []
+        self._segment_counter = 0
+        self._feedback_collector = feedback_collector
+
+    def reset_counter(self) -> None:
+        """Reset the segment counter. Call between documents in sequential mode
+        to keep segment IDs aligned with per-document tree node IDs."""
         self._segment_counter = 0
 
     def _extract_preference_fields(
@@ -885,6 +1038,41 @@ class TournamentStrategy:
                 )
                 preferences.append(pair)
 
+                # Collect enriched feedback if collector is configured
+                if self._feedback_collector is not None:
+                    try:
+                        from src.feedback.types import FeedbackRequest, FeedbackDimension
+                        judge_reasoning = clean_summary_text(reasoning)
+                        if len(judge_reasoning) > 2400:
+                            judge_reasoning = judge_reasoning[:2400].rstrip() + " ... (truncated)"
+                        fb_request = FeedbackRequest(
+                            request_id=pair.pair_id,
+                            text_a=summary_a,
+                            text_b=summary_b,
+                            original_text=original_text,
+                            rubric=rubric,
+                            law_type=law_type,
+                            node_id=segment_tag,
+                            dimensions=[
+                                FeedbackDimension(kind="pairwise"),
+                                FeedbackDimension(kind="critique"),
+                            ],
+                            context={
+                                "match_label": f"{segment_tag}_r{round_num}_m{match_num}",
+                                "candidate_indices": [idx_a, idx_b],
+                                "judge_preferred": preferred,
+                                "judge_confidence": confidence,
+                                "judge_reasoning": judge_reasoning,
+                                "judge_score_estimate_a": score_a,
+                                "judge_score_estimate_b": score_b,
+                                "judge_model": judge_model,
+                            },
+                        )
+                        fb_response = self._feedback_collector.collect(fb_request)
+                        self._feedback_responses.append((fb_request, fb_response))
+                    except Exception as e:
+                        logger.debug("Feedback collector failed in tournament: %s", e)
+
                 # Handle tie with random selection to avoid position bias
                 if preferred == "A":
                     winner = summary_a
@@ -1142,6 +1330,48 @@ class TournamentStrategy:
                     )
                     preferences.append(pair)
 
+                    # Collect enriched feedback if collector is configured
+                    if self._feedback_collector is not None:
+                        try:
+                            from src.feedback.types import FeedbackRequest, FeedbackDimension
+
+                            judge_reasoning = clean_summary_text(reasoning)
+                            if len(judge_reasoning) > 2400:
+                                judge_reasoning = judge_reasoning[:2400].rstrip() + " ... (truncated)"
+
+                            fb_request = FeedbackRequest(
+                                request_id=pair.pair_id,
+                                text_a=summary_a,
+                                text_b=summary_b,
+                                original_text=original_text,
+                                rubric=rubric,
+                                law_type=law_type,
+                                node_id=segment_tag,
+                                dimensions=[
+                                    FeedbackDimension(kind="pairwise"),
+                                    FeedbackDimension(kind="critique"),
+                                ],
+                                context={
+                                    "match_label": f"{segment_tag}_m{match_id}",
+                                    "match_id": match_id,
+                                    "round": getattr(m, "round", None),
+                                    "left_idx": getattr(m, "left_idx", None),
+                                    "right_idx": getattr(m, "right_idx", None),
+                                    "left_is_match": getattr(m, "left_is_match", None),
+                                    "right_is_match": getattr(m, "right_is_match", None),
+                                    "judge_preferred": preferred,
+                                    "judge_confidence": confidence,
+                                    "judge_reasoning": judge_reasoning,
+                                    "judge_score_estimate_a": score_a,
+                                    "judge_score_estimate_b": score_b,
+                                    "judge_model": judge_model,
+                                },
+                            )
+                            fb_response = self._feedback_collector.collect(fb_request)
+                            self._feedback_responses.append((fb_request, fb_response))
+                        except Exception as e:
+                            logger.debug("Feedback collector failed in tournament: %s", e)
+
                     # Check for newly ready matches
                     for m in matches.values():
                         if is_ready(m) and m.id not in pending and m.id not in completed:
@@ -1180,9 +1410,18 @@ class TournamentStrategy:
         """Get all collected preference pairs."""
         return self._preferences
 
+    def get_feedback_responses(self) -> List[Any]:
+        """Get all collected feedback request/response pairs.
+
+        Returns list of (FeedbackRequest, FeedbackResponse) tuples collected
+        when a feedback_collector is configured.
+        """
+        return self._feedback_responses
+
     def reset_preferences(self) -> None:
         """Reset collected preferences (e.g., between documents)."""
         self._preferences = []
+        self._feedback_responses = []
 
     def get_preference_count(self) -> int:
         """Get number of collected preferences."""

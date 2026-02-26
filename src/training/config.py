@@ -66,9 +66,18 @@ class OptimizationConfig:
 
     # GEPA-specific settings
     gepa_auto: str = "heavy"  # 'light', 'medium', 'heavy'
+    # Optional cap for GEPA worker threads. None means "do not cap" and
+    # honor num_threads directly.
+    gepa_max_threads: Optional[int] = None
+    gepa_reflection_minibatch_size: int = 8
+    gepa_add_format_failure_as_feedback: bool = True
 
     # MIPRO-specific settings
     mipro_auto: str = "medium"  # 'light', 'medium', 'heavy'
+    mipro_view_data_batch_size: int = 3  # examples shown to data-aware proposer
+    mipro_data_aware_proposer: bool = True
+    mipro_max_example_chars: int = 0  # 0 disables truncation; enable explicitly if needed
+    mipro_drop_optional_original_content: bool = True
     max_metric_calls: Optional[int] = None  # Direct control (overrides gepa_auto budget)
     reflection_lm_model: Optional[str] = None  # Use same LM if None
     enable_merge: bool = True
@@ -79,7 +88,7 @@ class OptimizationConfig:
     # Auto-selection thresholds (when optimizer_type='auto')
     auto_select_enabled: bool = False
     bootstrap_threshold: int = 10      # Dataset size <= this: use bootstrap
-    random_search_threshold: int = 50  # Dataset size <= this: use bootstrap_random_search
+    random_search_threshold: int = 120  # Dataset size <= this: use bootstrap_random_search
     mipro_threshold: int = 200         # Dataset size <= this: use mipro
     # Dataset size > mipro_threshold: use gepa
 
