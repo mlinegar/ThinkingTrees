@@ -2,23 +2,23 @@ import FormalProofs.OPT.PreferenceBounds
 import FormalProofs.OPT.AuditBounds
 
 /-!
-# Axiom Registry
+# Assumption Registry
 
-This file documents ALL axioms and assumption structures used in the formalization.
+This file documents all modeling assumptions and assumption structures used in the formalization.
 
 ## Summary
 
-### OPT Module: Lean `axiom` Declarations
+### OPT Module: RUM Assumption (No Axioms)
 
-| # | Axiom | Location | Purpose |
-|---|-------|----------|---------|
-| 1 | `ExpectedGroupLossLipschitz` | OPT/PreferenceBounds | Expected loss over groups is Lipschitz |
+| # | Assumption | Location | Purpose |
+|---|------------|----------|---------|
+| 1 | `ExpectedGroupLossLipschitz` | FormalProbability/DSL/RUM | Expected loss over groups is Lipschitz |
 
-This single axiom is justified by the **Random Utility Model** (McFadden 1974).
+This single assumption is justified by the **Random Utility Model** (McFadden 1974).
 Under continuous noise, ranking ties have measure zero, so the expected loss is Lipschitz
 even though the pointwise ranking function is discontinuous.
 
-The axiom is instantiated for specific loss functions:
+The assumption is instantiated for specific loss functions:
 - `ExpectedGRPOLossLipschitz` - GRPO-PL (Plackett-Luce ranking loss)
 - `ExpectedGRPORLLossLipschitz` - GRPO-RL (PPO-style clipped surrogate)
 
@@ -28,39 +28,46 @@ The axiom is instantiated for specific loss functions:
 |-----------|----------|---------|
 | `OracleAccess` | DSL/CoreDefinitions | Expert labels = oracle labels |
 | `MEstimationAxioms` | DSL/AsymptoticTheory | M-estimation asymptotics |
-| `CoverageAxioms` | DSL/AsymptoticTheory | CI coverage properties |
+| `MEstimatorConsistencyAssumption` / `MEstimatorAsymptoticNormalAssumption` | DSL/AsymptoticTheory | Decomposed M-estimation assumptions |
+| `CoverageFromAsymptoticNormal` (`CoverageAxioms` alias) | DSL/AsymptoticTheory | CI coverage transfer from asymptotic normality |
+| `CalibrationRMSEBound` (`CalibrationAxioms` alias) | DSL/JudgeCalibration | Calibration RMSE representativeness bound |
+| `EmpiricalBernsteinAxioms` | DSL/IPWTheory | Compatibility wrapper for self-normalized concentration (event-based form also available) |
+| `HonestyContract` (`HonestyAxioms` alias) | DSL/Honesty | Constructive honest sample splitting contract |
+| `AdaptiveSamplingAssumptions` (`AdaptiveSamplingAxioms` alias) | DSL/Honesty | Predictable adaptive sampling with exploration floor |
 
 ### Econometrics Module: Assumption Structures
 
 | Structure | Location | Purpose |
 |-----------|----------|---------|
 | `OLSAsymptoticAxioms` | Econometrics/OLS/AsymptoticOLS | LLN/CLT/Slutsky/delta-method package for OLS asymptotics |
+| `ScoreLLNAssumption` / `ScoreCLTAssumption` | Econometrics/OLS/AsymptoticOLS | Decomposed score-process assumptions |
+| `OLSConsistencyAssumption` / `OLSAsymptoticNormalAssumption` | Econometrics/OLS/AsymptoticOLS | Decomposed OLS limit assumptions |
 
 ## Soundness
 
-All axioms and assumptions are **modeling choices**, not gaps in the proof:
+All assumptions and assumption structures are **modeling choices**, not gaps in the proof:
 - Each has rigorous mathematical justification from the statistics/econometrics literature
-- The OPT axioms follow from the Random Utility Model (McFadden 1974)
+- The OPT RUM assumption follows from the Random Utility Model (McFadden 1974)
 - The DSL assumptions follow from M-estimation theory (Newey & McFadden 1994)
 - The formalization is SOUND under these assumptions
 
 ---
 
-## Axiom: ExpectedGroupLossLipschitz
+## Assumption: ExpectedGroupLossLipschitz
 
 **Statement**: Expected loss over groups is Lipschitz in oracle distance.
 
 ```lean
-axiom ExpectedGroupLossLipschitz {Strings A Y : Type*} [PseudoMetricSpace Y] {k : ℕ}
+def ExpectedGroupLossLipschitz {Strings A Y : Type*} [PseudoMetricSpace Y] {k : ℕ}
     (loss : Strings → (Fin k → A) → ℝ)
     (fstar : Strings → Y) (g : PMF (Fin k → A)) (L : ℝ≥0)
-    (x z : Strings) :
-    |∑' group, (g group).toReal * loss x group -
-     ∑' group, (g group).toReal * loss z group| ≤
-    L * dist (fstar x) (fstar z)
+    (x z : Strings) : Prop :=
+  |∑' group, (g group).toReal * loss x group -
+   ∑' group, (g group).toReal * loss z group| ≤
+  L * dist (fstar x) (fstar z)
 ```
 
-**Location**: `OPT/PreferenceBounds.lean`
+**Location**: `FormalProbability/DSL/RUM.lean` (re-exported in `OPT/PreferenceBounds.lean`)
 
 **Mathematical Justification**:
 Under the Random Utility Model (McFadden 1974), scores are:
@@ -118,6 +125,10 @@ labels are assumed to be correct for the sampled subset.
 **Contents**:
 - `consistent`: M-estimators converge in probability to true parameters
 - `asymptotic_normal`: Centered/scaled estimators converge to N(0, V)
+- decomposed interfaces:
+  - `MEstimatorConsistencyAssumption`
+  - `MEstimatorAsymptoticNormalAssumption`
+  - constructor: `mkMEstimationAxioms`
 
 **Mathematical Justification**:
 Standard M-estimation theory from econometrics (Newey & McFadden 1994,
@@ -135,7 +146,7 @@ bounded moments).
 
 ---
 
-## CoverageAxioms
+## CoverageFromAsymptoticNormal (`CoverageAxioms` alias)
 
 **Location**: `DSL/AsymptoticTheory.lean`
 
@@ -153,6 +164,73 @@ for well-behaved data, larger for heavy tails or sparse data).
 
 ---
 
+## EmpiricalBernsteinAxioms
+
+**Location**: `DSL/IPWTheory.lean`
+
+**Status**: Compatibility interface. The TreePO theorem path now also exposes
+direct event-based concentration assumptions (`empiricalBernstein_bound_ennreal_of_event`
+and event-parameterized wrappers in `DSL/TreeIPW.lean`), so core validity
+results no longer require this structure.
+
+**Statement**: A self-normalized (empirical Bernstein) concentration bound
+for weighted (Hajek) estimators. It provides a finite-sample confidence radius
+based on the observed weighted variance and effective sample size.
+
+**Mathematical Justification**:
+Empirical Bernstein and Freedman-style inequalities provide tighter bounds than
+Hoeffding by adapting to observed variance. For design-based weighting, the
+same style of inequality is typically proven for self-normalized sums or
+weighted means under appropriate boundedness and regularity assumptions.
+
+**When Safe**: When the sampling design and weighting satisfy the standard
+self-normalized concentration conditions (bounded outcomes, bounded weights,
+and valid tail control).
+
+---
+
+## HonestyContract (`HonestyAxioms` alias)
+
+**Location**: `DSL/Honesty.lean`
+
+**Statement**: The training procedure depends only on the training split and
+the evaluation estimator depends only on the evaluation split, with an explicit
+split function. This captures the *honesty* condition used in causal forests
+and sample-splitting inference.
+
+**Mathematical Justification**:
+Honest sample splitting ensures that evaluation is performed on data not used
+to fit the model, so finite-sample bounds can be applied as if the model were
+fixed. This prevents adaptive overfitting from invalidating inference.
+
+**When Safe**: When the split is enforced by design and the evaluation step is
+computed only on held-out data.
+
+---
+
+## CalibrationRMSEBound (`CalibrationAxioms` alias)
+
+**Location**: `DSL/JudgeCalibration.lean`
+
+**Status**: Compatibility interface. TreePO-level calibrated bounds now accept
+the RMSE envelope directly (`h_rmse_upper`) with `*_from_axioms` wrappers for
+backward compatibility.
+
+**Statement**: The population RMSE of judge error is bounded by the calibration
+estimate:
+```
+sqrt( E[(judge - oracle)^2] ) ≤ absbiasUpperBound + judgeStd
+```
+
+**Mathematical Justification**:
+This is a representativeness assumption for the calibration set: it asserts
+that calibration samples reflect the population error distribution.
+
+**When Safe**: When the calibration set is sampled from the same distribution
+as the evaluation population, with sufficient size for stable error estimates.
+
+---
+
 ## OLSAsymptoticAxioms
 
 **Location**: `Econometrics/OLS/AsymptoticOLS.lean`
@@ -163,6 +241,12 @@ for well-behaved data, larger for heavy tails or sparse data).
 - Slutsky-based asymptotic normality of OLS
 - Homoskedastic simplification to σ² Q⁻¹
 - t-statistics normality and delta method
+- decomposed interfaces:
+  - `ScoreLLNAssumption`, `ScoreCLTAssumption`
+  - `OLSConsistencyAssumption`, `OLSAsymptoticNormalAssumption`
+  - `OLSAsymptoticNormalHomoskedasticAssumption`
+  - `TStatNormalAssumption`, `DeltaMethodAssumption`
+  - constructor: `mkOLSAsymptoticAxioms`
 
 **Mathematical justification**:
 These are standard large-sample results in econometrics (Wooldridge, Ch. 5).

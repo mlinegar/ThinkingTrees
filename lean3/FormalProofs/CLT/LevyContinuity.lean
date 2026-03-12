@@ -14,7 +14,7 @@ import Mathlib.Topology.Order.OrderClosed
 import FormalProofs.CLT.HellySelection
 
 /-!
-# FormalProofs/Probability/LevyContinuity.lean
+# FormalProofs/CLT/LevyContinuity.lean
 
 Lemmas toward a Lévy-style continuity theorem for characteristic functions.
 -/

@@ -1,0 +1,136 @@
+\section{Counterexample: L3 is Independent}
+\label{app:counterexample}
+
+This appendix provides a constructive proof that Condition (C2) (Idempotence) cannot be derived from Conditions (C1) and (C3). This establishes that all three conditions are necessary for the main theorems.
+
+\subsection{Proof Strategy Overview}
+
+Independence proofs in logic and mathematics follow a standard template: to show that axiom $A$ is independent of axioms $B_1, \ldots, B_k$, construct a \textbf{model} (concrete example) where $B_1, \ldots, B_k$ all hold but $A$ fails.
+
+\paragraph{Why This Works.}
+If $A$ were derivable from $B_1, \ldots, B_k$, then \emph{every} model satisfying $B_1, \ldots, B_k$ would necessarily satisfy $A$. Finding even one counterexample model proves that no such derivation exists.
+
+\paragraph{Construction Strategy.}
+The counterexample exploits the \emph{closure} structure of the conditions:
+\begin{itemize}
+    \item (C1) only constrains behavior on ``fresh'' inputs (raw text)
+    \item (C2) constrains behavior on ``on-range'' inputs (prior summaries)
+    \item (C3) constrains behavior on concatenations
+\end{itemize}
+By constructing a summarizer that behaves well on fresh inputs but pathologically on its own outputs, we satisfy (C1) and (C3) while violating (C2).
+
+\subsection{Statement of Independence}
+
+\begin{theorem}[L3 is Substantive]\label{thm:l3-independent}
+There exists a summarizer $g_{\text{bad}}$ satisfying:
+\begin{enumerate}
+    \item (C1) Sufficiency on fresh inputs: $\metric(\fstar(g_{\text{bad}}(b)), \fstar(b)) = 0$ for all leaves $b$
+    \item (C3) Merge consistency on fresh inputs
+\end{enumerate}
+but violating:
+\begin{enumerate}
+    \setcounter{enumi}{2}
+    \item (C2) Idempotence: there exists $s \in \text{range}(g_{\text{bad}})$ with $\metric(\fstar(g_{\text{bad}}(s)), \fstar(s)) > 0$
+\end{enumerate}
+\end{theorem}
+
+\subsection{Construction}
+
+\paragraph{Setup.}
+Let $\Strings = \{0, 1, \text{POS}, \text{NEG}\}$ with trivial concatenation (ignore second argument). Let $\Y = \{0, 1\}$ with Hamming metric. Define the oracle:
+\[
+\fstar(x) = \begin{cases}
+1 & \text{if } x = \text{POS} \\
+0 & \text{otherwise}
+\end{cases}
+\]
+
+\paragraph{The Bad Summarizer.}
+Define $g_{\text{bad}}: \Strings \to \Strings$ as:
+\[
+g_{\text{bad}}(x) = \begin{cases}
+\text{NEG} & \text{if } x = \text{POS} \\
+\text{POS} & \text{if } x = \text{NEG} \\
+x & \text{otherwise}
+\end{cases}
+\]
+
+\paragraph{Verification of (C1).}
+For fresh inputs $b \in \{0, 1\}$:
+\[
+g_{\text{bad}}(b) = b \implies \fstar(g_{\text{bad}}(b)) = \fstar(b) \implies \metric = 0. \checkmark
+\]
+
+\paragraph{Verification of (C3).}
+Merge consistency requires checking $u \concat v \sim g(u \concat v) \sim g(g(u) \concat g(v))$.
+
+With trivial concatenation, this reduces to single-string checks, which are covered by (C1) for fresh inputs.
+
+\paragraph{Violation of (C2).}
+Consider $s = \text{POS} \in \text{range}(g_{\text{bad}})$ (since $g_{\text{bad}}(\text{NEG}) = \text{POS}$).
+
+Then:
+\[
+g_{\text{bad}}(\text{POS}) = \text{NEG}
+\]
+and:
+\[
+\fstar(\text{POS}) = 1, \quad \fstar(\text{NEG}) = 0
+\]
+so:
+\[
+\metric(\fstar(g_{\text{bad}}(\text{POS})), \fstar(\text{POS})) = |0 - 1| = 1 > 0. \checkmark
+\]
+
+\begin{proof}
+Define $\Strings=\{0,1,\text{POS},\text{NEG}\}$ with trivial concatenation and $\fstar$ as above. The summarizer $g_{\text{bad}}$ fixes fresh inputs $0,1$ and swaps $\text{POS}$ with $\text{NEG}$. Then (C1) holds on fresh inputs because $g_{\text{bad}}(b)=b$ for $b\in\{0,1\}$. With trivial concatenation, (C3) reduces to single-input checks already covered by (C1). However $\text{POS}$ lies in $\mathrm{range}(g_{\text{bad}})$ since $g_{\text{bad}}(\text{NEG})=\text{POS}$, and
+$\fstar(g_{\text{bad}}(\text{POS}))=\fstar(\text{NEG})=0\ne 1=\fstar(\text{POS})$,
+so (C2) fails. This exhibits a model where (C1) and (C3) hold but (C2) does not.
+\end{proof}
+
+\subsection{Interpretation}
+
+The counterexample shows that a summarizer can be ``faithful'' on first application but ``corrupt'' on repeated application. This corresponds to a practical failure mode:
+
+\begin{example}[Drift Under Re-summarization]
+Consider a summarizer that, when given a summary mentioning ``strong support for environmental regulation,'' paraphrases it as ``moderate environmental stance.'' The first summary is faithful (C1 holds), but re-summarization drifts further from the original (C2 fails).
+\end{example}
+
+\subsection{Implications for Practice}
+
+\paragraph{Auditing Idempotence is Essential.}
+The counterexample shows that passing sufficiency and merge-consistency audits does not guarantee safe re-summarization. Practitioners must explicitly audit idempotence (C2) if they use cleanup rounds.
+
+\paragraph{Single-Pass Pipelines.}
+If idempotence cannot be achieved, restrict to single-pass pipelines ($R = 1$). The main theorem still holds for one-pass preservation using only (C1) and (C3).
+
+\paragraph{Detecting C2 Violations.}
+The audit procedure in Section~\ref{sec:audit} explicitly tests:
+\[
+\hat{p}_{\text{idem}} = \frac{1}{n_s} \sum_{k=1}^{n_s} \mathbf{1}\{\metric(\fstar(g(z_k)), \fstar(z_k)) > 0\}
+\]
+on stored summaries $z_k \in \text{range}(g)$.
+
+\subsection{Related Independence Results}
+
+Similar independence arguments apply to other combinations:
+
+\begin{proposition}[C1 is Independent of C2, C3]
+There exists $g$ satisfying C2 and C3 but not C1. (Simply map all inputs to a fixed incorrect summary.)
+\end{proposition}
+
+\begin{proof}
+Let $g_{\text{const}}(x)=\text{WRONG}$ for all $x$, with $\fstar(\text{WRONG})\ne\fstar(b)$ for some fresh input $b$. Then C2 holds because $g_{\text{const}}$ is idempotent on its range: $g_{\text{const}}(\text{WRONG})=\text{WRONG}$. C3 holds because both routes at any merge return $\text{WRONG}$. But C1 fails at $b$ since $\fstar(g_{\text{const}}(b))=\fstar(\text{WRONG})\ne\fstar(b)$.
+\end{proof}
+
+\begin{proposition}[C3 is Independent of C1, C2]
+There exists $g$ satisfying C1 and C2 but not C3. (Construct $g$ that is faithful on single inputs but introduces errors when merging.)
+\end{proposition}
+
+\begin{proof}
+Define $g_{\text{merge-bad}}$ so that it preserves the oracle on single inputs and is idempotent on its own outputs, but returns a fixed error token on concatenations of summaries. Then C1 holds by construction on leaves, and C2 holds because reapplying $g_{\text{merge-bad}}$ to an on-range summary returns the same summary. However, for some $u,v$ whose summaries are on-range, the merge route produces $\text{ERROR}$, so
+$\fstar(g_{\text{merge-bad}}(g_{\text{merge-bad}}(u)\concat g_{\text{merge-bad}}(v)))\ne \fstar(u\concat v)$,
+violating C3.
+\end{proof}
+
+These results establish that the three conditions form a minimal set: no condition is redundant.

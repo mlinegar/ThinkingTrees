@@ -1,0 +1,104 @@
+\section{Application I: Manifesto Project RILE Scoring}\label{sec:manifesto}
+
+Our first empirical application demonstrates OPS on party manifestos from the Manifesto Project, estimating parties' positions on the left-right (RILE) dimension. This task is central to comparative politics and provides a well-defined oracle with established benchmarks.
+
+\subsection{Task Definition}
+
+The Manifesto Project \citep{manifesto2021} codes party positions by classifying sentences into policy categories. The RILE scale aggregates these codes into a single left-right score:
+\[
+\text{RILE} = \frac{R - L}{R + L + N} \times 100,
+\]
+where $R$ is the count of right-leaning statements, $L$ is left-leaning, and $N$ is neutral. Scores range from $-100$ (far left) to $+100$ (far right).
+
+\paragraph{Oracle Definition.}
+We define the oracle $\fstar$ as the RILE score that would be assigned by expert coders with access to the full manifesto. In practice, we approximate $\fstar$ using:
+\begin{enumerate}[nosep]
+    \item Published Manifesto Project expert scores (when available)
+    \item High-quality deliberation model (GPT-4o with detailed rubric)
+    \item Human validation on a sample
+\end{enumerate}
+
+\paragraph{Rubric Design.}
+The summarization rubric specifies what information must be preserved for RILE scoring. Following the Manifesto Project codebook, the rubric includes:
+\begin{itemize}[nosep]
+    \item Policy positions on economic issues (welfare, taxation, regulation)
+    \item Policy positions on social issues (immigration, law and order, traditional values)
+    \item Positions on political system (decentralization, democracy, EU integration)
+    \item Party's self-positioning relative to competitors
+\end{itemize}
+
+The \texttt{ThinkingTrees} implementation is in \texttt{src/tasks/manifesto/rubrics.py}.
+
+\subsection{Experimental Setup}
+
+\paragraph{Dataset.}
+We use manifestos from the Manifesto Project corpus spanning:
+\begin{itemize}[nosep]
+    \item Countries: [TBD: specify countries]
+    \item Years: [TBD: specify range]
+    \item Parties: [TBD: number of parties]
+    \item Total documents: [TBD]
+    \item Average length: [TBD tokens]
+\end{itemize}
+
+\paragraph{Baselines.}
+We compare three approaches:
+\begin{enumerate}[nosep]
+    \item \textbf{Direct scoring}: Apply the oracle directly to full manifestos (gold standard but expensive)
+    \item \textbf{Truncation}: Truncate to context window and score
+    \item \textbf{OPS}: Hierarchical summarization with audit
+\end{enumerate}
+
+\paragraph{Metrics.}
+\begin{itemize}[nosep]
+    \item Correlation with expert scores (Pearson's $r$)
+    \item Mean absolute error (MAE) on RILE scale
+    \item Audit violation rates ($\hat{p}_{\text{suff}}, \hat{p}_{\text{assoc}}, \hat{p}_{\text{idem}}$)
+    \item Compression ratio (original tokens / summary tokens)
+\end{itemize}
+
+\subsection{Results}
+
+[TBD: Present results including:]
+
+\paragraph{Audit Statistics.}
+Table showing empirical violation rates for each condition, with confidence intervals.
+
+\paragraph{Correlation with Expert Scores.}
+Comparison of OPS vs. baselines on correlation with published Manifesto Project scores.
+
+\paragraph{Compression vs. Preservation Trade-off.}
+Plot showing how correlation changes as a function of compression ratio.
+
+\paragraph{Error Analysis.}
+Examples of documents where OPS fails and why (e.g., complex cross-references, implicit positions).
+
+\subsection{Comparison with Benoit et al. (2025)}
+
+\citet{BenoitEtAl2025} use LLM ensembles to estimate party positions, achieving high correlation with expert surveys. Our approach differs in several ways:
+
+\begin{itemize}[nosep]
+    \item \textbf{Theoretical guarantees}: OPS provides provable bounds on information loss
+    \item \textbf{Auditing}: We measure and report violation rates, enabling quality control
+    \item \textbf{Scalability}: Hierarchical summarization handles arbitrary document lengths
+    \item \textbf{Preference learning}: Our framework extends to training policies on summaries
+\end{itemize}
+
+[TBD: Empirical comparison if data overlap permits]
+
+\subsection{Discussion}
+
+\paragraph{When OPS Helps.}
+OPS is most beneficial when:
+\begin{itemize}[nosep]
+    \item Documents exceed context windows (manifestos often do)
+    \item Multiple downstream analyses use the same summaries
+    \item Auditing and quality control are important
+    \item Preferences need to be collected from compressed representations
+\end{itemize}
+
+\paragraph{Rubric Design Lessons.}
+[TBD: Lessons learned from rubric iteration]
+
+\paragraph{Limitations.}
+[TBD: Task-specific limitations]

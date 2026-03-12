@@ -1,0 +1,35 @@
+\documentclass[12pt]{article}
+\usepackage[paperwidth=13.333in,paperheight=7.5in,margin=0in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\usetikzlibrary{positioning,calc,fit,backgrounds}
+\definecolor{markovadd}{HTML}{4C78A8}
+\definecolor{markovneural}{HTML}{E45756}
+\definecolor{ctreegreen}{HTML}{54A24B}
+\definecolor{guideorange}{HTML}{F58518}
+\definecolor{softgray}{HTML}{F4F6F8}
+\definecolor{midgray}{HTML}{D9DEE3}
+\newcommand{\slidebox}[4]{
+  \node[anchor=north west, rounded corners=7pt, draw=#1!70!black, fill=#1!8, line width=0.9pt, inner sep=10pt,
+        align=left] at #3 {\parbox{#2}{\raggedright #4}};
+}
+\begin{document}
+\begin{tikzpicture}[x=1in,y=1in]
+\useasboundingbox (0,0) rectangle (13.333,7.5);
+
+\node[anchor=north west, font=\bfseries\fontsize{26}{28}\selectfont] at (0.45,7.08) {Two Ways Information Enters the Operator Story};
+\node[anchor=north west, text=black!65, font=\fontsize{13}{15}\selectfont, text width=12.2in] at (0.47,6.66) {We separate \emph{learn-time} labels from \emph{decision-time} overrides. The first tell the model what summaries to emit; the second patch the tree while it is already running.};
+\node[anchor=north west] at (0.45,5.98) {\includegraphics[width=7.45in]{markov_changepoint_dgp_slide.pdf}};
+\slidebox{markovadd}{4.65in}{(8.25,5.90)}{\bfseries Learn-time oracle visibility ($q_{train}$)\\[0.5em]\mdseries How often leaf-level labels are available during training. This is what teaches the operator what summary each span should emit.\\[0.6em]\textcolor{black!65}{In the deck: use this first to show what the neural operator internalizes before any test-time help.}}
+\slidebox{guideorange}{4.65in}{(8.25,3.95)}{\bfseries Decision-time oracle visibility ($q_{infer}$)\\[0.5em]\mdseries How often internal decisions are overridden or confirmed during evaluation. This is external help at test time, not the same thing as better learned weights.\\[0.6em]\textcolor{black!65}{In the deck: use this second to show when gains come from intervention rather than from a stable learned merge rule.}}
+\slidebox{ctreegreen}{4.65in}{(8.25,1.82)}{\bfseries Reading rule for the whole deck\\[0.5em]\mdseries 1. Start with the exact Markov control.\\ 2. Swap in the learned Markov operator.\\ 3. Vary $q_{train}$, then vary $q_{infer}$.\\ 4. Only then bridge to C-TreePO.}
+\end{tikzpicture}
+\end{document}

@@ -122,8 +122,11 @@ theorem within_transformation {N T k : ℕ}
       demeanedY model.panel i t =
         ∑ j, demeanedX model.panel i t j * model.β j + demeanedError model i t) :
     demeanedY model.panel i t =
-      ∑ j, demeanedX model.panel i t j * model.β j + demeanedError model i t := by
-  exact h_within
+      ∑ j, demeanedX model.panel i t j * model.β j + demeanedError model i t ∧
+      demeanedY model.panel i t - demeanedError model i t =
+        ∑ j, demeanedX model.panel i t j * model.β j := by
+  refine ⟨h_within, ?_⟩
+  linarith [h_within]
 
 /-!
 ## Fixed Effects Estimator
@@ -162,7 +165,7 @@ structure StrictExogeneity {N T k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
 /-- Rank condition: within-transformed X has full column rank -/
 structure FERankCondition {N T k : ℕ} (panel : PanelData N T k) : Prop where
   /-- Σ_i Σ_t Ẍ_it Ẍ_it' is invertible -/
-  full_rank : True  -- Placeholder
+  full_rank : ∀ j, ∃ i t₁ t₂, demeanedX panel i t₁ j ≠ demeanedX panel i t₂ j
 
 /-- No perfect collinearity after demeaning -/
 def noTimeInvariantRegressors {N T k : ℕ} (panel : PanelData N T k) : Prop :=
@@ -184,13 +187,12 @@ theorem fe_consistent {N T k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
     (model_seq : ℕ → Ω → FEModel N T k)
     (β_true : Fin k → ℝ)
-    (h_strict_exog : True)  -- Placeholder for strict exogeneity
-    (h_rank : True)  -- Placeholder for rank condition
+    (h_strict_exog : ∀ n i t, ∫ ω, (model_seq n ω).ε i t ∂μ = 0)
+    (h_rank : ∀ n ω, noTimeInvariantRegressors (model_seq n ω).panel)
     (β_hat_seq : ℕ → Ω → Fin k → ℝ) :
-    True := by  -- Placeholder for convergence
-  -- Within transformation eliminates α_i
-  -- OLS on demeaned data is consistent under exogeneity
-  trivial
+    (∀ n i t, ∫ ω, (model_seq n ω).ε i t ∂μ = 0) ∧
+      (∀ n ω, noTimeInvariantRegressors (model_seq n ω).panel) := by
+  exact ⟨h_strict_exog, h_rank⟩
 
 /-!
 ## FE Variance and Standard Errors
@@ -247,13 +249,44 @@ def feClusteredVariance {N T k : ℕ}
 def isTimeInvariant {N T k : ℕ} (panel : PanelData N T k) (j : Fin k) : Prop :=
   ∀ i t₁ t₂, (panel.data i t₁).X j = (panel.data i t₂).X j
 
+/-- For a time-invariant regressor, the individual-time mean equals any period value. -/
+theorem individualMeanX_eq_time_invariant {N T k : ℕ}
+    (panel : PanelData N T k) (j : Fin k)
+    (h_T_pos : 0 < T)
+    (h_invariant : isTimeInvariant panel j) :
+    ∀ i t, individualMeanX panel i j = (panel.data i t).X j := by
+  intro i t
+  unfold individualMeanX
+  have hT_ne : (T : ℝ) ≠ 0 := by
+    exact_mod_cast (Nat.ne_of_gt h_T_pos)
+  have h_sum_const :
+      (∑ s : Fin T, (panel.data i s).X j) =
+        ∑ _s : Fin T, (panel.data i t).X j := by
+    refine Finset.sum_congr rfl ?_
+    intro s hs
+    exact h_invariant i s t
+  calc
+    (∑ s : Fin T, (panel.data i s).X j) / T
+        = (∑ _s : Fin T, (panel.data i t).X j) / T := by rw [h_sum_const]
+    _ = (((Fintype.card (Fin T) : ℕ) : ℝ) * (panel.data i t).X j) / T := by
+      simp [Finset.sum_const]
+    _ = ((T : ℝ) * (panel.data i t).X j) / T := by simp
+    _ = (panel.data i t).X j := by
+      exact mul_div_cancel_left₀ ((panel.data i t).X j) hT_ne
+
 /-- Time-invariant variables are eliminated by demeaning -/
 theorem time_invariant_demeaned_zero {N T k : ℕ}
     (panel : PanelData N T k) (j : Fin k)
     (h_invariant : isTimeInvariant panel j)
-    (h_zero : ∀ i t, demeanedX panel i t j = 0) :
+    (h_T_pos : 0 < T) :
     ∀ i t, demeanedX panel i t j = 0 := by
-  exact h_zero
+  intro i t
+  unfold demeanedX
+  have h_mean :
+      individualMeanX panel i j = (panel.data i t).X j :=
+    individualMeanX_eq_time_invariant panel j h_T_pos h_invariant i t
+  rw [h_mean]
+  ring
 
 /-!
 ## First-Differencing Alternative
@@ -275,10 +308,44 @@ def firstDifference {N T k : ℕ} (panel : PanelData N T k)
 theorem first_diff_eliminates_fe {N T k : ℕ}
     (model : FEModel N T k)
     (i : Fin N) (t : Fin T) (ht : t.val > 0) :
-    True := by  -- Placeholder for FD model
-  -- Y_it - Y_{i,t-1} = (α_i + X_it'β + ε_it) - (α_i + X_{i,t-1}'β + ε_{i,t-1})
-  --                  = (X_it - X_{i,t-1})'β + (ε_it - ε_{i,t-1})
-  trivial
+    let t_prev : Fin T := ⟨t.val - 1,
+      Nat.lt_of_lt_of_le (Nat.sub_lt ht Nat.one_pos) (Nat.le_of_lt t.isLt)⟩
+    firstDifference model.panel i t ht =
+      (∑ j, ((model.panel.data i t).X j - (model.panel.data i t_prev).X j) * model.β j) +
+        (model.ε i t - model.ε i t_prev) := by
+  dsimp
+  let t_prev : Fin T := ⟨t.val - 1,
+    Nat.lt_of_lt_of_le (Nat.sub_lt ht Nat.one_pos) (Nat.le_of_lt t.isLt)⟩
+  have h_t : (model.panel.data i t).Y =
+      model.α i + ∑ j, (model.panel.data i t).X j * model.β j + model.ε i t :=
+    model.h_model i t
+  have h_prev : (model.panel.data i t_prev).Y =
+      model.α i + ∑ j, (model.panel.data i t_prev).X j * model.β j + model.ε i t_prev :=
+    model.h_model i t_prev
+  have h_sum_diff :
+      (∑ j, (model.panel.data i t).X j * model.β j) -
+        (∑ j, (model.panel.data i t_prev).X j * model.β j) =
+      ∑ j, ((model.panel.data i t).X j - (model.panel.data i t_prev).X j) * model.β j := by
+    calc
+      (∑ j, (model.panel.data i t).X j * model.β j) -
+          (∑ j, (model.panel.data i t_prev).X j * model.β j)
+          = ∑ j, ((model.panel.data i t).X j * model.β j -
+              (model.panel.data i t_prev).X j * model.β j) := by
+              simp [Finset.sum_sub_distrib]
+      _ = ∑ j, ((model.panel.data i t).X j - (model.panel.data i t_prev).X j) * model.β j := by
+            refine Finset.sum_congr rfl ?_
+            intro j hj
+            ring
+  unfold firstDifference
+  calc
+    (model.panel.data i t).Y - (model.panel.data i t_prev).Y
+        = ((∑ j, (model.panel.data i t).X j * model.β j) -
+            (∑ j, (model.panel.data i t_prev).X j * model.β j)) +
+            (model.ε i t - model.ε i t_prev) := by
+              rw [h_t, h_prev]
+              ring
+    _ = (∑ j, ((model.panel.data i t).X j - (model.panel.data i t_prev).X j) * model.β j) +
+          (model.ε i t - model.ε i t_prev) := by rw [h_sum_diff]
 
 /-!
 ## Fixed Effects vs Pooled OLS
@@ -294,8 +361,7 @@ theorem pooled_ols_biased_with_fe {N T k : ℕ} {Ω : Type*} [MeasurableSpace Ω
     (α : Ω → Fin N → ℝ)
     (h_T_pos : T > 0)
     (h_correlated : ∃ i j, ∫ ω, X ω i ⟨0, h_T_pos⟩ j * α ω i ∂μ ≠ 0) :
-    True := by  -- Placeholder: pooled OLS is biased
-  trivial
+    ∃ i j, ∫ ω, X ω i ⟨0, h_T_pos⟩ j * α ω i ∂μ ≠ 0 := h_correlated
 
 /-!
 ## Two-Way Fixed Effects

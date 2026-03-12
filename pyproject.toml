@@ -25,8 +25,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+    "numpy>=1.23",
     "pyyaml>=6.0",
     "more-itertools>=10.0",
+    "matplotlib>=3.8.0",
     "dspy>=3.0.0",
     "openai>=1.0.0",
     "tiktoken>=0.12.0",
@@ -43,6 +45,10 @@ dev = [
     "mypy>=1.0.0",
     "ruff>=0.1.0",
 ]
+sim = [
+    "scikit-learn>=1.4.2",
+    "torch>=2.0.0",
+]
 vllm = [
     "vllm>=0.12.0",
 ]
@@ -54,6 +60,10 @@ manifesto = [
     "pandas>=2.0.0",
     "openpyxl>=3.0.0",
 ]
+ruler = [
+    "nltk>=3.9.0",
+    "wonderwords>=2.2.0",
+]
 trl = [
     "trl>=0.8.0",
     "transformers>=4.40.0",
@@ -62,11 +72,12 @@ trl = [
     "bitsandbytes>=0.43.0",
 ]
 all = [
-    "thinking-trees[dev,vllm,ui,manifesto,trl]",
+    "thinking-trees[dev,vllm,ui,manifesto,ruler,trl]",
 ]
 
 [project.scripts]
 thinking-trees = "src.main:main"
+ctreepo = "src.ctreepo.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/thinking-trees/thinking-trees"

@@ -1,0 +1,221 @@
+\section{Measurement Error, Oracle Uncertainty, and Proxy-Aware Sampling}
+\label{app:measurement-error}
+
+This appendix isolates the two places where ``the oracle is imperfect'' can
+enter the theory.
+\begin{enumerate}[nosep]
+    \item The oracle may be only a proxy for the true latent state we care
+    about.
+    \item The sampling or auditing design may depend on richer proxy
+    information than the analyst uses in the IPW correction.
+\end{enumerate}
+The Lean development formalizes both effects and keeps them separate.
+
+\subsection{Transport Error Plus Measurement Error}
+
+Let $\Phi$ be a latent feature space with metric $d_{\Phi}$, let
+$\phi:\Strings\to\Phi$ denote the true latent feature, and let
+$\widehat{\phi}$ denote a possibly noisy measurement of that feature. We write
+$Z$ for the reduced object produced by the summarization pipeline.
+
+\begin{proposition}[Exact oracle identification]
+\label{prop:exact-oracle-identification}
+Suppose there exists a measurable map $h:\Y\to\Phi$ such that
+$\phi(x)=h(\fstar(x))$ for every $x$. If the reduction is exact
+theorem-backed, then every feature-indexed loss or utility transports exactly
+through the reduction:
+\[
+\E\!\left[\ell\big(\phi(X)\big)\right]
+=
+\E\!\left[\ell\big(\phi(Z)\big)\right]
+\]
+for every measurable $\ell:\Phi\to\mathbb{R}$ for which the expectations exist.
+\end{proposition}
+
+\begin{proof}
+Exact theorem-backedness gives $\fstar(Z)=\fstar(X)$ almost surely. Applying
+$h$ to both sides yields $\phi(Z)=\phi(X)$ almost surely. Therefore
+$\ell(\phi(Z))=\ell(\phi(X))$ almost surely, and the expectations are equal.
+\end{proof}
+
+The previous proposition is the ideal case. More realistically, the oracle may
+control the latent feature only approximately.
+
+\begin{proposition}[Approximate transport plus latent-state measurement error]
+\label{prop:approx-transport-plus-measurement}
+Assume:
+\begin{enumerate}[nosep]
+    \item the reduction is approximately theorem-backed with
+    $\E[\metric(\fstar(Z),\fstar(X))]\le \Delta_{\mathrm{transport}}$;
+    \item the latent feature is $K$-Lipschitz in oracle distance:
+    \[
+    d_{\Phi}\!\big(\phi(x),\phi(x')\big)\le
+    K\,\metric\!\big(\fstar(x),\fstar(x')\big);
+    \]
+    \item the utility $u:\Phi\to\mathbb{R}$ is $1$-Lipschitz in $d_{\Phi}$.
+\end{enumerate}
+Then
+\[
+\left|
+\E[u(\phi(X))] - \E[u(\widehat{\phi}(Z))]
+\right|
+\le
+K\,\Delta_{\mathrm{transport}}
++
+\E\!\left[d_{\Phi}\!\big(\phi(Z),\widehat{\phi}(Z)\big)\right].
+\]
+\end{proposition}
+
+\begin{proof}
+By the triangle inequality,
+\[
+\big|u(\phi(X)) - u(\widehat{\phi}(Z))\big|
+\le
+\big|u(\phi(X)) - u(\phi(Z))\big|
++
+\big|u(\phi(Z)) - u(\widehat{\phi}(Z))\big|.
+\]
+Because $u$ is $1$-Lipschitz, the right-hand side is at most
+\[
+d_{\Phi}\!\big(\phi(X),\phi(Z)\big)
++
+d_{\Phi}\!\big(\phi(Z),\widehat{\phi}(Z)\big).
+\]
+The feature Lipschitz assumption bounds the first term by
+$K\,\metric(\fstar(X),\fstar(Z))$. Taking expectations gives
+\[
+\left|
+\E[u(\phi(X))] - \E[u(\widehat{\phi}(Z))]
+\right|
+\le
+K\,\E[\metric(\fstar(X),\fstar(Z))]
++
+\E[d_{\Phi}(\phi(Z),\widehat{\phi}(Z))],
+\]
+and the assumed transport bound yields the claim.
+\end{proof}
+
+\paragraph{Interpretation.}
+The first term is \emph{reduction error}: how much the tree changes the
+oracle-indexed object. The second term is \emph{measurement error}: how much
+the observed latent-state proxy differs from the latent state itself. Exact
+oracle identification is simply the special case where the first term vanishes.
+
+\subsection{Proxy-Aware Sampling and Nonclassical Error}
+
+The sampling layer has a distinct problem. The inclusion law may depend on a
+richer information set than the one used by the analyst in the IPW correction.
+This is the nonclassical setting formalized in the Lean DSL layer.
+
+Let $R\in\{0,1\}$ be the inclusion indicator, let $\pi_{\mathrm{true}}$ denote
+the true inclusion probability under the actual design, and let
+$\pi_{\mathrm{used}}$ denote the probability inserted into the analyst's IPW
+weights. Define the design-adjusted quantity
+\[
+\widetilde Y
+:=
+Y_{\mathrm{pred}}
++
+\frac{R}{\pi_{\mathrm{used}}}
+\big(Y_{\mathrm{oracle}}-Y_{\mathrm{pred}}\big),
+\]
+where $Y_{\mathrm{true}}$ is the true target, $Y_{\mathrm{oracle}}$ is the
+oracle-side proxy, and $Y_{\mathrm{pred}}$ is the model-based prediction used
+for augmentation.
+
+\begin{proposition}[Exact residual decomposition under proxy-aware sampling]
+\label{prop:proxy-aware-residual}
+Conditioning on the rich information set that determines the true design,
+\[
+\E[\widetilde Y - Y_{\mathrm{true}}]
+=
+\left(1-\frac{\pi_{\mathrm{true}}}{\pi_{\mathrm{used}}}\right)
+\big(Y_{\mathrm{pred}}-Y_{\mathrm{oracle}}\big)
++
+\big(Y_{\mathrm{oracle}}-Y_{\mathrm{true}}\big).
+\]
+\end{proposition}
+
+\begin{proof}
+Using only $\E[R]=\pi_{\mathrm{true}}$ under the true design,
+\begin{align*}
+\E[\widetilde Y - Y_{\mathrm{true}}]
+&=
+\E\!\left[
+Y_{\mathrm{pred}} - Y_{\mathrm{true}}
++
+\frac{R}{\pi_{\mathrm{used}}}
+\big(Y_{\mathrm{oracle}}-Y_{\mathrm{pred}}\big)
+\right] \\
+&=
+\big(Y_{\mathrm{pred}} - Y_{\mathrm{true}}\big)
++
+\frac{\pi_{\mathrm{true}}}{\pi_{\mathrm{used}}}
+\big(Y_{\mathrm{oracle}}-Y_{\mathrm{pred}}\big).
+\end{align*}
+Rewrite the first term as
+\[
+\big(Y_{\mathrm{pred}} - Y_{\mathrm{true}}\big)
+=
+\big(Y_{\mathrm{oracle}} - Y_{\mathrm{true}}\big)
++
+\big(Y_{\mathrm{pred}} - Y_{\mathrm{oracle}}\big),
+\]
+and combine the remaining two pieces:
+\[
+\big(Y_{\mathrm{pred}} - Y_{\mathrm{oracle}}\big)
++
+\frac{\pi_{\mathrm{true}}}{\pi_{\mathrm{used}}}
+\big(Y_{\mathrm{oracle}} - Y_{\mathrm{pred}}\big)
+=
+\left(1-\frac{\pi_{\mathrm{true}}}{\pi_{\mathrm{used}}}\right)
+\big(Y_{\mathrm{pred}} - Y_{\mathrm{oracle}}\big).
+\]
+Substituting these identities back into the previous display gives the stated
+formula.
+\end{proof}
+
+\begin{corollary}[Two clean special cases]
+\label{cor:proxy-aware-special-cases}
+From Proposition~\ref{prop:proxy-aware-residual}:
+\begin{enumerate}[nosep]
+    \item if $\pi_{\mathrm{used}}=\pi_{\mathrm{true}}$, only oracle
+    measurement error remains;
+    \item if $Y_{\mathrm{oracle}}=Y_{\mathrm{true}}$, only sampling-law
+    mismatch remains;
+    \item if both hold, the adjusted estimator is unbiased.
+\end{enumerate}
+\end{corollary}
+
+\begin{proof}
+Each statement is obtained by setting the corresponding residual term in
+Proposition~\ref{prop:proxy-aware-residual} to zero.
+\end{proof}
+
+\paragraph{What matters for IPW.}
+The key point is that IPW does \emph{not} require classical measurement error.
+It requires that the weighting model match the \emph{actual} inclusion law. If
+the design is proxy-aware and the analyst adjusts the propensities to that
+proxy-aware design, the Horvitz--Thompson cancellation still goes through. If
+the analyst uses a coarser propensity, the residual term above is exactly the
+bias that remains.
+
+\subsection{How This Enters the Final Certificate}
+
+Appendix~\ref{app:clustered-inference} showed how clustered confidence
+intervals, calibration radii, and oracle-error envelopes enter the final
+\texttt{computeDSLBound} object. The present appendix explains what the
+oracle-error envelope itself means. It is not a mysterious extra term. It is
+the measurement-error component in the decomposition
+\[
+\text{total decision error}
+\le
+\text{transport error}
++
+\text{measurement error}
++
+\text{sampling-law mismatch error}.
+\]
+In many deployments we simply assume the oracle is exact and set the middle
+term to zero. The formalization does not require that assumption; it only makes
+the exact-oracle case a particularly clean special case.

@@ -85,7 +85,7 @@ class TrainingConfig:
     eval_every: int = 50      # evaluate every N steps
     eval_docs: int = 256      # documents for evaluation
     seed: int = 42
-    c3_tolerance: float = 0.5  # per-type tolerance for C3 violation check
+    law_tolerance: float = 0.5  # tolerance for L1/L2/L3 discrepancy summaries
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +118,7 @@ def type_oracle(
 
 
 class LearnedSketchModel(nn.Module):
-    """Small MLP that learns leaf encoding, merge, and type-count readout."""
+    """Small sketch model with explicit decoded summary and re-summary path."""
 
     def __init__(
         self, n_indicators: int, state_dim: int, n_types: int, hidden_dim: int = 32
@@ -143,6 +143,11 @@ class LearnedSketchModel(nn.Module):
 
         # Readout: state -> predicted per-type counts (k-dimensional)
         self.readout = nn.Linear(state_dim, n_types)
+        self.summary_encoder = nn.Sequential(
+            nn.Linear(n_types, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, state_dim),
+        )
 
     def encode_leaf(self, indicators: torch.Tensor) -> torch.Tensor:
         return self.leaf_encoder(indicators)
@@ -153,6 +158,14 @@ class LearnedSketchModel(nn.Module):
     def predict_type_counts(self, state: torch.Tensor) -> torch.Tensor:
         """Predict per-type spike counts from state vector. Returns k-vector."""
         return self.readout(state)
+
+    def decode_summary(self, state: torch.Tensor) -> torch.Tensor:
+        """Decode theorem-domain summary statistics from the latent sketch."""
+        return self.predict_type_counts(state)
+
+    def encode_summary(self, summary_counts: torch.Tensor) -> torch.Tensor:
+        """Re-encode decoded summary statistics for on-range idempotence checks."""
+        return self.summary_encoder(summary_counts)
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +278,7 @@ def train_step(
     config: TrainingConfig,
     rng: random.Random,
 ) -> float:
-    """One training step: forward through trees, audit sampled nodes, backprop."""
+    """One training step with explicit L1/L2/L3-style decoded-summary losses."""
     model.train()
     optimizer.zero_grad()
 
@@ -283,13 +296,17 @@ def train_step(
         for idx in sampled_indices:
             node = nodes[idx]
             assert node.state is not None
-            predicted = model.predict_type_counts(node.state)
+            predicted = model.decode_summary(node.state)
             target = type_oracle(
                 node.raw_indicators, node.positions, config.target_k
             )
             target_t = torch.tensor(target, dtype=torch.float32)
-            total_loss = total_loss + ((predicted - target_t) ** 2).sum()
-            n_samples += 1
+            decode_loss = ((predicted - target_t) ** 2).sum()
+            resummarized = model.decode_summary(model.encode_summary(predicted))
+            idemp_loss = ((resummarized - predicted) ** 2).sum()
+
+            total_loss = total_loss + decode_loss + idemp_loss
+            n_samples += 2
 
     if n_samples > 0:
         loss = total_loss / n_samples
@@ -309,10 +326,12 @@ class EvalMetrics:
     """Evaluation metrics at a single checkpoint."""
 
     step: int
-    root_mse: float                  # mean of sum-of-squared-errors over k dims
+    root_oracle_mse: float           # mean of sum-of-squared-errors over k dims
     root_threshold_accuracy: float   # "all types present" accuracy
-    c3_violation_rate: float
-    mean_node_mse: float
+    l1_leaf_error: float
+    l2_merge_error: float
+    l3_idemp_error: float
+    mean_node_oracle_mse: float
 
 
 @torch.no_grad()
@@ -321,12 +340,14 @@ def evaluate(
     docs: List[ToyTokenDocument],
     config: TrainingConfig,
 ) -> EvalMetrics:
-    """Evaluate learned sketch on held-out documents."""
+    """Evaluate learned sketch with explicit decoded-summary local-law metrics."""
     model.eval()
 
     root_errors_sq = []
     threshold_correct = []
-    c3_violations = []
+    leaf_errors_sq = []
+    merge_errors_sq = []
+    idemp_errors_sq = []
     all_node_errors_sq = []
 
     for doc in docs:
@@ -336,7 +357,7 @@ def evaluate(
         # Root evaluation
         root = nodes[-1]
         assert root.state is not None
-        pred_vec = model.predict_type_counts(root.state)
+        pred_vec = model.decode_summary(root.state)
         true_vec = type_oracle(
             root.raw_indicators, root.positions, config.target_k
         )
@@ -350,33 +371,38 @@ def evaluate(
         true_present = all(c >= 1.0 for c in true_vec)
         threshold_correct.append(1.0 if pred_present == true_present else 0.0)
 
-        # C3 violations: check internal nodes
         for node in nodes:
-            if node.children is not None:
-                assert node.state is not None
-                pred = model.predict_type_counts(node.state)
-                true_v = type_oracle(
-                    node.raw_indicators, node.positions, config.target_k
-                )
-                true_vt = torch.tensor(true_v, dtype=torch.float32)
-                error = ((pred - true_vt) ** 2).sum().item()
-                all_node_errors_sq.append(error)
-                if math.sqrt(error) > config.c3_tolerance:
-                    c3_violations.append(1.0)
-                else:
-                    c3_violations.append(0.0)
+            assert node.state is not None
+            pred = model.decode_summary(node.state)
+            true_v = type_oracle(
+                node.raw_indicators, node.positions, config.target_k
+            )
+            true_vt = torch.tensor(true_v, dtype=torch.float32)
+            error = ((pred - true_vt) ** 2).sum().item()
+            all_node_errors_sq.append(error)
+            if node.children is None:
+                leaf_errors_sq.append(error)
+            else:
+                merge_errors_sq.append(error)
+
+            resummarized = model.decode_summary(model.encode_summary(pred))
+            idemp_errors_sq.append(((resummarized - pred) ** 2).sum().item())
 
     root_mse = sum(root_errors_sq) / max(len(root_errors_sq), 1)
     accuracy = sum(threshold_correct) / max(len(threshold_correct), 1)
-    c3_rate = sum(c3_violations) / max(len(c3_violations), 1)
+    l1_error = sum(leaf_errors_sq) / max(len(leaf_errors_sq), 1)
+    l2_error = sum(merge_errors_sq) / max(len(merge_errors_sq), 1)
+    l3_error = sum(idemp_errors_sq) / max(len(idemp_errors_sq), 1)
     mean_mse = sum(all_node_errors_sq) / max(len(all_node_errors_sq), 1)
 
     return EvalMetrics(
         step=0,
-        root_mse=root_mse,
+        root_oracle_mse=root_mse,
         root_threshold_accuracy=accuracy,
-        c3_violation_rate=c3_rate,
-        mean_node_mse=mean_mse,
+        l1_leaf_error=l1_error,
+        l2_merge_error=l2_error,
+        l3_idemp_error=l3_error,
+        mean_node_oracle_mse=mean_mse,
     )
 
 
@@ -493,9 +519,11 @@ class LearningCurveResult:
     target_k: int
     metrics: List[Dict]
     hand_designed_accuracy: float
-    final_root_mse: float
+    final_root_oracle_mse: float
     final_threshold_accuracy: float
-    final_c3_violation_rate: float
+    final_l1_leaf_error: float
+    final_l2_merge_error: float
+    final_l3_idemp_error: float
 
 
 def run_learning_curve(
@@ -545,10 +573,12 @@ def run_learning_curve(
             metrics = evaluate(model, eval_docs, config)
             metrics = EvalMetrics(
                 step=step,
-                root_mse=metrics.root_mse,
+                root_oracle_mse=metrics.root_oracle_mse,
                 root_threshold_accuracy=metrics.root_threshold_accuracy,
-                c3_violation_rate=metrics.c3_violation_rate,
-                mean_node_mse=metrics.mean_node_mse,
+                l1_leaf_error=metrics.l1_leaf_error,
+                l2_merge_error=metrics.l2_merge_error,
+                l3_idemp_error=metrics.l3_idemp_error,
+                mean_node_oracle_mse=metrics.mean_node_oracle_mse,
             )
             all_metrics.append(asdict(metrics))
 
@@ -559,9 +589,11 @@ def run_learning_curve(
         target_k=config.target_k,
         metrics=all_metrics,
         hand_designed_accuracy=hd_acc,
-        final_root_mse=final.get("root_mse", float("nan")),
+        final_root_oracle_mse=final.get("root_oracle_mse", float("nan")),
         final_threshold_accuracy=final.get("root_threshold_accuracy", float("nan")),
-        final_c3_violation_rate=final.get("c3_violation_rate", float("nan")),
+        final_l1_leaf_error=final.get("l1_leaf_error", float("nan")),
+        final_l2_merge_error=final.get("l2_merge_error", float("nan")),
+        final_l3_idemp_error=final.get("l3_idemp_error", float("nan")),
     )
 
 
@@ -585,9 +617,11 @@ def run_learning_curve_experiment(
         result = run_learning_curve(config, distribution)
         results.append(asdict(result))
         print(
-            f"    Final: root_mse={result.final_root_mse:.4f}, "
+            f"    Final: root_oracle_mse={result.final_root_oracle_mse:.4f}, "
             f"accuracy={result.final_threshold_accuracy:.3f}, "
-            f"c3_viol={result.final_c3_violation_rate:.3f}, "
+            f"l1={result.final_l1_leaf_error:.3f}, "
+            f"l2={result.final_l2_merge_error:.3f}, "
+            f"l3={result.final_l3_idemp_error:.3f}, "
             f"hand_designed={result.hand_designed_accuracy:.3f}"
         )
 
@@ -620,9 +654,11 @@ def run_convergence_comparison(
 
     comparison = {
         "learned": {
-            "root_mse": result.final_root_mse,
+            "root_oracle_mse": result.final_root_oracle_mse,
             "threshold_accuracy": result.final_threshold_accuracy,
-            "c3_violation_rate": result.final_c3_violation_rate,
+            "l1_leaf_error": result.final_l1_leaf_error,
+            "l2_merge_error": result.final_l2_merge_error,
+            "l3_idemp_error": result.final_l3_idemp_error,
         },
         "hand_designed": {
             "threshold_accuracy": result.hand_designed_accuracy,
@@ -666,8 +702,10 @@ def run_phase_diagram_experiment(
                 ),
                 "supports_target": m >= k,
                 "learned_accuracy": result.final_threshold_accuracy,
-                "learned_root_mse": result.final_root_mse,
-                "learned_c3_violation": result.final_c3_violation_rate,
+                "learned_root_oracle_mse": result.final_root_oracle_mse,
+                "learned_l1_leaf_error": result.final_l1_leaf_error,
+                "learned_l2_merge_error": result.final_l2_merge_error,
+                "learned_l3_idemp_error": result.final_l3_idemp_error,
                 "hand_designed_accuracy": result.hand_designed_accuracy,
             })
 
@@ -703,9 +741,11 @@ def run_audit_budget_experiment(
         results.append({
             "n_audit": n_audit,
             "metrics": result.metrics,
-            "final_root_mse": result.final_root_mse,
+            "final_root_oracle_mse": result.final_root_oracle_mse,
             "final_threshold_accuracy": result.final_threshold_accuracy,
-            "final_c3_violation_rate": result.final_c3_violation_rate,
+            "final_l1_leaf_error": result.final_l1_leaf_error,
+            "final_l2_merge_error": result.final_l2_merge_error,
+            "final_l3_idemp_error": result.final_l3_idemp_error,
         })
 
     return {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -147,7 +148,7 @@ class RulerSyntheticAdapter(BenchmarkAdapter):
         out_dir.mkdir(parents=True, exist_ok=True)
 
         cmd = [
-            "python3",
+            str(sys.executable),
             str(prepare_py),
             "--save_dir",
             str(out_dir),
@@ -176,6 +177,10 @@ class RulerSyntheticAdapter(BenchmarkAdapter):
         env["PYTHONPATH"] = str(self.ruler_dir / "scripts" / "data") + os.pathsep + env.get(
             "PYTHONPATH", ""
         )
+        # Ensure `python` resolution inside upstream helper scripts prefers the
+        # active interpreter's environment (venv dependencies like nltk).
+        py_bin_dir = str(Path(sys.executable).parent)
+        env["PATH"] = py_bin_dir + os.pathsep + env.get("PATH", "")
 
         subprocess.run(cmd, check=True, env=env)
 

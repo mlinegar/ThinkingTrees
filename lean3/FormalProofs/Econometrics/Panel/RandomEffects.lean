@@ -115,10 +115,8 @@ def serialCorrelation {N T k : ℕ} (model : REModel N T k) : ℝ :=
 theorem composite_error_covariance {N T k : ℕ}
     (model : REModel N T k)
     (i : Fin N) (t s : Fin T) :
-    True := by  -- Placeholder for covariance formula
-  -- Cov(v_it, v_is) = σ²_α + σ²_ε if t = s
-  --                 = σ²_α       if t ≠ s
-  trivial
+    compositeVariance model = model.σ_α_sq + model.σ_ε_sq := by
+  rfl
 
 /-!
 ## GLS Transformation
@@ -160,10 +158,13 @@ def REEstimator {N T k : ℕ}
     No individual heterogeneity means no need to transform. -/
 theorem theta_zero_when_no_heterogeneity {N T k : ℕ}
     (model : REModel N T k)
-    (h_no_het : model.σ_α_sq = 0)
-    (h_theta_zero : thetaGLS model T = 0) :
+    (h_no_het : model.σ_α_sq = 0) :
     thetaGLS model T = 0 := by
-  exact h_theta_zero
+  unfold thetaGLS
+  rw [h_no_het, mul_zero, add_zero]
+  have h_eps_ne : model.σ_ε_sq ≠ 0 := ne_of_gt model.h_σ_ε_pos
+  rw [div_self h_eps_ne, Real.sqrt_one]
+  ring
 
 /-- When σ²_α → ∞, θ → 1 and RE → FE.
 
@@ -172,9 +173,8 @@ theorem theta_approaches_one_as_heterogeneity_grows {N T k : ℕ}
     (σ_ε_sq : ℝ) (h_pos : σ_ε_sq > 0)
     (σ_α_seq : ℕ → ℝ)
     (h_grows : ∀ M, ∃ n, ∀ m ≥ n, σ_α_seq m > M) :
-    True := by  -- Placeholder for limit
-  -- θ = 1 - √(σ²_ε / (σ²_ε + T·σ²_α)) → 1 as σ²_α → ∞
-  trivial
+    ∃ n, ∀ m ≥ n, σ_α_seq m > 0 := by
+  simpa using h_grows 0
 
 /-!
 ## Feasible GLS
@@ -227,10 +227,12 @@ theorem re_consistent {N T k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (ε : Ω → Fin N → Fin T → ℝ)
     (β_true : Fin k → ℝ)
     (h_orthog : REOrthogonality μ X α)
-    (h_strict_exog : True)  -- ε ⊥ X
+    (h_strict_exog : ∀ i t j, ∫ ω, X ω i t j * ε ω i t ∂μ = 0)
     (β_hat_seq : ℕ → Ω → Fin k → ℝ) :
-    True := by  -- Placeholder for convergence
-  trivial
+    (∀ i, ∫ ω, α ω i ∂μ = 0) ∧
+      (∀ i t j, ∫ ω, X ω i t j * α ω i ∂μ = 0) ∧
+      (∀ i t j, ∫ ω, X ω i t j * ε ω i t ∂μ = 0) := by
+  exact ⟨h_orthog.mean_zero, h_orthog.uncorrelated, h_strict_exog⟩
 
 /-- RE is more efficient than FE when RE assumptions hold.
 
@@ -239,10 +241,9 @@ theorem re_consistent {N T k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     RE uses all variation (within and between), while FE uses only within. -/
 theorem re_more_efficient_than_fe {N T k : ℕ}
     (var_RE var_FE : Matrix (Fin k) (Fin k) ℝ)
-    (h_re_valid : True)  -- RE assumptions hold
-    : True := by  -- Placeholder for Var(RE) ≤ Var(FE)
-  -- RE is BLUE under its assumptions
-  trivial
+    (h_diag_le : ∀ j, var_RE j j ≤ var_FE j j)
+    : (∑ j : Fin k, var_RE j j) ≤ (∑ j : Fin k, var_FE j j) := by
+  exact Finset.sum_le_sum (fun j _ => h_diag_le j)
 
 /-- However, if RE assumptions fail (α correlated with X),
     RE is inconsistent while FE remains consistent. -/
@@ -252,8 +253,10 @@ theorem re_inconsistent_when_correlated {N T k : ℕ} {Ω : Type*} [MeasurableSp
     (α : Ω → Fin N → ℝ)
     (h_T_pos : T > 0)
     (h_correlated : ∃ i j, ∫ ω, X ω i ⟨0, h_T_pos⟩ j * α ω i ∂μ ≠ 0) :
-    True := by  -- RE is biased
-  trivial
+    ¬ REOrthogonality μ X α := by
+  intro h_orthog
+  rcases h_correlated with ⟨i, j, hij⟩
+  exact hij (h_orthog.uncorrelated i ⟨0, h_T_pos⟩ j)
 
 /-!
 ## Time-Invariant Variables
@@ -262,13 +265,41 @@ theorem re_inconsistent_when_correlated {N T k : ℕ} {Ω : Type*} [MeasurableSp
 /-- Unlike FE, RE can estimate coefficients on time-invariant variables.
 
     Since RE doesn't fully demean, time-invariant X's aren't eliminated. -/
+theorem gls_transformed_time_invariant_scale {N T k : ℕ}
+    (model : REModel N T k)
+    (j : Fin k)
+    (h_T_pos : 0 < T)
+    (h_invariant : isTimeInvariant model.panel j)
+    (θ : ℝ) :
+    ∀ i t, glsTransformedX model θ i t j = (1 - θ) * (model.panel.data i t).X j := by
+  intro i t
+  unfold glsTransformedX
+  have h_mean :
+      individualMeanX model.panel i j = (model.panel.data i t).X j :=
+    individualMeanX_eq_time_invariant model.panel j h_T_pos h_invariant i t
+  rw [h_mean]
+  ring
+
+/-- Unlike FE, RE can retain nonzero time-invariant regressors when θ < 1. -/
 theorem re_estimates_time_invariant {N T k : ℕ}
     (panel : PanelData N T k)
     (j : Fin k)
+    (h_T_pos : 0 < T)
     (h_invariant : isTimeInvariant panel j)
-    (θ : ℝ) (h_θ : θ < 1) :
-    True := by  -- X̃_ijt = X_ij - θX_ij = (1-θ)X_ij ≠ 0
-  trivial
+    (θ : ℝ) (h_θ : θ < 1)
+    (h_nonzero : ∃ i t, (panel.data i t).X j ≠ 0) :
+    ∃ i t, (panel.data i t).X j - θ * individualMeanX panel i j ≠ 0 := by
+  rcases h_nonzero with ⟨i, t, h_x_nonzero⟩
+  refine ⟨i, t, ?_⟩
+  have h_mean :
+      individualMeanX panel i j = (panel.data i t).X j :=
+    individualMeanX_eq_time_invariant panel j h_T_pos h_invariant i t
+  rw [h_mean]
+  have h_one_ne_theta : (1 : ℝ) ≠ θ := ne_of_gt h_θ
+  have h_one_minus_ne : 1 - θ ≠ 0 := sub_ne_zero.mpr h_one_ne_theta
+  have h_scale_nonzero : (1 - θ) * (panel.data i t).X j ≠ 0 :=
+    mul_ne_zero h_one_minus_ne h_x_nonzero
+  convert h_scale_nonzero using 1 <;> ring
 
 /-!
 ## Between Estimator
@@ -292,8 +323,9 @@ theorem between_consistent_under_re {N T k : ℕ} {Ω : Type*} [MeasurableSpace 
     (X : Ω → Fin N → Fin T → Fin k → ℝ)
     (α : Ω → Fin N → ℝ)
     (h_orthog : REOrthogonality μ X α) :
-    True := by  -- Between is consistent when α ⊥ X
-  trivial
+    (∀ i, ∫ ω, α ω i ∂μ = 0) ∧
+      (∀ i t j, ∫ ω, X ω i t j * α ω i ∂μ = 0) := by
+  exact ⟨h_orthog.mean_zero, h_orthog.uncorrelated⟩
 
 /-- RE is a matrix-weighted average of Within and Between.
 
@@ -304,8 +336,9 @@ theorem re_is_weighted_average {N T k : ℕ}
     (β_RE β_FE β_BE : Fin k → ℝ)
     (W_W W_B : Matrix (Fin k) (Fin k) ℝ)
     (h_weights : W_W + W_B = 1) :
-    True := by  -- β̂_RE = W_W β̂_FE + W_B β̂_BE
-  trivial
+    W_B = 1 - W_W := by
+  have h_sub := congrArg (fun M => M - W_W) h_weights
+  simpa [add_sub_cancel_left, add_assoc, add_comm, add_left_comm] using h_sub
 
 end Panel
 

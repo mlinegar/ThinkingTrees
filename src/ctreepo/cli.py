@@ -1,0 +1,205 @@
+from __future__ import annotations
+
+import argparse
+import sys
+from typing import Sequence
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="ctreepo", description="C-TreePO simulations and tooling.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sim = sub.add_parser("sim", help="Simulation families, sweeps, plots, and suites.")
+    sim_sub = sim.add_subparsers(dest="sim_cmd", required=True)
+
+    run = sim_sub.add_parser("run", help="Run a single simulation instance.")
+    run.add_argument(
+        "family",
+        choices=[
+            "markov-ops-count",
+            "segment-lda-ops",
+            "segmented-lda-ctreepo",
+            "tensor-lda-books",
+        ],
+    )
+    run.add_argument("args", nargs=argparse.REMAINDER)
+
+    sweep = sim_sub.add_parser("sweep", help="Build (and optionally execute) sweep commands.")
+    sweep.add_argument(
+        "family",
+        choices=[
+            "markov-ops-count",
+            "segment-lda-ops",
+            "segmented-lda-ctreepo",
+            "tensor-lda-books",
+        ],
+    )
+    sweep.add_argument("args", nargs=argparse.REMAINDER)
+
+    exec_p = sim_sub.add_parser("exec", help="Execute a command list with bounded parallelism.")
+    exec_p.add_argument("args", nargs=argparse.REMAINDER)
+
+    plot = sim_sub.add_parser("plot", help="Run plot utilities.")
+    plot.add_argument(
+        "name",
+        choices=[
+            "segment-lda-ops-grid",
+            "segment-lda-oracle-gap",
+            "segment-lda-ops-ceilings",
+            "segmented-lda-ctreepo-phase",
+            "segmented-lda-ctreepo-ceilings",
+            "ctreepo-guidance-frontier",
+            "full-budget-gap-suite",
+        ],
+    )
+    plot.add_argument("args", nargs=argparse.REMAINDER)
+
+    report = sim_sub.add_parser("report", help="Generate reports from sweep outputs.")
+    report.add_argument("name", choices=["identifiable-zero", "publication-ctreepo-progress"])
+    report.add_argument("args", nargs=argparse.REMAINDER)
+
+    suite = sim_sub.add_parser("suite", help="Curated multi-family suites.")
+    suite_sub = suite.add_subparsers(dest="suite_name", required=True)
+    iz = suite_sub.add_parser("identifiable-zero", help="Identifiable-Zero suite orchestration.")
+    iz_sub = iz.add_subparsers(dest="suite_cmd", required=True)
+    for cmd in ["build", "run", "plot", "report"]:
+        sp = iz_sub.add_parser(cmd, help=f"{cmd} the identifiable-zero suite.")
+        sp.add_argument("args", nargs=argparse.REMAINDER)
+
+    pub = suite_sub.add_parser("publication-ctreepo", help="Publication C-TreePO benchmark suite.")
+    pub_sub = pub.add_subparsers(dest="suite_cmd", required=True)
+    for cmd in ["build", "run", "progress"]:
+        sp = pub_sub.add_parser(cmd, help=f"{cmd} the publication-ctreepo suite.")
+        sp.add_argument("args", nargs=argparse.REMAINDER)
+
+    return p
+
+
+def _dispatch_run(family: str, argv: Sequence[str]) -> int:
+    if family == "markov-ops-count":
+        from src.ctreepo.sim.cli.run_markov_changepoint_ops_count import main as _main
+
+        return int(_main(argv))
+    if family == "segment-lda-ops":
+        from src.ctreepo.sim.cli.run_segment_lda_ops_weight_recovery import main as _main
+
+        return int(_main(argv))
+    if family == "segmented-lda-ctreepo":
+        from src.ctreepo.sim.cli.run_segmented_lda_ctreepo import main as _main
+
+        return int(_main(argv))
+    if family == "tensor-lda-books":
+        from src.ctreepo.sim.cli.run_tensor_lda_book_benchmark import main as _main
+
+        return int(_main(argv))
+    raise ValueError(f"Unknown family: {family}")
+
+
+def _dispatch_sweep(family: str, argv: Sequence[str]) -> int:
+    if family == "markov-ops-count":
+        from src.ctreepo.sim.cli.sweep_markov_changepoint_ops_count import main as _main
+
+        return int(_main(argv))
+    if family == "segment-lda-ops":
+        from src.ctreepo.sim.cli.sweep_segment_lda_ops_weight_recovery import main as _main
+
+        return int(_main(argv))
+    if family == "segmented-lda-ctreepo":
+        from src.ctreepo.sim.cli.sweep_segmented_lda_ctreepo import main as _main
+
+        return int(_main(argv))
+    if family == "tensor-lda-books":
+        from src.ctreepo.sim.cli.sweep_tensor_lda_book_benchmark import main as _main
+
+        return int(_main(argv))
+    raise ValueError(f"Unknown family: {family}")
+
+
+def _dispatch_plot(name: str, argv: Sequence[str]) -> int:
+    if name == "segment-lda-ops-grid":
+        from src.ctreepo.sim.cli.plot.segment_lda_ops_weight_recovery_grid import main as _main
+
+        return int(_main(argv))
+    if name == "segment-lda-oracle-gap":
+        from src.ctreepo.sim.cli.plot.segment_lda_oracle_gap_focus import main as _main
+
+        return int(_main(argv))
+    if name == "segment-lda-ops-ceilings":
+        from src.ctreepo.sim.cli.plot.segment_lda_ops_weight_recovery_ceilings import main as _main
+
+        return int(_main(argv))
+    if name == "segmented-lda-ctreepo-phase":
+        from src.ctreepo.sim.cli.plot.segmented_lda_ctreepo_phase import main as _main
+
+        return int(_main(argv))
+    if name == "segmented-lda-ctreepo-ceilings":
+        from src.ctreepo.sim.cli.plot.segmented_lda_ctreepo_ceilings import main as _main
+
+        return int(_main(argv))
+    if name == "ctreepo-guidance-frontier":
+        from src.ctreepo.sim.cli.plot.ctreepo_guidance_frontier import main as _main
+
+        return int(_main(argv))
+    if name == "full-budget-gap-suite":
+        from src.ctreepo.sim.cli.plot.full_budget_gap_suite import main as _main
+
+        return int(_main(argv))
+    raise ValueError(f"Unknown plot name: {name}")
+
+
+def _dispatch_report(name: str, argv: Sequence[str]) -> int:
+    if name == "identifiable-zero":
+        from src.ctreepo.sim.cli.report.identifiable_zero_suite import main as _main
+
+        return int(_main(argv))
+    if name == "publication-ctreepo-progress":
+        from src.ctreepo.sim.cli.report.publication_ctreepo_progress import main as _main
+
+        return int(_main(argv))
+    raise ValueError(f"Unknown report name: {name}")
+
+
+def _dispatch_suite_identifiable_zero(cmd: str, argv: Sequence[str]) -> int:
+    from src.ctreepo.sim.suite.identifiable_zero import main as _main
+
+    # suite main owns its own subcommand parsing; we forward "<cmd> ..." as argv.
+    return int(_main([cmd, *argv]))
+
+
+def _dispatch_suite_publication_ctreepo(cmd: str, argv: Sequence[str]) -> int:
+    from src.ctreepo.sim.suite.publication_ctreepo import main as _main
+
+    # suite main owns its own subcommand parsing; we forward "<cmd> ..." as argv.
+    return int(_main([cmd, *argv]))
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args_in = list(sys.argv[1:] if argv is None else argv)
+    p = _build_parser()
+    ns = p.parse_args(args_in)
+
+    if ns.cmd == "sim":
+        if ns.sim_cmd == "run":
+            return _dispatch_run(str(ns.family), list(ns.args))
+        if ns.sim_cmd == "sweep":
+            return _dispatch_sweep(str(ns.family), list(ns.args))
+        if ns.sim_cmd == "exec":
+            from src.ctreepo.sim.cli.exec_cmds import main as _main
+
+            return int(_main(list(ns.args)))
+        if ns.sim_cmd == "plot":
+            return _dispatch_plot(str(ns.name), list(ns.args))
+        if ns.sim_cmd == "report":
+            return _dispatch_report(str(ns.name), list(ns.args))
+        if ns.sim_cmd == "suite":
+            if ns.suite_name == "identifiable-zero":
+                return _dispatch_suite_identifiable_zero(str(ns.suite_cmd), list(ns.args))
+            if ns.suite_name == "publication-ctreepo":
+                return _dispatch_suite_publication_ctreepo(str(ns.suite_cmd), list(ns.args))
+            raise ValueError(f"Unknown suite: {ns.suite_name}")
+
+    raise ValueError("unreachable")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

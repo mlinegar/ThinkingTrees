@@ -563,41 +563,6 @@ def chunk_for_ops(
     )
 
 
-def chunk_for_ops_adaptive(
-    text: str,
-    max_chars: int = 2000,
-    strategy: str = "axis",
-    feedback_signals: Optional[Sequence[ChunkFeedbackSignal]] = None,
-    config: Optional[AdaptiveChunkingConfig] = None,
-) -> List[TextChunk]:
-    """Convenience wrapper for adaptive OPS chunking."""
-    adaptive_cfg = config or AdaptiveChunkingConfig(enabled=True)
-    if not adaptive_cfg.enabled:
-        adaptive_cfg = AdaptiveChunkingConfig(
-            enabled=True,
-            min_chars=adaptive_cfg.min_chars,
-            max_chars=adaptive_cfg.max_chars,
-            low_info_expansion_weight=adaptive_cfg.low_info_expansion_weight,
-            noise_expansion_weight=adaptive_cfg.noise_expansion_weight,
-            high_info_compression_weight=adaptive_cfg.high_info_compression_weight,
-            min_target_scale=adaptive_cfg.min_target_scale,
-            max_target_scale=adaptive_cfg.max_target_scale,
-            proxy_blend=adaptive_cfg.proxy_blend,
-            crossfit_folds=adaptive_cfg.crossfit_folds,
-            proxy_model=adaptive_cfg.proxy_model,
-            proxy_score_key=adaptive_cfg.proxy_score_key,
-            proxy_fallback_to_baseline=adaptive_cfg.proxy_fallback_to_baseline,
-        )
-
-    return chunk_for_ops(
-        text=text,
-        max_chars=max_chars,
-        strategy=strategy,
-        adaptive_config=adaptive_cfg,
-        feedback_signals=feedback_signals,
-    )
-
-
 def _axis_segment_intervals(text: str, axis_segment_chars: int) -> List[tuple[int, int]]:
     """Extract fixed-width axis intervals with light whitespace alignment."""
     if not text:
@@ -933,6 +898,83 @@ def _build_adaptive_chunks(
 
     finalize_current()
     return chunks
+
+
+# =============================================================================
+# Oracle → Feedback Signals (Phase 2: feedback loop)
+# =============================================================================
+
+
+def oracle_to_feedback_signals(
+    nodes: Any,
+    oracle_key: str = "rile",
+    *,
+    target_min: float = -100.0,
+    target_max: float = 100.0,
+    high_error_threshold: float = 0.3,
+    source: str = "oracle_audit",
+) -> List[ChunkFeedbackSignal]:
+    """Convert oracle audit results on tree nodes to chunking feedback signals.
+
+    For each node that has both an oracle score and a sketch prediction, this
+    computes the discrepancy and maps it to a ``ChunkFeedbackSignal``:
+
+    - **High discrepancy** (sketch disagrees with oracle) →
+      ``oracle_relevance_probability`` is LOW, signaling that the window
+      boundaries in this region should be **refined** (the sketch didn't
+      capture the right information from these windows).
+    - **Low discrepancy** (sketch agrees with oracle) →
+      ``oracle_relevance_probability`` is HIGH, signaling the windows are
+      **good** and can be merged/expanded.
+
+    Args:
+        nodes: List of ``EmbeddingTreeNode`` (from ``build_unified_tree``).
+        oracle_key: Which oracle score to use (default ``"rile"``).
+        target_min: Min value of the oracle scale (for normalisation).
+        target_max: Max value of the oracle scale.
+        high_error_threshold: Normalised error above which we flag for
+            refinement (0.3 = 30% of scale range).
+        source: Source tag for the feedback signals.
+
+    Returns:
+        List of ``ChunkFeedbackSignal`` covering audited regions.
+    """
+    scale = max(1.0, target_max - target_min)
+    signals: List[ChunkFeedbackSignal] = []
+
+    for node in nodes:
+        oracle_val = node.oracle_scores.get(oracle_key) if hasattr(node, "oracle_scores") else None
+        sketch_val = node.sketch_scores.get(oracle_key) if hasattr(node, "sketch_scores") else None
+
+        if oracle_val is None:
+            continue
+
+        # Compute normalised error
+        if sketch_val is not None:
+            norm_error = abs(oracle_val - sketch_val) / scale
+        else:
+            # No sketch prediction → moderate uncertainty
+            norm_error = 0.5
+
+        # Map: high error → low oracle_relevance (needs refinement)
+        # Low error → high oracle_relevance (windows are fine)
+        oracle_relevance = max(0.0, min(1.0, 1.0 - norm_error))
+
+        # Low info = inverse of relevance (high error means current windows
+        # are not capturing the signal well)
+        low_info_prob = max(0.0, min(1.0, norm_error))
+
+        signals.append(ChunkFeedbackSignal(
+            start_char=node.char_start,
+            end_char=node.char_end,
+            low_info_probability=low_info_prob,
+            noise_probability=0.0,
+            confidence=1.0 if sketch_val is not None else 0.5,
+            source=source,
+            oracle_relevance_probability=oracle_relevance,
+        ))
+
+    return signals
 
 
 # =============================================================================

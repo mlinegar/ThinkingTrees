@@ -96,11 +96,11 @@ def run_validation(
             prediction = pipeline(text=sample.text)
 
             # The pipeline's forward() gives us:
-            # - prediction.rile_score (normalized 0-1)
+            # - prediction.score (normalized 0-1)
             # - We need to compare vs sample.rile (ground truth -100 to +100)
 
             # Denormalize prediction back to -100 to +100 scale
-            pred_rile = prediction.rile_score * RILE_RANGE + RILE_MIN
+            pred_rile = prediction.score * RILE_RANGE + RILE_MIN
 
             # Compute normalized error
             error = abs(pred_rile - sample.rile) / RILE_RANGE

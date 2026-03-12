@@ -478,7 +478,7 @@ class GRPOGeneratorTrainer(BaseGeneratorTrainer):
         Initialize GRPO trainer.
 
         Args:
-            genrm_judge: GenRM judge for creating reward function
+            genrm_judge: Optional GenRM judge for creating reward function
             config: Training configuration
             prompt_builder: Optional prompt builder
             num_generations: Number of generations per prompt
@@ -510,6 +510,7 @@ class GRPOGeneratorTrainer(BaseGeneratorTrainer):
             law_type: Optional filter for specific law type
             reward_funcs: Reward function(s) for GRPO. If None and genrm_judge
                          is set, creates reward function from GenRM.
+                         In large-model-only mode, callers should pass reward_funcs.
             **kwargs: Additional arguments
 
         Returns:
@@ -732,7 +733,7 @@ def create_trainer_from_method(
 
     Args:
         method: Training method name
-        genrm_judge: GenRM judge (required for GRPO and BootstrapFinetune)
+        genrm_judge: Optional GenRM judge (legacy convenience for GRPO/BootstrapFinetune)
         teacher_lm: Teacher model (for BootstrapFinetune)
         config: Training configuration
         prompt_builder: Optional prompt builder

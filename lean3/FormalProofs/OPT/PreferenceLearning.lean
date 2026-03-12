@@ -462,6 +462,18 @@ def OracleIndexedGroupGen {Strings A Y : Type*} [PseudoMetricSpace Y] {k : ℕ}
     (gen : GroupGenerator Strings A k) (fstar : Strings → Y) : Prop :=
   ∀ x x', dist (fstar x) (fstar x') = 0 → gen x = gen x'
 
+/-- L1-Lipschitz group generator: generator shift bounded by oracle distance.
+
+We measure generator shift by the L1 distance between PMFs:
+  ∑_g |gen x g - gen x' g| ≤ L * dist(f*(x), f*(x')).
+
+This is the minimal stability condition needed to extend TreePO bounds
+to doc-dependent group generators. -/
+def GroupGeneratorLipschitzL1 {Strings A Y : Type*} [PseudoMetricSpace Y] {k : ℕ}
+    [Fintype A]
+    (gen : GroupGenerator Strings A k) (fstar : Strings → Y) (L : ℝ≥0) : Prop :=
+  ∀ x x', (∑ g, |(gen x g).toReal - (gen x' g).toReal|) ≤ (L : ℝ) * dist (fstar x) (fstar x')
+
 /-- Group loss: loss on a k-sized group of actions. -/
 def GroupLoss (Strings A : Type*) (k : ℕ) := Strings → (Fin k → A) → ℝ
 
@@ -580,6 +592,19 @@ def GRPOPolicyLipschitz {Strings A Y : Type*} [PseudoMetricSpace Y]
     (pol : Policy' Strings A) (fstar : Strings → Y) (L : ℝ≥0) : Prop :=
   ∀ x x' a, |pol x a - pol x' a| ≤ (L : ℝ) * dist (fstar x) (fstar x')
 
+lemma grpo_policy_lipschitz_mono {Strings A Y : Type*} [PseudoMetricSpace Y]
+    {pol : Policy' Strings A} {fstar : Strings → Y} {L L' : ℝ≥0}
+    (h : GRPOPolicyLipschitz pol fstar L) (hL : L ≤ L') :
+    GRPOPolicyLipschitz pol fstar L' := by
+  intro x x' a
+  have hL' : (L : ℝ) ≤ (L' : ℝ) := by
+    exact_mod_cast hL
+  have hmul :
+      (L : ℝ) * dist (fstar x) (fstar x') ≤
+      (L' : ℝ) * dist (fstar x) (fstar x') := by
+    exact mul_le_mul_of_nonneg_right hL' dist_nonneg
+  exact le_trans (h x x' a) hmul
+
 /-- GRPO-PL loss satisfies the abstract LipschitzGroupLoss predicate.
 
 This is the bridge lemma connecting GRPO-specific infrastructure to the abstract framework.
@@ -678,26 +703,6 @@ theorem grpo_equivalence_via_ZR {Strings A Y : Type*} [Monoid Strings] [MetricSp
   exact h_pol
   exact h_ranker
   exact h_gen
-
-/-- Bundle for GRPO oracle-measurability conditions. -/
-structure GRPOOracleMeasurableBundle {Strings A Y : Type*} [PseudoMetricSpace Y] {k : ℕ}
-    (pol : Policy' Strings A) (ranker : Strings → GroupRanker A k)
-    (gen : GroupGenerator Strings A k) (fstar : Strings → Y) where
-  pol_measurable : GRPOOracleMeasurable pol fstar
-  ranker_indexed : OracleIndexedRanker ranker fstar
-  gen_indexed : OracleIndexedGroupGen gen fstar
-
-/-- GRPO equivalence with bundled conditions. -/
-theorem grpo_equivalence_bundle {Strings A Y : Type*} [Monoid Strings] [MetricSpace Y] {k : ℕ}
-    (fstar : Strings → Y)
-    (pol : Policy' Strings A) (ranker : Strings → GroupRanker A k)
-    (gen : GroupGenerator Strings A k)
-    (μ_X μ_Z : PMF Strings)
-    (h_zero : ∀ z x, z ∈ μ_Z.support → x ∈ μ_X.support → dist (fstar z) (fstar x) = 0)
-    (bundle : GRPOOracleMeasurableBundle (Y := Y) pol ranker gen fstar) :
-    ExpectedGRPOLoss pol ranker μ_X gen = ExpectedGRPOLoss pol ranker μ_Z gen :=
-  grpo_equivalence (Y := Y) fstar pol ranker gen μ_X μ_Z h_zero
-    bundle.pol_measurable bundle.ranker_indexed bundle.gen_indexed
 
 /-!
 ## GRPO Variant 2: Clipped-Surrogate + KL (DeepSeek-R1 Style)
@@ -848,6 +853,76 @@ theorem grpo_rl_equivalence {Strings A Y : Type*} [Monoid Strings] [MetricSpace 
     exact h_meas x x' g hdist
   have h_eq := expected_group_loss_eq_of_zero_dist fstar loss gen μ_X μ_Z h_zero h_meas' h_gen
   simpa [ExpectedGroupLoss, ExpectedGRPORLLoss, loss] using h_eq
+
+/-- GRPO-RL equivalence via ZR: connecting to tree-based summarization. -/
+theorem grpo_rl_equivalence_via_ZR {Strings A Y : Type*} [Monoid Strings] [MetricSpace Y] (k : ℕ)
+    (fstar : Strings → Y)
+    (pol pol_old pol_ref : Policy' Strings A)
+    (reward : Strings → A → ℝ) (eps beta : ℝ)
+    (gen : GroupGenerator Strings A k)
+    (g : Summarizer Strings) (x : Strings) (R : ℕ) (T : BinTree Strings)
+    -- Local laws ensure zero distortion
+    (hp : S T = x)
+    (h1 : L1 g T fstar) (h2 : L2 g T fstar) (h3 : L3 g fstar) (hR : R ≥ 1)
+    -- Oracle-measurability conditions
+    (h_meas : OracleMeasurableGRPORLLoss k pol pol_old pol_ref reward eps beta fstar)
+    (h_gen : OracleIndexedGroupGen (Y := Y) gen fstar)
+    -- Boundedness for multi_round_proper
+    (M : ℝ) (hM : 0 ≤ M) (hbound : ∀ w z, D fstar w z ≤ M) :
+    ExpectedGRPORLLoss pol pol_old pol_ref reward eps beta (PMF.pure x) gen =
+    ExpectedGRPORLLoss pol pol_old pol_ref reward eps beta (ZR g x R T) gen := by
+  apply grpo_rl_equivalence (Y := Y) (k := k) fstar pol pol_old pol_ref reward eps beta gen
+    (PMF.pure x) (ZR g x R T)
+  -- Prove zero distortion from local laws (same as grpo_equivalence_via_ZR)
+  intro z x' hz hx'
+  simp only [PMF.support_pure, Set.mem_singleton_iff] at hx'
+  rw [hx']
+  have h_exp_zero : Exp (ZR g x R T) (fun z => D fstar z x) = 0 :=
+    multi_round_proper g T x R fstar hp h1 h2 h3 hR M hM hbound
+  unfold D at h_exp_zero
+  by_contra h_dist_ne_zero
+  have h_dist_pos : 0 < dist (fstar z) (fstar x) :=
+    lt_of_le_of_ne dist_nonneg (Ne.symm h_dist_ne_zero)
+  have h_term_pos : 0 < (ZR g x R T z).toReal * dist (fstar z) (fstar x) := by
+    apply mul_pos
+    · exact ENNReal.toReal_pos hz (PMF.apply_ne_top _ _)
+    · exact h_dist_pos
+  have h_summable : Summable (fun z => (ZR g x R T z).toReal * dist (fstar z) (fstar x)) :=
+    summable_D_of_bounded (ZR g x R T) fstar x M hM (fun z => hbound z x)
+  have h_sum_pos : 0 < ∑' z, (ZR g x R T z).toReal * dist (fstar z) (fstar x) := by
+    calc 0 < (ZR g x R T z).toReal * dist (fstar z) (fstar x) := h_term_pos
+         _ ≤ ∑' z, (ZR g x R T z).toReal * dist (fstar z) (fstar x) := by
+             apply Summable.le_tsum h_summable z
+             intro i _
+             exact mul_nonneg ENNReal.toReal_nonneg dist_nonneg
+  unfold Exp at h_exp_zero
+  linarith [h_exp_zero]
+  -- Other hypotheses
+  exact h_meas
+  exact h_gen
+
+/-- Bundle for GRPO oracle-measurability conditions. -/
+structure GRPOOracleMeasurableBundle {Strings A Y : Type*} [PseudoMetricSpace Y] {k : ℕ}
+    (pol : Policy' Strings A) (ranker : Strings → GroupRanker A k)
+    (gen : GroupGenerator Strings A k) (fstar : Strings → Y) where
+  pol_measurable : GRPOOracleMeasurable pol fstar
+  ranker_indexed : OracleIndexedRanker ranker fstar
+  gen_indexed : OracleIndexedGroupGen gen fstar
+
+/-- GRPO equivalence with bundled conditions. -/
+theorem grpo_equivalence_bundle {Strings A Y : Type*} [Monoid Strings] [MetricSpace Y] {k : ℕ}
+    (fstar : Strings → Y)
+    (pol : Policy' Strings A) (ranker : Strings → GroupRanker A k)
+    (gen : GroupGenerator Strings A k)
+    (μ_X μ_Z : PMF Strings)
+    (h_zero : ∀ z x, z ∈ μ_Z.support → x ∈ μ_X.support → dist (fstar z) (fstar x) = 0)
+    (bundle : GRPOOracleMeasurableBundle (Y := Y) pol ranker gen fstar) :
+    ExpectedGRPOLoss pol ranker μ_X gen = ExpectedGRPOLoss pol ranker μ_Z gen :=
+  grpo_equivalence (Y := Y) fstar pol ranker gen μ_X μ_Z h_zero
+    bundle.pol_measurable bundle.ranker_indexed bundle.gen_indexed
+
+
+
 
 end PreferenceLearning
 

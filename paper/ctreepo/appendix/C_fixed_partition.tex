@@ -1,0 +1,23 @@
+\section{Fixed-Partition Extension}\label{app:fixed-partition}
+
+\begin{theorem}[Extension to Any Deterministic Fixed Partition]\label{thm:fixed-partition}
+Let $\Pi$ be any deterministic rule that maps each document $x$ to a finite ordered rooted tree $\mathcal{T}_\Pi(x)$ with contiguous leaves. Assume Assumption~\ref{ass:context}. For each $x$, construct summaries on $\mathcal{T}_\Pi(x)$ and assume C1--C3 hold almost surely on all realized calls induced by $\mathcal{T}_\Pi(x)$. Then for every round $R \ge 1$,
+\[
+\E\!\left[\metric\!\big(\fstar(Z_\Pi^{(R)}(x)),\fstar(x)\big)\,\middle|\,x\right]=0.
+\]
+Consequently, for any distribution over documents $X$,
+\[
+\E\!\left[\metric\!\big(\fstar(Z_\Pi^{(R)}(X)),\fstar(X)\big)\right]=0.
+\]
+\end{theorem}
+
+\paragraph{Quantifier order.}
+The statement is conditional: for each deterministic $\Pi$, if the local laws (and Assumption~\ref{ass:context}) hold on the realized hierarchy induced by $\Pi$, then preservation follows. It does not claim that an arbitrary deterministic partition rule automatically satisfies these assumptions.
+
+\begin{proof}
+Fix $x$ and condition on the realized tree $\mathcal{T}_\Pi(x)$. Because $\Pi$ is deterministic, the tree is fixed under this conditioning, so Theorem~\ref{thm:multi-round} applies directly and yields
+\[
+\E\!\left[\metric\!\big(\fstar(Z_\Pi^{(R)}(x)),\fstar(x)\big)\,\middle|\,x,\mathcal{T}_\Pi(x)\right]=0.
+\]
+Since $\mathcal{T}_\Pi(x)$ is a measurable function of $x$, the same equality holds conditioning only on $x$. Taking expectation over $X$ and applying the tower property gives the unconditional statement.
+\end{proof}

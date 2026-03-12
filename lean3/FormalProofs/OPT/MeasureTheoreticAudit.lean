@@ -148,11 +148,7 @@ This is a standard property of product measures: if f depends only on the i-th
 coordinate, then ∫ f(ω_i) dμ^n = ∫ f dμ.
 
 NOTE: This is a standard result about product measures requiring careful handling of
-`MeasureTheory.integral_pi_eq_inner` and related lemmas.
-
-Declared as `sorry` rather than `axiom` to be honest:
-- Standard property of product measures (marginal integral)
-- Mathlib has the machinery but wiring requires effort -/
+`MeasureTheory.integral_pi_eq_inner` and related lemmas. -/
 lemma integral_proj_eq_marginal {α : Type*} [MeasurableSpace α]
     (μ : Measure α) [IsProbabilityMeasure μ] {n : ℕ} (i : Fin n) (f : α → ℝ)
     (hf : Integrable f μ) :
@@ -185,11 +181,7 @@ If f is integrable under μ, then f ∘ (· i) is integrable under the product m
 This follows from the fact that the marginal of a product measure is the original measure.
 
 NOTE: Full proof requires showing Measure.map (· i) (iidSampleMeasure μ n) = μ
-for probability measures, which involves Mathlib's `pi_map_eval` lemma.
-
-Declared as `sorry` rather than `axiom` to be honest:
-- Standard result about product measure marginals
-- Mathlib has `pi_map_eval` but wiring requires effort -/
+for probability measures, which involves Mathlib's `pi_map_eval` lemma. -/
 lemma integrable_proj_of_integrable {α : Type*} [MeasurableSpace α]
     (μ : Measure α) [IsProbabilityMeasure μ] {n : ℕ} (i : Fin n) (f : α → ℝ)
     (hf : Integrable f μ) :
@@ -246,18 +238,14 @@ def empiricalViolationRate (fstar : Strings → Y) (x : Strings) (n : ℕ)
 This follows from the fact that empiricalViolationRate is a finite sum of indicator functions
 composed with coordinate projections, and {x | c ≤ |f x|} is measurable for measurable f.
 
-**Proof structure (mostly complete):**
+**Proof structure:**
 1. MeasurableSet → NullMeasurableSet ✓
 2. empiricalViolationRate is measurable (finite sum of indicator functions) ✓
 3. Subtraction by constant, abs, division preserve measurability ✓
 4. {|f| ≥ ε} is measurable for measurable f ✓
 
-**Remaining sorry:** One step requires `{z : Strings | dist (fstar z) (fstar x) > 0}`
-to be measurable. This needs either:
-- `fstar : Strings → Y` to be measurable (not currently a hypothesis), or
-- `Strings` to be countable (making all sets measurable)
-
-This is a standard measurability assumption in probability theory. -/
+We discharge measurability via `[Countable Strings]`, which gives a discrete
+measurable structure and makes the indicator condition measurable. -/
 lemma deviationSet_nullMeasurable {n : ℕ} [MeasurableSpace Strings] [MeasurableSingletonClass Strings]
     [Countable Strings]
     (μ : Measure (Fin n → Strings)) (fstar : Strings → Y) (x : Strings) (p_true ε : ℝ) :
@@ -351,11 +339,9 @@ X_i ∈ [0,1] with common mean p, the empirical mean p̂ = (1/n)∑X_i satisfies
 - `iIndepFun_pi`: coordinate projections from product measure are independent
 
 ## Status
-Declared as `sorry` (not axiom) to be honest about Lean wiring status:
-- The mathematical result IS in Mathlib (not a new assumption)
-- Wiring requires handling two-sided bounds via union of one-sided Hoeffding bounds
-- Full proof requires converting between sum form and empirical mean form -/
-lemma hoeffding_iid_bounded_axiom {Ω : Type*} [MeasurableSpace Ω]
+Fully proved in this file by reducing to Mathlib sub-Gaussian concentration
+results and performing the finite-sum/empirical-mean algebraic rewrites. -/
+lemma hoeffding_iid_bounded {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
     (n : ℕ) (hn : 0 < n)
     (X : Fin n → Ω → ℝ)  -- n random variables
@@ -543,6 +529,20 @@ lemma hoeffding_iid_bounded_axiom {Ω : Type*} [MeasurableSpace Ω]
         gcongr
     _ = 2 * Real.exp (-2 * n * ε^2) := by ring
 
+/-- Backward-compatible alias for older imports. -/
+lemma hoeffding_iid_bounded_axiom {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (n : ℕ) (hn : 0 < n)
+    (X : Fin n → Ω → ℝ)
+    (p : ℝ)
+    (hX_bound : ∀ i ω, X i ω ∈ Set.Icc 0 1)
+    (hX_mean : ∀ i, ∫ ω, X i ω ∂μ = p)
+    (hX_meas : ∀ i, AEMeasurable (X i) μ)
+    (hX_indep : iIndepFun X μ)
+    (ε : ℝ) (hε : 0 < ε) :
+    μ.real {ω | |((∑ i : Fin n, X i ω) / n) - p| ≥ ε} ≤ 2 * Real.exp (-2 * n * ε^2) := by
+  exact hoeffding_iid_bounded μ n hn X p hX_bound hX_mean hX_meas hX_indep ε hε
+
 /-- Hoeffding bound on empirical violation rate deviation.
 
 With n iid samples, the probability that the empirical rate deviates
@@ -598,7 +598,7 @@ theorem hoeffding_violation_rate_bound
     rfl
   -- Apply Hoeffding's inequality
   simp only [h_rate]
-  exact hoeffding_iid_bounded_axiom (iidSampleMeasure μ n) n hn X p_true hX_bound hX_mean hX_meas hX_indep ε hε
+  exact hoeffding_iid_bounded (iidSampleMeasure μ n) n hn X p_true hX_bound hX_mean hX_meas hX_indep ε hε
 
 /-!
 ## Section 8: Final Audit Certification Theorem

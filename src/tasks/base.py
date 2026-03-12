@@ -699,6 +699,36 @@ class AbstractTask(ABC):
             "Override this method to enable tournament of tournaments."
         )
 
+    def describe_local_law_oracle(self) -> Dict[str, Any]:
+        """
+        Describe the task-provided node-span oracle, if any.
+
+        Tasks with exact/mechanical DGP-backed span verification should override
+        this and set ``exact=True``. Real-data tasks may also expose model-backed
+        task oracles, but those remain explicit fallback label sources.
+        """
+        return {
+            "available": False,
+            "exact": False,
+            "model_backed": False,
+            "kind": "none",
+            "spec": None,
+        }
+
+    def create_local_law_oracle(self, **_: Any) -> Callable[[str], float]:
+        """
+        Create a node-span oracle for local-law supervision.
+
+        Override in tasks/settings where the teacher already supplies a span
+        oracle. For DGP-backed settings this should be an exact mechanical
+        verifier; for real-data tasks this may be a task-specific fallback
+        teacher labeler.
+        """
+        raise NotImplementedError(
+            f"create_local_law_oracle not implemented for task '{self.name}'. "
+            "Override this method to expose task-provided node-span labels."
+        )
+
     def create_preference_labeler(self) -> Optional[Callable[['PreferencePair', float], Optional[str]]]:
         """
         Optional preference labeler for tournament of tournaments.
@@ -829,6 +859,8 @@ class AbstractTask(ABC):
             if not original_content:
                 original_content = getattr(result, "doc_id", "")
             doc_id = getattr(result, "doc_id", None)
+            metadata = getattr(result, "metadata", None)
+            prompt_metadata = dict(metadata) if isinstance(metadata, dict) else None
 
             example = dspy.Example(
                 doc_id=doc_id,
@@ -837,6 +869,7 @@ class AbstractTask(ABC):
                 rubric=rubric,
                 task_context=task_context,
                 reference_score=reference,
+                metadata=prompt_metadata,
             ).with_inputs("original_content", "summary", "rubric")
             examples.append(example)
 

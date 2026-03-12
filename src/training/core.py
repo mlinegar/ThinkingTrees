@@ -28,6 +28,8 @@ class ViolationType(Enum):
             'sufficiency': cls.SUFFICIENCY,
             'merge_consistency': cls.MERGE_CONSISTENCY,
             'merge': cls.MERGE_CONSISTENCY,
+            'joint_to_disjoint_drift': cls.MERGE_CONSISTENCY,
+            'readout_aggregation_drift': cls.MERGE_CONSISTENCY,
             'idempotence': cls.IDEMPOTENCE,
             'substitution': cls.SUBSTITUTION,
         }

@@ -669,6 +669,219 @@ theorem A1_implies_L3 (g_det : Strings → Strings) (fstar : Strings → Y)
   -- This is exactly A1 applied at Z
   exact hA1 Z
 
+/-- For deterministic summaries, L1 is exactly leafwise global sufficiency on that tree. -/
+theorem L1_deterministic_iff_leafwise (g_det : Strings → Strings) (fstar : Strings → Y)
+    (T : BinTree Strings) :
+    L1 (fun x => PMF.pure (g_det x)) T fstar ↔
+      ∀ b, b ∈ leaves T → D fstar (g_det b) b = 0 := by
+  constructor
+  · intro hL1 b hb
+    have h_leaf : Eg (fun x => PMF.pure (g_det x)) (fun z => D fstar z b) b = 0 := hL1 b hb
+    simpa [Eg_deterministic] using h_leaf
+  · intro h_leaf b hb
+    have h_zero : D fstar (g_det b) b = 0 := h_leaf b hb
+    simpa [Eg_deterministic] using h_zero
+
+/-- For deterministic summaries, L3 is exactly in-range global sufficiency. -/
+theorem L3_deterministic_iff_inRange (g_det : Strings → Strings) (fstar : Strings → Y) :
+    L3 (fun x => PMF.pure (g_det x)) fstar ↔
+      ∀ Z, InRange (fun x => PMF.pure (g_det x)) Z → D fstar (g_det Z) Z = 0 := by
+  constructor
+  · intro hL3 Z hZ
+    have h_step : Eg (fun x => PMF.pure (g_det x)) (fun z => D fstar z Z) Z = 0 := hL3 Z hZ
+    simpa [Eg_deterministic] using h_step
+  · intro h_inrange Z hZ
+    have h_zero : D fstar (g_det Z) Z = 0 := h_inrange Z hZ
+    simpa [Eg_deterministic] using h_zero
+
+/-- Global sufficiency restricted to the summary range of a deterministic summarizer. -/
+def A1_on_summary_range (g_det : Strings → Strings) (fstar : Strings → Y) : Prop :=
+  ∀ Z, InRange (fun x => PMF.pure (g_det x)) Z → D fstar (g_det Z) Z = 0
+
+/-- Non-surjective converse variant: deterministic L3 is equivalent to A1 on summary range. -/
+theorem L3_iff_A1_on_summary_range (g_det : Strings → Strings) (fstar : Strings → Y) :
+    L3 (fun x => PMF.pure (g_det x)) fstar ↔ A1_on_summary_range g_det fstar := by
+  simpa [A1_on_summary_range] using L3_deterministic_iff_inRange g_det fstar
+
+/-- Global A1 always implies the weaker in-range variant. -/
+theorem A1_implies_A1_on_summary_range (g_det : Strings → Strings) (fstar : Strings → Y)
+    (hA1 : A1_global g_det fstar) :
+    A1_on_summary_range g_det fstar := by
+  intro Z _hZ
+  exact hA1 Z
+
+/-- If deterministic L1 holds for every tree, then A1 holds globally. -/
+theorem L1_for_all_trees_implies_A1 (g_det : Strings → Strings) (fstar : Strings → Y)
+    (hL1 : ∀ T : BinTree Strings, L1 (fun x => PMF.pure (g_det x)) T fstar) :
+    A1_global g_det fstar := by
+  intro z
+  have h_leaf_tree : L1 (fun x => PMF.pure (g_det x)) (BinTree.leaf z) fstar := hL1 (BinTree.leaf z)
+  have hz_mem : z ∈ leaves (BinTree.leaf z) := by simp [leaves]
+  have h_zero : Eg (fun x => PMF.pure (g_det x)) (fun w => D fstar w z) z = 0 := h_leaf_tree z hz_mem
+  simpa [Eg_deterministic] using h_zero
+
+/-- Global A1 is equivalent to deterministic L1 holding on all trees. -/
+theorem A1_iff_L1_for_all_trees (g_det : Strings → Strings) (fstar : Strings → Y) :
+    A1_global g_det fstar ↔ ∀ T : BinTree Strings, L1 (fun x => PMF.pure (g_det x)) T fstar := by
+  constructor
+  · intro hA1 T
+    exact A1_implies_L1 g_det fstar hA1 T
+  · intro h_all
+    exact L1_for_all_trees_implies_A1 g_det fstar h_all
+
+/-- Deterministic L3 implies A1 when every string is in the summary range. -/
+theorem L3_implies_A1_of_surjective (g_det : Strings → Strings) (fstar : Strings → Y)
+    (h_surj : Function.Surjective g_det)
+    (hL3 : L3 (fun x => PMF.pure (g_det x)) fstar) :
+    A1_global g_det fstar := by
+  intro Z
+  have h_in_range : InRange (fun x => PMF.pure (g_det x)) Z := by
+    rcases h_surj Z with ⟨x, hx⟩
+    refine ⟨x, ?_⟩
+    rw [PMF.support_pure, Set.mem_singleton_iff]
+    exact hx.symm
+  have h_step : Eg (fun x => PMF.pure (g_det x)) (fun z => D fstar z Z) Z = 0 := hL3 Z h_in_range
+  simpa [Eg_deterministic] using h_step
+
+/-- Under surjectivity, deterministic L3 is equivalent to A1 global sufficiency. -/
+theorem A1_iff_L3_of_surjective (g_det : Strings → Strings) (fstar : Strings → Y)
+    (h_surj : Function.Surjective g_det) :
+    A1_global g_det fstar ↔ L3 (fun x => PMF.pure (g_det x)) fstar := by
+  constructor
+  · exact A1_implies_L3 g_det fstar
+  · intro hL3
+    exact L3_implies_A1_of_surjective g_det fstar h_surj hL3
+
+/-- Deterministic L2 on a two-leaf tree is exactly the A2 two-route identity at `(u,v)`. -/
+theorem L2_deterministic_two_leaf_iff_A2_pointwise
+    (g_det : Strings → Strings) (fstar : Strings → Y) (u v : Strings) :
+    L2 (fun x => PMF.pure (g_det x)) (BinTree.node (BinTree.leaf u) (BinTree.leaf v)) fstar ↔
+      D fstar (u * v) (g_det (g_det u * g_det v)) = 0 := by
+  constructor
+  · intro hL2
+    have h_local :
+        Egu (fun x => PMF.pure (g_det x))
+          (BinTree.node (BinTree.leaf u) (BinTree.leaf v))
+          (fun z => D fstar z (S (BinTree.node (BinTree.leaf u) (BinTree.leaf v)))) = 0 := by
+      exact hL2 (BinTree.leaf u, BinTree.leaf v) (by simp [internal_nodes])
+    have h_det : D fstar (g_det (g_det u * g_det v)) (u * v) = 0 := by
+      simpa [Egu_deterministic, reduce_det, S] using h_local
+    simpa [D_symm] using h_det
+  · intro hA2 p hp
+    have hp_eq : p = (BinTree.leaf u, BinTree.leaf v) := by
+      simpa [internal_nodes] using hp
+    subst p
+    have h_det : D fstar (g_det (g_det u * g_det v)) (u * v) = 0 := by
+      simpa [D_symm] using hA2
+    simpa [Egu_deterministic, reduce_det, S] using h_det
+
+/-- A2 implies deterministic L2 on every two-leaf tree. -/
+theorem A2_implies_L2_on_two_leaf_trees (g_det : Strings → Strings) (fstar : Strings → Y)
+    (hA2 : A2_global g_det fstar) :
+    ∀ u v, L2 (fun x => PMF.pure (g_det x)) (BinTree.node (BinTree.leaf u) (BinTree.leaf v)) fstar := by
+  intro u v
+  exact (L2_deterministic_two_leaf_iff_A2_pointwise g_det fstar u v).2 (hA2 u v)
+
+/-- Deterministic L2 on all two-leaf trees implies A2 global two-route identity. -/
+theorem L2_on_two_leaf_trees_implies_A2 (g_det : Strings → Strings) (fstar : Strings → Y)
+    (hL2 : ∀ u v, L2 (fun x => PMF.pure (g_det x)) (BinTree.node (BinTree.leaf u) (BinTree.leaf v)) fstar) :
+    A2_global g_det fstar := by
+  intro u v
+  exact (L2_deterministic_two_leaf_iff_A2_pointwise g_det fstar u v).1 (hL2 u v)
+
+/-- Global A2 is equivalent to deterministic L2 holding on all two-leaf trees. -/
+theorem A2_iff_L2_on_two_leaf_trees (g_det : Strings → Strings) (fstar : Strings → Y) :
+    A2_global g_det fstar ↔
+      ∀ u v, L2 (fun x => PMF.pure (g_det x)) (BinTree.node (BinTree.leaf u) (BinTree.leaf v)) fstar := by
+  constructor
+  · exact A2_implies_L2_on_two_leaf_trees g_det fstar
+  · exact L2_on_two_leaf_trees_implies_A2 g_det fstar
+
+/-- Deterministic L2 on all trees implies A2 global two-route identity. -/
+theorem L2_on_all_trees_implies_A2 (g_det : Strings → Strings) (fstar : Strings → Y)
+    (hL2 : ∀ T : BinTree Strings, L2 (fun x => PMF.pure (g_det x)) T fstar) :
+    A2_global g_det fstar := by
+  intro u v
+  exact (L2_deterministic_two_leaf_iff_A2_pointwise g_det fstar u v).1 (hL2 _)
+
+/-- Under A1 and A3, global A2 is equivalent to deterministic L2 on all trees. -/
+theorem A2_iff_L2_on_all_trees_of_A1_A3 (g_det : Strings → Strings) (fstar : Strings → Y)
+    (hA1 : A1_global g_det fstar) (hA3 : A3_global g_det fstar) :
+    A2_global g_det fstar ↔ ∀ T : BinTree Strings, L2 (fun x => PMF.pure (g_det x)) T fstar := by
+  constructor
+  · intro hA2 T
+    exact A1_A2_A3_implies_L2 g_det fstar hA1 hA2 hA3 T
+  · intro hL2
+    exact L2_on_all_trees_implies_A2 g_det fstar hL2
+
+/-- Under A1 and A3, checking deterministic L2 on two-leaf trees is equivalent
+to checking deterministic L2 on all trees. -/
+theorem L2_on_all_trees_iff_two_leaf_trees_of_A1_A3 (g_det : Strings → Strings) (fstar : Strings → Y)
+    (hA1 : A1_global g_det fstar) (hA3 : A3_global g_det fstar) :
+    (∀ T : BinTree Strings, L2 (fun x => PMF.pure (g_det x)) T fstar) ↔
+      (∀ u v, L2 (fun x => PMF.pure (g_det x)) (BinTree.node (BinTree.leaf u) (BinTree.leaf v)) fstar) := by
+  constructor
+  · intro h_all u v
+    exact h_all _
+  · intro h_two
+    have hA2 : A2_global g_det fstar := L2_on_two_leaf_trees_implies_A2 g_det fstar h_two
+    intro T
+    exact A1_A2_A3_implies_L2 g_det fstar hA1 hA2 hA3 T
+
+/-- Under surjectivity, deterministic L1-on-all-trees and deterministic L3 are equivalent. -/
+theorem L1_on_all_trees_iff_L3_of_surjective
+    (g_det : Strings → Strings) (fstar : Strings → Y)
+    (h_surj : Function.Surjective g_det) :
+    (∀ T : BinTree Strings, L1 (fun x => PMF.pure (g_det x)) T fstar) ↔
+      L3 (fun x => PMF.pure (g_det x)) fstar := by
+  constructor
+  · intro hL1
+    have hA1 : A1_global g_det fstar := L1_for_all_trees_implies_A1 g_det fstar hL1
+    exact (A1_iff_L3_of_surjective g_det fstar h_surj).1 hA1
+  · intro hL3
+    have hA1 : A1_global g_det fstar := (A1_iff_L3_of_surjective g_det fstar h_surj).2 hL3
+    intro T
+    exact A1_implies_L1 g_det fstar hA1 T
+
+/-- Under A3 and surjectivity, `(A1 ∧ A2)` is equivalent to `(L3 ∧ L2-on-all-trees)`. -/
+theorem A1_A2_iff_L3_and_L2_on_all_trees_of_A3_surjective
+    (g_det : Strings → Strings) (fstar : Strings → Y)
+    (hA3 : A3_global g_det fstar) (h_surj : Function.Surjective g_det) :
+    (A1_global g_det fstar ∧ A2_global g_det fstar) ↔
+      (L3 (fun x => PMF.pure (g_det x)) fstar ∧
+        ∀ T : BinTree Strings, L2 (fun x => PMF.pure (g_det x)) T fstar) := by
+  constructor
+  · intro h
+    rcases h with ⟨hA1, hA2⟩
+    refine ⟨A1_implies_L3 g_det fstar hA1, ?_⟩
+    intro T
+    exact A1_A2_A3_implies_L2 g_det fstar hA1 hA2 hA3 T
+  · intro h
+    rcases h with ⟨hL3, hL2⟩
+    have hA1 : A1_global g_det fstar := (A1_iff_L3_of_surjective g_det fstar h_surj).2 hL3
+    have hA2 : A2_global g_det fstar := L2_on_all_trees_implies_A2 g_det fstar hL2
+    exact ⟨hA1, hA2⟩
+
+/-- Under A3 and surjectivity, `(A1 ∧ A2)` is equivalent to
+`(L3 ∧ L2-on-two-leaf-trees)`. -/
+theorem A1_A2_iff_L3_and_L2_on_two_leaf_trees_of_A3_surjective
+    (g_det : Strings → Strings) (fstar : Strings → Y)
+    (hA3 : A3_global g_det fstar) (h_surj : Function.Surjective g_det) :
+    (A1_global g_det fstar ∧ A2_global g_det fstar) ↔
+      (L3 (fun x => PMF.pure (g_det x)) fstar ∧
+        ∀ u v, L2 (fun x => PMF.pure (g_det x)) (BinTree.node (BinTree.leaf u) (BinTree.leaf v)) fstar) := by
+  constructor
+  · intro h
+    rcases h with ⟨hA1, hA2⟩
+    refine ⟨A1_implies_L3 g_det fstar hA1, ?_⟩
+    intro u v
+    exact A1_A2_A3_implies_L2 g_det fstar hA1 hA2 hA3 _
+  · intro h
+    rcases h with ⟨hL3, hL2⟩
+    have hA1 : A1_global g_det fstar := (A1_iff_L3_of_surjective g_det fstar h_surj).2 hL3
+    have hA2 : A2_global g_det fstar := L2_on_two_leaf_trees_implies_A2 g_det fstar hL2
+    exact ⟨hA1, hA2⟩
+
 /-!
 ## GlobalPreservation → LocalLawsBundle Derivation
 

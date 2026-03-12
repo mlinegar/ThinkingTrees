@@ -3,9 +3,11 @@ import FormalProofs.DSL.CoreDefinitions
 
 -- Sampling theory and Assumption 1
 import FormalProofs.DSL.SamplingTheory
+import FormalProofs.DSL.IPWMeasurementError
 
 -- Cross-fitting
 import FormalProofs.DSL.CrossFitting
+import FormalProofs.DSL.Honesty
 
 -- Moment functions for GLMs
 import FormalProofs.DSL.MomentFunctions
@@ -18,6 +20,7 @@ import FormalProofs.DSL.AsymptoticTheory
 
 -- Bias analysis
 import FormalProofs.DSL.BiasAnalysis
+import FormalProofs.DSL.NonclassicalExpectationMismatch
 
 -- Variance decomposition and power
 import FormalProofs.DSL.VarianceDecomposition
@@ -32,7 +35,9 @@ import FormalProofs.DSL.CategoryProportion
 import FormalProofs.DSL.FixedEffects
 
 -- Main theorems summary
+import FormalProofs.DSL.MergeableCertificates
 import FormalProofs.DSL.MainTheorems
+import FormalProofs.DSL.TreePOEndToEnd
 
 /-!
 # FormalProofs/DSL.lean

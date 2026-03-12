@@ -2,6 +2,22 @@
 
 Hierarchical summarization with verifiable information preservation guarantees. Build recursive summarization trees that maintain task-critical information through probabilistic auditing and DSPy-based optimization.
 
+## ThinkingTrees And `treepo`
+
+This repository now exposes two public faces:
+
+- `ThinkingTrees`: the full platform for long-document OPS pipelines, task plugins, training, and deployment.
+- `treepo`: a focused PyTorch package under [`treepo/`](./treepo) for method-level simulations and reports.
+
+The `treepo` package is the canonical home for the new HyperLogLog streaming/cardinality work. Typical commands:
+
+```bash
+cd treepo
+pip install -e ".[torch]"
+treepo-bench suite cardinality-paper --out-root ../outputs/cardinality --jobs 4
+treepo-bench report cardinality --output-root ../outputs/cardinality
+```
+
 ## Quick Start
 
 ```bash
@@ -17,14 +33,12 @@ source venv/bin/activate
   --train-samples 100 \
   --optimizer bootstrap_random_search
 
-# Full training example (use GenRM for tournaments, prompt tuning on the same port)
+# Full training example (large-model-only path; GenRM/TOT flags are deprecated)
 ./scripts/run_training_pipeline.sh \
   --output-dir outputs/train_$(date +%Y%m%d_%H%M) \
   --train-samples 100 \
   --val-samples 30 \
   --test-samples 30 \
-  --enable-genrm \
-  --genrm-port 8001 \
   --opt-model-port 8001 \
   --optimizer bootstrap_random_search \
   --optimizer-budget heavy \
@@ -36,6 +50,104 @@ source venv/bin/activate
 ./scripts/run_training_pipeline.sh \
   --task summarization \
   --output-dir outputs/summarization_test
+```
+
+## LawStress Benchmark (MVP)
+
+Generate synthetic local-law stress data for general information extraction (C1/C2/C3-aware) and evaluate staged.
+This workflow is not a STEM/math/coding problem generator.
+
+```bash
+# 1) Generate benchmark fixtures + pipeline-consumable JSONL
+python scripts/generate_manifesto_lawstress.py \
+  --output-dir outputs/lawstress_mvp \
+  --teacher-base-url http://localhost:8000/v1 \
+  --teacher-model /mnt/data/models/nvidia/Qwen3.5-397B-A17B-NVFP4
+
+# 2a) Stage 1: summarization only (small model)
+python scripts/eval_manifesto_lawstress.py \
+  --records outputs/lawstress_mvp/lawstress_records.jsonl \
+  --output-dir outputs/lawstress_eval \
+  --mode summarize_only \
+  --summarizer-model qwen3.5-4b
+
+# 2b) Stage 2: teacher scoring only (GenRM disabled)
+python scripts/eval_manifesto_lawstress.py \
+  --records outputs/lawstress_mvp/lawstress_records.jsonl \
+  --output-dir outputs/lawstress_eval \
+  --mode score_and_judge_only \
+  --scorer-model /mnt/data/models/nvidia/Qwen3.5-397B-A17B-NVFP4 \
+  --disable-genrm
+```
+
+## Teacher Trace Bootstrap (Real Anchors)
+
+Generate training traces from real manifesto anchors:
+- sample real manifesto text with known RILE
+- generate score-preserving English expansion with the teacher
+- produce 2-hop summaries + structured extraction traces
+
+```bash
+# Optional: launch 397B teacher on port 8000
+./scripts/start_vllm.sh qwen3.5-397b-a17b-nvfp4 --port 8000 --cuda-devices 0,1,2,3
+
+# Generate traces
+python scripts/generate_manifesto_teacher_traces.py \
+  --output-dir outputs/teacher_trace_bootstrap \
+  --train-size 120 \
+  --val-size 30 \
+  --test-size 30 \
+  --teacher-base-url http://localhost:8000/v1 \
+  --teacher-model /mnt/data/models/nvidia/Qwen3.5-397B-A17B-NVFP4 \
+  --scorer-base-url http://localhost:8000/v1 \
+  --scorer-model /mnt/data/models/nvidia/Qwen3.5-397B-A17B-NVFP4
+```
+
+Optional: feed generated docs back through the existing JSONL dataset path:
+
+```bash
+./scripts/run_training_pipeline.sh \
+  --task manifesto_rile \
+  --dataset jsonl \
+  --dataset-path outputs/teacher_trace_bootstrap/benchmark_docs.jsonl \
+  --train-samples 120 \
+  --val-samples 30 \
+  --test-samples 30
+```
+
+## Method Stack v1 (Equal-Maturity UX)
+
+The pipeline now exposes a consistent interface for:
+
+- LLM prompt optimization (Phase 2)
+- Embedding proxy heads (`ridge`, `linear_sgd`, `mil_sgd`) (Phase 1.25)
+- Neural operators (`CTreePO`, `mergeable_sketch`) (Phase 1.3)
+- Generator fine-tuning with LoRA/full-FT toggle (Phase 3.25/3.5)
+
+Quick examples:
+
+```bash
+# Embedding proxy with explicit error policy
+./scripts/run_training_pipeline.sh \
+  --adaptive-embedding-proxy \
+  --adaptive-embedding-head-method ridge \
+  --embedding-proxy-fail-on-error
+
+# Neural operators + hybrid representation auto-wire
+./scripts/run_training_pipeline.sh \
+  --train-neural-operators \
+  --neural-operators-which both \
+  --hybrid-oracle-seeded-ensemble
+
+# Generator fine-tuning (LoRA)
+./scripts/run_training_pipeline.sh \
+  --train-generator \
+  --generator-method dpo \
+  --generator-use-lora
+
+# One-command compare (fast-smoke default)
+python scripts/run_method_compare.py --output-root outputs/method_compare_smoke
+python scripts/report_method_compare.py --manifest outputs/method_compare_smoke/method_compare_manifest.json
 ```
 
 ## Architecture
@@ -92,6 +204,7 @@ ThinkingTrees/
 ├── scripts/
 │   ├── start_dual_servers.sh      # Start inference servers
 │   ├── run_training_pipeline.sh   # Training wrapper
+│   ├── generate_manifesto_teacher_traces.py  # Real-anchor teacher trace generation
 │   └── stop_small_servers.sh      # Server shutdown
 │
 └── experiments/                   # Experiment scripts
@@ -243,32 +356,28 @@ samples = dataset.load_samples(limit=100)
 | `--convergence-patience` | 3 | Early stop patience |
 | `--skip-oracle-opt` | False | Skip oracle/scorer optimization |
 
-### GenRM OPS Tree Building
+### Legacy GenRM/TOT (Deprecated)
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--enable-genrm` | False | Enable GenRM preference collection |
-| `--genrm-port` | 8001 | GenRM server port |
-| `--genrm-init-samples` | 8 | Number of OPS trees to build |
-| `--genrm-init-candidates` | 4 | Candidates per node in tournament |
-| `--max-init-prompt-tokens` | 4000 | Max tokens for init prompts (doc + rubric + instructions) |
-| `--max-init-doc-chars` | None | Deprecated alias for `--max-init-prompt-tokens` |
-| `--train-comparison-module` | False | Train OPSComparisonModule from preferences |
+| `--enable-genrm` | blocked | Deprecated; use local-law bootstrap (teacher scorer + proxy/GEPA), no GenRM |
+| `--start-genrm` (wrapper) | blocked | Deprecated; wrapper exits with error |
+| `--train-comparison-module` | blocked | Deprecated; wrapper exits with error |
 
-### Judge Optimization
+### Judge Optimization (Deprecated GenRM/TOT Path)
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--optimize-judge` | False | Optimize GenRM judge prompts (single pass) |
+| `--optimize-judge` | blocked | Deprecated; use local-law bootstrap path |
 | `--judge-optimization-budget` | light | Judge optimization budget |
 | `--use-dspy-strategy` | False | Reserved (currently unused) |
 | `--load-optimized-judge` | None | Load a pre-optimized judge |
 
-### Tournament of Tournaments (Iterative Judge Optimization)
+### Tournament of Tournaments (Deprecated)
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--tournament-of-tournaments` | False | Full ToT loop (build → optimize → repeat) |
+| `--tournament-of-tournaments` | blocked | Deprecated; use local-law bootstrap path |
 | `--tot-max-iterations` | 5 | Max ToT iterations |
 | `--tot-convergence-threshold` | 0.01 | ToT convergence threshold |
 | `--tot-convergence-patience` | 2 | ToT convergence patience |
@@ -311,7 +420,7 @@ samples = dataset.load_samples(limit=100)
 | Model | Port | Use Case |
 |-------|------|----------|
 | Nemotron-30B-FP8 | 8000 | Default inference |
-| GenRM-NVFP4-235B | 8001 | Preference scoring |
+| Qwen3.5-397B-A17B-NVFP4 | 8001 | Large teacher/scorer (when launched as second server) |
 
 ## Development
 

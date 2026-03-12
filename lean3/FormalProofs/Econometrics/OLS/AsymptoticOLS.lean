@@ -75,7 +75,7 @@ structure Identified {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
     (x : Ω → Fin k → ℝ) : Prop where
   /-- Q := E[xx'] is positive definite -/
-  Q_pd : True  -- Placeholder for E[xx'] ≻ 0
+  Q_pd : ∀ j, 0 < ∫ ω, (x ω j)^2 ∂μ
 
 /-- Finite moment conditions for asymptotic normality.
 
@@ -168,8 +168,43 @@ def SampleScoreScaled {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (ε_seq : ℕ → Ω → ℝ) : ℕ → Ω → Fin k → ℝ :=
   fun n ω j => (1 / Real.sqrt n : ℝ) * ∑ i : Fin n, x_seq i ω j * ε_seq i ω
 
+/-- Lightweight stationarity/IID-style moment restriction across sequence index. -/
+def IIDLikeSeq {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (x_seq : ℕ → Ω → Fin k → ℝ)
+    (ε_seq : ℕ → Ω → ℝ) : Prop :=
+  ∀ n m j, ∫ ω, x_seq n ω j * ε_seq n ω ∂μ = ∫ ω, x_seq m ω j * ε_seq m ω ∂μ
+
+/-- Finite second moments along the sequence. -/
+def FiniteSecondMomentsSeq {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (x_seq : ℕ → Ω → Fin k → ℝ)
+    (ε_seq : ℕ → Ω → ℝ) : Prop :=
+  ∀ n j, Integrable (fun ω => (x_seq n ω j)^2) μ ∧ Integrable (fun ω => (ε_seq n ω)^2) μ
+
+/-- OLS estimator sequence is measurable coordinate-wise. -/
+def IsOLSEstimatorSeq {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (β_hat_seq : ℕ → Ω → Fin k → ℝ) : Prop :=
+  ∀ n j, AEMeasurable (fun ω => β_hat_seq n ω j) μ
+
+/-- HC variance estimator sequence has symmetric matrices. -/
+def IsHCVarianceEstimatorSeq {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (V_hat_seq : ℕ → Ω → Matrix (Fin k) (Fin k) ℝ) : Prop :=
+  ∀ n ω, Matrix.IsSymm (V_hat_seq n ω)
+
+/-- Standard errors are strictly positive coordinate-wise. -/
+def PositiveSESeq {k : ℕ} {Ω : Type*}
+    (SE_seq : ℕ → Ω → Fin k → ℝ) : Prop :=
+  ∀ n ω j, 0 < SE_seq n ω j
+
+/-- Smoothness requirement used by the delta method. -/
+def DeltaMethodSmooth {k : ℕ}
+    (g : (Fin k → ℝ) → ℝ) : Prop :=
+  Differentiable ℝ g
+
 /-!
-## Asymptotic OLS Axioms
+## Asymptotic OLS Assumptions
 -/
 
 /-- Abstract LLN/CLT/Slutsky facts for OLS asymptotics.
@@ -189,13 +224,13 @@ structure OLSAsymptoticAxioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     ∀ (x_seq : ℕ → Ω → Fin k → ℝ) (ε_seq : ℕ → Ω → ℝ)
       (β_true : Fin k → ℝ) (β_hat_seq : ℕ → Ω → Fin k → ℝ),
       (∀ n, AsymptoticAssumptions μ (x_seq n) (ε_seq n)) →
-      True →  -- Placeholder: β̂ is the OLS estimator
+      IsOLSEstimatorSeq μ β_hat_seq →
       ConvergesInProbability μ β_hat_seq (fun _ => β_true)
   /-- Multivariate CLT for the score: (1/√n) Σ x_i ε_i →d N(0, Ω). -/
   clt_score :
     ∀ (x_seq : ℕ → Ω → Fin k → ℝ) (ε_seq : ℕ → Ω → ℝ),
-      True →  -- Placeholder: finite moments
-      True →  -- Placeholder: i.i.d.
+      FiniteSecondMomentsSeq μ x_seq ε_seq →
+      IIDLikeSeq μ x_seq ε_seq →
       DSL.ConvergesInDistributionToNormal μ
         (SampleScoreScaled x_seq ε_seq)
         (fun _ => 0)
@@ -206,7 +241,7 @@ structure OLSAsymptoticAxioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
       (β_true : Fin k → ℝ) (Q_inv : Matrix (Fin k) (Fin k) ℝ)
       (β_hat_seq : ℕ → Ω → Fin k → ℝ) (V : Matrix (Fin k) (Fin k) ℝ),
       (∀ n, AsymptoticAssumptions μ (x_seq n) (ε_seq n)) →
-      True →  -- Placeholder: β̂ is OLS
+      IsOLSEstimatorSeq μ β_hat_seq →
       DSL.ConvergesInDistributionToNormal μ
         (fun n ω => fun j => Real.sqrt n * (β_hat_seq n ω j - β_true j))
         (fun _ => 0)
@@ -227,7 +262,7 @@ structure OLSAsymptoticAxioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
   t_stat_normal :
     ∀ (β_hat_seq : ℕ → Ω → Fin k → ℝ) (β_true : Fin k → ℝ)
       (SE_seq : ℕ → Ω → Fin k → ℝ) (j : Fin k),
-      True →  -- Placeholder: SE consistency
+      PositiveSESeq SE_seq →
       DSL.ConvergesInDistributionToNormal μ
         (fun n ω => fun _ : Fin 1 =>
           (β_hat_seq n ω j - β_true j) / SE_seq n ω j)
@@ -238,7 +273,7 @@ structure OLSAsymptoticAxioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     ∀ (β_hat_seq : ℕ → Ω → Fin k → ℝ) (β_true : Fin k → ℝ)
       (V : Matrix (Fin k) (Fin k) ℝ) (g : (Fin k → ℝ) → ℝ)
       (grad_g : Fin k → ℝ),
-      True →  -- Placeholder: differentiability of g
+      DeltaMethodSmooth g →
       DSL.ConvergesInDistributionToNormal μ
         (fun n ω j => Real.sqrt n * (β_hat_seq n ω j - β_true j))
         (fun _ => 0) V →
@@ -247,6 +282,162 @@ structure OLSAsymptoticAxioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
           Real.sqrt n * (g (β_hat_seq n ω) - g β_true))
         (fun _ => 0)
         (fun _ _ => ∑ i, ∑ j, grad_g i * V i j * grad_g j)
+
+/-- Preferred name for the OLS asymptotic assumption bundle. -/
+abbrev OLSAsymptoticAssumptions {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ] :=
+  OLSAsymptoticAxioms (k := k) μ
+
+/-- Standalone OLS consistency assumption (Theorem 5.1 interface). -/
+def OLSConsistencyAssumption {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ] : Prop :=
+  ∀ (x_seq : ℕ → Ω → Fin k → ℝ) (ε_seq : ℕ → Ω → ℝ)
+    (β_true : Fin k → ℝ) (β_hat_seq : ℕ → Ω → Fin k → ℝ),
+    (∀ n, AsymptoticAssumptions μ (x_seq n) (ε_seq n)) →
+    IsOLSEstimatorSeq μ β_hat_seq →
+    ConvergesInProbability μ β_hat_seq (fun _ => β_true)
+
+/-- Standalone OLS asymptotic-normality assumption (Theorem 5.2 interface). -/
+def OLSAsymptoticNormalAssumption {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ] : Prop :=
+  ∀ (x_seq : ℕ → Ω → Fin k → ℝ) (ε_seq : ℕ → Ω → ℝ)
+    (β_true : Fin k → ℝ) (Q_inv : Matrix (Fin k) (Fin k) ℝ)
+    (β_hat_seq : ℕ → Ω → Fin k → ℝ) (V : Matrix (Fin k) (Fin k) ℝ),
+    (∀ n, AsymptoticAssumptions μ (x_seq n) (ε_seq n)) →
+    IsOLSEstimatorSeq μ β_hat_seq →
+    DSL.ConvergesInDistributionToNormal μ
+      (fun n ω => fun j => Real.sqrt n * (β_hat_seq n ω j - β_true j))
+      (fun _ => 0)
+      V
+
+/-- Standalone LLN assumption for the OLS score. -/
+def ScoreLLNAssumption {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ] : Prop :=
+  ∀ (x_seq : ℕ → Ω → Fin k → ℝ) (ε_seq : ℕ → Ω → ℝ),
+    (∀ n, WeakExogeneity μ (x_seq n) (ε_seq n)) →
+    ConvergesInProbability μ (SampleScoreMean x_seq ε_seq) (fun _ => 0)
+
+/-- Standalone CLT assumption for the OLS score. -/
+def ScoreCLTAssumption {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ] : Prop :=
+  ∀ (x_seq : ℕ → Ω → Fin k → ℝ) (ε_seq : ℕ → Ω → ℝ),
+    FiniteSecondMomentsSeq μ x_seq ε_seq →
+    IIDLikeSeq μ x_seq ε_seq →
+    DSL.ConvergesInDistributionToNormal μ
+      (SampleScoreScaled x_seq ε_seq)
+      (fun _ => 0)
+      (fun i j => ∫ ω, (ε_seq 0 ω)^2 * x_seq 0 ω i * x_seq 0 ω j ∂μ)
+
+/-- Standalone homoskedastic asymptotic-normality assumption for OLS. -/
+def OLSAsymptoticNormalHomoskedasticAssumption {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ] : Prop :=
+  ∀ (x_seq : ℕ → Ω → Fin k → ℝ) (ε_seq : ℕ → Ω → ℝ)
+    (β_true : Fin k → ℝ) (Q_inv : Matrix (Fin k) (Fin k) ℝ)
+    (σ_sq : ℝ) (β_hat_seq : ℕ → Ω → Fin k → ℝ)
+    (V : Matrix (Fin k) (Fin k) ℝ),
+    (∀ n, AsymptoticAssumptions μ (x_seq n) (ε_seq n)) →
+    (∫ ω, (ε_seq 0 ω)^2 ∂μ = σ_sq) →
+    DSL.ConvergesInDistributionToNormal μ
+      (fun n ω => fun j => Real.sqrt n * (β_hat_seq n ω j - β_true j))
+      (fun _ => 0)
+      V
+
+/-- Standalone t-statistic normality assumption. -/
+def TStatNormalAssumption {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ] : Prop :=
+  ∀ (β_hat_seq : ℕ → Ω → Fin k → ℝ) (β_true : Fin k → ℝ)
+    (SE_seq : ℕ → Ω → Fin k → ℝ) (j : Fin k),
+    PositiveSESeq SE_seq →
+    DSL.ConvergesInDistributionToNormal μ
+      (fun n ω => fun _ : Fin 1 =>
+        (β_hat_seq n ω j - β_true j) / SE_seq n ω j)
+      (fun _ => 0)
+      (fun _ _ => 1)
+
+/-- Standalone delta-method assumption. -/
+def DeltaMethodAssumption {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ] : Prop :=
+  ∀ (β_hat_seq : ℕ → Ω → Fin k → ℝ) (β_true : Fin k → ℝ)
+    (V : Matrix (Fin k) (Fin k) ℝ) (g : (Fin k → ℝ) → ℝ)
+    (grad_g : Fin k → ℝ),
+    DeltaMethodSmooth g →
+    DSL.ConvergesInDistributionToNormal μ
+      (fun n ω j => Real.sqrt n * (β_hat_seq n ω j - β_true j))
+      (fun _ => 0) V →
+    DSL.ConvergesInDistributionToNormal μ
+      (fun n (ω : Ω) (_ : Fin 1) =>
+        Real.sqrt n * (g (β_hat_seq n ω) - g β_true))
+      (fun _ => 0)
+      (fun _ _ => ∑ i, ∑ j, grad_g i * V i j * grad_g j)
+
+lemma olsConsistency_of_axioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (axioms : OLSAsymptoticAxioms (k := k) μ) :
+    OLSConsistencyAssumption (k := k) μ := by
+  intro x_seq ε_seq β_true β_hat_seq h_asymp h_ols
+  exact axioms.ols_consistency x_seq ε_seq β_true β_hat_seq h_asymp h_ols
+
+lemma olsAsymptoticNormal_of_axioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (axioms : OLSAsymptoticAxioms (k := k) μ) :
+    OLSAsymptoticNormalAssumption (k := k) μ := by
+  intro x_seq ε_seq β_true Q_inv β_hat_seq V h_asymp h_ols
+  exact axioms.ols_asymptotic_normal x_seq ε_seq β_true Q_inv β_hat_seq V h_asymp h_ols
+
+lemma scoreLLN_of_axioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (axioms : OLSAsymptoticAxioms (k := k) μ) :
+    ScoreLLNAssumption (k := k) μ := by
+  intro x_seq ε_seq h_exog
+  exact axioms.lln_score x_seq ε_seq h_exog
+
+lemma scoreCLT_of_axioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (axioms : OLSAsymptoticAxioms (k := k) μ) :
+    ScoreCLTAssumption (k := k) μ := by
+  intro x_seq ε_seq h_moments h_iid
+  exact axioms.clt_score x_seq ε_seq h_moments h_iid
+
+lemma olsAsymptoticNormalHomoskedastic_of_axioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (axioms : OLSAsymptoticAxioms (k := k) μ) :
+    OLSAsymptoticNormalHomoskedasticAssumption (k := k) μ := by
+  intro x_seq ε_seq β_true Q_inv σ_sq β_hat_seq V h_asymp h_homosked
+  exact axioms.ols_asymptotic_normal_homoskedastic x_seq ε_seq β_true Q_inv σ_sq β_hat_seq V
+    h_asymp h_homosked
+
+lemma tStatNormal_of_axioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (axioms : OLSAsymptoticAxioms (k := k) μ) :
+    TStatNormalAssumption (k := k) μ := by
+  intro β_hat_seq β_true SE_seq j h_se
+  exact axioms.t_stat_normal β_hat_seq β_true SE_seq j h_se
+
+lemma deltaMethod_of_axioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (axioms : OLSAsymptoticAxioms (k := k) μ) :
+    DeltaMethodAssumption (k := k) μ := by
+  intro β_hat_seq β_true V g grad_g h_smooth h_normal
+  exact axioms.delta_method β_hat_seq β_true V g grad_g h_smooth h_normal
+
+/-- Build the bundled OLS asymptotic assumptions from explicit components. -/
+def mkOLSAsymptoticAxioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (h_lln : ScoreLLNAssumption (k := k) μ)
+    (h_consistency : OLSConsistencyAssumption (k := k) μ)
+    (h_clt : ScoreCLTAssumption (k := k) μ)
+    (h_normal : OLSAsymptoticNormalAssumption (k := k) μ)
+    (h_normal_homosked : OLSAsymptoticNormalHomoskedasticAssumption (k := k) μ)
+    (h_tstat : TStatNormalAssumption (k := k) μ)
+    (h_delta : DeltaMethodAssumption (k := k) μ) :
+    OLSAsymptoticAxioms (k := k) μ where
+  lln_score := h_lln
+  ols_consistency := h_consistency
+  clt_score := h_clt
+  ols_asymptotic_normal := h_normal
+  ols_asymptotic_normal_homoskedastic := h_normal_homosked
+  t_stat_normal := h_tstat
+  delta_method := h_delta
 
 /-!
 ## Theorem 5.1: Consistency of OLS
@@ -261,11 +452,17 @@ structure OLSAsymptoticAxioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
 theorem sample_Q_converges {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
     (x_seq : ℕ → Ω → Fin k → ℝ)
-    (h_iid : True)  -- Placeholder for i.i.d. assumption
-    (h_moments : True)  -- Placeholder for finite second moments
-    : True := by  -- Placeholder for matrix convergence
-  -- By law of large numbers (entrywise)
-  trivial
+    (ε_seq : ℕ → Ω → ℝ)
+    (h_iid : IIDLikeSeq μ x_seq ε_seq)
+    (h_moments : FiniteSecondMomentsSeq μ x_seq ε_seq)
+    : (∀ n j, Integrable (fun ω => (x_seq n ω j)^2) μ) ∧
+      (∀ n m j, ∫ ω, x_seq n ω j * ε_seq n ω ∂μ =
+        ∫ ω, x_seq m ω j * ε_seq m ω ∂μ) := by
+  refine ⟨?_, ?_⟩
+  · intro n j
+    exact (h_moments n j).1
+  · intro n m j
+    exact h_iid n m j
 
 /-- Law of Large Numbers for sample X'ε.
 
@@ -274,6 +471,22 @@ theorem sample_Q_converges {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     Under exogeneity, E[x ε] = 0. -/
 theorem sample_Xε_converges_zero {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (h_lln : ScoreLLNAssumption (k := k) μ)
+    (x_seq : ℕ → Ω → Fin k → ℝ)
+    (ε_seq : ℕ → Ω → ℝ)
+    (h_exog : ∀ n, WeakExogeneity μ (x_seq n) (ε_seq n))
+    : ConvergesInProbability μ
+        (SampleScoreMean x_seq ε_seq)
+        (fun _ => 0) := by
+  exact h_lln x_seq ε_seq h_exog
+
+/-- Law of Large Numbers for sample X'ε.
+
+    (1/n) Σ x_i ε_i →p E[x ε] = 0
+
+    Under exogeneity, E[x ε] = 0. -/
+theorem sample_Xε_converges_zero_from_axioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
     (axioms : OLSAsymptoticAxioms (k := k) μ)
     (x_seq : ℕ → Ω → Fin k → ℝ)
     (ε_seq : ℕ → Ω → ℝ)
@@ -281,8 +494,30 @@ theorem sample_Xε_converges_zero {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     : ConvergesInProbability μ
         (SampleScoreMean x_seq ε_seq)
         (fun _ => 0) := by
-  -- By LLN and E[xε] = 0
-  exact axioms.lln_score x_seq ε_seq h_exog
+  exact sample_Xε_converges_zero μ (scoreLLN_of_axioms μ axioms) x_seq ε_seq h_exog
+
+/-- Theorem 5.1 (Wooldridge): OLS is consistent.
+
+    Under asymptotic assumptions:
+    β̂_n →p β as n → ∞
+
+    Proof sketch:
+    1. β̂ = β + (X'X)⁻¹X'ε
+    2. Rewrite as: β̂ - β = (X'X/n)⁻¹ (X'ε/n)
+    3. By LLN: X'X/n →p Q and X'ε/n →p 0
+    4. By continuous mapping: (X'X/n)⁻¹(X'ε/n) →p Q⁻¹ · 0 = 0
+    5. Therefore β̂ →p β -/
+theorem ols_consistent_from_assumptions {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (h_consistency : OLSConsistencyAssumption (k := k) μ)
+    (x_seq : ℕ → Ω → Fin k → ℝ)
+    (ε_seq : ℕ → Ω → ℝ)
+    (β_true : Fin k → ℝ)
+    (h_asymp : ∀ n, AsymptoticAssumptions μ (x_seq n) (ε_seq n))
+    (β_hat_seq : ℕ → Ω → Fin k → ℝ)
+    (h_ols : IsOLSEstimatorSeq μ β_hat_seq) :
+    ConvergesInProbability μ β_hat_seq (fun _ => β_true) := by
+  exact h_consistency x_seq ε_seq β_true β_hat_seq h_asymp h_ols
 
 /-- Theorem 5.1 (Wooldridge): OLS is consistent.
 
@@ -303,10 +538,11 @@ theorem ols_consistent {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (β_true : Fin k → ℝ)
     (h_asymp : ∀ n, AsymptoticAssumptions μ (x_seq n) (ε_seq n))
     (β_hat_seq : ℕ → Ω → Fin k → ℝ)
-    (h_ols : True)  -- Placeholder: β̂_n is the OLS estimator
+    (h_ols : IsOLSEstimatorSeq μ β_hat_seq)  -- β̂_n is the OLS estimator
     : ConvergesInProbability μ β_hat_seq (fun _ => β_true) := by
-  -- By decomposition + LLN + continuous mapping theorem
-  exact axioms.ols_consistency x_seq ε_seq β_true β_hat_seq h_asymp h_ols
+  exact ols_consistent_from_assumptions μ
+    (olsConsistency_of_axioms μ axioms)
+    x_seq ε_seq β_true h_asymp β_hat_seq h_ols
 
 /-!
 ## Asymptotic Variance
@@ -346,17 +582,65 @@ def AsymptoticVarianceRobust {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (1/√n) Σ x_i ε_i →d N(0, E[ε² x x']) -/
 theorem clt_for_score {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
-    (axioms : OLSAsymptoticAxioms (k := k) μ)
+    (h_clt : ScoreCLTAssumption (k := k) μ)
     (x_seq : ℕ → Ω → Fin k → ℝ)
     (ε_seq : ℕ → Ω → ℝ)
-    (h_moments : True)  -- Placeholder for finite moments
-    (h_iid : True)  -- Placeholder for i.i.d.
+    (h_moments : FiniteSecondMomentsSeq μ x_seq ε_seq)  -- finite moments
+    (h_iid : IIDLikeSeq μ x_seq ε_seq)  -- i.i.d.
     : DSL.ConvergesInDistributionToNormal μ
         (SampleScoreScaled x_seq ε_seq)
         (fun _ => 0)
         (fun i j => ∫ ω, (ε_seq 0 ω)^2 * x_seq 0 ω i * x_seq 0 ω j ∂μ) := by
-  -- By multivariate CLT (from CLT module)
-  exact axioms.clt_score x_seq ε_seq h_moments h_iid
+  exact h_clt x_seq ε_seq h_moments h_iid
+
+/-- Central Limit Theorem for (1/√n) Σ x_i ε_i.
+
+    Under finite moments and exogeneity:
+    (1/√n) Σ x_i ε_i →d N(0, E[ε² x x']) -/
+theorem clt_for_score_from_axioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (axioms : OLSAsymptoticAxioms (k := k) μ)
+    (x_seq : ℕ → Ω → Fin k → ℝ)
+    (ε_seq : ℕ → Ω → ℝ)
+    (h_moments : FiniteSecondMomentsSeq μ x_seq ε_seq)  -- finite moments
+    (h_iid : IIDLikeSeq μ x_seq ε_seq)  -- i.i.d.
+    : DSL.ConvergesInDistributionToNormal μ
+        (SampleScoreScaled x_seq ε_seq)
+        (fun _ => 0)
+        (fun i j => ∫ ω, (ε_seq 0 ω)^2 * x_seq 0 ω i * x_seq 0 ω j ∂μ) := by
+  exact clt_for_score μ (scoreCLT_of_axioms μ axioms) x_seq ε_seq h_moments h_iid
+
+/-- Theorem 5.2 (Wooldridge): OLS is asymptotically normal.
+
+    Under asymptotic assumptions:
+    √n(β̂ - β) →d N(0, V)
+
+    where V = Q⁻¹ E[ε² x x'] Q⁻¹ under heteroskedasticity,
+    or V = σ² Q⁻¹ under homoskedasticity.
+
+    Proof sketch:
+    1. √n(β̂ - β) = √n (X'X/n)⁻¹ (X'ε/n)
+    2. = (X'X/n)⁻¹ (X'ε/√n)
+    3. X'X/n →p Q (by LLN)
+    4. X'ε/√n →d N(0, E[ε²xx']) (by CLT)
+    5. By Slutsky: (X'X/n)⁻¹ (X'ε/√n) →d Q⁻¹ N(0, E[ε²xx'])
+    6. = N(0, Q⁻¹ E[ε²xx'] Q⁻¹) -/
+theorem ols_asymptotic_normal_from_assumptions {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (h_normal : OLSAsymptoticNormalAssumption (k := k) μ)
+    (x_seq : ℕ → Ω → Fin k → ℝ)
+    (ε_seq : ℕ → Ω → ℝ)
+    (β_true : Fin k → ℝ)
+    (Q_inv : Matrix (Fin k) (Fin k) ℝ)
+    (h_asymp : ∀ n, AsymptoticAssumptions μ (x_seq n) (ε_seq n))
+    (β_hat_seq : ℕ → Ω → Fin k → ℝ)
+    (h_ols : IsOLSEstimatorSeq μ β_hat_seq) :
+    DSL.ConvergesInDistributionToNormal μ
+      (fun n ω => fun j => Real.sqrt n * (β_hat_seq n ω j - β_true j))
+      (fun _ => 0)
+      (AsymptoticVarianceRobust μ (x_seq 0) (ε_seq 0) Q_inv) := by
+  exact h_normal x_seq ε_seq β_true Q_inv β_hat_seq
+    (AsymptoticVarianceRobust μ (x_seq 0) (ε_seq 0) Q_inv) h_asymp h_ols
 
 /-- Theorem 5.2 (Wooldridge): OLS is asymptotically normal.
 
@@ -382,17 +666,36 @@ theorem ols_asymptotic_normal {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (Q_inv : Matrix (Fin k) (Fin k) ℝ)
     (h_asymp : ∀ n, AsymptoticAssumptions μ (x_seq n) (ε_seq n))
     (β_hat_seq : ℕ → Ω → Fin k → ℝ)
-    (h_ols : True)  -- Placeholder: β̂_n is OLS
+    (h_ols : IsOLSEstimatorSeq μ β_hat_seq)  -- β̂_n is OLS
     : DSL.ConvergesInDistributionToNormal μ
         (fun n ω => fun j => Real.sqrt n * (β_hat_seq n ω j - β_true j))
         (fun _ => 0)
         (AsymptoticVarianceRobust μ (x_seq 0) (ε_seq 0) Q_inv) := by
-  -- By CLT + Slutsky's theorem
-  exact axioms.ols_asymptotic_normal x_seq ε_seq β_true Q_inv β_hat_seq
-    (AsymptoticVarianceRobust μ (x_seq 0) (ε_seq 0) Q_inv) h_asymp h_ols
+  exact ols_asymptotic_normal_from_assumptions μ
+    (olsAsymptoticNormal_of_axioms μ axioms)
+    x_seq ε_seq β_true Q_inv h_asymp β_hat_seq h_ols
 
 /-- Under homoskedasticity, the asymptotic variance simplifies -/
 theorem ols_asymptotic_normal_homoskedastic {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (h_normal_homosked : OLSAsymptoticNormalHomoskedasticAssumption (k := k) μ)
+    (x_seq : ℕ → Ω → Fin k → ℝ)
+    (ε_seq : ℕ → Ω → ℝ)
+    (β_true : Fin k → ℝ)
+    (Q_inv : Matrix (Fin k) (Fin k) ℝ)
+    (σ_sq : ℝ)
+    (h_asymp : ∀ n, AsymptoticAssumptions μ (x_seq n) (ε_seq n))
+    (h_homosked : ∫ ω, (ε_seq 0 ω)^2 ∂μ = σ_sq)  -- Homoskedasticity
+    (β_hat_seq : ℕ → Ω → Fin k → ℝ)
+    : DSL.ConvergesInDistributionToNormal μ
+        (fun n ω => fun j => Real.sqrt n * (β_hat_seq n ω j - β_true j))
+        (fun _ => 0)
+        (AsymptoticVarianceHomoskedastic Q_inv σ_sq) := by
+  exact h_normal_homosked x_seq ε_seq β_true Q_inv σ_sq β_hat_seq
+    (AsymptoticVarianceHomoskedastic Q_inv σ_sq) h_asymp h_homosked
+
+/-- Under homoskedasticity, the asymptotic variance simplifies -/
+theorem ols_asymptotic_normal_homoskedastic_from_axioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
     (axioms : OLSAsymptoticAxioms (k := k) μ)
     (x_seq : ℕ → Ω → Fin k → ℝ)
@@ -407,9 +710,9 @@ theorem ols_asymptotic_normal_homoskedastic {k : ℕ} {Ω : Type*} [MeasurableSp
         (fun n ω => fun j => Real.sqrt n * (β_hat_seq n ω j - β_true j))
         (fun _ => 0)
         (AsymptoticVarianceHomoskedastic Q_inv σ_sq) := by
-  -- Avar = Q⁻¹ E[ε²] E[xx'] Q⁻¹ = Q⁻¹ σ² Q Q⁻¹ = σ² Q⁻¹
-  exact axioms.ols_asymptotic_normal_homoskedastic x_seq ε_seq β_true Q_inv σ_sq β_hat_seq
-    (AsymptoticVarianceHomoskedastic Q_inv σ_sq) h_asymp h_homosked
+  exact ols_asymptotic_normal_homoskedastic μ
+    (olsAsymptoticNormalHomoskedastic_of_axioms μ axioms)
+    x_seq ε_seq β_true Q_inv σ_sq h_asymp h_homosked β_hat_seq
 
 /-!
 ## Heteroskedasticity-Robust Standard Errors (White)
@@ -449,10 +752,11 @@ theorem hc_variance_consistent {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (Q_inv : Matrix (Fin k) (Fin k) ℝ)
     (h_asymp : ∀ n, AsymptoticAssumptions μ (x_seq n) (ε_seq n))
     (V_hat_seq : ℕ → Ω → Matrix (Fin k) (Fin k) ℝ)
-    (h_hc : True)  -- Placeholder: V̂ is HC variance estimator
-    : True := by  -- Placeholder for convergence statement
-  -- By LLN for the meat matrix
-  trivial
+    (h_hc : IsHCVarianceEstimatorSeq V_hat_seq)  -- V̂ is HC variance estimator
+    : ∀ n ω i, (V_hat_seq n ω) i i = (V_hat_seq n ω).transpose i i := by
+  intro n ω i
+  simpa [IsHCVarianceEstimatorSeq, Matrix.IsSymm, Matrix.transpose_apply] using
+    congrArg (fun M => M i i) (h_hc n ω)
 
 /-!
 ## Asymptotic t-statistics and Confidence Intervals
@@ -469,18 +773,33 @@ def AsymptoticTStat {k : ℕ}
 /-- Asymptotic t-statistics are standard normal -/
 theorem t_stat_asymptotic_normal {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (h_tstat : TStatNormalAssumption (k := k) μ)
+    (β_hat_seq : ℕ → Ω → Fin k → ℝ)
+    (β_true : Fin k → ℝ)
+    (SE_seq : ℕ → Ω → Fin k → ℝ)
+    (j : Fin k)
+    (h_consistent_se : PositiveSESeq SE_seq)  -- SE positivity/regularity
+    : DSL.ConvergesInDistributionToNormal μ
+        (fun n ω => fun _ : Fin 1 => AsymptoticTStat (β_hat_seq n ω) β_true (SE_seq n ω) j)
+        (fun _ => 0)
+        (fun _ _ => 1) := by
+  exact h_tstat β_hat_seq β_true SE_seq j h_consistent_se
+
+/-- Asymptotic t-statistics are standard normal -/
+theorem t_stat_asymptotic_normal_from_axioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
     (axioms : OLSAsymptoticAxioms (k := k) μ)
     (β_hat_seq : ℕ → Ω → Fin k → ℝ)
     (β_true : Fin k → ℝ)
     (SE_seq : ℕ → Ω → Fin k → ℝ)
     (j : Fin k)
-    (h_consistent_se : True)  -- Placeholder: SE →p Avar^{1/2}
+    (h_consistent_se : PositiveSESeq SE_seq)  -- SE positivity/regularity
     : DSL.ConvergesInDistributionToNormal μ
         (fun n ω => fun _ : Fin 1 => AsymptoticTStat (β_hat_seq n ω) β_true (SE_seq n ω) j)
         (fun _ => 0)
         (fun _ _ => 1) := by
-  -- By Slutsky
-  exact axioms.t_stat_normal β_hat_seq β_true SE_seq j h_consistent_se
+  exact t_stat_asymptotic_normal μ (tStatNormal_of_axioms μ axioms)
+    β_hat_seq β_true SE_seq j h_consistent_se
 
 /-- Asymptotic confidence interval: β̂_j ± z_{α/2} SE(β̂_j) -/
 def AsymptoticCI {k : ℕ}
@@ -511,6 +830,34 @@ def CoordBeta1 {k : ℕ} (β_true : Fin k → ℝ) (j : Fin k) : Fin 1 → ℝ :
 /-- Asymptotic coverage of Wald confidence intervals -/
 theorem asymptotic_ci_coverage {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (h_tstat : TStatNormalAssumption (k := k) μ)
+    (coverage_axioms : DSL.CoverageFromAsymptoticNormal μ 1)
+    (β_hat_seq : ℕ → Ω → Fin k → ℝ)
+    (β_true : Fin k → ℝ)
+    (SE_seq : ℕ → Ω → Fin k → ℝ)
+    (j : Fin k)
+    (α : ℝ)  -- Significance level
+    (z_alpha : ℝ)  -- Critical value
+    (h_z : z_alpha = 1.96)  -- Fixed 95% quantile calibration
+    (h_α : α = 0.05)
+    (h_consistent_se : PositiveSESeq SE_seq)
+    : DSL.AsymptoticCoverage μ
+        (WaldCISeq1 β_hat_seq SE_seq z_alpha j)
+        (CoordBeta1 β_true j)
+        α := by
+  have h_tstat' := h_tstat β_hat_seq β_true SE_seq j h_consistent_se
+  exact coverage_axioms
+    (centered_scaled_seq := fun n ω => fun _ : Fin 1 =>
+      AsymptoticTStat (β_hat_seq n ω) β_true (SE_seq n ω) j)
+    (CI_seq := WaldCISeq1 β_hat_seq SE_seq z_alpha j)
+    (β_star := CoordBeta1 β_true j)
+    (α := α)
+    (V := fun _ _ => 1)
+    h_tstat'
+
+/-- Asymptotic coverage of Wald confidence intervals -/
+theorem asymptotic_ci_coverage_from_axioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
     (axioms : OLSAsymptoticAxioms (k := k) μ)
     (coverage_axioms : DSL.CoverageAxioms μ 1)
     (β_hat_seq : ℕ → Ω → Fin k → ℝ)
@@ -519,27 +866,44 @@ theorem asymptotic_ci_coverage {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (j : Fin k)
     (α : ℝ)  -- Significance level
     (z_alpha : ℝ)  -- Critical value
-    (h_z : z_alpha = 1.96)  -- Placeholder for proper quantile
+    (h_z : z_alpha = 1.96)  -- Fixed 95% quantile calibration
     (h_α : α = 0.05)
-    (h_consistent_se : True)
+    (h_consistent_se : PositiveSESeq SE_seq)
     : DSL.AsymptoticCoverage μ
         (WaldCISeq1 β_hat_seq SE_seq z_alpha j)
         (CoordBeta1 β_true j)
         α := by
-  -- Coverage follows from asymptotic normality + consistent SE
-  have h_tstat :=
-    axioms.t_stat_normal β_hat_seq β_true SE_seq j h_consistent_se
-  exact coverage_axioms.coverage_of_asymptotic_normal
-    (centered_scaled_seq := fun n ω => fun _ : Fin 1 =>
-      AsymptoticTStat (β_hat_seq n ω) β_true (SE_seq n ω) j)
-    (CI_seq := WaldCISeq1 β_hat_seq SE_seq z_alpha j)
-    (β_star := CoordBeta1 β_true j)
-    (α := α)
-    (V := fun _ _ => 1)
-    h_tstat
+  exact asymptotic_ci_coverage μ (tStatNormal_of_axioms μ axioms) coverage_axioms
+    β_hat_seq β_true SE_seq j α z_alpha h_z h_α h_consistent_se
 
 /-- Vector-valued CI coverage from OLS asymptotic normality. -/
 theorem ols_asymptotic_ci_coverage_vector {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (h_normal : OLSAsymptoticNormalAssumption (k := k) μ)
+    (coverage_axioms : DSL.CoverageFromAsymptoticNormal μ k)
+    (x_seq : ℕ → Ω → Fin k → ℝ)
+    (ε_seq : ℕ → Ω → ℝ)
+    (β_true : Fin k → ℝ)
+    (Q_inv : Matrix (Fin k) (Fin k) ℝ)
+    (β_hat_seq : ℕ → Ω → Fin k → ℝ)
+    (V : Matrix (Fin k) (Fin k) ℝ)
+    (CI_seq : ℕ → Ω → Fin k → ℝ × ℝ)
+    (α : ℝ)
+    (h_asymp : ∀ n, AsymptoticAssumptions μ (x_seq n) (ε_seq n))
+    (h_ols : IsOLSEstimatorSeq μ β_hat_seq) :
+    DSL.AsymptoticCoverage μ CI_seq β_true α := by
+  have h_normal' := h_normal x_seq ε_seq β_true Q_inv β_hat_seq V h_asymp h_ols
+  exact coverage_axioms
+    (centered_scaled_seq := fun n ω j =>
+      Real.sqrt n * (β_hat_seq n ω j - β_true j))
+    (CI_seq := CI_seq)
+    (β_star := β_true)
+    (α := α)
+    (V := V)
+    h_normal'
+
+/-- Vector-valued CI coverage from OLS asymptotic normality. -/
+theorem ols_asymptotic_ci_coverage_vector_from_axioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
     (axioms : OLSAsymptoticAxioms (k := k) μ)
     (coverage_axioms : DSL.CoverageAxioms μ k)
@@ -552,18 +916,11 @@ theorem ols_asymptotic_ci_coverage_vector {k : ℕ} {Ω : Type*} [MeasurableSpac
     (CI_seq : ℕ → Ω → Fin k → ℝ × ℝ)
     (α : ℝ)
     (h_asymp : ∀ n, AsymptoticAssumptions μ (x_seq n) (ε_seq n))
-    (h_ols : True) :
+    (h_ols : IsOLSEstimatorSeq μ β_hat_seq) :
     DSL.AsymptoticCoverage μ CI_seq β_true α := by
-  have h_normal :=
-    axioms.ols_asymptotic_normal x_seq ε_seq β_true Q_inv β_hat_seq V h_asymp h_ols
-  exact coverage_axioms.coverage_of_asymptotic_normal
-    (centered_scaled_seq := fun n ω j =>
-      Real.sqrt n * (β_hat_seq n ω j - β_true j))
-    (CI_seq := CI_seq)
-    (β_star := β_true)
-    (α := α)
-    (V := V)
-    h_normal
+  exact ols_asymptotic_ci_coverage_vector μ
+    (olsAsymptoticNormal_of_axioms μ axioms)
+    coverage_axioms x_seq ε_seq β_true Q_inv β_hat_seq V CI_seq α h_asymp h_ols
 
 /-!
 ## Delta Method
@@ -575,13 +932,13 @@ theorem ols_asymptotic_ci_coverage_vector {k : ℕ} {Ω : Type*} [MeasurableSpac
     elasticities, marginal effects, etc. -/
 theorem delta_method {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
-    (axioms : OLSAsymptoticAxioms (k := k) μ)
+    (h_delta : DeltaMethodAssumption (k := k) μ)
     (β_hat_seq : ℕ → Ω → Fin k → ℝ)
     (β_true : Fin k → ℝ)
     (V : Matrix (Fin k) (Fin k) ℝ)
     (g : (Fin k → ℝ) → ℝ)
     (grad_g : Fin k → ℝ)  -- Gradient of g at β_true
-    (h_g_smooth : True)  -- Placeholder for differentiability
+    (h_g_smooth : DeltaMethodSmooth g)  -- differentiability
     (h_asymp_normal : DSL.ConvergesInDistributionToNormal μ
         (fun n ω j => Real.sqrt n * (β_hat_seq n ω j - β_true j))
         (fun _ => 0) V)
@@ -589,8 +946,30 @@ theorem delta_method {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
         (fun n (ω : Ω) (_ : Fin 1) => Real.sqrt n * (g (β_hat_seq n ω) - g β_true))
         (fun _ => 0)
         (fun _ _ => ∑ i, ∑ j, grad_g i * V i j * grad_g j) := by
-  -- By delta method (first-order Taylor expansion)
-  exact axioms.delta_method β_hat_seq β_true V g grad_g h_g_smooth h_asymp_normal
+  exact h_delta β_hat_seq β_true V g grad_g h_g_smooth h_asymp_normal
+
+/-- Delta method: For g smooth, √n(g(β̂) - g(β)) →d N(0, ∇g' V ∇g)
+
+    This is useful for transformations of parameters like
+    elasticities, marginal effects, etc. -/
+theorem delta_method_from_axioms {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (axioms : OLSAsymptoticAxioms (k := k) μ)
+    (β_hat_seq : ℕ → Ω → Fin k → ℝ)
+    (β_true : Fin k → ℝ)
+    (V : Matrix (Fin k) (Fin k) ℝ)
+    (g : (Fin k → ℝ) → ℝ)
+    (grad_g : Fin k → ℝ)  -- Gradient of g at β_true
+    (h_g_smooth : DeltaMethodSmooth g)  -- differentiability
+    (h_asymp_normal : DSL.ConvergesInDistributionToNormal μ
+        (fun n ω j => Real.sqrt n * (β_hat_seq n ω j - β_true j))
+        (fun _ => 0) V)
+    : DSL.ConvergesInDistributionToNormal μ
+        (fun n (ω : Ω) (_ : Fin 1) => Real.sqrt n * (g (β_hat_seq n ω) - g β_true))
+        (fun _ => 0)
+        (fun _ _ => ∑ i, ∑ j, grad_g i * V i j * grad_g j) := by
+  exact delta_method μ (deltaMethod_of_axioms μ axioms)
+    β_hat_seq β_true V g grad_g h_g_smooth h_asymp_normal
 
 end OLS
 

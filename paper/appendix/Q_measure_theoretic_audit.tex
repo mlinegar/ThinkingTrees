@@ -1,0 +1,205 @@
+\section{Measure-Theoretic Audit Framework}
+\label{app:measure-audit}
+
+This appendix provides the rigorous measure-theoretic foundations for the probabilistic audit, connecting discrete PMF-based analysis to Mathlib's Hoeffding inequality machinery.
+
+\subsection{Proof Strategy Overview}
+
+The measure-theoretic audit framework bridges three worlds: discrete probability (PMFs), continuous measure theory (Mathlib), and computational implementation (sampling). The key challenge is ensuring that all probabilistic statements are well-founded.
+
+\paragraph{The Bridge Architecture.}
+\begin{center}
+\begin{tikzcd}
+\text{PMF } p \arrow[r, "\texttt{toMeasure}"] & \text{Measure } \mu \arrow[r, "\mu^{\otimes n}"] & \text{iid Samples}
+\end{tikzcd}
+\end{center}
+
+Each arrow preserves the key properties:
+\begin{itemize}
+    \item $\texttt{toMeasure}$: Converts discrete PMF to a probability measure, preserving expectations
+    \item $\mu^{\otimes n}$: Product measure construction ensuring independence
+\end{itemize}
+
+\paragraph{Why Measure Theory is Needed.}
+Mathlib's Hoeffding inequality operates on measure spaces, not directly on PMFs. The formalization must:
+\begin{enumerate}
+    \item Prove all relevant functions are measurable
+    \item Verify integrability conditions
+    \item Ensure null-measurability of deviation sets
+\end{enumerate}
+
+\paragraph{Key Insight: Centering.}
+The centered violation indicator $\tilde{V}_i = V_i - p_{\text{true}}$ has mean zero by construction. This transforms the bound from ``$\hat{p}$ concentrates around $p_{\text{true}}$'' to ``$\sum \tilde{V}_i$ concentrates around zero,'' which is the standard Hoeffding form.
+
+\subsection{PMF to Measure Bridge}
+
+The core connection between discrete expectation and measure-theoretic integration:
+
+\begin{definition}[Expectation-Integral Correspondence]
+For a PMF $p$ and bounded measurable function $f$:
+\[
+\text{Exp}_p[f] = \int f \, d(p.\text{toMeasure})
+\]
+\end{definition}
+
+\begin{lemma}[Violation Probability as Integral]
+\[
+\text{ViolationProb}(\fstar, p, x) = \int \mathbf{1}\{D(\fstar(z), \fstar(x)) > 0\} \, dp(z)
+\]
+\end{lemma}
+
+\subsection{iid Sampling Space}
+
+For $n$ independent samples from a distribution $\mu$, we use the product measure construction.
+
+\begin{definition}[iid Sample Measure]
+\[
+\text{iidSampleMeasure}(\mu, n) = \mu^{\otimes n} = \prod_{i=1}^n \mu
+\]
+defined on the sample space $\text{Fin}(n) \to \Strings$.
+\end{definition}
+
+\begin{lemma}[Sample Projections]
+The $i$-th sample projection $\omega \mapsto \omega_i$ satisfies:
+\begin{enumerate}
+    \item \textbf{Measurability:} Each projection is measurable
+    \item \textbf{Independence:} Projections are mutually independent under the product measure
+    \item \textbf{Marginal property:} $\int f(\omega_i) \, d\mu^{\otimes n}(\omega) = \int f \, d\mu$
+\end{enumerate}
+\end{lemma}
+
+\subsection{Violation Indicator Properties}
+
+\begin{definition}[Centered Violation Indicator]
+\[
+\tilde{V}_i(\omega) = \mathbf{1}\{D(\fstar(\omega_i), \fstar(x)) > 0\} - p_{\text{true}}
+\]
+where $p_{\text{true}} = \Pr[D(\fstar(Z), \fstar(x)) > 0]$.
+\end{definition}
+
+\begin{lemma}[Centered Indicator Bounds]
+\begin{enumerate}
+    \item $V_i \in [0, 1]$ (violation indicator)
+    \item $\tilde{V}_i \in [-1, 1]$ (centered)
+    \item $\E[\tilde{V}_i] = 0$ (by construction)
+\end{enumerate}
+\end{lemma}
+
+\subsection{Sub-Gaussian Property}
+
+The key property enabling Hoeffding bounds:
+
+\begin{theorem}[Sub-Gaussian MGF]
+Bounded centered random variables are sub-Gaussian. Specifically, for $\tilde{V}_i \in [a, b]$ with $\E[\tilde{V}_i] = 0$:
+\[
+\E[e^{t\tilde{V}_i}] \le e^{t^2(b-a)^2/8}
+\]
+\end{theorem}
+
+\begin{proof}
+Let $\lambda=(\tilde{V}_i-a)/(b-a)\in[0,1]$, so $\tilde{V}_i=\lambda b+(1-\lambda)a$. By convexity of $\exp$,
+\[
+e^{t\tilde{V}_i}\le \lambda e^{tb}+(1-\lambda)e^{ta}.
+\]
+Taking expectations and using $\E[\tilde{V}_i]=0$ (equivalently, $\E[\lambda]=-a/(b-a)$) gives Hoeffding's lemma:
+\[
+\E[e^{t\tilde{V}_i}] \le \frac{b}{b-a}e^{ta}+\frac{-a}{b-a}e^{tb}.
+\]
+The right-hand side is maximized by a centered two-point distribution and is bounded by
+$\exp\!\left(t^2(b-a)^2/8\right)$, yielding the stated sub-Gaussian MGF bound.
+\end{proof}
+
+For violation indicators with $\tilde{V}_i \in [-1, 1]$, the sub-Gaussian parameter is $(b-a)^2/4 = 1$.
+
+\subsection{Empirical Violation Rate}
+
+\begin{definition}[Empirical Rate]
+\[
+\hat{p}(\omega) = \frac{1}{n} \sum_{i=1}^n \mathbf{1}\{D(\fstar(\omega_i), \fstar(x)) > 0\}
+\]
+\end{definition}
+
+\begin{lemma}[Rate Decomposition]
+\[
+\hat{p}(\omega) = p_{\text{true}} + \frac{1}{n}\sum_{i=1}^n \tilde{V}_i(\omega)
+\]
+\end{lemma}
+
+\subsection{Main Hoeffding Application}
+
+\begin{theorem}[Hoeffding for iid Bounded Variables]\label{thm:hoeffding-iid}
+For $n$ iid random variables $X_1, \ldots, X_n \in [0, 1]$ with common mean $p$:
+\[
+\Pr\left[\left|\frac{1}{n}\sum_{i=1}^n X_i - p\right| \ge \epsilon\right] \le 2e^{-2n\epsilon^2}
+\]
+\end{theorem}
+
+\begin{proof}
+Let $Y_i=X_i-p$. Then $\E[Y_i]=0$ and $Y_i\in[-p,1-p]\subseteq[-1,1]$. By the sub-Gaussian MGF bound,
+$\E[e^{tY_i}]\le e^{t^2/8}$ for all $t\in\mathbb{R}$. Independence implies
+\[
+\E\!\left[e^{t\sum_i Y_i}\right]=\prod_{i=1}^n \E[e^{tY_i}] \le e^{nt^2/8}.
+\]
+By Markov's inequality,
+\[
+\Pr\!\left[\sum_i Y_i \ge n\epsilon\right]
+\le \exp\!\left(-tn\epsilon+\frac{nt^2}{8}\right).
+\]
+Optimizing over $t$ gives $t=4\epsilon$ and
+$\Pr[\sum_i Y_i \ge n\epsilon]\le e^{-2n\epsilon^2}$. The same bound holds for the left tail by applying the argument to $-Y_i$. A union bound yields the two-sided inequality.
+\end{proof}
+
+
+\subsection{Violation Rate Bound}
+
+\begin{theorem}[Hoeffding Bound on Violation Rate]
+With $n$ iid samples from the summarization distribution:
+\[
+\Pr\left[|\hat{p} - p_{\text{true}}| \ge \epsilon\right] \le 2e^{-2n\epsilon^2}
+\]
+\end{theorem}
+
+This follows directly from Theorem~\ref{thm:hoeffding-iid} with $X_i = \text{violationInd}(\fstar, \omega_i, x)$.
+
+\subsection{Audit Certification}
+
+\begin{definition}[Confidence Margin]
+\[
+\epsilon(\delta, n) = \sqrt{\frac{\log(2/\delta)}{2n}}
+\]
+\end{definition}
+
+\begin{lemma}[Margin Algebra]
+For $0 < \delta < 2$ and $n \ge 1$:
+\[
+2 \exp(-2n \cdot \epsilon(\delta, n)^2) = \delta
+\]
+\end{lemma}
+
+\begin{theorem}[Measure-Theoretic Audit Certification]\label{thm:audit-cert-measure}
+With $n$ iid samples and $\epsilon = \epsilon(\delta, n)$:
+\[
+\Pr\left[p_{\text{true}} \le \hat{p} + \epsilon\right] \ge 1 - \delta
+\]
+\end{theorem}
+
+\begin{proof}
+From the Hoeffding bound:
+\[
+\Pr\left[|\hat{p} - p_{\text{true}}| \ge \epsilon\right] \le \delta
+\]
+Taking complements and using $|\hat{p} - p_{\text{true}}| < \epsilon \Rightarrow p_{\text{true}} - \epsilon < \hat{p}$:
+\[
+\Pr\left[p_{\text{true}} \le \hat{p} + \epsilon\right] \ge 1 - \delta
+\]
+\end{proof}
+
+\subsection{Specialization to PMF}
+
+\begin{corollary}[PMF Audit Certification]
+For PMF $p$ with $n$ iid samples:
+\[
+\Pr\left[\text{ViolationProb}(\fstar, p, x) \le \hat{p} + \epsilon\right] \ge 1 - \delta
+\]
+where the probability is over the iid sample measure from $p.\text{toMeasure}$.
+\end{corollary}

@@ -1,0 +1,184 @@
+\section{Blackwell–Style Score Transport}
+\label{app:blackwell}
+
+When the task involves learning from supervision—scores, rewards, or preferences—hierarchical summarization must preserve not just the oracle $\fstar(X)$ but entire conditional score processes. This section establishes \emph{score transport}: under Assumption~\ref{ass:CF}, any supervision signal that factors through $\fstar$ can be transported from documents to summaries without information loss. The key insight is that sufficiency in the Blackwell sense (the summary's $\sigma$-field contains the oracle's) implies equality of all linearly aggregated expectations, including proper scoring rules and linear utilities. For nonlinear objectives such as logistic transforms in preference learning, exact preservation still holds when the three consistency conditions are satisfied exactly; approximate preservation is controlled by the oracle distortion $\Delta_R$ quantified in Appendix~\ref{app:practical_audit}.
+
+\subsection{Conceptual Overview}
+
+The score transport theorem is fundamentally a \textbf{sufficiency argument}. The intuition is classical:
+
+\begin{quote}
+\emph{If a statistic $T(X)$ is sufficient for parameter $\theta$, then any inference about $\theta$ based on $X$ can be equivalently performed using only $T(X)$.}
+\end{quote}
+
+In our setting:
+\begin{itemize}
+    \item The ``parameter'' is the oracle value $\fstar(X) \in \Y$
+    \item The ``statistic'' is the summary $Z = g(X)$
+    \item ``Sufficiency'' means $\fstar(X)$ can be recovered from $Z$: there exists $h$ with $\fstar(X) = h(Z)$
+\end{itemize}
+
+When the summary is sufficient for the oracle, \emph{any} downstream task that depends only on $\fstar(X)$ can be performed equally well using $Z$ instead of $X$.
+
+\paragraph{The Doob--Dynkin Lemma.} The technical backbone is the Doob--Dynkin lemma, which states: a random variable $Y$ is $\sigma(Z)$-measurable (i.e., $Y \in \sigma(Z)$) if and only if there exists a measurable function $h$ such that $Y = h(Z)$. When $\fstar(X) = h(Z)$ a.s., we say $Z$ is \emph{sufficient for $\fstar$}.
+
+We recall Assumption~\ref{ass:CF}: there exists a measurable $\bar Q:\Y\times\A\to\R$ such that
+$\E[\sstar(X,a)\mid X]=\bar Q(\fstar(X),a)$ for all $a\in\A$. The random object we compare across representations is always \emph{real-valued}: either the conditional score process $a\mapsto \E[\sstar(X,a)\mid \cdot]$ or its linear images under bounded linear functionals $\Lambda$; we never take expectations of $Y$-valued quantities.
+
+\subsection{Exact Score Transport}
+
+The first statement is a Blackwell/Doob–Dynkin equality specialized to our setup. To avoid undefined expressions like $\sstar(Z,a)$, we define the summary-indexed score process by conditional expectation:
+\[
+\sstar_Z(Z,a)\ :=\ \E\!\big[\sstar(X,a)\mid Z\big],
+\qquad a\in\A.
+\]
+This averages the population score over all documents $X$ that compress to the same summary $Z$. Intuitively, if the summary preserves all oracle information, then the score process on summaries must match the score process on documents.
+
+We now show that when the summary is sufficient for the oracle—meaning $\sigma(\fstar(X))\subseteq\sigma(Z)$, i.e., the oracle can be recovered from $Z$—all expected scores are identical whether computed on full documents or on summaries.
+
+\begin{lemma}[Blackwell/Doob–Dynkin score transport]
+\label{lem:blackwell-transport-appendix}
+Assume Assumption~\ref{ass:CF}. Let $Z$ be any representation with $\sigma(\fstar(X))\subseteq\sigma(Z)$ (i.e., $Z$ is sufficient for $\fstar(X)$).
+Then for every $a\in\A$, the expected score is the same whether computed on documents or summaries:
+\[
+\E\!\big[\sstar(X,a)\big]\ =\ \E\!\big[\sstar_Z(Z,a)\big]\ =\ \E\!\big[\bar Q(\fstar(X),a)\big].
+\]
+Moreover, for any bounded linear functional $\Lambda$ on the Banach space $(\mathcal{B}(\A),\|\cdot\|_\infty)$ of bounded real functions on $\A$,
+\[
+\E\!\big[\Lambda\big(\sstar(X,\cdot)\big)\big]
+\ =\
+\E\!\big[\Lambda\big(\sstar_Z(Z,\cdot)\big)\big]
+\ =\
+\E\!\big[\Lambda\big(\bar Q(\fstar(X),\cdot)\big)\big].
+\]
+\end{lemma}
+
+\begin{proof}
+Let $Y=\fstar(X)$. By Assumption~\ref{ass:CF},
+\[
+\E[\sstar(X,a)]=\E[\E[\sstar(X,a)\mid X]]=\E[\bar Q(Y,a)].
+\]
+By definition, $\sstar_Z(Z,a)=\E[\sstar(X,a)\mid Z]$, so the tower property gives
+\[
+\E[\sstar_Z(Z,a)]=\E[\E[\sstar(X,a)\mid Z]]=\E[\sstar(X,a)].
+\]
+If $\sigma(Y)\subseteq\sigma(Z)$, the Doob--Dynkin lemma yields a measurable $h$ with $Y=h(Z)$ a.s. Therefore
+\[
+\sstar_Z(Z,a)=\E[\bar Q(Y,a)\mid Z]=\E[\bar Q(h(Z),a)\mid Z]=\bar Q(h(Z),a)\quad\text{a.s.},
+\]
+and taking expectations recovers $\E[\bar Q(Y,a)]$. Finally, for any bounded linear functional $\Lambda$ on $\mathcal{B}(\A)$, linearity and boundedness allow $\Lambda$ to pass through the expectations, giving the stated equalities for $\Lambda(\sstar(X,\cdot))$, $\Lambda(\sstar_Z(Z,\cdot))$, and $\Lambda(\bar Q(Y,\cdot))$.
+\end{proof}
+
+A particularly transparent special case is when $Z$ \emph{preserves the oracle exactly}, i.e., there exists a measurable $h$ with $\fstar(X)=h(Z)$ almost surely (Doob–Dynkin). Then
+$\sstar_Z(Z,a)=\E[\sstar(X,a)\mid Z]=\bar Q(h(Z),a)$, so for any bounded $\Lambda$,
+\[
+\E\!\big[\Lambda\big(\sstar(X,\cdot)\big)\big]\ =\ \E\!\big[\Lambda\big(\bar Q(h(Z),\cdot)\big)\big].
+\]
+In particular, when $Z=Z^{(R)}(X)$ is the $R$-round hierarchical reduction and the three conditions hold \emph{exactly} along the realized tree so that $\fstar(Z^{(R)}(X))=\fstar(X)$ almost surely (Theorems~\ref{thm:one-pass} and \ref{thm:multi-round}), we may take $h(Z^{(R)}(X))=\fstar(Z^{(R)}(X))$ and obtain equality of all linearly aggregated supervision risks when training on $X$ versus on $Z^{(R)}(X)$.
+
+
+% \section{Practical audit guidance}\label{sec:audit}
+
+% What matters at deployment is a single number,
+% \[
+% \Delta_R\ :=\ \E\Big[\ \metric\big(\fstar(Z^{(R)}(X)),\ \fstar(X)\big)\ \Big],
+% \]
+% which is the expected \emph{task–space} distortion after one hierarchical pass and $R-1$ optional re‑summarization rounds. In practice we estimate $\Delta_R$ from the very operations the hierarchy actually executed: realized leaves, realized internal merges, and—only if we re‑summarize—an on‑range probe at the realized root. The audit is therefore local, deployment‑specific, and reproducible. It piggybacks exactly on the objects shown in the two‑route merge diagram (the parent can be reached either by ``concatenate–summarize" or by ``summarize children–concatenate–summarize again"). 
+
+
+% \paragraph{What to estimate.}
+% Let a realized reduction tree have $N$ leaves and $M=N-1$ internal nodes. Denote realized leaves by $b$ and realized internal nodes by $u$ with children $u_L,u_R$ and stored child summaries $g(u_L),g(u_R)$. Using $\E$ for the internal randomness of $g$, we define three \emph{operation–level} quantities and estimate each by simple random sampling:
+% \[
+% \delta_{\mathrm{leaf}}\ :=\ \E\,\metric\big(\fstar(g(B)),\,\fstar(B)\big),\qquad
+% \epsilon_{\mathrm{merge}}\ :=\ \E\ \metric\!\Big(\fstar\!\big(g(g(u_L)\concat g(u_R))\big),\,\fstar\!\big(g(u_L)\concat g(u_R)\big)\Big),
+% \]
+% \[
+% \iota_{\mathrm{root}}\ :=\ \E\,\metric\big(\fstar(g(Z^{(1)}(x))),\,\fstar(Z^{(1)}(x))\big)\quad\text{(only if $R\ge2$).}
+% \]
+% These target, respectively, leaf sufficiency \eqref{eq:leaf_sufficiency}, parentwise compatibility at realized merges \eqref{eq:leaf_compatibility}, and on‑range stability for extra rounds \eqref{eq:leaf_idempotence}. In code: log $S(\cdot)$ and $g(\cdot)$ at every realized node together with the seeds/call‑counts used by $g$; then \emph{sample} leaves and nodes, \emph{replay} the same randomness policy when needed, evaluate the displayed $\metric$ terms via $\fstar$, and average. Conditioning on the realized subtree in the merge term keeps the estimate aligned with the nodewise statement of \eqref{eq:leaf_compatibility}.
+
+
+% \paragraph{Aggregation.}
+% A direct triangle‑inequality/telescoping argument along the realized path from leaves to root yields the additive envelope
+% \[
+% \Delta_1\ \le\ N\,\delta_{\mathrm{leaf}}\ +\ M\,\epsilon_{\mathrm{merge}},
+% \qquad
+% \Delta_R\ \le\ N\,\delta_{\mathrm{leaf}}\ +\ M\,\epsilon_{\mathrm{merge}}\ +\ (R-1)\,\iota_{\mathrm{root}}\quad(R\ge2).
+% \]
+% In deployment we report the \emph{plug‑in} versions
+% \[
+% \widehat{\Delta}_1\ :=\ N\,\hat\delta_{\mathrm{leaf}}\ +\ M\,\hat\epsilon_{\mathrm{merge}},
+% \qquad
+% \widehat{\Delta}_R\ :=\ N\,\hat\delta_{\mathrm{leaf}}\ +\ M\,\hat\epsilon_{\mathrm{merge}}\ +\ (R-1)\,\hat\iota_{\mathrm{root}},
+% \]
+% computed from the sampled leaves, sampled internal nodes, and (if applicable) sampled roots. This is the quantity that tells us, in the task metric we actually care about, how far a one‑pass or $R$‑round hierarchy drifts from $\fstar$ on the documents actually processed.
+
+% Sampling should be random over the realized leaves and realized internal nodes of the run; if worried about depth or heterogeneity, stratify by depth or by child summary length and then aggregate to a single quantity. Labeling is whatever the choice of $\fstar$ in question requires: sometimes a script, sometimes a human codebook; in either case the metric $\metric(\fstar(\cdot),\cdot)$ is evaluated on the sampled units only. Stability matters at merges: recompute $g(u_L)$ and $g(u_R)$ under the deployment randomness policy (same seeds/call‑counts), then recompute the parent on the concatenation; this mirrors \eqref{eq:leaf_compatibility} exactly and prevents ``off‑policy" drift in the probe.
+
+% \paragraph{Aggregation without additional parent stability.}
+% Absent a stability hypothesis on the parent map (see Assumption~\ref{ass:det-lip}), there
+% is in general no subadditive recursion that upper–bounds the root distortion by a sum of
+% leaf and merge distortions. In that case we report the deployment–level distortion \(
+% \widehat\Delta_R=\frac1n\sum_i d_Y(\fstar(Z^{(R)}(x_i)),\fstar(x_i)) \) from a random sample of
+% documents processed by the system, together with its bootstrap uncertainty; when $R\ge2$,
+% $L3$ implies $Z^{(R)}$ is on–range and additional rounds are inert in expectation (Theorem~2),
+% so the direct estimate for $R=1$ already controls all further rounds.
+
+% \paragraph{What to report.}
+% Report $(N,M,R)$, the three sampled means $(\hat\delta_{\mathrm{leaf}},\,\hat\epsilon_{\mathrm{merge}},\,\hat\iota_{\mathrm{root}})$, and the single aggregate $\widehat{\Delta}_R$. For readers who want uncertainty, either add nonparametric bootstrap intervals or refer to the appendix for finite‑sample concentration bounds; nothing in the main text requires more than the point estimate. If $\Y=\{0,1\}$ and $\metric$ is Hamming, the same procedure returns flip shares; the algebra above already specializes to that case without new notation.
+
+% The three sampled means correspond one‑for‑one to the three conditions \eqref{eq:leaf_sufficiency}–\eqref{eq:leaf_idempotence}; the plug‑in bound is exactly the telescoping of those local errors along the realized tree. Because we never leave the realized schedule, the audit is faithful to deployment: it exposes the trade‑off between finer partitions (larger $M$) and local error rates, and it certifies the exact hierarchy you ran rather than an abstract one. This is all you need for downstream guarantees: any loss that is Lipschitz in $\metric$ (including the DPO envelopes we state later) propagates directly through $\widehat{\Delta}_R$.
+
+
+% \begin{theorem}[Exact DPO equivalence under oracle preservation and oracle–indexed pairs]
+% \label{thm:dpo-exact}
+% Assume \eqref{eq:BT-oracle} and suppose that for some $R\ge1$ the hierarchy preserves the oracle exactly, i.e.
+% \[
+% \metric\!\big(\fstar(Z^{(R)}(X)),\,\fstar(X)\big)\;=\;0\quad\text{almost surely}.
+% \]
+% Assume further that the pair–generation mechanism depends on $X$ only through $\fstar(X)$ and that the reference policy $\pi_{\mathrm{ref}}$ is oracle–measurable with full support on $\A$. Then the sets of population minimizers of \eqref{eq:dpo-loss} coincide when training on documents $X$ and when training on summaries $Z^{(R)}(X)$. In particular, every population minimizer depends on inputs only through $\fstar(\cdot)$.
+% \end{theorem}
+
+% \noindent\emph{Why the metric enters the learning guarantee.} What changes between training on $X$ and on $Z^{(R)}(X)$ is the \emph{input} to the logit inside the DPO loss \eqref{eq:dpo-loss}. When the hierarchy is only approximately oracle–preserving, the two inputs differ by how much the oracle value moves under summarization, and we measure that movement in the task metric $\metric$. The policy–side regularity assumptions below stipulate that either (a) the policy’s \emph{log–ratio} relative to $\pi_{\mathrm{ref}}$ is Lipschitz in the oracle value, or (b) the per–oracle rewards that induce the policy are Lipschitz in the oracle value. In both cases, a small task–space distortion $\metric\!\big(\fstar(Z^{(R)}(X)),\fstar(X)\big)$ forces a small change in the DPO logit, and hence in the DPO loss, because the logistic loss is $1$–Lipschitz. The single number
+% \[
+% \Delta_R\ :=\ \E\,\metric\!\big(\fstar(Z^{(R)}(X)),\,\fstar(X)\big)
+% \]
+% is exactly what the operational audit certifies from realized leaves, realized merges, and on–range root probes; it is therefore the right currency for translating pipeline behavior into learning guarantees.
+
+% \paragraph{Approximate preservation implies a metric, audit‑driven gap bound.}
+% To control the difference between training on $X$ and on $Z^{(R)}(X)$ when preservation holds only approximately, we restrict to \emph{oracle‑measurable} policies, i.e.\ policies that do not react idiosyncratically to string‑level features beyond the oracle value.
+
+% \begin{definition}[Oracle‑measurable policy class]
+% \label{def:oracle-measurable}
+% A policy $\pi$ (and likewise $\pi_{\mathrm{ref}}$) is oracle‑measurable if $\pi(\cdot\mid x)=\pi(\cdot\mid x')$ whenever $\metric\!\big(\fstar(x),\fstar(x')\big)=0$.
+% \end{definition}
+
+% \begin{theorem}[Quantitative DPO gap under metric distortion]
+% \label{thm:dpo-gap}
+% Let $\Delta_R=\E\big[\,\metric\!\big(\fstar(Z^{(R)}(X)),\,\fstar(X)\big)\,\big]$. Suppose $\pi,\pi_{\mathrm{ref}}$ are oracle‑measurable and either
+% \begin{enumerate}
+% \item[(i)] there exists $L_\pi<\infty$ with
+% \[
+% \Bigg|\log\frac{\pi(a\mid y)}{\pi_{\mathrm{ref}}(a\mid y)}-\log\frac{\pi(a\mid y')}{\pi_{\mathrm{ref}}(a\mid y')}\Bigg|\,\le\,L_\pi\,\metric(y,y')
+% \quad\text{for all }y,y'\in\Y,\ a\in\A,
+% \]
+% or
+% \item[(ii)] $\pi(a\mid y)\propto \pi_{\mathrm{ref}}(a\mid y)\exp\{\beta^{-1}R_y(a)\}$ with
+% \[
+% \sup_{a\in\A}\,|R_y(a)-R_{y'}(a)|\ \le\ L_R\,\metric(y,y')\quad\text{for all }y,y'\in\Y.
+% \]
+% \end{enumerate}
+% Writing $\mathcal{L}^{X}$ and $\mathcal{L}^{Z}$ for \eqref{eq:dpo-loss} with inputs $X$ and $Z^{(R)}(X)$, respectively, one has
+% \[
+% \big|\ \mathcal{L}^{X}(\pi)\ -\ \mathcal{L}^{Z}(\pi)\ \big|
+% \ \le\
+% \begin{cases}
+% 2\,\beta\,L_\pi\,\Delta_R, & \text{under \emph{(i)}},\\[2pt]
+% 2\,L_R\,\Delta_R, & \text{under \emph{(ii)}}.
+% \end{cases}
+% \qquad\text{and}\qquad
+% \inf_\pi \mathcal{L}^{X}(\pi)\ -\ \inf_\pi \mathcal{L}^{Z}(\pi)\ \le\ \text{same bound}.
+% \]
+% \end{theorem}
+
+% \noindent\emph{Interpretation.} The two Lipschitz conditions link the \emph{policy} to the \emph{metric}: they assert that changing the oracle value from $y$ to $y'$ by $\metric(y,y')$ changes either the policy’s log–ratio or the induced reward differences by at most a constant times $\metric(y,y')$. Because the DPO loss applies a $1$–Lipschitz logistic transform to a \emph{difference} of two such log–ratios (or rewards), a factor of $2$ appears. The audit supplies $\Delta_R$; multiplying by the appropriate Lipschitz constant turns that operational number into a learning‑time envelope. If $\metric\!\big(\fstar(Z^{(R)}(X)),\fstar(X)\big)=0$ almost surely, then $\Delta_R=0$ and the two training schemes are population‑equivalent.

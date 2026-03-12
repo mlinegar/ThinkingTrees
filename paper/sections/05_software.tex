@@ -1,0 +1,157 @@
+\section{The ThinkingTrees Package}\label{sec:software}
+
+We release \textsc{ThinkingTrees}, an open-source Python package implementing the full Oracle-Preserving Summarization pipeline. The package comprises approximately 182,000 lines of Python code with comprehensive test coverage, designed for both research prototyping and production deployment. This section describes the architecture; Appendix~\ref{app:software} provides installation instructions and API documentation.
+
+\subsection{Architecture Overview}
+
+The package follows a plugin-based architecture with four main layers:
+
+\begin{description}[nosep]
+    \item[Core Layer] (\texttt{src/core/}): Generic building blocks including data models, LLM clients, scoring primitives, and batch processing.
+    \item[Tree Layer] (\texttt{src/tree/}): Hierarchical tree construction (\texttt{TreeBuilder}) and probabilistic verification (\texttt{TreeAuditor}).
+    \item[Training Layer] (\texttt{src/training/}): DSPy optimization, preference learning, and judge implementations.
+    \item[Task Layer] (\texttt{src/tasks/}): Task-specific plugins (e.g., Manifesto RILE scoring) with rubrics and oracles.
+\end{description}
+
+\subsection{ThinkingTrees Platform and \texttt{treepo} Method Package}
+
+We keep \textsc{ThinkingTrees} as the full platform name for the end-to-end OPS system, but we now expose a focused PyTorch method package, \texttt{treepo}, for simulation-heavy work. This split is practical rather than conceptual: \textsc{ThinkingTrees} owns the broader long-document pipeline, while \texttt{treepo} owns reproducible benchmark harnesses, exact sketch sanity checks, and paper-facing simulation reports.
+
+For the commutative-sketch bridge, \texttt{treepo} exposes a public HyperLogLog surface (\texttt{HLLConfig}, \texttt{HyperLogLogSketch}) with streaming updates, exact merges, and tree-reduction helpers. The same package also exposes two benchmark families used in our running examples: (i) end-to-end cardinality recovery, where a learned TreePO sketch is compared against exact-set truth, exact HLL, and a deliberately wrong non-merge-safe baseline; and (ii) HLL merge-learning, where the learned object is the merge law itself over exact HLL register states.
+
+\subsection{Core Components}
+
+\paragraph{Data Models.}
+The fundamental data structure is the \texttt{Node} class, which represents a node in the hierarchical summary tree:
+
+\begin{lstlisting}
+@dataclass
+class Node:
+    content: str           # The summary text at this node
+    children: list[Node]   # Child nodes (empty for leaves)
+    metadata: NodeMetadata # Audit status, scores, etc.
+\end{lstlisting}
+
+A \texttt{Tree} is the root \texttt{Node} plus methods for traversal, serialization, and audit access. The \texttt{AuditResult} dataclass tracks violation counts and confidence intervals for each condition.
+
+\paragraph{TreeBuilder.}
+The \texttt{TreeBuilder} class constructs hierarchical summaries from documents:
+
+\begin{enumerate}[nosep]
+    \item \textbf{Chunking}: Partition the document into context-fitting blocks using configurable tokenizers and overlap settings.
+    \item \textbf{Leaf summarization}: Apply the summarizer $g$ to each block, creating leaf nodes.
+    \item \textbf{Recursive merging}: Build the tree bottom-up by concatenating sibling summaries and applying $g$ again.
+    \item \textbf{Optional cleanup}: Apply additional rounds of summarization to the root.
+\end{enumerate}
+
+The builder supports multiple \texttt{SummarizationStrategy} backends:
+\begin{itemize}[nosep]
+    \item \texttt{BatchedStrategy}: High-throughput async batched inference with request pooling
+    \item \texttt{DSPyStrategy}: Optimizable summarization with DSPy modules
+    \item \texttt{TournamentStrategy}: Tournament-based selection with learning
+\end{itemize}
+
+\paragraph{TreeAuditor.}
+The \texttt{TreeAuditor} class implements the probabilistic audit from Section~\ref{sec:audit}:
+
+\begin{lstlisting}
+auditor = TreeAuditor(oracle=oracle, confidence=0.95)
+result = auditor.audit(tree, n_leaves=100, n_merges=50)
+print(f"Sufficiency rate: {result.p_suff:.4f} +/- {result.ci_suff:.4f}")
+\end{lstlisting}
+
+The auditor uses Hoeffding bounds to compute confidence intervals, supports streaming mode for incremental sampling, and flags nodes exceeding violation thresholds for human review.
+
+\subsection{DSPy-First Optimization}
+
+The package integrates deeply with DSPy \citep{khattab2024dspy} for prompt optimization. The training layer provides:
+
+\begin{description}[nosep]
+    \item[Bootstrap Optimizer] (\texttt{optimization/bootstrap.py}): Random search over prompt variations using successful traces as exemplars.
+    \item[GEPA] (\texttt{optimization/gepa.py}): Gradient-Ensemble based Prompt Augmentation.
+    \item[MIPRO] (\texttt{optimization/mipro.py}): Multi-task Instruction Prompt Optimization.
+\end{description}
+
+The consistency bootstrap loop (Section~\ref{sec:audit}) is implemented as:
+
+\begin{lstlisting}
+trainer = ConsistencyBootstrap(
+    leaf_module=LeafSummarizer(),
+    merge_module=MergeSummarizer(),
+    oracle=oracle,
+    optimizer="mipro"
+)
+trainer.train(documents, target_violation_rate=0.01)
+\end{lstlisting}
+
+\subsection{Preference Learning Integration}
+
+For downstream preference learning, the package provides:
+
+\begin{itemize}[nosep]
+    \item \textbf{PreferencePair}: Abstract representation of (chosen, rejected) pairs with oracle scores.
+    \item \textbf{PreferenceCollector}: Generate pairs from oracle comparisons on summaries.
+    \item \textbf{Judge implementations}: Oracle-based, LLM-based, and GenRM-based pairwise judges.
+    \item \textbf{TRL integration}: Export to Hugging Face TRL format for DPO/PPO training.
+\end{itemize}
+
+The key insight from Theorem~\ref{thm:dpo-equiv} is that when the audit certifies small violation rates, preferences collected from summaries are equivalent to preferences from full documents.
+
+\subsection{Task Plugin Architecture}
+
+Tasks are defined via the \texttt{AbstractTask} interface:
+
+\begin{lstlisting}
+class AbstractTask(Protocol):
+    def oracle(self, text: str) -> OracleScore: ...
+    def rubric(self) -> str: ...
+    def metric(self, a: OracleScore, b: OracleScore) -> float: ...
+\end{lstlisting}
+
+The package includes two complete task implementations:
+
+\begin{description}[nosep]
+    \item[Manifesto RILE] (\texttt{tasks/manifesto/}): Left-right scoring of party manifestos on a $-100$ to $+100$ scale. Includes expert-calibrated rubrics, data loaders for the Manifesto Project corpus, and comparison metrics.
+    \item[Congressional Record] (\texttt{tasks/congressional/}): Policy position extraction on specific issues. (In development; see Section~\ref{sec:congressional}.)
+\end{description}
+
+New tasks are registered via the plugin system:
+
+\begin{lstlisting}
+@register_task("my_custom_task")
+class MyTask(ScoringTask):
+    scale = BoundedScale(min_val=-100, max_val=100)
+    rubric = "Extract the author's position on..."
+\end{lstlisting}
+
+\subsection{LLM Backend Support}
+
+The package supports multiple LLM backends through a unified \texttt{LLMClient} interface:
+
+\begin{itemize}[nosep]
+    \item \textbf{OpenAI API}: GPT-4, GPT-4o, o1, etc.
+    \item \textbf{vLLM}: Self-hosted inference with batching
+    \item \textbf{SGLang}: High-performance serving
+\end{itemize}
+
+The \texttt{AsyncBatchLLMClient} provides request pooling and rate limiting for high-throughput workloads.
+
+\subsection{Configuration}
+
+Configuration is YAML-based with sensible defaults:
+
+\begin{lstlisting}
+model:
+  name: gpt-4o
+  temperature: 0.0
+  max_tokens: 2048
+chunking:
+  max_chunk_size: 4000
+  overlap: 200
+audit:
+  n_leaves: 100
+  n_merges: 50
+  confidence: 0.95
+\end{lstlisting}
+
+The full configuration schema and options are documented in Appendix~\ref{app:software}.

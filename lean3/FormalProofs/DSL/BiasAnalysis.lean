@@ -67,13 +67,24 @@ def IgnorablePredictionError
     (3) Unobserved confounders U
 
     Any of these correlations causes bias. -/
+structure ErrorDependenceProfile where
+  /-- Correlation diagnostic for error vs covariates. -/
+  corr_error_x : ℝ
+  /-- Correlation diagnostic for error vs true outcomes. -/
+  corr_error_y : ℝ
+  /-- Correlation diagnostic for error vs latent confounders. -/
+  corr_error_u : ℝ
+
+/-- Structural failure modes for ignorability, encoded via concrete diagnostics. -/
 structure IgnorabilityFailureModes where
+  /-- Empirical/theoretical diagnostics describing dependence channels. -/
+  diagnostics : ErrorDependenceProfile
   /-- Errors correlated with covariates: E[e | X] ≠ 0 -/
-  correlated_with_X : Prop
+  correlated_with_X : diagnostics.corr_error_x ≠ 0
   /-- Errors correlated with true outcome: Corr(e, Y) ≠ 0 -/
-  correlated_with_Y : Prop
+  correlated_with_Y : diagnostics.corr_error_y ≠ 0
   /-- Errors correlated with confounders: Corr(e, U) ≠ 0 -/
-  correlated_with_U : Prop
+  correlated_with_U : diagnostics.corr_error_u ≠ 0
 
 /-!
 ## Bias When Ignoring Prediction Errors
@@ -236,14 +247,14 @@ theorem proportion_bias_with_high_accuracy
 
     In practice, none of these hold. -/
 structure IgnorableErrorConditions where
+  /-- Empirical/theoretical diagnostics describing dependence channels. -/
+  diagnostics : ErrorDependenceProfile
   /-- Errors independent of covariates -/
-  independent_of_X : Prop
+  independent_of_X : diagnostics.corr_error_x = 0
   /-- Errors independent of true outcome -/
-  independent_of_Y : Prop
+  independent_of_Y : diagnostics.corr_error_y = 0
   /-- Errors independent of unobservables -/
-  independent_of_U : Prop
-  /-- Full independence required -/
-  h_full : independent_of_X ∧ independent_of_Y ∧ independent_of_U
+  independent_of_U : diagnostics.corr_error_u = 0
 
 /-- Classical measurement error rarely applies to LLM predictions.
 
@@ -258,8 +269,12 @@ theorem llm_errors_not_classical
     (cond : IgnorableErrorConditions)
     -- LLM errors have patterns that violate full independence.
     (h_patterns :
-      ¬ (cond.independent_of_X ∧ cond.independent_of_Y ∧ cond.independent_of_U))
-    : ¬ (cond.independent_of_X ∧ cond.independent_of_Y ∧ cond.independent_of_U) := by
+      ¬ (cond.diagnostics.corr_error_x = 0 ∧
+          cond.diagnostics.corr_error_y = 0 ∧
+          cond.diagnostics.corr_error_u = 0))
+    : ¬ (cond.diagnostics.corr_error_x = 0 ∧
+        cond.diagnostics.corr_error_y = 0 ∧
+        cond.diagnostics.corr_error_u = 0) := by
   exact h_patterns
 
 end DSL

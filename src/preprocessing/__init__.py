@@ -11,7 +11,6 @@ from src.preprocessing.chunker import (
     feedback_from_prediction_errors,
     chunk_for_ops_token_budget,
     chunk_for_ops,
-    chunk_for_ops_adaptive,
     chunk_text,
 )
 
@@ -49,7 +48,6 @@ __all__ = [
     "feedback_from_prediction_errors",
     "chunk_for_ops_token_budget",
     "chunk_for_ops",
-    "chunk_for_ops_adaptive",
     "chunk_text",
     "AxisWindow",
     "uniform_axis_windows",

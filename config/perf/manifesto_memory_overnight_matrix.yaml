@@ -1,0 +1,173 @@
+version: 1
+
+defaults:
+  timeout_seconds: 21600
+  workdir: "."
+
+profiles:
+  overnight_memory_main:
+    include_layers: ["meso"]
+  overnight_memory_controls:
+    include_layers: ["micro", "macro"]
+  overnight_memory_full:
+    include_layers: ["micro", "meso", "macro"]
+  overnight_memory_recommended:
+    include_scenarios:
+      - temporal_main_sem_on_learned_chunker
+      - temporal_negctrl_impossible_delta_sem_on
+      - micro_crosslang_embedding_reference
+      - micro_crosslang_embedding_missing_endpoint
+
+scenarios:
+  - id: temporal_main_{semantic_tag}_{weight_tag}_{window_tag}
+    layer: meso
+    timeout_seconds: 18000
+    description: "Main overnight temporal matrix (semantic features x loss weighting x windowing)."
+    matrix:
+      semantic:
+        - semantic_tag: sem_on
+          semantic_flag: --semantic-memory-features
+        - semantic_tag: sem_off
+          semantic_flag: --no-semantic-memory-features
+      weighting:
+        - weight_tag: learned
+          weight_flag: --learn-loss-weights
+        - weight_tag: fixed
+          weight_flag: --no-learn-loss-weights
+      windowing:
+        - window_tag: uniform
+          window_flag: --windowing-mode uniform
+        - window_tag: chunker
+          window_flag: --windowing-mode chunker
+    env:
+      CUDA_VISIBLE_DEVICES: "0,1"
+    command: >
+      source venv/bin/activate &&
+      OUT=outputs/perf_harness/generated/overnight_memory/{scenario_id} &&
+      mkdir -p "$OUT" &&
+      python3 scripts/train_rile_embedding_sketch.py
+      --output-dir "$OUT"
+      --embedding-url http://localhost:8003/v1
+      --train-samples 260
+      --val-samples 120
+      --test-samples 120
+      --epochs 8
+      --batch-size 32
+      --delta-head
+      {semantic_flag}
+      {weight_flag}
+      {window_flag}
+      --max-windows 0
+      --log-every 50
+    metrics_file: outputs/perf_harness/generated/overnight_memory/{scenario_id}/metrics.json
+    metrics:
+      test_rile_mae: final.test.mae
+      test_delta_count: delta_vs_zero.test.count
+      test_delta_improvement: delta_vs_zero.test.relative_improvement
+      val_delta_improvement: delta_vs_zero.val.relative_improvement
+    regression:
+      - metric: test_delta_count
+        op: ">="
+        threshold: 20
+        severity: error
+      - metric: test_delta_improvement
+        op: ">="
+        threshold: -0.10
+        severity: warn
+      - metric: val_delta_improvement
+        op: ">="
+        threshold: -0.10
+        severity: warn
+      - metric: test_rile_mae
+        op: "<="
+        threshold: 0.15
+        severity: warn
+
+  - id: temporal_negctrl_impossible_delta_{semantic_tag}
+    layer: macro
+    timeout_seconds: 10800
+    description: "Negative-control temporal runs: impossible delta improvement gate must fail."
+    matrix:
+      semantic:
+        - semantic_tag: sem_on
+          semantic_flag: --semantic-memory-features
+        - semantic_tag: sem_off
+          semantic_flag: --no-semantic-memory-features
+    env:
+      CUDA_VISIBLE_DEVICES: "0,1"
+    command: >
+      source venv/bin/activate &&
+      OUT=outputs/perf_harness/generated/overnight_memory/{scenario_id} &&
+      mkdir -p "$OUT" &&
+      python3 scripts/train_rile_embedding_sketch.py
+      --output-dir "$OUT"
+      --embedding-url http://localhost:8003/v1
+      --train-samples 120
+      --val-samples 60
+      --test-samples 60
+      --epochs 4
+      --batch-size 32
+      --delta-head
+      {semantic_flag}
+      --no-learn-loss-weights
+      --windowing-mode uniform
+      --max-windows 0
+      --log-every 50
+    metrics_file: outputs/perf_harness/generated/overnight_memory/{scenario_id}/metrics.json
+    metrics:
+      test_delta_count: delta_vs_zero.test.count
+      test_delta_improvement: delta_vs_zero.test.relative_improvement
+    regression:
+      - metric: test_delta_count
+        op: ">="
+        threshold: 8
+        severity: error
+      - metric: test_delta_improvement
+        op: ">="
+        threshold: 1.10
+        severity: error
+    expected:
+      outcome: fail
+      failure_modes: ["regression"]
+
+  - id: micro_crosslang_embedding_reference
+    layer: micro
+    timeout_seconds: 1800
+    description: "Cross-language embedding retrieval gate on 5-doc pilot."
+    command: >
+      source venv/bin/activate &&
+      OUT=outputs/perf_harness/generated/overnight_memory/{scenario_id} &&
+      mkdir -p "$OUT" &&
+      python3 scripts/eval_crosslang_embeddings.py
+      --embedding-url http://localhost:8003/v1
+      --window-chars 6000
+      --max-windows 6
+      --json-out "$OUT/metrics.json"
+    metrics_file: outputs/perf_harness/generated/overnight_memory/{scenario_id}/metrics.json
+    metrics:
+      separation: cluster_metrics.separation
+      precision_at_1: retrieval_metrics.precision_at_1
+    regression:
+      - metric: separation
+        op: ">"
+        threshold: 0.0
+        severity: error
+      - metric: precision_at_1
+        op: ">="
+        threshold: 0.8
+        severity: error
+
+  - id: micro_crosslang_embedding_missing_endpoint
+    layer: micro
+    timeout_seconds: 300
+    description: "Negative control: invalid embedding endpoint should fail fast."
+    command: >
+      source venv/bin/activate &&
+      python3 scripts/eval_crosslang_embeddings.py
+      --embedding-url http://localhost:65530/v1
+      --window-chars 6000
+      --max-windows 4
+      --json-out outputs/perf_harness/generated/overnight_memory/{scenario_id}/metrics.json
+    expected:
+      outcome: fail
+      failure_modes: ["command"]

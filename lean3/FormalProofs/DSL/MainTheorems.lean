@@ -33,11 +33,16 @@ DSL is the only approach that provides:
 
 import FormalProofs.DSL.AsymptoticTheory
 import FormalProofs.DSL.BiasAnalysis
+import FormalProofs.DSL.IPWMeasurementError
+import FormalProofs.DSL.NonclassicalExpectationMismatch
 import FormalProofs.DSL.VarianceDecomposition
 import FormalProofs.DSL.LinearRegression
 import FormalProofs.DSL.LogisticRegression
 import FormalProofs.DSL.CategoryProportion
 import FormalProofs.DSL.FixedEffects
+import FormalProofs.DSL.TreeIPW
+import FormalProofs.DSL.MergeableCertificates
+import FormalProofs.DSL.TreePOEndToEnd
 
 set_option linter.mathlibStandardSet false
 
@@ -87,6 +92,46 @@ Specifically:
 
 This holds for ANY predictor - the LLM can have 50% accuracy or 99% accuracy,
 and the inference is still valid. -/
+theorem DSL_valid_inference_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (E : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (coverage_axioms : CoverageFromAsymptoticNormal μ d)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ) (hα : 0 < α ∧ α < 1)
+    : ValidInference μ β_hat_seq β_star centered_scaled_seq V CI_seq α := by
+  refine ⟨?_, ?_, ?_⟩
+  · exact DSL_consistent_from_assumptions μ E h_consistent dbs m β_star reg h_unbiased data_seq β_hat_seq
+      h_est
+  · exact DSL_asymptotic_normal_from_assumptions μ E h_normal dbs m β_star V reg h_unbiased
+      centered_scaled_seq
+  · exact DSL_valid_coverage_from_assumptions μ E h_normal coverage_axioms dbs m β_star V reg
+      h_unbiased CI_seq α hα centered_scaled_seq
+
+/-- **Theorem 1: DSL Provides Valid Inference**
+
+Under Assumption 1 (design-based sampling), the DSL estimator provides
+valid statistical inference regardless of the prediction accuracy.
+
+Specifically:
+1. β̂_DSL is consistent for β*
+2. √N(β̂_DSL - β*) →d N(0, V)
+3. The 95% CI achieves 95% coverage asymptotically
+
+This holds for ANY predictor - the LLM can have 50% accuracy or 99% accuracy,
+and the inference is still valid. -/
 theorem DSL_valid_inference
     {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
     {Obs Mis Con : Type*} {d : ℕ}
@@ -105,11 +150,41 @@ theorem DSL_valid_inference
     (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
     (α : ℝ) (hα : 0 < α ∧ α < 1)
     : ValidInference μ β_hat_seq β_star centered_scaled_seq V CI_seq α := by
-  refine ⟨?_, ?_, ?_⟩
-  · exact DSL_consistent μ axioms dbs m β_star reg h_unbiased data_seq β_hat_seq h_est
-  · exact DSL_asymptotic_normal μ axioms dbs m β_star V reg h_unbiased centered_scaled_seq
-  · exact DSL_valid_coverage μ axioms coverage_axioms dbs m β_star V reg h_unbiased CI_seq α hα
-      centered_scaled_seq
+  exact DSL_valid_inference_from_assumptions μ axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    coverage_axioms dbs m β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq
+    CI_seq α hα
+
+/-- **Theorem 1 (Oracle Parameter Form): DSL Provides Valid Inference**
+
+This variant names the estimand explicitly as the oracle parameter `β_oracle`,
+defined by the true moment condition. Oracle access ensures expert labels match
+the oracle labels on sampled documents. -/
+theorem DSL_valid_inference_oracle_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (assumptions : DSLAssumptions Obs Mis Con)
+    (E : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (coverage_axioms : CoverageFromAsymptoticNormal μ d)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_oracle : Fin d → ℝ)
+    (h_oracle : OracleTarget m E β_oracle)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E β_oracle)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ) (hα : 0 < α ∧ α < 1)
+    : ValidInference μ β_hat_seq β_oracle centered_scaled_seq V CI_seq α := by
+  exact DSL_valid_inference_from_assumptions μ E h_consistent h_normal coverage_axioms
+    assumptions.sampling m β_oracle V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq
+    CI_seq α hα
 
 /-- **Theorem 1 (Oracle Parameter Form): DSL Provides Valid Inference**
 
@@ -135,8 +210,37 @@ theorem DSL_valid_inference_oracle
     (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
     (α : ℝ) (hα : 0 < α ∧ α < 1)
     : ValidInference μ β_hat_seq β_oracle centered_scaled_seq V CI_seq α := by
-  exact DSL_valid_inference μ axioms coverage_axioms assumptions.sampling m β_oracle V reg
-    h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq α hα
+  exact DSL_valid_inference_oracle_from_assumptions μ assumptions axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    coverage_axioms m β_oracle h_oracle V reg h_unbiased data_seq β_hat_seq h_est
+    centered_scaled_seq CI_seq α hα
+
+/-- Corollary: DSL CI coverage converges to nominal level -/
+theorem DSL_CI_coverage_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (E : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (coverage_axioms : CoverageFromAsymptoticNormal μ d)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ) (hα : 0 < α ∧ α < 1)
+    : AsymptoticCoverage μ CI_seq β_star α := by
+  have h :=
+    DSL_valid_inference_from_assumptions μ E h_consistent h_normal coverage_axioms dbs m β_star V reg
+      h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq α hα
+  exact h.coverage
 
 /-- Corollary: DSL CI coverage converges to nominal level -/
 theorem DSL_CI_coverage
@@ -157,9 +261,37 @@ theorem DSL_CI_coverage
     (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
     (α : ℝ) (hα : 0 < α ∧ α < 1)
     : AsymptoticCoverage μ CI_seq β_star α := by
+  exact DSL_CI_coverage_from_assumptions μ axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    coverage_axioms dbs m β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq
+    α hα
+
+/-- Corollary (Oracle Parameter Form): DSL CI coverage converges to nominal level. -/
+theorem DSL_CI_coverage_oracle_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (assumptions : DSLAssumptions Obs Mis Con)
+    (E : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (coverage_axioms : CoverageFromAsymptoticNormal μ d)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_oracle : Fin d → ℝ)
+    (h_oracle : OracleTarget m E β_oracle)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E β_oracle)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ) (hα : 0 < α ∧ α < 1)
+    : AsymptoticCoverage μ CI_seq β_oracle α := by
   have h :=
-    DSL_valid_inference μ axioms coverage_axioms dbs m β_star V reg h_unbiased data_seq β_hat_seq
-      h_est centered_scaled_seq CI_seq α hα
+    DSL_valid_inference_oracle_from_assumptions μ assumptions E h_consistent h_normal coverage_axioms m
+      β_oracle h_oracle V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq α hα
   exact h.coverage
 
 /-- Corollary (Oracle Parameter Form): DSL CI coverage converges to nominal level. -/
@@ -182,10 +314,11 @@ theorem DSL_CI_coverage_oracle
     (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
     (α : ℝ) (hα : 0 < α ∧ α < 1)
     : AsymptoticCoverage μ CI_seq β_oracle α := by
-  have h :=
-    DSL_valid_inference_oracle μ assumptions axioms coverage_axioms m β_oracle h_oracle V reg
-      h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq α hα
-  exact h.coverage
+  exact DSL_CI_coverage_oracle_from_assumptions μ assumptions axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    coverage_axioms m β_oracle h_oracle V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq
+    CI_seq α hα
 
 /-!
 ## Main Theorem 2: Efficiency from Predictions
@@ -219,6 +352,202 @@ theorem perfect_predictions_optimal {d : ℕ}
     (h_perfect : vp.σ_pred_sq = 0)
     : approximateVariance vp = vp.σ_Y_sq / vp.N :=
   perfect_predictions_minimum_variance vp h_perfect
+
+/-!
+## TreePO: Calibrated DSL Upper Bound
+
+This re-exports the TreePO + calibration bound for external use.
+-/
+
+/-- Re-export: calibration RMSE representativeness assumption. -/
+abbrev calibration_rmse_representativeness :=
+  @CalibrationRMSEBound
+
+/-- Re-export: backward-compatible calibration assumption alias. -/
+abbrev calibration_axioms_representativeness :=
+  @CalibrationAxioms
+
+/-- Re-export: generic clustered confidence-interval coverage from an error event. -/
+abbrev clustered_confidence_interval_coverage_of_error_event_export :=
+  @clusteredConfidenceInterval_coverage_of_error_event
+
+/-- Re-export: judge-bias confidence-interval coverage from an error event. -/
+abbrev judge_bias_confidence_interval_coverage_of_error_event_export :=
+  @judgeBiasConfidenceInterval_coverage_of_error_event
+
+/-- Re-export: clustered judge-bias confidence-interval coverage from an error event. -/
+abbrev judge_clustered_bias_confidence_interval_coverage_of_error_event_export :=
+  @judgeClusteredBiasConfidenceInterval_coverage_of_error_event
+
+/-- Re-export: absolute-bias envelope from judge-bias confidence-interval membership. -/
+abbrev abs_true_bias_le_absbiasUpperBound_of_mem_biasConfidenceInterval_export :=
+  @abs_trueBias_le_absbiasUpperBound_of_mem_biasConfidenceInterval
+
+/-- Re-export: clustered absolute-bias envelope from clustered judge-bias interval membership. -/
+abbrev abs_true_bias_le_clusteredAbsbiasUpperBound_of_mem_clusteredBiasConfidenceInterval_export :=
+  @abs_trueBias_le_clusteredAbsbiasUpperBound_of_mem_clusteredBiasConfidenceInterval
+
+/-- Re-export: exact HT unbiasedness for `Exp` targets under Bernoulli inclusion. -/
+abbrev ht_exp_unbiased :=
+  @htExp_unbiased
+
+abbrev dsl_treepo_upper_bound_calibrated_pmf :=
+  @dsl_upperBound_treepo_calibrated_pmf
+
+/-- Re-export: TreePO upper bound with an explicit oracle-measurement term. -/
+abbrev dsl_treepo_upper_bound_with_oracleMeasurement :=
+  @dsl_upperBound_treepo_with_oracleMeasurement
+
+/-- Re-export: worst-case envelope with calibration + estimation error. -/
+abbrev treepo_gap_calibration_estimation_envelope :=
+  @treepo_gap_with_calibration_and_estimation
+
+/-- Re-export: worst-case envelope with oracle measurement + calibration + estimation. -/
+abbrev treepo_gap_oracleMeasurement_calibration_estimation_envelope :=
+  @treepo_gap_with_oracleMeasurement_calibration_and_estimation
+
+/-- Re-export: worst-case envelope with calibration + estimation + clipping. -/
+abbrev treepo_gap_calibration_estimation_clipping_envelope :=
+  @treepo_gap_with_calibration_estimation_clipping
+
+/-- Re-export: worst-case envelope with oracle measurement + calibration + estimation + clipping. -/
+abbrev treepo_gap_oracleMeasurement_calibration_estimation_clipping_envelope :=
+  @treepo_gap_with_oracleMeasurement_calibration_estimation_clipping
+
+/-- Re-export: absolute-gap DSL envelope from estimate-space assumptions. -/
+abbrev dsl_abs_gap_bound_from_estimate_export :=
+  @dsl_abs_gap_bound_from_estimate
+
+/-- Re-export: estimate-space envelope with oracle measurement. -/
+abbrev dsl_abs_gap_bound_from_estimate_with_oracleMeasurement_export :=
+  @dsl_abs_gap_bound_from_estimate_with_oracleMeasurement
+
+/-- Re-export: clipped-estimate DSL envelope. -/
+abbrev dsl_abs_gap_bound_from_clipped_estimate_export :=
+  @dsl_abs_gap_bound_from_clipped_estimate
+
+/-- Re-export: clipped-estimate DSL envelope with oracle measurement. -/
+abbrev dsl_abs_gap_bound_from_clipped_estimate_with_oracleMeasurement_export :=
+  @dsl_abs_gap_bound_from_clipped_estimate_with_oracleMeasurement
+
+/-- Re-export: one-shot high-probability envelope from calibration + estimation. -/
+abbrev dsl_abs_gap_bound_from_estimate_high_prob_export :=
+  @dsl_abs_gap_bound_from_estimate_high_prob
+
+/-- Re-export: one-shot high-probability envelope with oracle measurement. -/
+abbrev dsl_abs_gap_bound_from_estimate_high_prob_with_oracleMeasurement_export :=
+  @dsl_abs_gap_bound_from_estimate_high_prob_with_oracleMeasurement
+
+/-- Re-export: one-shot high-probability envelope with clipping. -/
+abbrev dsl_abs_gap_bound_from_clipped_estimate_high_prob_export :=
+  @dsl_abs_gap_bound_from_clipped_estimate_high_prob
+
+/-- Re-export: total-budget two-component one-shot envelope. -/
+abbrev dsl_abs_gap_bound_from_estimate_high_prob_total_export :=
+  @dsl_abs_gap_bound_from_estimate_high_prob_total
+
+/-- Re-export: total-budget three-component oracle-measurement envelope. -/
+abbrev dsl_abs_gap_bound_from_estimate_high_prob_with_oracleMeasurement_total_export :=
+  @dsl_abs_gap_bound_from_estimate_high_prob_with_oracleMeasurement_total
+
+/-- Re-export: total-budget three-component one-shot envelope. -/
+abbrev dsl_abs_gap_bound_from_clipped_estimate_high_prob_total_export :=
+  @dsl_abs_gap_bound_from_clipped_estimate_high_prob_total
+
+/-- Re-export: event-based validity for an explicit DSL bound object. -/
+abbrev dsl_bound_valid_from_events_export :=
+  @dsl_bound_valid_from_events
+
+/-- Re-export: event-based validity for an explicit DSL bound with oracle measurement. -/
+abbrev dsl_bound_valid_from_events_with_oracleMeasurement_export :=
+  @dsl_bound_valid_from_events_with_oracleMeasurement
+
+/-- Re-export: total-failure-budget form of DSL bound validity. -/
+abbrev dsl_bound_valid_from_events_total_export :=
+  @dsl_bound_valid_from_events_total
+
+/-- Re-export: total-failure-budget form of DSL bound validity with oracle measurement. -/
+abbrev dsl_bound_valid_from_events_with_oracleMeasurement_total_export :=
+  @dsl_bound_valid_from_events_with_oracleMeasurement_total
+
+/-- Re-export: event-based validity specialized to `computeDSLBound`. -/
+abbrev computeDSLBound_valid_from_events_export :=
+  @computeDSLBound_valid_from_events
+
+/-- Re-export: `computeDSLBound` validity with oracle measurement. -/
+abbrev computeDSLBound_valid_from_events_with_oracleMeasurement_export :=
+  @computeDSLBound_valid_from_events_with_oracleMeasurement
+
+/-- Re-export: pointwise `computeDSLBound` validity from confidence-interval membership. -/
+abbrev dsl_treepo_upper_bound_of_interval_membership_export :=
+  @dsl_upperBound_of_interval_membership
+
+/-- Re-export: pointwise `computeDSLBound` validity from confidence-interval membership with oracle measurement. -/
+abbrev dsl_treepo_upper_bound_of_interval_membership_with_oracleMeasurement_export :=
+  @dsl_upperBound_of_interval_membership_with_oracleMeasurement
+
+/-- Re-export: event-level `computeDSLBound` validity from a joint interval/calibration event. -/
+abbrev computeDSLBound_valid_from_joint_interval_event_export :=
+  @computeDSLBound_valid_from_joint_interval_event
+
+/-- Re-export: event-level `computeDSLBound` validity from a joint interval/calibration/oracle event. -/
+abbrev computeDSLBound_valid_from_joint_interval_event_with_oracleMeasurement_export :=
+  @computeDSLBound_valid_from_joint_interval_event_with_oracleMeasurement
+
+/-!
+## TreePO End-to-End Certificates
+-/
+
+/-- Re-export: generic loss-gap bridge with oracle measurement. -/
+abbrev treepo_loss_gap_with_oracleMeasurement_export :=
+  @treepo_loss_gap_with_oracleMeasurement
+
+/-- Re-export: generic exact-oracle end-to-end loss-gap bridge. -/
+abbrev treepo_loss_gap_of_exactOracle_export :=
+  @treepo_loss_gap_of_exactOracle
+
+/-- Re-export: DPO end-to-end certificate with oracle measurement. -/
+abbrev dpo_treepo_end_to_end_with_oracleMeasurement_export :=
+  @dpo_treepo_end_to_end_certificate_with_oracleMeasurement
+
+/-- Re-export: GRPO-PL end-to-end certificate with oracle measurement. -/
+abbrev grpo_pl_treepo_end_to_end_with_oracleMeasurement_export :=
+  @grpo_pl_treepo_end_to_end_certificate_with_oracleMeasurement
+
+/-- Re-export: GRPO-PL generator end-to-end certificate with oracle measurement. -/
+abbrev grpo_pl_treepo_end_to_end_gen_with_oracleMeasurement_export :=
+  @grpo_pl_treepo_end_to_end_gen_certificate_with_oracleMeasurement
+
+/-- Re-export: GRPO-RL end-to-end certificate with oracle measurement. -/
+abbrev grpo_rl_treepo_end_to_end_with_oracleMeasurement_export :=
+  @grpo_rl_treepo_end_to_end_certificate_with_oracleMeasurement
+
+/-!
+## TreePO Mergeable-Certificate Bridge
+-/
+
+/-- Deterministic upper-bound substitution for tree gap certificates. -/
+abbrev treepo_gap_transport_upper := @tree_gap_bound_transport_upper
+
+/-- Event-conditional upper-bound substitution for high-probability events. -/
+abbrev treepo_gap_transport_upper_prob := @tree_gap_bound_transport_upper_prob
+
+/-- DPO TreePO gap bound with externally supplied sketch upper bound. -/
+abbrev dpo_tree_gap_sketch_upper := @dpo_tree_gap_bounded_by_sketch_upper
+
+/-- GRPO-PL TreePO gap bound with externally supplied sketch upper bound. -/
+abbrev grpo_pl_tree_gap_sketch_upper := @grpo_pl_tree_gap_bounded_by_sketch_upper
+
+/-- GRPO-RL TreePO gap bound with externally supplied sketch upper bound. -/
+abbrev grpo_rl_tree_gap_sketch_upper := @grpo_rl_tree_gap_bounded_by_sketch_upper
+
+/-- KLL availability: hierarchical mergeability at fixed randomness. -/
+abbrev kll_hierarchical_mergeability_available_export :=
+  @kll_hierarchical_mergeability_available
+
+/-- GK availability: one-way mergeability in the Agarwal et al. interface. -/
+abbrev gk_one_way_mergeability_available_export :=
+  @gk_one_way_mergeability_available
 
 /-!
 ## Main Theorem 3: Naive Approach is Invalid
@@ -270,6 +599,48 @@ theorem high_accuracy_still_biased
 
 DSL is strictly better: it provides valid inference that the naive
 approach cannot, while still leveraging predictions for efficiency. -/
+theorem DSL_dominates_naive_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (E_mest : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E_mest)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E_mest)
+    (coverage_axioms : CoverageFromAsymptoticNormal μ d)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E_mest β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ) (hα : 0 < α ∧ α < 1)
+    (E_naive : ((Obs × Mis × Mis) → Fin d → ℝ) → Fin d → ℝ)
+    (h_true : MomentUnbiased (TrueMomentFromData m) E_naive β_star)
+    (h_bias : ∃ i, MomentBias m E_naive β_star i ≠ 0)
+    (hE_linear : ExpectationLinear E_naive)
+    : ValidInference μ β_hat_seq β_star centered_scaled_seq V CI_seq α ∧
+      ¬ MomentUnbiased (PredMomentFromData m) E_naive β_star := by
+  refine ⟨?_, ?_⟩
+  · exact DSL_valid_inference_from_assumptions μ E_mest h_consistent h_normal coverage_axioms
+      dbs m β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq α hα
+  · exact naive_estimator_biased_general m E_naive β_star h_true h_bias hE_linear
+
+/-- Comparison of DSL vs Naive approaches
+
+| Property | DSL | Naive |
+|----------|-----|-------|
+| Valid inference | ✓ Always | ✗ Rarely |
+| Efficiency | Better with good predictions | N/A (invalid) |
+| Requires prediction assumptions | ✗ No | ✓ Very strong |
+| Uses all data | ✓ Yes | ✓ Yes |
+| Needs expert labels | ✓ Sample only | ✗ None |
+
+DSL is strictly better: it provides valid inference that the naive
+approach cannot, while still leveraging predictions for efficiency. -/
 theorem DSL_dominates_naive
     {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
     {Obs Mis Con : Type*} {d : ℕ}
@@ -293,10 +664,44 @@ theorem DSL_dominates_naive
     (hE_linear : ExpectationLinear E)
     : ValidInference μ β_hat_seq β_star centered_scaled_seq V CI_seq α ∧
       ¬ MomentUnbiased (PredMomentFromData m) E β_star := by
+  exact DSL_dominates_naive_from_assumptions μ axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    coverage_axioms dbs m β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq
+    α hα E h_true h_bias hE_linear
+
+/-- Oracle-parameter comparison: DSL dominates naive inference. -/
+theorem DSL_dominates_naive_oracle_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (assumptions : DSLAssumptions Obs Mis Con)
+    (E_mest : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E_mest)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E_mest)
+    (coverage_axioms : CoverageFromAsymptoticNormal μ d)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_oracle : Fin d → ℝ)
+    (h_oracle : OracleTarget m E_mest β_oracle)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E_mest β_oracle)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ) (hα : 0 < α ∧ α < 1)
+    (E_naive : ((Obs × Mis × Mis) → Fin d → ℝ) → Fin d → ℝ)
+    (h_true : MomentUnbiased (TrueMomentFromData m) E_naive β_oracle)
+    (h_bias : ∃ i, MomentBias m E_naive β_oracle i ≠ 0)
+    (hE_linear : ExpectationLinear E_naive)
+    : ValidInference μ β_hat_seq β_oracle centered_scaled_seq V CI_seq α ∧
+      ¬ MomentUnbiased (PredMomentFromData m) E_naive β_oracle := by
   refine ⟨?_, ?_⟩
-  · exact DSL_valid_inference μ axioms coverage_axioms dbs m β_star V reg h_unbiased data_seq
-      β_hat_seq h_est centered_scaled_seq CI_seq α hα
-  · exact naive_estimator_biased_general m E β_star h_true h_bias hE_linear
+  · exact DSL_valid_inference_oracle_from_assumptions μ assumptions E_mest h_consistent h_normal
+      coverage_axioms m β_oracle h_oracle V reg h_unbiased data_seq β_hat_seq h_est
+      centered_scaled_seq CI_seq α hα
+  · exact naive_estimator_biased_general m E_naive β_oracle h_true h_bias hE_linear
 
 /-- Oracle-parameter comparison: DSL dominates naive inference. -/
 theorem DSL_dominates_naive_oracle
@@ -323,14 +728,55 @@ theorem DSL_dominates_naive_oracle
     (hE_linear : ExpectationLinear E)
     : ValidInference μ β_hat_seq β_oracle centered_scaled_seq V CI_seq α ∧
       ¬ MomentUnbiased (PredMomentFromData m) E β_oracle := by
-  refine ⟨?_, ?_⟩
-  · exact DSL_valid_inference_oracle μ assumptions axioms coverage_axioms m β_oracle h_oracle V reg
-      h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq α hα
-  · exact naive_estimator_biased_general m E β_oracle h_true h_bias hE_linear
+  exact DSL_dominates_naive_oracle_from_assumptions μ assumptions axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    coverage_axioms m β_oracle h_oracle V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq
+    CI_seq α hα E h_true h_bias hE_linear
 
 /-!
 ## Application Guidelines
 -/
+
+/-- When to use DSL:
+
+1. **Always** when using LLM/ML predictions in downstream analysis
+2. **Especially** when:
+   - Prediction accuracy < 99%
+   - Errors may correlate with analysis variables
+   - Valid inference is important
+   - Resources allow for some expert coding
+
+The cost of DSL is minimal (need some expert labels), and the benefit
+is valid inference. There is no reason to use the naive approach. -/
+theorem DSL_guidelines_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (E_mest : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E_mest)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E_mest)
+    (coverage_axioms : CoverageFromAsymptoticNormal μ d)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E_mest β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ) (hα : 0 < α ∧ α < 1)
+    (E_naive : ((Obs × Mis × Mis) → Fin d → ℝ) → Fin d → ℝ)
+    (h_true : MomentUnbiased (TrueMomentFromData m) E_naive β_star)
+    (h_bias : ∃ i, MomentBias m E_naive β_star i ≠ 0)
+    (hE_linear : ExpectationLinear E_naive)
+    : ValidInference μ β_hat_seq β_star centered_scaled_seq V CI_seq α ∧
+      ¬ MomentUnbiased (PredMomentFromData m) E_naive β_star := by
+  exact DSL_dominates_naive_from_assumptions μ E_mest h_consistent h_normal coverage_axioms dbs m
+    β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq α hα E_naive h_true
+    h_bias hE_linear
 
 /-- When to use DSL:
 
@@ -366,8 +812,11 @@ theorem DSL_guidelines
     (hE_linear : ExpectationLinear E)
     : ValidInference μ β_hat_seq β_star centered_scaled_seq V CI_seq α ∧
       ¬ MomentUnbiased (PredMomentFromData m) E β_star := by
-  exact DSL_dominates_naive μ axioms coverage_axioms dbs m β_star V reg h_unbiased data_seq
-    β_hat_seq h_est centered_scaled_seq CI_seq α hα E h_true h_bias hE_linear
+  exact DSL_guidelines_from_assumptions μ axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    coverage_axioms dbs m β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq
+    α hα E h_true h_bias hE_linear
 
 /-- Sample size recommendations:
 
@@ -452,6 +901,49 @@ theorem cross_fitting_variation
 
 These results establish DSL as the correct approach for using
 automated annotations in statistical inference. -/
+theorem formal_results_summary_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (E_mest : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E_mest)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E_mest)
+    (coverage_axioms : CoverageFromAsymptoticNormal μ d)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E_mest β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ) (hα : 0 < α ∧ α < 1)
+    (E_naive : ((Obs × Mis × Mis) → Fin d → ℝ) → Fin d → ℝ)
+    (h_true : MomentUnbiased (TrueMomentFromData m) E_naive β_star)
+    (h_bias : ∃ i, MomentBias m E_naive β_star i ≠ 0)
+    (hE_linear : ExpectationLinear E_naive)
+    : ValidInference μ β_hat_seq β_star centered_scaled_seq V CI_seq α ∧
+      ¬ MomentUnbiased (PredMomentFromData m) E_naive β_star := by
+  exact DSL_dominates_naive_from_assumptions μ E_mest h_consistent h_normal coverage_axioms dbs m
+    β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq α hα E_naive h_true
+    h_bias hE_linear
+
+/-- Summary of key formal results in this formalization:
+
+| Theorem | Location | Description |
+|---------|----------|-------------|
+| DSL_unbiased | DSLEstimator | E[Ỹ - Y | X] = 0 |
+| DSL_consistent | AsymptoticTheory | β̂_DSL →p β* |
+| DSL_asymptotic_normal | AsymptoticTheory | √N(β̂_DSL - β*) →d N(0,V) |
+| variance_decreases_with_n | VarianceDecomposition | More n → smaller variance |
+| variance_decreases_with_accuracy | VarianceDecomposition | Better predictions → smaller variance |
+| bias_with_high_accuracy | BiasAnalysis | 90% accuracy can still give bias |
+| naive_proportion_biased | CategoryProportion | Naive estimator is biased |
+
+These results establish DSL as the correct approach for using
+automated annotations in statistical inference. -/
 theorem formal_results_summary
     {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
     {Obs Mis Con : Type*} {d : ℕ}
@@ -475,8 +967,11 @@ theorem formal_results_summary
     (hE_linear : ExpectationLinear E)
     : ValidInference μ β_hat_seq β_star centered_scaled_seq V CI_seq α ∧
       ¬ MomentUnbiased (PredMomentFromData m) E β_star := by
-  exact DSL_dominates_naive μ axioms coverage_axioms dbs m β_star V reg h_unbiased data_seq
-    β_hat_seq h_est centered_scaled_seq CI_seq α hα E h_true h_bias hE_linear
+  exact formal_results_summary_from_assumptions μ axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    coverage_axioms dbs m β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq
+    α hα E h_true h_bias hE_linear
 
 end DSL
 

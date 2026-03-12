@@ -1,0 +1,749 @@
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!50!black,
+    citecolor=blue!50!black,
+    urlcolor=blue!50!black
+}
+
+\graphicspath{
+    {../../outputs/}
+    {../../doc/old/figures/cld/}
+    {../figures/}
+}
+
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+\newtheorem{remark}{Remark}
+\newtheorem{assumption}{Assumption}
+\newtheorem{example}{Example}
+\newtheorem{lemma}{Lemma}
+
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Prob}{\mathbb{P}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\X}{\mathcal{X}}
+\newcommand{\Y}{\mathcal{Y}}
+\newcommand{\A}{\mathcal{A}}
+\newcommand{\metric}{d_{\Y}}
+\newcommand{\fstar}{f^\ast}
+\newcommand{\concat}{\oplus}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\title{C-TreePO: Compression Tree Preference Optimization}
+\author{Mitchell Linegar et al.}
+\date{February 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Preference optimization on long documents is constrained by context limits and oracle cost.
+This draft introduces \emph{Compression Tree Preference Optimization} (C-TreePO), where one \emph{Compression Tree} (C-Tree) is the fundamental unit of representation, auditing, and optimization.
+The argument proceeds in two stages. First, we use a small mergeable-sketch toy problem to show the core mechanism: when retained sketch support is below the interaction order of the target, failure is structural; when retained support is sufficient, recovery is stable.
+Second, we lift the same mechanism to semantic trees and connect it to preference objectives (DPO, GRPO-PL, GRPO-RL), design-based estimation, and event-based certificates.
+The toy symbols are pedagogical only; the main results concern oracle-preserving tree compression, objective equivalence, and end-to-end estimable certificates.
+The draft includes local-law figures, mergeable validation plots, and an appendix proof map with Lean crosswalk references.
+\end{abstract}
+
+\section{Introduction}\label{sec:introduction}
+
+Long-document preference optimization presents a practical contradiction. The quality signal we care about is global and often interaction-heavy, while oracle access is local, expensive, and context-limited. Full-document comparisons are accurate but costly; truncation is cheaper but can distort the utility that defines the learning problem. The central question is therefore structural: \emph{can we decompose optimization so that local checks still control global preference behavior?}
+
+C-TreePO answers this question by replacing ``one long context'' with a recursively constructed \emph{Compression Tree}. An individual tree instance is a \textbf{C-Tree}, and the method family is \textbf{C-TreePO} (Compression Tree Preference Optimization). Each node stores a bounded summary state, optimization and auditing are performed over these states, and guarantees are written as explicit statements about oracle discrepancy between original documents and tree outputs. At system scale, multiple C-Trees form the \textbf{Semantic Forests} layer, which is the natural focus of a separate systems paper.
+
+The claim of this draft is intentionally narrow and explicit. The local mechanism that makes mergeable summaries correct in numeric settings also controls semantic preference optimization when local laws are enforced, assumptions are stated transparently, and design-based estimation is used to connect sampled audits to population-level objective gaps.
+
+The reading order is important for interpretability. Section~\ref{sec:mergeable-intuition} is a toy numeric warmup used only to expose the interaction mechanism in the clearest possible setting. The core C-TreePO method and guarantees are in Sections~\ref{sec:semantic-lift}--\ref{sec:estimation}.
+
+\section{Framework and Local Laws}\label{sec:framework}
+
+\subsection{Setup}
+
+We now fix the main-text setup as explicitly as possible. Let $x\in\X$ be a document, let $g$ be a (possibly stochastic) compression operator, and let $\fstar:\X\to\Y$ be the oracle returning task values of interest. A C-Tree applies $g$ at leaves and then recursively on concatenated child summaries. We compare strings in oracle space with metric $\metric$.
+
+\begin{assumption}[Fixed C-Tree Structure]\label{ass:fixed-structure}
+For each document $x$, the C-Tree topology and leaf partition are treated as fixed throughout optimization and auditing in the main text.
+\end{assumption}
+
+Assumption~\ref{ass:fixed-structure} is a notational simplification, not a restriction of principle. It isolates representation quality from partition randomness so the local-to-global argument can be read directly. Appendix~\ref{app:fixed-partition} then shows the same preservation logic holds for any deterministic partition rule that maps each document to a fixed realized tree.
+
+\begin{definition}[Oracle Equivalence]
+For strings/spans $u,v$, define $u\sim v$ iff $\metric(\fstar(u),\fstar(v))=0$.
+\end{definition}
+
+\begin{assumption}[Context Compatibility]\label{ass:context-compat}
+For all strings $u,v,w$, if $u\sim v$ then both $w\concat u\sim w\concat v$ and $u\concat w\sim v\concat w$.
+\end{assumption}
+
+The C-Tree audit uses three local consistency laws. They are written locally because each is checked on bounded prompts, but together they imply global control over the tree output:
+\begin{align*}
+\text{(C1) Sufficiency:}\quad & g(b)\sim b\quad\text{for every realized leaf }b,\\
+\text{(C2) Idempotence:}\quad & g(s)\sim s\quad\text{for every }s\in\operatorname{range}(g),\\
+\text{(C3) Merge Consistency:}\quad &
+u\concat v\sim g(u\concat v)\sim g\big(g(u)\concat g(v)\big)\quad\text{for all }u,v.
+\end{align*}
+
+The role of each law is operational. C1 asserts that a leaf summary preserves oracle-relevant content. C2 prevents drift when already-compressed states are reprocessed. C3 is the compositional law that allows local guarantees to propagate upward through internal merges.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{05_full.pdf}
+    \caption{Spotlight view of the three local laws on a realized tree.
+    Gray nodes are context; colored panels are the auditable local prompts.
+    This is the operational object for both certification and optimization.}
+    \label{fig:local-laws-full}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{02_sufficiency.pdf}
+        \caption{C1}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{03_idempotence.pdf}
+        \caption{C2}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{04_merge.pdf}
+        \caption{C3}
+    \end{subfigure}
+    \caption{Law-specific panels reused from the slides.
+    Each panel corresponds to a bounded context that can be sampled and scored.}
+    \label{fig:local-laws-panels}
+\end{figure}
+
+\subsection{Proof Strategy}
+
+The paper's proofs are intentionally constructive. Each global claim is decomposed into local invariance steps involving tree structure, oracle measurability, and design-based estimation, then recomposed by induction or triangle inequality. To make this auditable, Appendix~\ref{app:proof-map} provides a map from each result to its full proof location, and each appendix proof cites the corresponding Lean theorem anchors.
+
+\section{Mergeable Intuition First}\label{sec:mergeable-intuition}
+
+We begin with a controlled numeric setting because the sufficiency boundary is explicit and easy to visualize before moving to semantics.
+In this section only, $k$ denotes a threshold order in a toy event-count target and $m$ denotes retained sketch support (the number of top events the summary can preserve across merges).
+These are pedagogical symbols for intuition, not the primary optimization variables of C-TreePO.
+
+Consider targets
+\[
+\theta_k = P(\text{count}\ge k\mid\text{spike}),
+\]
+with repeated aggregation over chunked documents. The key question is whether a bounded sketch retains enough structure to preserve threshold events after multiple merges.
+
+\subsection{Toy mechanism}
+
+\begin{definition}[Order Sufficiency]
+In the toy threshold target $\theta_k$, a top-$m$ merge-safe sketch is order-sufficient when $m\ge k$.
+\end{definition}
+
+\begin{proposition}[Failure Boundary for $m<k$]\label{prop:m_lt_k}
+In the toy threshold setting above, if $m<k$, there exist documents with identical top-$m$ signatures but different values of $\mathbf{1}\{\text{count}\ge k\}$.
+Hence estimators restricted to that sketch class are information-limited.
+\end{proposition}
+
+The intuition is direct. If $k=5$ and $m=4$, the sequences
+\[
+r^{-}=(1,1,1,1,0,\ldots,0),\qquad r^{+}=(1,1,1,1,1,0,\ldots,0)
+\]
+have identical top-$4$ sketches but different threshold labels $\mathbf{1}\{\text{count}\ge 5\}$.
+The ambiguity is structural and remains even with infinite data.
+
+\subsection{Step-by-step motivation from mergeable sketches}
+
+The easiest starting point is an additive strawman. If the target utility were additively separable across tree children, then local summaries could be scored independently and aggregated without interaction terms. In that world, a mean-of-means style estimator would be natural because no cross-child information is needed beyond local expectations.
+
+The threshold target immediately breaks this logic. Let two child summaries carry event counts $(c_L,c_R)$ and define
+\[
+U(c_L,c_R)=\mathbf{1}\{c_L+c_R\ge 5\}.
+\]
+Here the marginal value of changing $c_R$ depends on $c_L$, so utility is not additively separable. For example, moving from $(4,0)$ to $(4,1)$ flips the label, while moving from $(0,0)$ to $(0,1)$ does not. The global decision is interaction-driven.
+
+Once this is clear, the sketch boundary is immediate. If the merge state only retains top-$m$ events with $m<5$, the two documents above can collapse to the same retained state, so the threshold cannot be recovered. If $m\ge5$, retained support is sufficient to distinguish the crossing event. This is exactly the transition captured by Proposition~\ref{prop:m_lt_k}.
+
+This is the same structural point emphasized in the mergeable-sketch literature. Distinct counting is not additively separable across partitions because overlap terms matter, and quantile queries are not additively separable because global rank is not recoverable from chunk medians alone. Mergeable sketches such as HyperLogLog and quantile sketches succeed by carrying compact interaction-aware state through merges. C-TreePO uses the same principle for semantic objectives: local states must preserve the interaction-bearing information required by the oracle utility.
+
+\begin{figure}[t]
+    \centering
+    \setlength{\fboxsep}{6pt}
+    \fbox{%
+    \begin{minipage}[t]{0.30\linewidth}
+    \small
+    \textbf{Additive strawman.}
+    If utility were additively separable, local summaries could be scored independently and summed. This motivates mean-of-means style aggregation, but only when no interaction terms are needed.
+    \[
+    U_{\mathrm{add}}(c_L,c_R)=h_L(c_L)+h_R(c_R)
+    \]
+    \end{minipage}}
+    \hfill
+    \fbox{%
+    \begin{minipage}[t]{0.30\linewidth}
+    \small
+    \textbf{Interaction target.}
+    For threshold utility, interactions control the label.
+    \[
+    U(c_L,c_R)=\mathbf{1}\{c_L+c_R\ge5\}
+    \]
+    The pair $(4,0)$ maps to $0$, while $(4,1)$ maps to $1$.
+    \end{minipage}}
+    \hfill
+    \fbox{%
+    \begin{minipage}[t]{0.30\linewidth}
+    \small
+    \textbf{Sketch boundary.}
+    With top-$m$ state and $m<5$, both cases can collapse to the same retained support. With $m\ge5$, the crossing event is representable, so the threshold is recoverable.
+    \[
+    m<k\Rightarrow\text{collapse},\quad m\ge k\Rightarrow\text{recovery}
+    \]
+    \end{minipage}}
+    \caption{Step-by-step intuition for targets that are not additively separable and the mergeable-support boundary.}
+    \label{fig:stepwise-mergeable-intuition}
+\end{figure}
+
+\subsection{Basic numerical examples}
+
+Table~\ref{tab:numeric-intuition} summarizes the same mechanism in current runs. The supported regime $m\ge k$ delivers stable low bias, while the unsupported regime $m<k$ produces a persistent penalty that does not vanish with sample size.
+
+\begin{table}[t]
+    \centering
+    \small
+    \begin{tabular}{p{0.27\linewidth}p{0.17\linewidth}p{0.16\linewidth}p{0.32\linewidth}}
+        \toprule
+        Setting & Mean abs bias & Target capture & Interpretation \\
+        \midrule
+        Naive majority baseline & $0.4375$ & n/a & High-bias non-merge-safe baseline \\
+        Naive mean-of-means baseline & $0.5391$ & n/a & Not additively separable target failure \\
+        Supported sketch ($m=k$) & $\sim 0.036$--$0.038$ & high & Stable low-bias regime \\
+        Unsupported sketch ($m<k$, $k=5$) & exact $+0.4405$ penalty & low & Structural insufficiency \\
+        Fine leaves, low budget ($s=1,b\le4$) & $\approx 0.20$ & $0.00$ & Retention failure despite fine leaves \\
+        Fine leaves, sufficient budget ($s=1,b=6$) & $\approx 0.0355$ & $1.00$ & Recovery once support is retained \\
+        \bottomrule
+    \end{tabular}
+    \caption{Numerical intuition from
+    \texttt{outputs/mergeable\_k\_m\_phase\_summary.json} and
+    \texttt{outputs/mergeable\_chunk\_quality\_sweep\_summary.json}.}
+    \label{tab:numeric-intuition}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{mergeable_k_m_phase.png}
+    \caption{Phase behavior across sketch order and target order.
+    The dominant boundary is $m<k$ versus $m\ge k$.}
+    \label{fig:km-phase}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{mergeable_chunk_quality_sweep.png}
+    \caption{Chunk quality and budget sweep.
+    Leaf quality and retained mass are separate control axes.}
+    \label{fig:chunk-quality}
+\end{figure}
+
+\section{From Numeric Sketches to Semantic C-Trees}\label{sec:semantic-lift}
+
+The semantic lift is a statement about structure, not modality. Figure~\ref{fig:stepwise-mergeable-intuition} gives the numeric template: additively separable surrogates fail when the target depends on interactions, and recovery occurs once the merge state carries enough support to represent those interactions. The toy symbols $m$ and $k$ are no longer needed after this point; the method-level results are written directly in terms of oracle equivalence, tree composition laws, and preference objectives. In numeric settings the propagated state is a merge-safe sketch, while in semantic settings it is a compressed textual state. In both cases the same three laws govern composition. C1 is the sufficiency law at leaves, C2 is the stability law under reprocessing, and C3 is the merge law that allows local guarantees to compose along internal edges.
+
+In numeric settings, insufficiency means missing higher-order count information. In semantic settings, insufficiency means missing interaction-bearing information such as cross-span references, ordering, and boundary conditions that only become decision-relevant when spans are combined. This is precisely why additive baselines fail in Table~\ref{tab:numeric-intuition}: the target depends on interactions that cannot be reconstructed from independent leaf scores alone.
+
+\begin{definition}[Additively Separable and Not Additively Separable Tree Utilities]\label{def:nonseparable}
+A tree-level utility $U$ is additively separable if there exist leaf-local functions $\{h_u\}$ such that
+\[
+U(T)=\sum_{u\in\mathrm{Leaves}(T)} h_u(s_u)
+\]
+for all realized trees in the support. A utility is not additively separable when no such representation exists and interaction terms are required.
+\end{definition}
+
+\begin{example}[Explicit Not Additively Separable Threshold Utility]\label{ex:threshold-nonseparable}
+Let two child states carry event counts $(c_L,c_R)$ and define
+\[
+U(c_L,c_R)=\mathbf{1}\{c_L+c_R\ge 5\}.
+\]
+This utility is not additively separable because the marginal effect of increasing $c_R$ by one depends on $c_L$: moving $c_R$ from $0$ to $1$ flips utility when $c_L=4$, but not when $c_L=0$. The same interaction appears in the mergeable-sketch boundary. With $m=4$ and $k=5$, two documents can share the same top-$4$ sketch state yet have utilities $0$ and $1$, exactly as in Proposition~\ref{prop:m_lt_k}. The semantic analogue is a claim-evidence pair where neither span alone determines correctness, but the pair does.
+\end{example}
+
+For this reason C-TreePO is not a bag-of-node surrogate. The tree utility must allow interaction terms, and the role of the local laws is to preserve exactly the interaction-bearing information needed by the oracle objective:
+\[
+U(T)=\sum_{u\in T}\phi_u + \sum_{(u,v)\in\mathcal{E}(T)}\psi_{uv} + \sum_{p\in\mathcal{P}(T)}\chi_p,
+\]
+where $\psi_{uv}$ and $\chi_p$ capture sibling and path interactions.
+
+\section{C-TreePO as Preference Optimization}\label{sec:po-mapping}
+
+\subsection{Data-generating object}
+
+For document $x$, Assumption~\ref{ass:fixed-structure} gives a fixed realized tree structure, and policy $\pi_\theta$ induces randomness only through node-level generation, compression, and scoring decisions on that structure. We write the resulting random C-Tree as $T\sim\pi_\theta(\cdot\mid x)$:
+\[
+T = \mathrm{BuildTree}(x,\mathcal{T}(x);\theta,\xi),
+\]
+where $\xi$ denotes internal stochasticity. Preference supervision is collected over paired trees $(T^+,T^-)$.
+
+The same formal mapping extends to any deterministic partition rule $\Pi$ with $x\mapsto\mathcal{T}_\Pi(x)$, because conditioning on $\mathcal{T}_\Pi(x)$ returns the identical fixed-structure argument. Appendix~\ref{app:fixed-partition} gives the explicit statement and proof.
+
+\subsection{Objective layer}
+
+For pairwise optimization (DPO style), the tree-level objective is:
+\[
+\mathcal{L}_{\mathrm{DPO}}(\theta)
+= -\E\!\left[\log\sigma\!\left(
+\beta\log\frac{\pi_\theta(T^+\mid x)}{\pi_{\mathrm{ref}}(T^+\mid x)}
+-\beta\log\frac{\pi_\theta(T^-\mid x)}{\pi_{\mathrm{ref}}(T^-\mid x)}
+\right)\right].
+\]
+Listwise and RL-style objectives use tree groups and tree-indexed rank/reward definitions analogously.
+
+\subsection{Core guarantees}
+
+\begin{theorem}[Preservation Under Local Laws]\label{thm:preservation}
+Assume C1--C3 hold on realized C-Tree leaves and internal edges.
+Then the expected oracle distortion between the C-Tree output and the original document is zero:
+\[
+\E\left[\metric\big(\fstar(Z^{(R)}(x)),\fstar(x)\big)\right]=0\quad\text{for }R\ge1.
+\]
+\end{theorem}
+
+The proof is inductive over tree structure and rounds. C1 handles leaves, C3 transports equivalence across merges, and C2 controls re-summarization rounds. The corresponding Lean theorem is \texttt{multi\_round\_proper}.
+
+\begin{theorem}[Preference-Objective Equivalence]\label{thm:equiv}
+Under oracle-measurability/indexing conditions for policies, generators, and rewards/rankers,
+training objectives on C-Tree summaries equal corresponding objectives on originals.
+For nonzero distortion $\Delta_R$, objective differences satisfy method-specific Lipschitz bounds:
+\[
+\left|\E[\mathcal{L}(X)]-\E[\mathcal{L}(Z)]\right| \le L\,\Delta_R.
+\]
+\end{theorem}
+
+Lean anchors for Theorem~\ref{thm:equiv} are \texttt{dpo\_equivalence}, \texttt{grpo\_equivalence}, \texttt{grpo\_rl\_equivalence}, and \texttt{unified\_preference\_gap\_bounded}.
+
+\begin{theorem}[End-to-End C-TreePO Certificate]\label{thm:e2e}
+With logged propensities and design-based sampling,
+Horvitz--Thompson style estimators of C-Tree objective terms are unbiased (or controlled in clipped/noisy variants),
+and method-level DPO/GRPO gap certificates follow by composition.
+\end{theorem}
+
+\subsection{Map of Full Proofs}
+
+Table~\ref{tab:proof-map-main} shows where each complete proof appears in the appendix.
+The detailed theorem-to-Lean crosswalk is moved to Appendix~\ref{app:lean-crosswalk}.
+A supporting extension theorem covering arbitrary deterministic fixed partition rules appears in Appendix~\ref{app:fixed-partition}.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{p{0.42\linewidth}p{0.45\linewidth}}
+\toprule
+Result in Main Text & Full proof location \\
+\midrule
+Proposition~\ref{prop:m_lt_k} (failure boundary) & Appendix~\ref{app:proof-m-lt-k} \\
+Theorem~\ref{thm:preservation} (local laws $\Rightarrow$ preservation) & Appendix~\ref{app:proof-preservation} \\
+Theorem~\ref{thm:equiv} (preference-objective equivalence and gap bound) & Appendix~\ref{app:proof-equivalence} \\
+Theorem~\ref{thm:e2e} (end-to-end certificate) & Appendix~\ref{app:proof-e2e} \\
+\bottomrule
+\end{tabular}
+\caption{Map of where each full proof is written out in detail.}
+\label{tab:proof-map-main}
+\end{table}
+
+C-TreePO is best described as a compression-tree data and estimation framework that enables standard preference optimizers with explicit distortion and estimation certificates.
+
+\section{Empirical Pattern Summary}\label{sec:empirics}
+
+\subsection{Nonlanguage transfer and coverage behavior}
+
+The same structural behavior appears across ICU, intrusion, manufacturing, and ECG scenarios.
+Table~\ref{tab:nonlanguage-summary} reports representative aligned-bias and coverage recovery from budget $b=1$ to $b=8$.
+
+\begin{table}[t]
+    \centering
+    \small
+    \begin{tabular}{p{0.38\linewidth}p{0.26\linewidth}p{0.26\linewidth}}
+        \toprule
+        Scenario & Aligned abs bias ($b=1 \rightarrow 8$) & Coverage ($b=1 \rightarrow 8$) \\
+        \midrule
+        ICU alarm stream & $0.10 \rightarrow 0.0281$ & $0.00 \rightarrow 0.95$ \\
+        Network intrusion bursts & $0.25 \rightarrow 0.0516$ & $0.00 \rightarrow 0.933$ \\
+        ECG arrhythmia monitor & $0.10 \rightarrow 0.0382$ & $0.00 \rightarrow 0.933$ \\
+        Manufacturing defect line & $0.03 \rightarrow 0.0187$ & $1.00 \rightarrow 1.00$ \\
+        \bottomrule
+    \end{tabular}
+    \caption{Representative values from
+    \texttt{outputs/mergeable\_nonlanguage\_suite\_summary.json} and
+    \texttt{outputs/mergeable\_nonlanguage\_coverage\_summary.json}.}
+    \label{tab:nonlanguage-summary}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{mergeable_nonlanguage_suite.png}
+    \caption{Nonlanguage suite: same mechanism across distinct ordered-signal domains.}
+    \label{fig:nonlanguage-suite}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{mergeable_nonlanguage_coverage.png}
+    \caption{Coverage recovery with improved retained support.
+    Severe undercoverage at low support is a structural warning signal.}
+    \label{fig:nonlanguage-coverage}
+\end{figure}
+
+\subsection{Failure attribution}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{mergeable_complexity_ladder.png}
+    \caption{Complexity ladder with targeted ablations.
+    Positive controls remain stable; missing-stat and wrong-chunker variants fail in predicted regimes.}
+    \label{fig:complexity-ladder}
+\end{figure}
+
+\section{Estimation, Auditing, and Honesty}\label{sec:estimation}
+
+C-TreePO relies on sampled oracle queries.
+For queried unit $i$ with inclusion indicator $Z_i$, propensity $\pi_i$, and contribution $R_i$, the HT estimator is:
+\[
+\hat{J}_{\mathrm{HT}} = \frac{1}{n}\sum_i \frac{Z_i}{\pi_i}R_i.
+\]
+
+Adaptive chunking and learned judges introduce interference paths.
+To keep evaluation valid, reporting must be honest with respect to adaptation roles (chunker, summarizer, oracle): adaptation on train-role partitions, evaluation on held-out role intersections.
+The same discipline applies to simulation sweeps with tunable local-law weights: hyperparameter selection belongs on a validation split, and the paper's quantitative claims should be reported on a disjoint test split. Any plots that optimize on the same held-out slice they report are exploratory diagnostics rather than confirmatory evidence.
+
+A practical bound stack decomposes target error into calibration, estimation, and clipping envelopes.
+For true gap $G^\ast$, judge-view $G^J$, sampled estimate $G^E$, and clipped estimate $G^C$:
+\[
+|G^\ast-G^C| \le |G^\ast-G^J| + |G^J-G^E| + |G^E-G^C|.
+\]
+Event-based concentration and union composition then yield one-shot high-probability certificates.
+
+\section{Scope and Relation to Semantic Forests}\label{sec:scope}
+
+C-TreePO is intended for long-context settings in which full-document oracle usage is too expensive, local bounded checks are feasible, and utility-relevant information can be propagated through compression states.
+
+Likely failure modes include irreducibly nonlocal tasks, severe support collapse, and unstable calibration transfer.
+
+This paper should own the method and certificate core (local laws, objective mapping, estimation guarantees).
+The Semantic Forests paper should own system-scale orchestration, deployment engineering, and broad cross-domain throughput/robustness analysis.
+
+\section{Conclusion}\label{sec:conclusion}
+
+C-TreePO provides a concrete local-to-global route for long-document preference optimization.
+The draft's argument is intentionally staged: mergeable intuition first, numeric evidence next, semantic lift after, then formal preference and estimation mapping.
+The resulting picture is pragmatic: local checks become optimization signals, design-based estimators control uncertainty, and global preference claims are made through explicit certificates rather than implicit trust in truncation.
+
+\appendix
+
+\section{Proof Map and Lean Crosswalk}\label{app:proof-map}
+
+\subsection{Proof Map}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{0.34\linewidth}p{0.24\linewidth}p{0.36\linewidth}}
+\toprule
+Result & Appendix proof section & Lean reference section \\
+\midrule
+Theorem~\ref{thm:fixed-partition} & Appendix~\ref{app:fixed-partition} & Appendix~\ref{app:lean-crosswalk} \\
+Proposition~\ref{prop:m_lt_k} & Appendix~\ref{app:proof-m-lt-k} & Appendix~\ref{app:lean-crosswalk} \\
+Theorem~\ref{thm:preservation} & Appendix~\ref{app:proof-preservation} & Appendix~\ref{app:lean-crosswalk} \\
+Theorem~\ref{thm:equiv} & Appendix~\ref{app:proof-equivalence} & Appendix~\ref{app:lean-crosswalk} \\
+Theorem~\ref{thm:e2e} & Appendix~\ref{app:proof-e2e} & Appendix~\ref{app:lean-crosswalk} \\
+\bottomrule
+\end{tabular}
+\caption{Navigation map for all full proofs in this draft.}
+\end{table}
+
+\subsection{Lean Crosswalk}\label{app:lean-crosswalk}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{0.34\linewidth}p{0.30\linewidth}p{0.30\linewidth}}
+\toprule
+Paper result & Lean theorem name(s) & Lean file \\
+\midrule
+Theorem~\ref{thm:fixed-partition} &
+\texttt{multi\_round\_proper} (instantiated for arbitrary fixed tree) &
+\texttt{lean3/FormalProofs/OPT/ExpectationTheory.lean} \\
+
+Theorem~\ref{thm:preservation} &
+\texttt{multi\_round\_proper} &
+\texttt{lean3/FormalProofs/OPT/ExpectationTheory.lean} \\
+
+Theorem~\ref{thm:equiv} (exact case) &
+\texttt{dpo\_equivalence}, \texttt{grpo\_equivalence}, \texttt{grpo\_rl\_equivalence} &
+\texttt{lean3/FormalProofs/OPT/PreferenceLearning.lean} \\
+
+Theorem~\ref{thm:equiv} (gap bound) &
+\texttt{unified\_preference\_gap\_bounded} &
+\texttt{lean3/FormalProofs/OPT/PreferenceBounds.lean} \\
+
+Theorem~\ref{thm:e2e} (objective unbiasedness) &
+\texttt{treepo\_objective\_unbiased}, \texttt{treepo\_distortion\_unbiased} &
+\texttt{lean3/FormalProofs/DSL/TreePOEndToEnd.lean} \\
+
+Theorem~\ref{thm:e2e} (method certificates) &
+\texttt{dpo\_treepo\_end\_to\_end\_certificate}, \texttt{grpo\_pl\_treepo\_end\_to\_end\_certificate}, \texttt{grpo\_rl\_treepo\_end\_to\_end\_certificate} &
+\texttt{lean3/FormalProofs/DSL/TreePOEndToEnd.lean} \\
+
+Sketch-transport component used in Theorem~\ref{thm:e2e} discussion &
+\texttt{dpo\_tree\_gap\_bounded\_by\_sketch\_upper}, \texttt{grpo\_pl\_tree\_gap\_bounded\_by\_sketch\_upper}, \texttt{grpo\_rl\_tree\_gap\_bounded\_by\_sketch\_upper} &
+\texttt{lean3/FormalProofs/DSL/MergeableCertificates.lean} \\
+\bottomrule
+\end{tabular}
+\caption{Theorem-to-Lean crosswalk (moved to appendix).}
+\end{table}
+
+\section{Fixed-Partition Extension}\label{app:fixed-partition}
+
+\begin{theorem}[Extension to Any Deterministic Fixed Partition]\label{thm:fixed-partition}
+Let $\Pi$ be any deterministic rule that maps each document $x$ to a finite ordered rooted tree $\mathcal{T}_\Pi(x)$ with contiguous leaves. For each $x$, construct C-Tree summaries on $\mathcal{T}_\Pi(x)$ and assume C1--C3 hold almost surely on all realized leaf and merge calls. Then for every round $R\ge 1$,
+\[
+\E\!\left[\metric\!\big(\fstar(Z_\Pi^{(R)}(x)),\fstar(x)\big)\,\middle|\,x\right]=0.
+\]
+Consequently, for any distribution over documents $X$,
+\[
+\E\!\left[\metric\!\big(\fstar(Z_\Pi^{(R)}(X)),\fstar(X)\big)\right]=0.
+\]
+\end{theorem}
+
+\begin{proof}
+Fix $x$ and condition on the realized tree $\mathcal{T}_\Pi(x)$. Because $\Pi$ is deterministic, the tree is fixed under this conditioning, so Theorem~\ref{thm:preservation} applies directly and yields
+\[
+\E\!\left[\metric\!\big(\fstar(Z_\Pi^{(R)}(x)),\fstar(x)\big)\,\middle|\,x,\mathcal{T}_\Pi(x)\right]=0.
+\]
+Since $\mathcal{T}_\Pi(x)$ is a measurable function of $x$, the same equality holds conditioning only on $x$. Taking expectation over $X$ and applying the tower property gives the unconditional statement.
+\end{proof}
+
+Lean correspondence for Theorem~\ref{thm:fixed-partition} follows from the same formal theorem used in Theorem~\ref{thm:preservation}, namely \texttt{multi\_round\_proper} in \texttt{lean3/FormalProofs/OPT/ExpectationTheory.lean}, instantiated at an arbitrary fixed tree.
+
+\section{Full Proof of Proposition~\ref{prop:m_lt_k}}\label{app:proof-m-lt-k}
+
+\begin{proof}
+Fix integers $k,m$ with $1\le m < k$.
+Consider documents represented by binary event indicators
+$r=(r_1,\dots,r_n)\in\{0,1\}^n$ and count functional
+$C(r)=\sum_{j=1}^n r_j$.
+Define target
+\[
+\tau_k(r):=\mathbf{1}\{C(r)\ge k\}.
+\]
+Let $S_m(r)$ denote any top-$m$ sketch that retains only the $m$ largest event indicators (equivalently, for binary events, at most $m$ detected spikes and no information about spikes beyond rank $m$).
+
+Construct two documents:
+\[
+r^{-}=(\underbrace{1,\dots,1}_{m\ \text{times}},0,\dots,0),\qquad
+r^{+}=(\underbrace{1,\dots,1}_{k\ \text{times}},0,\dots,0),
+\]
+with common length $n\ge k$.
+Then:
+\[
+C(r^-)=m<k,\quad C(r^+)=k\ge k,
+\]
+so
+\[
+\tau_k(r^-)=0,\qquad \tau_k(r^+)=1.
+\]
+However, both sequences have at least $m$ unit entries, and all top-$m$ retained entries are ones.
+Hence
+\[
+S_m(r^-)=S_m(r^+).
+\]
+Therefore two inputs with identical sketch state yield different target values.
+No estimator that depends only on $S_m(\cdot)$ can recover $\tau_k$ without ambiguity.
+This proves information-limited failure when $m<k$.
+\end{proof}
+
+The exact impossibility lemma above is currently not exposed as a standalone theorem name in the Lean tree.
+The closest formal bridge for this paper's certificate path is in
+\texttt{lean3/FormalProofs/DSL/MergeableCertificates.lean} and
+\texttt{lean3/FormalProofs/OPT/MergeableReduction.lean}.
+
+\section{Full Proof of Theorem~\ref{thm:preservation}}\label{app:proof-preservation}
+
+\begin{proof}
+Fix a realized full binary C-Tree $T$ over document $x$.
+For each node $u$, define latent raw span $S(u)$ recursively by setting $S(u)=b$ when $u$ is a leaf containing block $b$, and setting $S(u)=S(u_L)\concat S(u_R)$ when $u$ is an internal node with children $(u_L,u_R)$.
+Define stored summary $s_u$ recursively by setting $s_u=g(S(u))$ at leaves and $s_u=g(s_{u_L}\concat s_{u_R})$ at internal nodes.
+Let $r$ be the root and set $Z^{(1)}(x):=s_r$.
+Assume C1--C3 hold almost surely on all realized calls.
+
+We first show $s_u\sim S(u)$ for every node $u$ by structural induction on node height. If $u$ is a leaf, C1 gives $s_u=g(S(u))\sim S(u)$. For the inductive step, assume $s_{u_L}\sim S(u_L)$ and $s_{u_R}\sim S(u_R)$.
+By context compatibility,
+\[
+s_{u_L}\concat s_{u_R}\sim S(u_L)\concat S(u_R)=S(u).
+\]
+By C3 (applied to $u=s_{u_L}$ and $v=s_{u_R}$),
+\[
+g(s_{u_L}\concat s_{u_R})\sim s_{u_L}\concat s_{u_R}.
+\]
+Since $s_u=g(s_{u_L}\concat s_{u_R})$, transitivity gives $s_u\sim S(u)$.
+This completes induction.
+
+At root $r$, we have $s_r\sim S(r)=x$, hence
+\[
+\metric\!\big(\fstar(Z^{(1)}(x)),\fstar(x)\big)=0
+\]
+almost surely, so
+\[
+\E\!\left[\metric\!\big(\fstar(Z^{(1)}(x)),\fstar(x)\big)\right]=0.
+\]
+
+Define rounds by $Z^{(R+1)}(x):=g(Z^{(R)}(x))$ for $R\ge1$.
+Because $Z^{(1)}(x)=s_r\in\operatorname{range}(g)$ and $g$ maps into its range, each $Z^{(R)}(x)$ is in $\operatorname{range}(g)$.
+By C2:
+\[
+Z^{(R+1)}(x)\sim Z^{(R)}(x)\quad\text{for all }R\ge1.
+\]
+We prove $Z^{(R)}(x)\sim x$ by induction on $R$.
+Base $R=1$ holds from the nodewise equivalence argument above.
+If $Z^{(R)}(x)\sim x$ and $Z^{(R+1)}(x)\sim Z^{(R)}(x)$, transitivity yields $Z^{(R+1)}(x)\sim x$.
+Thus $Z^{(R)}(x)\sim x$ for all $R\ge1$, so
+\[
+\E\!\left[\metric\!\big(\fstar(Z^{(R)}(x)),\fstar(x)\big)\right]=0.
+\]
+This proves Theorem~\ref{thm:preservation}.
+\end{proof}
+
+The formal theorem for this statement is
+\texttt{multi\_round\_proper} in
+\texttt{lean3/FormalProofs/OPT/ExpectationTheory.lean}.
+
+\section{Full Proof of Theorem~\ref{thm:equiv}}\label{app:proof-equivalence}
+
+\begin{proof}
+Fix policy parameter $\theta$.
+Let $(X,Z)$ be coupled random variables on a common probability space, with
+$Z=Z^{(R)}(X)$ from the C-Tree pipeline.
+Let $\mathcal{J}_\theta(x)$ denote the population integrand for the preference objective (pairwise, listwise, or RL variant after integrating over method-specific internal sampling).
+
+Assume oracle-measurability/indexing in the sense that there exists measurable
+$\phi_\theta$ on oracle space such that
+\[
+\mathcal{J}_\theta(x)=\phi_\theta(\fstar(x)).
+\]
+Under the exact-preservation condition from Theorem~\ref{thm:preservation},
+$\fstar(Z)=\fstar(X)$ almost surely, hence
+\[
+\mathcal{J}_\theta(Z)=\phi_\theta(\fstar(Z))
+=\phi_\theta(\fstar(X))
+=\mathcal{J}_\theta(X)
+\quad\text{a.s.}
+\]
+Taking expectation:
+\[
+\E[\mathcal{J}_\theta(Z)]=\E[\mathcal{J}_\theta(X)].
+\]
+Therefore the summary and original objectives are equal pointwise in $\theta$.
+Consequently, their argmin sets are identical.
+
+For the approximate case, assume an $L$-Lipschitz condition in oracle metric:
+\[
+|\mathcal{J}_\theta(x)-\mathcal{J}_\theta(z)|
+\le L\,\metric(\fstar(x),\fstar(z)).
+\]
+Then
+\begin{align*}
+\left|\E[\mathcal{J}_\theta(X)]-\E[\mathcal{J}_\theta(Z)]\right|
+&\le \E\left[\left|\mathcal{J}_\theta(X)-\mathcal{J}_\theta(Z)\right|\right] \\
+&\le L\,\E\left[\metric(\fstar(X),\fstar(Z))\right] \\
+&=: L\,\Delta_R.
+\end{align*}
+This gives the unified preference gap bound.
+Applying this template to DPO, GRPO-PL, and GRPO-RL yields method-specific constants and the theorem.
+\end{proof}
+
+The Lean correspondence is as follows. Exact equivalence uses
+\texttt{dpo\_equivalence}, \texttt{grpo\_equivalence},
+\texttt{grpo\_rl\_equivalence} in
+\texttt{lean3/FormalProofs/OPT/PreferenceLearning.lean}.
+The quantitative bound uses
+\texttt{unified\_preference\_gap\_bounded} in
+\texttt{lean3/FormalProofs/OPT/PreferenceBounds.lean}.
+
+\section{Full Proof of Theorem~\ref{thm:e2e}}\label{app:proof-e2e}
+
+\begin{proof}
+Let $\mathcal{U}$ be the finite set of sampled tree units for a training/evaluation population, with $N:=|\mathcal{U}|$.
+For each unit $i\in\mathcal{U}$, let $Y_i$ denote a target contribution (objective or distortion term), and let $Z_i\in\{0,1\}$ be its sampling indicator with logged propensity
+$\pi_i:=\Prob(Z_i=1\mid\mathcal{F})$, where $0<\pi_i\le1$.
+Condition on $\mathcal{F}$ (the sigma-field generated by population values and sampling design metadata).
+
+Define Horvitz--Thompson estimator:
+\[
+\widehat{\mu}_{\mathrm{HT}}:=\frac{1}{N}\sum_{i\in\mathcal{U}}\frac{Z_i}{\pi_i}Y_i.
+\]
+Then
+\[
+\E\left[\frac{Z_i}{\pi_i}Y_i\,\middle|\,\mathcal{F}\right]
+=\frac{\E[Z_i\mid\mathcal{F}]}{\pi_i}Y_i
+=Y_i,
+\]
+so
+\[
+\E[\widehat{\mu}_{\mathrm{HT}}\mid\mathcal{F}]
+=\frac{1}{N}\sum_{i\in\mathcal{U}}Y_i
+=:\mu.
+\]
+Thus $\widehat{\mu}_{\mathrm{HT}}$ is conditionally unbiased for the population mean $\mu$.
+
+Now let $G_{\mathrm{meth}}$ be a method-specific objective gap (DPO/GRPO variant), and suppose transport plus calibration/estimation envelopes provide
+\[
+|G_{\mathrm{meth}}|
+\le C_{\mathrm{meth}}\,\mu_{\mathrm{dist}} + B_{\mathrm{cal}}+B_{\mathrm{est}}+B_{\mathrm{clip}},
+\]
+with $\mu_{\mathrm{dist}}$ the population distortion functional.
+Let $\widehat{\mu}_{\mathrm{dist}}$ be its HT estimator.
+By unbiasedness, $\E[\widehat{\mu}_{\mathrm{dist}}\mid\mathcal{F}]=\mu_{\mathrm{dist}}$.
+Taking conditional expectation in the display above:
+\[
+\E[|G_{\mathrm{meth}}|\mid\mathcal{F}]
+\le C_{\mathrm{meth}}\,\E[\widehat{\mu}_{\mathrm{dist}}\mid\mathcal{F}]
++B_{\mathrm{cal}}+B_{\mathrm{est}}+B_{\mathrm{clip}}.
+\]
+Hence the certificate is unbiased at the design level.
+
+If additionally a high-probability radius $r_\delta$ satisfies
+\[
+\Prob\big(\mu_{\mathrm{dist}}\le\widehat{\mu}_{\mathrm{dist}}+r_\delta\big)\ge1-\delta,
+\]
+then on that event:
+\[
+|G_{\mathrm{meth}}|
+\le C_{\mathrm{meth}}\big(\widehat{\mu}_{\mathrm{dist}}+r_\delta\big)
++B_{\mathrm{cal}}+B_{\mathrm{est}}+B_{\mathrm{clip}}.
+\]
+Therefore the end-to-end C-TreePO bound follows by composition of
+(i) unbiased design-based estimation and
+(ii) deterministic method gap transport.
+\end{proof}
+
+Unbiasedness and end-to-end method certificates are formalized in
+\texttt{lean3/FormalProofs/DSL/TreePOEndToEnd.lean}:
+\texttt{treepo\_objective\_unbiased},
+\texttt{treepo\_distortion\_unbiased},
+\texttt{dpo\_treepo\_end\_to\_end\_certificate},
+\texttt{grpo\_pl\_treepo\_end\_to\_end\_certificate},
+\texttt{grpo\_rl\_treepo\_end\_to\_end\_certificate}.
+
+\end{document}

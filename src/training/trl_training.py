@@ -1065,6 +1065,87 @@ def train_dpo(
     return str(output_dir / "final")
 
 
+def _build_grpo_train_records(
+    dataset: "PreferenceDataset",
+    *,
+    config: TRLTrainingConfig,
+    law_type: Optional[str],
+    prompt_builder: Optional[PromptBuilder],
+) -> List[Dict[str, Any]]:
+    """
+    Build GRPO prompt records while preserving reward-context columns.
+
+    Reward functions may rely on `reference_score`/`original_text`, so these
+    fields must survive any de-duplication or resampling path.
+    """
+    prompt_records: List[Dict[str, Any]] = []
+    for pair in dataset.pairs:
+        if pair.preferred == "tie":
+            continue
+        if law_type is not None and pair.law_type != law_type:
+            continue
+        prompt_records.append(
+            {
+                "prompt": render_prompt(pair.original_text, pair.rubric, prompt_builder),
+                "sample_weight": pair.ipw_weight(max_weight=config.propensity_weight_clip),
+                "reference_score": pair.reference_score,
+                "original_text": pair.original_text,
+                "rubric": pair.rubric,
+                "law_type": pair.law_type,
+            }
+        )
+
+    if not prompt_records:
+        return []
+
+    if config.use_propensity_weighting:
+        if config.propensity_resample and not config.propensity_native_loss_weighting:
+            logger.info(
+                "Using weighted prompt resampling fallback for GRPO (native weighting disabled)."
+            )
+            prompt_records = _resample_records_by_weight(prompt_records, config)
+        elif config.propensity_native_loss_weighting:
+            logger.info(
+                "Using native GRPO sample-weighted advantages for propensity weighting."
+            )
+        return [
+            {
+                "prompt": str(record.get("prompt", "")),
+                "sample_weight": float(record.get("sample_weight", 1.0)),
+                "reference_score": record.get("reference_score"),
+                "original_text": record.get("original_text"),
+                "rubric": record.get("rubric"),
+                "law_type": record.get("law_type"),
+            }
+            for record in prompt_records
+            if str(record.get("prompt", "")).strip()
+        ]
+
+    deduped: List[Dict[str, Any]] = []
+    seen: set[tuple[str, Any, str]] = set()
+    for record in prompt_records:
+        prompt = str(record.get("prompt", "")).strip()
+        if not prompt:
+            continue
+        reference_score = record.get("reference_score")
+        original_text = str(record.get("original_text", "") or "")
+        key = (prompt, reference_score, original_text)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(
+            {
+                "prompt": prompt,
+                "sample_weight": 1.0,
+                "reference_score": reference_score,
+                "original_text": original_text,
+                "rubric": record.get("rubric"),
+                "law_type": record.get("law_type"),
+            }
+        )
+    return deduped
+
+
 def train_grpo(
     dataset: "PreferenceDataset",
     model_name: str,
@@ -1118,48 +1199,16 @@ def train_grpo(
     except ImportError:
         raise ImportError("datasets library required. Install with: pip install datasets")
 
-    prompt_records = []
-    for pair in dataset.pairs:
-        if pair.preferred == "tie":
-            continue
-        if law_type is not None and pair.law_type != law_type:
-            continue
-        prompt_records.append({
-            "prompt": render_prompt(pair.original_text, pair.rubric, prompt_builder),
-            "sample_weight": pair.ipw_weight(max_weight=config.propensity_weight_clip),
-        })
+    prompt_records = _build_grpo_train_records(
+        dataset,
+        config=config,
+        law_type=law_type,
+        prompt_builder=prompt_builder,
+    )
 
     if not prompt_records:
         raise ValueError("No prompts available for GRPO training after filtering")
-
-    if config.use_propensity_weighting:
-        if config.propensity_native_loss_weighting:
-            logger.info(
-                "Using native GRPO sample-weighted advantages for propensity weighting."
-            )
-        if config.propensity_resample and not config.propensity_native_loss_weighting:
-            logger.info(
-                "Using weighted prompt resampling fallback for GRPO (native weighting disabled)."
-            )
-            prompt_records = _resample_records_by_weight(prompt_records, config)
-        prompts = [
-            {
-                "prompt": record["prompt"],
-                "sample_weight": float(record.get("sample_weight", 1.0)),
-            }
-            for record in prompt_records
-        ]
-    else:
-        seen = set()
-        prompts = []
-        for record in prompt_records:
-            prompt = record["prompt"]
-            if prompt in seen:
-                continue
-            seen.add(prompt)
-            prompts.append({"prompt": prompt, "sample_weight": 1.0})
-
-    train_dataset = Dataset.from_list(prompts)
+    train_dataset = Dataset.from_list(prompt_records)
 
     # Load model
     model, tokenizer, peft_config = _load_model_for_training(model_name, config)

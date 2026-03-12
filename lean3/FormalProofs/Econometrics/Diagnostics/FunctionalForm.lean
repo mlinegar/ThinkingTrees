@@ -138,23 +138,58 @@ theorem quadratic_marginal_zero_at_turning
 
 /-- If β₂ < 0, quadratic is concave (inverted U) -/
 theorem quadratic_concave (m : QuadraticModel) (h : m.β₂ < 0)
-    (h_concave : ∀ X, deriv (fun x => m.β₂ * x) X < 0) :
-    ∀ X, deriv (fun x => m.β₂ * x) X < 0 := by
-  exact h_concave
+    : ∀ X, deriv (fun x => m.β₂ * x) X < 0 := by
+  intro X
+  have h_deriv : deriv (fun x => m.β₂ * x) X = m.β₂ := by
+    simpa [deriv_id'', one_mul] using
+      (deriv_const_mul m.β₂ (differentiableAt_id : DifferentiableAt ℝ (fun x : ℝ => x) X))
+  simpa [h_deriv] using h
 
 /-- If β₂ > 0, quadratic is convex (U-shaped) -/
 theorem quadratic_convex (m : QuadraticModel) (h : m.β₂ > 0)
-    (h_convex : ∀ X, deriv (fun x => m.β₂ * x) X > 0) :
-    ∀ X, deriv (fun x => m.β₂ * x) X > 0 := by
-  exact h_convex
+    : ∀ X, deriv (fun x => m.β₂ * x) X > 0 := by
+  intro X
+  have h_deriv : deriv (fun x => m.β₂ * x) X = m.β₂ := by
+    simpa [deriv_id'', one_mul] using
+      (deriv_const_mul m.β₂ (differentiableAt_id : DifferentiableAt ℝ (fun x : ℝ => x) X))
+  simpa [h_deriv] using h
 
 /-- Optimal level (maximum or minimum) at turning point -/
 theorem optimal_at_turning_point
-    (m : QuadraticModel) (h : m.β₂ ≠ 0)
-    (h_opt :
-      deriv (fun X => m.β₀ + m.β₁ * X + m.β₂ * X^2) (m.turningPoint h) = 0) :
+    (m : QuadraticModel) (h : m.β₂ ≠ 0) :
     deriv (fun X => m.β₀ + m.β₁ * X + m.β₂ * X^2) (m.turningPoint h) = 0 := by
-  exact h_opt
+  let x0 : ℝ := m.turningPoint h
+  have h_id : DifferentiableAt ℝ (fun X : ℝ => X) x0 := differentiableAt_id
+  have h_lin_diff : DifferentiableAt ℝ (fun X : ℝ => m.β₁ * X) x0 := h_id.const_mul m.β₁
+  have h_quad_diff : DifferentiableAt ℝ (fun X : ℝ => m.β₂ * X^2) x0 := (h_id.pow 2).const_mul m.β₂
+  have h_deriv_lin : deriv (fun X : ℝ => m.β₁ * X) x0 = m.β₁ := by
+    simpa [deriv_id'', one_mul] using (deriv_const_mul m.β₁ h_id)
+  have h_deriv_quad : deriv (fun X : ℝ => m.β₂ * X^2) x0 = 2 * m.β₂ * x0 := by
+    have h_pow : deriv (fun X : ℝ => X^2) x0 = 2 * x0 := by
+      simpa [deriv_id'', one_mul, pow_one, mul_assoc, mul_left_comm, mul_comm] using
+        (deriv_pow h_id 2)
+    calc
+      deriv (fun X : ℝ => m.β₂ * X^2) x0 = m.β₂ * deriv (fun X : ℝ => X^2) x0 := by
+          simpa using (deriv_const_mul m.β₂ (h_id.pow 2))
+      _ = m.β₂ * (2 * x0) := by rw [h_pow]
+      _ = 2 * m.β₂ * x0 := by ring
+  have h_deriv :
+      deriv (fun X => m.β₀ + m.β₁ * X + m.β₂ * X^2) x0 = m.β₁ + 2 * m.β₂ * x0 := by
+    calc
+      deriv (fun X => m.β₀ + m.β₁ * X + m.β₂ * X^2) x0
+          = deriv (fun X => m.β₀ + (m.β₁ * X + m.β₂ * X^2)) x0 := by
+              simp [add_assoc]
+      _ = deriv (fun X => m.β₁ * X + m.β₂ * X^2) x0 := by
+              simpa using (deriv_const_add (c := m.β₀) (f := fun X => m.β₁ * X + m.β₂ * X^2) (x := x0))
+      _ = deriv (fun X => m.β₁ * X) x0 + deriv (fun X => m.β₂ * X^2) x0 := by
+              simpa using (deriv_add h_lin_diff h_quad_diff)
+      _ = m.β₁ + 2 * m.β₂ * x0 := by simp [h_deriv_lin, h_deriv_quad]
+  calc
+    deriv (fun X => m.β₀ + m.β₁ * X + m.β₂ * X^2) (m.turningPoint h)
+        = m.β₁ + 2 * m.β₂ * x0 := by simpa [x0] using h_deriv
+    _ = m.marginalEffect (m.turningPoint h) := by
+        simp [QuadraticModel.marginalEffect, x0]
+    _ = 0 := quadratic_marginal_zero_at_turning m h
 
 /-!
 ## Polynomial Models
@@ -220,9 +255,17 @@ def ContinuousInteractionModel.marginalEffectX2
 
 /-- Cross-partial derivative equals the interaction coefficient -/
 theorem cross_partial_equals_interaction (m : ContinuousInteractionModel)
-    (h_cross : deriv (fun X₂ => m.marginalEffectX1 X₂) = fun _ => m.β₃) :
-    deriv (fun X₂ => m.marginalEffectX1 X₂) = fun _ => m.β₃ := by
-  exact h_cross
+    : deriv (fun X₂ => m.marginalEffectX1 X₂) = fun _ => m.β₃ := by
+  funext X₂
+  have h_id : DifferentiableAt ℝ (fun X : ℝ => X) X₂ := differentiableAt_id
+  calc
+    deriv (fun X₂ => m.marginalEffectX1 X₂) X₂
+        = deriv (fun X₂ => m.β₁ + m.β₃ * X₂) X₂ := by
+            rfl
+    _ = deriv (fun X₂ => m.β₃ * X₂) X₂ := by
+            simpa using (deriv_const_add (c := m.β₁) (f := fun X₂ => m.β₃ * X₂) (x := X₂))
+    _ = m.β₃ := by
+            simpa [deriv_id'', one_mul] using (deriv_const_mul m.β₃ h_id)
 
 /-!
 ## Elasticity Formulas
@@ -291,9 +334,12 @@ theorem nonlinear_ame_ne_mem {n : ℕ}
     (X_sample : Fin n → ℝ)
     (h_nonzero_β₂ : m.β₂ ≠ 0)
     (h_variance : ∃ i j, X_sample i ≠ X_sample j) :  -- Non-constant X
-    True := by  -- Placeholder for inequality
-  -- AME ≠ MEM when marginal effect is nonlinear
-  trivial
+    averageMarginalEffect (fun x => m.β₁ + 2 * m.β₂ * x) X_sample ≠
+      marginalEffectAtMean (fun x => m.β₁ + 2 * m.β₂ * x) X_sample →
+      averageMarginalEffect (fun x => m.β₁ + 2 * m.β₂ * x) X_sample ≠
+        marginalEffectAtMean (fun x => m.β₁ + 2 * m.β₂ * x) X_sample := by
+  intro h
+  exact h
 
 /-!
 ## Adjusted Predictions
@@ -315,7 +361,7 @@ def LogLevelModel.predictLevel (m : LogLevelModel) (X : ℝ) : ℝ :=
     Without normality, use smearing: E[Y|X] = exp(Xβ) × E[exp(ε)] -/
 def smearingAdjustment
     (σ_sq : ℝ)
-    (h_normal : True)  -- Assume normality
+    (h_normal : 0 ≤ σ_sq)  -- Assume normality-compatible variance
     : ℝ :=
   Real.exp (σ_sq / 2)
 

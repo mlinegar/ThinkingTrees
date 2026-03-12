@@ -1,0 +1,78 @@
+# Test Configuration for ThinkingTrees
+# These settings are used by the test suite to ensure consistent behavior
+
+# Chunking test parameters
+chunking:
+  # Default chunker settings for tests
+  default:
+    max_chars: 500
+    min_chars: 50
+    overlap: 0
+
+  # Small chunker for forcing multiple chunks
+  small:
+    max_chars: 100
+    min_chars: 20
+    overlap: 0
+
+  # Chunker with overlap for overlap tests
+  with_overlap:
+    max_chars: 100
+    min_chars: 20
+    overlap: 20
+
+# Tree builder test parameters
+builder:
+  default:
+    max_chunk_chars: 200
+    min_chunk_chars: 20
+    chunk_strategy: "axis"
+    verbose: false
+
+  # Force many chunks
+  many_chunks:
+    max_chunk_chars: 100
+    min_chunk_chars: 10
+    chunk_strategy: "axis"
+
+# Auditor test parameters
+auditor:
+  default:
+    sample_budget: 10
+    discrepancy_threshold: 0.1
+
+  # Exhaustive auditing for testing
+  exhaustive:
+    sample_budget: 1000  # Effectively all nodes
+    discrepancy_threshold: 0.1
+
+  # Minimal auditing
+  minimal:
+    sample_budget: 2
+    discrepancy_threshold: 0.5
+
+# Sample text for tests
+sample_texts:
+  short: "This is a short piece of text. It has just a few sentences."
+
+  medium: |
+    The quick brown fox jumps over the lazy dog. This sentence contains every
+    letter of the alphabet. It has been used for typing practice for over a
+    century now.
+
+    Another paragraph begins here. We need enough text to create multiple
+    chunks when testing the chunker.
+
+    A third paragraph provides even more content.
+
+# Sample rubrics for tests
+rubrics:
+  default: "Preserve key information, entities, and conclusions."
+  simple: "Keep important information."
+  detailed: |
+    Preserve the following:
+    - Main topics and themes
+    - Key entities (people, places, organizations)
+    - Numerical data and statistics
+    - Causal relationships
+    - Conclusions and recommendations

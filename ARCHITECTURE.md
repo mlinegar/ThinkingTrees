@@ -42,6 +42,15 @@ Quality control through sampling:
 - **Oracle**: Ground truth or learned approximation
 - **Mini-trees**: Generate training data for oracle approximation
 
+### 6. Unified Artifacts (Support + Memory + Embeddings)
+Represent each document with *shared window/support spans* plus multiple interchangeable “summaries”:
+- **Support spans**: `Tree.metadata["chunk_boundaries"]` stores leaf offsets; `Node.metadata` stores per-node `char_start/char_end` propagated bottom-up (see `src/tree/unified_artifacts.py`).
+- **LLM summaries**: OPS leaves/internal nodes store `raw_text_span` + `summary` (text representation).
+- **Static memory (Engram)**: `src/core/engram_memory.py` extracts verbatim strings; prompt builders are wrapped in `src/core/engram_prompting.py` so the model can preserve them without “re-deriving” them.
+- **Multilingual embeddings**: the embedding endpoint (default `Qwen/Qwen3-Embedding-8B`) produces window vectors; long documents are embedded via deterministic windowing/pooling (`src/embeddings/document_embedder.py`).
+- **Mergeable sketches**: `src/training/embedding_sketch.py` implements a strictly-mergeable DeepSets sketch over window embeddings; checkpoints trained by `scripts/train_rile_embedding_sketch.py` can be plugged into batched inference via `BatchedPipelineConfig.mergeable_sketch_model_path`.
+- **ConditionalMemory**: `src/core/conditional_memory.py` caches extracted memory items and embedding calls for cross-run reuse.
+
 ## Architecture Layers
 
 ```

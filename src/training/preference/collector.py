@@ -17,7 +17,13 @@ Key components:
 """
 
 import logging
-from typing import List, Optional, Dict, Any, Callable, Literal
+import re
+from typing import TYPE_CHECKING, List, Optional, Dict, Any, Callable, Literal, Set
+
+from src.core.conditional_memory import canonical_hash
+
+if TYPE_CHECKING:
+    from src.core.conditional_memory import ConditionalMemory
 
 import dspy
 
@@ -198,6 +204,7 @@ class PreferenceCollector(BasePreferenceCollector[GenerationConfig]):
         genrm_judge: Optional[Any] = None,  # GenRMJudge
         oracle_predict: Optional[Any] = None,  # Callable[[str], float]
         tie_margin: float = 5.0,  # For oracle strategy
+        memory: Optional["ConditionalMemory"] = None,
     ):
         """
         Initialize the collector.
@@ -211,6 +218,7 @@ class PreferenceCollector(BasePreferenceCollector[GenerationConfig]):
             genrm_judge: GenRMJudge instance (required for strategy="genrm")
             oracle_predict: Function (text) -> float (required for strategy="oracle")
             tie_margin: Error margin for ties in oracle strategy
+            memory: Optional ConditionalMemory for cross-run oracle score persistence
         """
         # Build generation configs first (needed for super().__init__)
         if generation_configs is None:
@@ -245,6 +253,7 @@ class PreferenceCollector(BasePreferenceCollector[GenerationConfig]):
             raise ValueError("oracle_predict is required when strategy='oracle'")
 
         self._oracle_cache: Dict[str, float] = {}  # For oracle strategy
+        self._memory = memory
 
     def _create_candidate_metadata(
         self,
@@ -272,11 +281,86 @@ class PreferenceCollector(BasePreferenceCollector[GenerationConfig]):
         return ""
 
     def _get_oracle_score(self, text: str) -> float:
-        """Get oracle score with caching (for oracle strategy)."""
-        text_hash = hashlib.md5(text.encode()).hexdigest()
-        if text_hash not in self._oracle_cache:
-            self._oracle_cache[text_hash] = self.oracle_predict(text)
-        return self._oracle_cache[text_hash]
+        """Get oracle score with caching (for oracle strategy).
+
+        Checks ConditionalMemory first (cross-run persistent), then local dict.
+        """
+        text_hash = canonical_hash(text)
+
+        # Check ConditionalMemory first
+        if self._memory is not None:
+            namespace = f"oracle_pref:{self._memory.namespace_version}"
+            cached = self._memory.get_json(namespace, text_hash)
+            if cached is not None:
+                try:
+                    return float(cached)
+                except (TypeError, ValueError):
+                    pass
+
+        if text_hash in self._oracle_cache:
+            return self._oracle_cache[text_hash]
+
+        score = self.oracle_predict(text)
+        self._oracle_cache[text_hash] = score
+
+        # Persist to ConditionalMemory
+        if self._memory is not None:
+            namespace = f"oracle_pref:{self._memory.namespace_version}"
+            self._memory.set_json(namespace, text_hash, float(score))
+
+        return score
+
+    def _build_enrichment_context(
+        self,
+        original_text: str,
+        summary_a: str,
+        summary_b: str,
+    ) -> Optional[str]:
+        """Build entity preservation context from ConditionalMemory enrichment.
+
+        Looks up enrichment metadata for the original text and computes
+        entity preservation rates for each candidate summary. Returns a
+        compact string for injection into GenRM extra_context, or None
+        if enrichment data is unavailable.
+        """
+        if self._memory is None:
+            return None
+
+        # Look up enrichment metadata for the original text
+        key = canonical_hash(original_text)
+        enrichment_data = self._memory.get_json(
+            f"enrichment:{self._memory.namespace_version}", key
+        )
+        if enrichment_data is None:
+            # Try the generic enrichment namespace
+            enrichment_data = self._memory.get_json("enrichment", key)
+        if not isinstance(enrichment_data, dict):
+            return None
+
+        key_entities: List[str] = enrichment_data.get("key_entities", [])
+        key_numbers: List[str] = enrichment_data.get("key_numbers", [])
+        if not key_entities and not key_numbers:
+            return None
+
+        # Check entity preservation in each summary
+        def _preservation_rate(summary: str, entities: List[str]) -> float:
+            if not entities:
+                return 1.0
+            lower = summary.lower()
+            found = sum(1 for e in entities if e.lower() in lower)
+            return found / len(entities)
+
+        ent_rate_a = _preservation_rate(summary_a, key_entities)
+        ent_rate_b = _preservation_rate(summary_b, key_entities)
+        num_rate_a = _preservation_rate(summary_a, key_numbers)
+        num_rate_b = _preservation_rate(summary_b, key_numbers)
+
+        parts = []
+        parts.append(f"Key entities ({len(key_entities)}): {', '.join(key_entities[:8])}")
+        parts.append(f"Entity preservation: A={ent_rate_a:.0%}, B={ent_rate_b:.0%}")
+        if key_numbers:
+            parts.append(f"Number preservation: A={num_rate_a:.0%}, B={num_rate_b:.0%}")
+        return "[ENRICHMENT CONTEXT] " + " | ".join(parts)
 
     def _derive_preference(
         self,
@@ -322,6 +406,10 @@ class PreferenceCollector(BasePreferenceCollector[GenerationConfig]):
             )
 
         elif self.strategy == "genrm":
+            # Build memory-augmented enrichment context (Phase 6.2)
+            enrichment_ctx = self._build_enrichment_context(
+                original_text, summary_a, summary_b
+            )
             # GenRM-based comparison
             result = self.genrm_judge.compare(
                 context=rubric,
@@ -329,6 +417,7 @@ class PreferenceCollector(BasePreferenceCollector[GenerationConfig]):
                 summary_a=summary_a,
                 summary_b=summary_b,
                 law_type=law_type,
+                extra_context=enrichment_ctx,
             )
             # Handle error results
             if hasattr(result, 'is_error') and result.is_error():

@@ -53,24 +53,57 @@ namespace DSL
 ## Regularity Conditions
 -/
 
+/-- Minimal structural holdout condition for cross-fitting:
+each unit has at least one unit in a different fold. -/
+def HasHoldoutFold {ι Obs Con Mis : Type*} [Fintype ι]
+    (cf : CrossFit ι Obs Con Mis) : Prop :=
+  ∀ i, ∃ j, cf.fold j ≠ cf.fold i
+
 /-- Standard regularity conditions for asymptotic normality.
     These are the conditions from M-estimation theory. -/
 structure RegularityConditions (Data : Type*) (d : ℕ) where
-  /-- The parameter space is open -/
-  param_space_open : True  -- Placeholder
-  /-- The moment function is twice continuously differentiable -/
-  moment_smooth : True  -- Placeholder
-  /-- The Jacobian E[∂m/∂β] is invertible at β* -/
-  jacobian_invertible : True  -- Placeholder
-  /-- The second moment E[m m'] exists and is finite -/
-  second_moment_finite : True  -- Placeholder
-  /-- Uniform convergence of sample moments -/
-  uniform_convergence : True  -- Placeholder
+  /-- Candidate parameter space Θ. -/
+  param_space : Set (Fin d → ℝ)
+  /-- Openness of Θ at the target point. -/
+  param_space_open : IsOpen param_space
+  /-- Deterministic modulus controlling local smoothness error terms. -/
+  moment_modulus : ℕ → ℝ
+  /-- Nonnegativity of the smoothness modulus. -/
+  moment_modulus_nonneg : ∀ n, 0 ≤ moment_modulus n
+  /-- Smoothness proxy: modulus vanishes asymptotically. -/
+  moment_smooth : Filter.Tendsto moment_modulus Filter.atTop (𝓝 0)
+  /-- Jacobian proxy matrix S = E[∂m/∂β] at β*. -/
+  jacobian : Matrix (Fin d) (Fin d) ℝ
+  /-- Nonsingularity proxy for identification. -/
+  jacobian_invertible : Matrix.det jacobian ≠ 0
+  /-- Envelope dominating per-observation moment magnitudes. -/
+  moment_envelope : Data → ℝ
+  /-- Finite second-moment proxy via a global quadratic envelope bound. -/
+  second_moment_finite : ∃ M : ℝ, 0 ≤ M ∧ ∀ D, (moment_envelope D)^2 ≤ M
+  /-- Deterministic uniform-convergence rate for sample moments. -/
+  uniform_rate : ℕ → ℝ
+  /-- Rate is nonnegative. -/
+  uniform_rate_nonneg : ∀ n, 0 ≤ uniform_rate n
+  /-- Uniform convergence proxy: rate vanishes with n. -/
+  uniform_convergence : Filter.Tendsto uniform_rate Filter.atTop (𝓝 0)
 
-/-- Cross-fitting regularity conditions (placeholder). -/
+/-- Cross-fitting regularity conditions (minimal structural bundle). -/
 structure CrossFittingConditions {ι Obs Con Mis : Type*} [Fintype ι]
     (cf : CrossFit ι Obs Con Mis) : Prop where
-  no_leakage : True  -- Predictor for each fold is trained on other folds
+  /-- Structural no-leakage proxy: every unit has a distinct holdout fold. -/
+  no_leakage : HasHoldoutFold cf
+
+/-- MGF characterization hook for a multivariate normal limit. -/
+def NormalMGFCharacteristic {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ] {d : ℕ}
+    (Z : Ω → Fin d → ℝ) (mean : Fin d → ℝ)
+    (variance : Matrix (Fin d) (Fin d) ℝ) : Prop :=
+  ∀ t : Fin d → ℝ,
+    Integrable (fun ω => Real.exp (∑ i, t i * Z ω i)) μ ∧
+      (∫ ω, Real.exp (∑ i, t i * Z ω i) ∂μ) =
+        Real.exp
+          ((∑ i, t i * mean i) +
+            (1 / 2 : ℝ) * ∑ i, ∑ j, t i * variance i j * t j)
 
 /-!
 ## Consistency
@@ -83,7 +116,7 @@ def ConvergesInProbability {Ω : Type*} [MeasurableSpace Ω]
     (seq : ℕ → Ω → E) (limit : Ω → E) : Prop :=
   MeasureTheory.TendstoInMeasure μ seq Filter.atTop limit
 
-/-- Placeholder predicate for a normal limit.
+/-- Abstract predicate for a normal limit.
 
 Mathlib does not yet provide a packaged multivariate normal distribution,
 so we record normality as an explicit assumption. -/
@@ -91,7 +124,8 @@ structure NormalLimit {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ] {d : ℕ}
     (Z : Ω → Fin d → ℝ) (mean : Fin d → ℝ)
     (variance : Matrix (Fin d) (Fin d) ℝ) : Prop where
-  placeholder : True := by trivial
+  /-- Abstract normal-law characterization (MGF form). -/
+  law_characterization : NormalMGFCharacteristic μ Z mean variance
 
 /-- Convergence in distribution to a normal limit (mathlib: `TendstoInDistribution`). -/
 def ConvergesInDistributionToNormal {Ω : Type*} [MeasurableSpace Ω]
@@ -114,17 +148,21 @@ def AsymptoticCoverage {Ω : Type*} [MeasurableSpace Ω]
       μ {ω | β_star i ∈ Set.Icc (CI_seq n ω i).1 (CI_seq n ω i).2})
     Filter.atTop (𝓝 (ENNReal.ofReal (1 - α)))
 
-/-- Wald-style coverage derived from asymptotic normality (assumption bundle). -/
-structure CoverageAxioms {Ω : Type*} [MeasurableSpace Ω]
-    (μ : Measure Ω) [IsProbabilityMeasure μ] (d : ℕ) : Prop where
-  coverage_of_asymptotic_normal :
-    ∀ (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
-      (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
-      (β_star : Fin d → ℝ)
-      (α : ℝ)
-      (V : Matrix (Fin d) (Fin d) ℝ),
-      ConvergesInDistributionToNormal μ centered_scaled_seq (fun _ => 0) V →
-      AsymptoticCoverage μ CI_seq β_star α
+/-- Wald-style coverage transfer from asymptotic normality. -/
+def CoverageFromAsymptoticNormal {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ] (d : ℕ) : Prop :=
+  ∀ (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (β_star : Fin d → ℝ)
+    (α : ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ),
+    ConvergesInDistributionToNormal μ centered_scaled_seq (fun _ => 0) V →
+    AsymptoticCoverage μ CI_seq β_star α
+
+/-- Backward-compatible name for the coverage transfer assumption. -/
+abbrev CoverageAxioms {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ] (d : ℕ) : Prop :=
+  CoverageFromAsymptoticNormal μ d
 
 /-!
 ## Sample Moments and Estimators
@@ -183,10 +221,10 @@ def OracleTarget {Obs Mis : Type*} {d : ℕ}
   MomentUnbiased (TrueMomentFromFullData m) E β
 
 /-!
-## Generic M-Estimation Axioms
+## Generic M-Estimation Assumptions
 -/
 
-/-- Abstract M-estimation asymptotic results, used as axioms in this formalization. -/
+/-- Abstract M-estimation asymptotic results, bundled as explicit assumptions. -/
 structure MEstimationAxioms (Ω Data : Type*) [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ] (d : ℕ) where
   /-- Expectation operator for moments. -/
@@ -206,6 +244,84 @@ structure MEstimationAxioms (Ω Data : Type*) [MeasurableSpace Ω]
       MomentUnbiased m E β_star →
       RegularityConditions Data d →
       ConvergesInDistributionToNormal μ centered_scaled_seq (fun _ => 0) V
+
+/-- Preferred name for the M-estimation assumption bundle. -/
+abbrev MEstimationAssumptions (Ω Data : Type*) [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ] (d : ℕ) :=
+  MEstimationAxioms Ω Data μ d
+
+/-- Standalone consistency assumption used by DSL M-estimation results. -/
+def MEstimatorConsistencyAssumption {Ω Data : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (d : ℕ) (E : (Data → Fin d → ℝ) → Fin d → ℝ) : Prop :=
+  ∀ (m : MomentFunction Data d) (β_star : Fin d → ℝ)
+    (data_seq : ℕ → Ω → List Data) (β_hat_seq : ℕ → Ω → Fin d → ℝ),
+    MomentUnbiased m E β_star →
+    RegularityConditions Data d →
+    IsMEstimatorSeq m data_seq β_hat_seq →
+    ConvergesInProbability μ β_hat_seq (fun _ => β_star)
+
+/-- Standalone asymptotic-normality assumption used by DSL M-estimation results. -/
+def MEstimatorAsymptoticNormalAssumption {Ω Data : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (d : ℕ) (E : (Data → Fin d → ℝ) → Fin d → ℝ) : Prop :=
+  ∀ (m : MomentFunction Data d) (β_star : Fin d → ℝ) (V : Matrix (Fin d) (Fin d) ℝ)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ),
+    MomentUnbiased m E β_star →
+    RegularityConditions Data d →
+    ConvergesInDistributionToNormal μ centered_scaled_seq (fun _ => 0) V
+
+lemma mEstimatorConsistency_of_axioms
+    {Ω Data : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ] (d : ℕ)
+    (axioms : MEstimationAxioms Ω Data μ d) :
+    MEstimatorConsistencyAssumption μ d axioms.E := by
+  intro m β_star data_seq β_hat_seq h_unbiased h_reg h_est
+  exact axioms.consistent m β_star data_seq β_hat_seq h_unbiased h_reg h_est
+
+lemma mEstimatorAsymptoticNormal_of_axioms
+    {Ω Data : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ] (d : ℕ)
+    (axioms : MEstimationAxioms Ω Data μ d) :
+    MEstimatorAsymptoticNormalAssumption μ d axioms.E := by
+  intro m β_star V centered_scaled_seq h_unbiased h_reg
+  exact axioms.asymptotic_normal m β_star V centered_scaled_seq h_unbiased h_reg
+
+/-- Build the bundled M-estimation assumption package from explicit components. -/
+def mkMEstimationAxioms
+    {Ω Data : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ] (d : ℕ)
+    (E : (Data → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E) :
+    MEstimationAxioms Ω Data μ d where
+  E := E
+  consistent := h_consistent
+  asymptotic_normal := h_normal
+
+/-- DSL consistency theorem.
+
+    Under Assumption 1 and regularity conditions, the DSL estimator
+    converges in probability to the true parameter β*.
+
+    The key insight is that E[m̃(D; β*)] = 0 because the design-adjusted
+    moment is unbiased, so by the law of large numbers,
+    (1/N)∑m̃(Di; β) → E[m̃(D; β)] and the unique zero is at β*. -/
+theorem DSL_consistent_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (E : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    : ConvergesInProbability μ β_hat_seq (fun _ => β_star) := by
+  exact h_consistent (DSLMomentFromData m) β_star data_seq β_hat_seq h_unbiased reg h_est
 
 /-- DSL consistency theorem.
 
@@ -228,7 +344,28 @@ theorem DSL_consistent
     (β_hat_seq : ℕ → Ω → Fin d → ℝ)
     (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
     : ConvergesInProbability μ β_hat_seq (fun _ => β_star) := by
-  exact axioms.consistent (DSLMomentFromData m) β_star data_seq β_hat_seq h_unbiased reg h_est
+  exact DSL_consistent_from_assumptions μ axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    dbs m β_star reg h_unbiased data_seq β_hat_seq h_est
+
+/-- Cross-fitted DSL consistency theorem (Appendix B.2). -/
+theorem DSL_consistent_crossfit_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {ι Obs Mis Con : Type*} [Fintype ι] {d : ℕ}
+    (E : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (cf : CrossFit ι Obs Con Mis)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (cf_reg : CrossFittingConditions cf)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    : ConvergesInProbability μ β_hat_seq (fun _ => β_star) := by
+  exact h_consistent (DSLMomentFromData m) β_star data_seq β_hat_seq h_unbiased reg h_est
 
 /-- Cross-fitted DSL consistency theorem (Appendix B.2). -/
 theorem DSL_consistent_crossfit
@@ -246,11 +383,35 @@ theorem DSL_consistent_crossfit
     (β_hat_seq : ℕ → Ω → Fin d → ℝ)
     (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
     : ConvergesInProbability μ β_hat_seq (fun _ => β_star) := by
-  exact axioms.consistent (DSLMomentFromData m) β_star data_seq β_hat_seq h_unbiased reg h_est
+  exact DSL_consistent_crossfit_from_assumptions μ axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    cf dbs m β_star reg cf_reg h_unbiased data_seq β_hat_seq h_est
 
 /-!
 ## Asymptotic Normality
 -/
+
+/-- DSL asymptotic normality theorem (Proposition 1).
+
+    Under Assumption 1 and regularity conditions:
+    √N(β̂_DSL - β*) →d N(0, V)
+
+    where V is the sandwich variance matrix. -/
+theorem DSL_asymptotic_normal_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (E : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E β_star)
+    : ∀ (centered_scaled_seq : ℕ → Ω → Fin d → ℝ),
+      ConvergesInDistributionToNormal μ centered_scaled_seq (fun _ => 0) V := by
+  intro seq
+  exact h_normal (DSLMomentFromData m) β_star V seq h_unbiased reg
 
 /-- DSL asymptotic normality theorem (Proposition 1).
 
@@ -271,8 +432,28 @@ theorem DSL_asymptotic_normal
     : ∀ (centered_scaled_seq : ℕ → Ω → Fin d → ℝ),
       -- √N(β̂_N - β*) where β̂_N is the DSL estimator
       ConvergesInDistributionToNormal μ centered_scaled_seq (fun _ => 0) V := by
+  exact DSL_asymptotic_normal_from_assumptions μ axioms.E
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    dbs m β_star V reg h_unbiased
+
+/-- Cross-fitted DSL asymptotic normality theorem (Appendix B.2). -/
+theorem DSL_asymptotic_normal_crossfit_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {ι Obs Mis Con : Type*} [Fintype ι] {d : ℕ}
+    (E : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (cf : CrossFit ι Obs Con Mis)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (cf_reg : CrossFittingConditions cf)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E β_star)
+    : ∀ (centered_scaled_seq : ℕ → Ω → Fin d → ℝ),
+      ConvergesInDistributionToNormal μ centered_scaled_seq (fun _ => 0) V := by
   intro seq
-  exact axioms.asymptotic_normal (DSLMomentFromData m) β_star V seq h_unbiased reg
+  exact h_normal (DSLMomentFromData m) β_star V seq h_unbiased reg
 
 /-- Cross-fitted DSL asymptotic normality theorem (Appendix B.2). -/
 theorem DSL_asymptotic_normal_crossfit
@@ -289,8 +470,9 @@ theorem DSL_asymptotic_normal_crossfit
     (h_unbiased : MomentUnbiased (DSLMomentFromData m) axioms.E β_star)
     : ∀ (centered_scaled_seq : ℕ → Ω → Fin d → ℝ),
       ConvergesInDistributionToNormal μ centered_scaled_seq (fun _ => 0) V := by
-  intro seq
-  exact axioms.asymptotic_normal (DSLMomentFromData m) β_star V seq h_unbiased reg
+  exact DSL_asymptotic_normal_crossfit_from_assumptions μ axioms.E
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    cf dbs m β_star V reg cf_reg h_unbiased
 
 /-!
 ## Variance Formula
@@ -299,10 +481,10 @@ theorem DSL_asymptotic_normal_crossfit
 /-- Jacobian matrix of the moment function: E[∂m/∂β] -/
 def JacobianMatrix {Obs Mis : Type*} {d : ℕ}
     (m : MomentFunction (Obs × Mis) d)
+    (jacobian_integrand : (Obs × Mis) → (Fin d → ℝ) → Matrix (Fin d) (Fin d) ℝ)
     (E : ((Obs × Mis) → Matrix (Fin d) (Fin d) ℝ) → Matrix (Fin d) (Fin d) ℝ)
     (β : Fin d → ℝ) : Matrix (Fin d) (Fin d) ℝ :=
-  -- Placeholder: proper definition would involve differentiation
-  fun _ _ => 0
+  E (fun D => jacobian_integrand D β)
 
 /-- Meat matrix: E[m̃ m̃'] -/
 def MeatMatrix {Obs Mis : Type*} {d : ℕ}
@@ -374,8 +556,7 @@ theorem better_predictions_smaller_variance {d : ℕ}
     -- Same π and V_full
     (h_π : vd1.π = vd2.π)
     (h_full : vd1.V_full = vd2.V_full)
-    -- V_correction is "smaller" for vd2 (in positive semidefinite sense)
-    -- Placeholder: proper definition would use matrix ordering
+    -- V_correction is "smaller" for vd2 in entrywise matrix order.
     (h_smaller : MatrixLE vd2.V_correction vd1.V_correction)
     (h_factor_nonneg : (1 / vd1.π - 1 : ℝ) ≥ 0)
     : MatrixLE vd2.V_DSL vd1.V_DSL := by
@@ -419,11 +600,40 @@ def confidenceInterval {d : ℕ}
 
     This is the key advantage of DSL: valid inference without
     assumptions about prediction error structure. -/
+theorem DSL_valid_coverage_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (E : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (coverage_axioms : CoverageFromAsymptoticNormal μ d)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E β_star)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ)  -- Significance level
+    (h_α : 0 < α ∧ α < 1)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    : AsymptoticCoverage μ CI_seq β_star α := by
+  have h_norm :
+      ConvergesInDistributionToNormal μ centered_scaled_seq (fun _ => 0) V :=
+    DSL_asymptotic_normal_from_assumptions μ E h_normal dbs m β_star V reg h_unbiased centered_scaled_seq
+  exact coverage_axioms centered_scaled_seq CI_seq β_star α V h_norm
+
+/-- DSL confidence intervals have correct coverage.
+
+    Under Assumption 1, the DSL confidence intervals achieve the
+    nominal coverage rate asymptotically, regardless of prediction accuracy.
+
+    This is the key advantage of DSL: valid inference without
+    assumptions about prediction error structure. -/
 theorem DSL_valid_coverage
     {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
     {Obs Mis Con : Type*} {d : ℕ}
     (axioms : MEstimationAxioms Ω (Obs × Mis × Mis × SamplingIndicator × ℝ) μ d)
-    (coverage_axioms : CoverageAxioms μ d)
+    (coverage_axioms : CoverageFromAsymptoticNormal μ d)
     (dbs : DesignBasedSampling Obs Mis Con)
     (m : MomentFunction (Obs × Mis) d)
     (β_star : Fin d → ℝ)
@@ -435,10 +645,12 @@ theorem DSL_valid_coverage
     (h_α : 0 < α ∧ α < 1)
     (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
     : AsymptoticCoverage μ CI_seq β_star α := by
-  have h_norm :
-      ConvergesInDistributionToNormal μ centered_scaled_seq (fun _ => 0) V :=
-    DSL_asymptotic_normal μ axioms dbs m β_star V reg h_unbiased centered_scaled_seq
-  exact coverage_axioms.coverage_of_asymptotic_normal centered_scaled_seq CI_seq β_star α V h_norm
+  exact DSL_valid_coverage_from_assumptions μ axioms.E
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    coverage_axioms dbs m β_star V reg h_unbiased CI_seq α h_α centered_scaled_seq
+
+/-- Backward-compatible alias for the axioms-based coverage theorem name. -/
+abbrev DSL_valid_coverage_from_axioms := @DSL_valid_coverage
 
 /-!
 ## Comparison with Naive Estimator

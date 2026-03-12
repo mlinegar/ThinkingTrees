@@ -1,0 +1,156 @@
+\section{The Core Mechanism: When Does Compression Lose Information?}\label{sec:example}
+
+The three laws tell us \emph{what} a compression tree must preserve. This section shows \emph{where the pressure comes from}. We begin with the running manifesto example so the reader sees the semantic failure mode directly, then isolate the same mechanism in a toy sketch with a sharp information boundary.
+
+\subsection{A RILE Pass/Fail Example}
+
+\begin{example}[RILE scoring: what C3 must preserve]\label{ex:rile-c3}
+Consider a two-chapter manifesto scored by a RILE oracle $\fstar$ on $[-100,+100]$. The scores below are illustrative and chosen only to expose the merge mechanism.
+
+\emph{Chunk A (environment chapter):} ``The party supports renewable energy subsidies, opposes fossil fuel extraction, and backs public investment in green industry.'' Read in isolation, the oracle scores this chunk as strong-left ($\fstar(\text{A}) \approx -60$).
+
+\emph{Chunk B (economics chapter):} ``However, the party also emphasizes fiscal restraint, market competition, and private-sector innovation in energy markets.'' Read in isolation, the oracle scores this chunk as center-right ($\fstar(\text{B}) \approx +30$).
+
+\emph{Full-document judgment:} The full text $\text{A} \concat \text{B}$ is not simply ``left plus right.'' The contrastive structure matters: the manifesto is environmentally interventionist but economically restrained, so the combined score is closer to the center ($\fstar(\text{A} \concat \text{B}) \approx -15$).
+
+\emph{C3 pass:} A good merge summary keeps both sides of the tension: ``The party supports renewable-energy intervention while pairing it with fiscal restraint and market-oriented energy policy.'' This preserves the interaction, so the root summary supports the same RILE judgment.
+
+\emph{C3 fail:} A bad merge summary keeps only one side from each chapter: ``The party supports renewable energy and emphasizes fiscal responsibility.'' The specific tension has disappeared, and the RILE score drifts because the merge state no longer represents the interaction the oracle uses.
+\end{example}
+
+This is the recurring failure mode in the paper. The leaf summaries may each look locally plausible, yet the merged state can still be too weak for the oracle because the decisive information lives in the \emph{combination} of chapters rather than in either chapter alone. That is exactly what C3 is meant to detect.
+
+\subsection{A Threshold Toy Model}
+
+The same mechanism can be isolated in a fully controlled setting. Represent a document as a sequence of binary indicators $r = (r_1, \dots, r_n) \in \{0,1\}^n$, where each indicator records whether a signal is present. The target is a threshold event:
+\[
+\theta_k(r) := \One\{C(r) \ge k\}, \qquad C(r) = \textstyle\sum_{j=1}^n r_j.
+\]
+This is a stylized version of many document tasks: does the text contain at least $k$ commitments, at least $k$ adverse events, at least $k$ amendment references?
+
+A document is partitioned into chunks and processed through a binary merge tree. At each node, the merge state retains only a bounded summary: the top-$m$ indicators. This is a concrete mergeable sketch, and it exposes the same question as the semantic case: is the retained state large enough to determine the oracle after all merges?
+
+\begin{definition}[Order Sufficiency]
+In the threshold target $\theta_k$, a top-$m$ merge-safe sketch is \emph{order-sufficient} when $m \ge k$.
+\end{definition}
+
+\begin{proposition}[Failure Boundary for $m < k$]\label{prop:m_lt_k}
+If $m < k$, there exist documents with identical top-$m$ signatures but different values of $\One\{\text{count} \ge k\}$. Hence estimators restricted to that sketch class are information-limited.
+\end{proposition}
+
+The intuition is direct. If $k = 5$ and $m = 4$, the sequences
+\[
+r^{-} = (1,1,1,1,0,\ldots,0), \qquad r^{+} = (1,1,1,1,1,0,\ldots,0)
+\]
+have identical top-$4$ sketches but different threshold labels. The ambiguity is structural and remains even with infinite data. When $m \ge k$, the retained state carries enough information to distinguish the crossing event under this threshold model.
+
+\paragraph{Connection back to RILE.}
+The failure at $m < k$ is the toy analogue of the RILE merge failure above. In the sketch, the missing object is the $(m+1)$-th indicator. In the manifesto example, the missing object is the cross-chapter policy tension. In both cases, the merge state is too small for the oracle's interaction structure.
+
+\subsection{Why Naive Aggregation Fails}
+
+The non-additive structure breaks standard aggregation strategies. Consider two child states with event counts $(c_L, c_R)$ and threshold utility
+\[
+U(c_L, c_R) = \One\{c_L + c_R \ge 5\}.
+\]
+The marginal value of changing $c_R$ depends on $c_L$: moving from $(4,0)$ to $(4,1)$ flips the label, while moving from $(0,0)$ to $(0,1)$ does not. Any method that processes children independently and combines results through addition or averaging cannot capture this interaction.
+
+\begin{figure}[t]
+    \centering
+    \setlength{\fboxsep}{8pt}
+    \fbox{%
+    \begin{minipage}[t]{0.29\linewidth}
+    \small
+    \textbf{(a) Additive target.}
+    \vspace{2pt}
+
+    Each child can be scored on its own and the results summed:
+    \[
+    U_{\mathrm{add}}(c_L,c_R)=h_L(c_L)+h_R(c_R)
+    \]
+    No cross-child information is needed; any summary that preserves each child's score is sufficient.
+    \end{minipage}}
+    \hfill
+    \fbox{%
+    \begin{minipage}[t]{0.29\linewidth}
+    \small
+    \textbf{(b) Interaction target.}
+    \vspace{2pt}
+
+    The label depends on whether the \emph{combined} count crosses a threshold:
+    \[
+    U(c_L,c_R)=\One\{c_L+c_R\ge5\}
+    \]
+    $(4,0) \mapsto 0$ but $(4,1) \mapsto 1$: the marginal value of $c_R$ depends on $c_L$.
+    \end{minipage}}
+    \hfill
+    \fbox{%
+    \begin{minipage}[t]{0.29\linewidth}
+    \small
+    \textbf{(c) Sketch boundary.}
+    \vspace{2pt}
+
+    A top-$m$ sketch retains only the $m$ largest signals at each merge. When $m < k$, the sketch can drop the signal that determines whether the threshold is crossed:
+    \[
+    m<k \;\Rightarrow\; \text{collapse}
+    \]
+    \[
+    m \ge k \;\Rightarrow\; \text{recovery}
+    \]
+    \end{minipage}}
+    \caption{Why non-additive targets require interaction-aware merge state.
+    \textbf{(a)}~When the target decomposes as a sum of child-local functions, any summary preserving each child's score is sufficient.
+    \textbf{(b)}~For threshold targets, the label depends on the \emph{joint} count across children.
+    \textbf{(c)}~A top-$m$ sketch fails below the sufficiency boundary $m=k$ because the decisive signal can be dropped at merge time.}
+    \label{fig:stepwise-mergeable-intuition}
+\end{figure}
+
+The point is the same in the semantic setting: if the target is not additively separable, summaries cannot be combined by a naive average, vote, or per-chapter score. The merge state has to carry the interaction-bearing information the oracle will need later.
+
+\subsection{Classical Sketches as a Special Case}
+
+The top-$m$ threshold sketch is a toy example, but it already has the one property that matters here: it is a concrete mergeable sketch with a sharp sufficiency boundary. The generic mergeable-sketch contract is
+\[
+\underbrace{S_B(d_1 \concat d_2)}_{\text{joint processing}}
+\;\approx\;
+\underbrace{S_B(d_1)\oplus_B S_B(d_2)}_{\text{merge of local sketches}},
+\]
+where $S_B(\cdot)$ is a bounded state and $\oplus_B$ is a merge operator. The C-TreePO analogue is C3:
+\[
+\underbrace{d_1 \concat d_2}_{\text{raw text}}
+\;\sim\;
+\underbrace{g(d_1 \concat d_2)}_{\text{joint summary}}
+\;\sim\;
+\underbrace{g(g(d_1)\concat g(d_2))}_{\text{merge of local summaries}}.
+\]
+The compositional template is the same; C-TreePO replaces the hand-designed merge operator with a learned semantic compressor and an audit.
+
+Table~\ref{tab:sketch-mapping} makes the correspondence explicit. Under the stronger deterministic assumptions of Proposition~\ref{prop:mergeable-reduction}, the semantic tree collapses back to the classical mergeable-summary setting. The point of C-TreePO is that for semantic tasks no hand-designed merge operator is usually available, so the sketch must be learned and then audited.
+
+\begin{table}[t]
+    \centering
+    \small
+    \begin{tabular}{p{0.46\linewidth}p{0.46\linewidth}}
+        \toprule
+        Classical mergeable sketch & C-TreePO semantic compression \\
+        \midrule
+        Data shard $d_i$ & Leaf text block $b_i$ \\
+        Bounded sketch state $S_B(d_i)$ & Leaf summary $s_i = g(b_i)$ \\
+        Merge operator $\oplus_B$ & Learned merge $g(s_{u_L}\concat s_{u_R})$ \\
+        Query (e.g., distinct count, frequency) & Oracle query $\fstar(x)$ (task value) \\
+        Memory budget $B$ controls what survives merges & Summary budget controls interaction-bearing content retention \\
+        Correctness by algebraic proof (no runtime check) & Correctness by probabilistic audit (Section~\ref{sec:estimation}) \\
+        Error = sketch estimation variance & Error = $L \cdot \Delta_R$ + estimation envelopes (Theorem~\ref{thm:e2e}) \\
+        \bottomrule
+    \end{tabular}
+    \caption{Mapping from a classical mergeable sketch to the C-TreePO setting. In classical sketches, the merge operator is hand-designed and algebraically exact; in C-TreePO, it is learned and certified by audit.}
+    \label{tab:sketch-mapping}
+\end{table}
+
+The practical implication is the same in both domains: if the retained state is too small for the query, the failure is structural rather than sample-size noise.
+
+\subsection{From Numeric Sketches to Learned Semantic Sketches}
+
+The numeric setting isolates the mechanism because ground truth is exact. Moving to semantic summaries changes the modality, not the structural question. The same three laws govern both cases; only the sketch changes from a hand-designed state to a learned textual one.
+
+In the numeric case, insufficiency means dropping the $(m+1)$-th indicator that decides the threshold label. In the semantic case, insufficiency means dropping a cross-span qualifier, tension, or boundary condition that matters only when two spans are combined. Either way, the merge state is too small for the oracle's needs, so the error persists as more data are collected.

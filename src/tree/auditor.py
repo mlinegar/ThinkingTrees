@@ -34,12 +34,22 @@ import math
 
 from src.core.data_models import Node, Tree, AuditStatus, AuditResult
 from src.core.scoring import OracleScore, ScoringOracle
-from src.core.ops_checks import CheckType, CheckConfig, aggregate_check_stats
+from src.core.ops_checks import CheckType, CheckConfig, aggregate_check_stats, LawKind
+from src.core.provenance import ORACLE_SOURCE
 from src.config.concurrency import ConcurrencyConfig, get_concurrency_config
 from src.stats.sampling import (
     pps_inclusion_probabilities,
     systematic_pps_sample_indices,
 )
+from src.tree.compositional_operator import OperatorAssumptionBundle
+from src.tree.compositional_learning import (
+    CompositionalLearningProblemSpec,
+    SupervisionDeliveryMode,
+    oracle_query_policy,
+    sampled_substructure_supervision_channel,
+)
+from src.tree.compositional_operator import make_text_compositional_operator
+from src.tree.theorem_backing import TheoremAssumptionSpec
 
 
 logger = logging.getLogger(__name__)
@@ -309,7 +319,7 @@ class AuditConfig:
 class AuditCheckResult:
     """Result of a single audit check."""
     node_id: str
-    check_type: str  # "sufficiency" or "merge_consistency"
+    check_type: str  # compatibility shim: theorem laws + explicit drift diagnostics
     passed: bool
     discrepancy_score: float
     reasoning: str
@@ -367,6 +377,8 @@ class AuditReport:
     substitution_population: int = 0
     sampling_strategy: str = SamplingStrategy.RANDOM.value
     sampling_probability: float = 1.0
+    operator_capabilities: Dict[str, Any] = field(default_factory=dict)
+    compositional_learning_problem: Dict[str, Any] = field(default_factory=dict)
 
     # Design-time inclusion probabilities for ALL auditable nodes (not just sampled).
     # Populated by CONTENT_WEIGHTED and LEVEL_WEIGHTED strategies for downstream use.
@@ -400,10 +412,10 @@ class AuditReport:
     @property
     def assoc_rate(self) -> float:
         """
-        Combined merge-consistency violation rate (p_assoc).
+        Combined audit-decomposition violation rate (p_assoc).
 
-        Weighted average of substitution (leaf boundary) and merge (internal) rates.
-        From paper: p_assoc = λ * p_bound + (1-λ) * p_merge
+        Weighted average of substitution (leaf boundary) and theorem-merge rates.
+        This is an audit-level aggregation, not a separate Lean local law.
         """
         total = self.substitution_samples + self.merge_samples
         if total == 0:
@@ -641,7 +653,7 @@ class AuditReport:
         p_assoc_upper = self.confidence_upper_bound("assoc", delta)
         p_idem_upper = self.confidence_upper_bound("idempotence", delta)
 
-        # Union bound: N * p_suff + M * p_assoc + (R-1) * p_idem
+        # Union bound over leaf, combined audit-decomposition, and idempotence rates.
         bound = (
             num_leaves * p_suff_upper +
             num_merges * p_assoc_upper +
@@ -677,6 +689,51 @@ class AuditReport:
             return GuaranteeLevel.UNION_BOUND
         else:
             return GuaranteeLevel.EMPIRICAL
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "tree_id": self.tree_id,
+            "total_nodes": int(self.total_nodes),
+            "nodes_audited": int(self.nodes_audited),
+            "nodes_passed": int(self.nodes_passed),
+            "nodes_failed": int(self.nodes_failed),
+            "failure_rate": float(self.failure_rate),
+            "source_doc_id": self.source_doc_id,
+            "checks": [
+                {
+                    "node_id": check.node_id,
+                    "check_type": check.check_type,
+                    "passed": bool(check.passed),
+                    "discrepancy_score": float(check.discrepancy_score),
+                    "reasoning": check.reasoning,
+                    "input_a": check.input_a,
+                    "input_b": check.input_b,
+                    "skipped": bool(check.skipped),
+                    "skip_reason": check.skip_reason,
+                    "inclusion_probability": check.inclusion_probability,
+                    "sampling_design": check.sampling_design,
+                }
+                for check in self.checks
+            ],
+            "failed_node_ids": list(self.failed_node_ids),
+            "sufficiency_violations": int(self.sufficiency_violations),
+            "merge_violations": int(self.merge_violations),
+            "idempotence_violations": int(self.idempotence_violations),
+            "substitution_violations": int(self.substitution_violations),
+            "sufficiency_samples": int(self.sufficiency_samples),
+            "merge_samples": int(self.merge_samples),
+            "idempotence_samples": int(self.idempotence_samples),
+            "substitution_samples": int(self.substitution_samples),
+            "leaf_population": int(self.leaf_population),
+            "merge_population": int(self.merge_population),
+            "idempotence_population": int(self.idempotence_population),
+            "substitution_population": int(self.substitution_population),
+            "sampling_strategy": self.sampling_strategy,
+            "sampling_probability": float(self.sampling_probability),
+            "operator_capabilities": dict(self.operator_capabilities),
+            "compositional_learning_problem": dict(self.compositional_learning_problem),
+            "inclusion_probability_map": dict(self.inclusion_probability_map),
+        }
 
 
 class ReviewPriority(Enum):
@@ -1042,7 +1099,8 @@ class Auditor:
         oracle: ScoringOracle,
         config: Optional[AuditConfig] = None,
         review_queue: Optional[ReviewQueue] = None,
-        summarizer: Optional[Callable[[str], str]] = None
+        summarizer: Optional[Callable[[str, str], str]] = None,
+        theorem_operator: Optional[Any] = None,
     ):
         """
         Initialize the auditor.
@@ -1053,11 +1111,18 @@ class Auditor:
             review_queue: Optional queue for flagging failures for batch review
             summarizer: Optional summarizer function for idempotence/substitution checks.
                        Required if audit_idempotence or audit_substitution is True.
+            theorem_operator: Optional theorem-facing operator with resummarize/combine support.
         """
         self._oracle = oracle
         self.config = config or AuditConfig()
         self.review_queue = review_queue
         self.summarizer = summarizer
+        self.theorem_operator = theorem_operator
+        if self.theorem_operator is None and self.summarizer is not None:
+            self.theorem_operator = make_text_compositional_operator(
+                self.summarizer,
+                name="auditor_summary_operator",
+            )
         self._last_inclusion_prob_map: Dict[str, float] = {}
 
         # Use a per-auditor RNG to avoid clobbering the global random state.
@@ -1081,6 +1146,124 @@ class Auditor:
         discrepancy = 1.0 - result.score
         is_congruent = discrepancy <= self.config.discrepancy_threshold
         return is_congruent, discrepancy, result.reasoning
+
+    def _combine_inputs(self, left: str, right: str, rubric: str) -> str:
+        operator = self.theorem_operator
+        if operator is not None and hasattr(operator, "combine"):
+            return str(operator.combine(left, right, rubric=rubric))
+        return format_merge_input(left, right)
+
+    def _resummarize(self, text: str, rubric: str) -> str:
+        operator = self.theorem_operator
+        if operator is not None:
+            if hasattr(operator, "resummarize"):
+                return str(operator.resummarize(text, rubric=rubric))
+            if hasattr(operator, "encode") and hasattr(operator, "decode"):
+                encoded = operator.encode(text, rubric=rubric)
+                return str(operator.decode(encoded, rubric=rubric))
+        if self.summarizer is None:
+            raise RuntimeError("No summarizer or theorem operator configured")
+        return str(self.summarizer(text, rubric))
+
+    def _resolve_operator_assumptions(
+        self,
+    ) -> Tuple[Optional[TheoremAssumptionSpec], Optional[OperatorAssumptionBundle]]:
+        candidate = self.theorem_operator
+        seen: Set[int] = set()
+        while candidate is not None and id(candidate) not in seen:
+            seen.add(id(candidate))
+            theorem_assumptions = getattr(candidate, "theorem_assumptions", None)
+            operator_assumptions = getattr(candidate, "assumptions", None)
+            resolved_theorem = (
+                theorem_assumptions
+                if isinstance(theorem_assumptions, TheoremAssumptionSpec)
+                else None
+            )
+            resolved_operator = (
+                operator_assumptions
+                if isinstance(operator_assumptions, OperatorAssumptionBundle)
+                else None
+            )
+            if resolved_theorem is not None or resolved_operator is not None:
+                return resolved_theorem, resolved_operator
+            candidate = getattr(candidate, "operator", None)
+        return None, None
+
+    def _compositional_learning_problem(self) -> Dict[str, Any]:
+        theorem_assumptions, operator_assumptions = self._resolve_operator_assumptions()
+        capability_report = (
+            self.theorem_operator.capability_report()
+            if self.theorem_operator is not None and hasattr(self.theorem_operator, "capability_report")
+            else None
+        )
+        targeted_laws = [LawKind.L1_LEAF, LawKind.L2_MERGE]
+        if bool(self.config.audit_idempotence):
+            targeted_laws.append(LawKind.L3_IDEMPOTENCE)
+        problem = CompositionalLearningProblemSpec(
+            name="tree_audit_verification",
+            document_type_name="tree_structured_documents",
+            theorem_domain_name="summary_objects",
+            operator_name=(
+                capability_report.operator_name
+                if capability_report is not None
+                else (
+                    "auditor_summary_operator"
+                    if self.theorem_operator is not None or self.summarizer is not None
+                    else "no_theorem_operator"
+                )
+            ),
+            theorem_assumptions=theorem_assumptions,
+            operator_assumptions=operator_assumptions,
+            operator_capabilities=capability_report,
+            supervision_channels=(
+                sampled_substructure_supervision_channel(
+                    name="audit_sampled_nodes",
+                    target_name="leaf_merge_resummary_checks",
+                    active=bool(
+                        self.config.audit_leaves
+                        or self.config.audit_internal
+                        or self.config.audit_idempotence
+                        or self.config.audit_substitution
+                    ),
+                    label_source=ORACLE_SOURCE,
+                    delivery_mode=SupervisionDeliveryMode.ONLINE_ORACLE_QUERY,
+                    query_policy=oracle_query_policy(
+                        name="audit_sampling_policy",
+                        query_unit_name="tree_nodes",
+                        selection_strategy=str(self.config.sampling_strategy.value),
+                        adaptive=bool(
+                            self.config.sampling_strategy
+                            != SamplingStrategy.RANDOM
+                        ),
+                        budget={
+                            "sample_budget": int(
+                                self.config.compute_sample_budget_for_guarantee()
+                            ),
+                            "idempotence_budget": int(self.config.idempotence_budget),
+                            "substitution_budget": int(self.config.substitution_budget),
+                        },
+                        propensity_field_name="inclusion_probability",
+                        logs_realized_propensities=True,
+                        supports_ipw_estimation=True,
+                        notes=(
+                            "Auditor queries the oracle online on sampled nodes and logs inclusion probabilities when available.",
+                        ),
+                    ),
+                    targeted_laws=tuple(targeted_laws),
+                    requires_propensity_logging=True,
+                    supports_unbiased_risk=True,
+                    notes=(
+                        "Auditor supervision arrives through sampled leaves, merges, and optional resummary checks.",
+                        "Substitution checks are also sampled but live outside the strict L1/L2/L3 theorem-law trio.",
+                    ),
+                ),
+            ),
+            notes=(
+                "This manifest records the audit problem itself, not only the realized sampled checks.",
+                "When a theorem operator is attached, the capability surface is copied into the problem spec.",
+            ),
+        )
+        return problem.to_dict()
 
     def audit_tree(self, tree: Tree) -> AuditReport:
         """
@@ -1154,7 +1337,7 @@ class Auditor:
                 if not result.passed:
                     sufficiency_violations += 1
 
-        # Audit internal nodes (merge consistency check - C3 Case B) - concurrent
+        # Audit internal nodes using Lean L2 / paper C3 semantics - concurrent
         if self.config.audit_internal and internal:
             internal_samples = self._sample_nodes(internal, internal_budget)
             internal_results = self._batch_audit_nodes(internal_samples, self._check_merge_consistency, rubric)
@@ -1187,20 +1370,22 @@ class Auditor:
                 idempotence_samples += 1
                 if not result.passed:
                     idempotence_violations += 1
-        elif self.config.audit_idempotence and internal and self.summarizer is None:
+        elif self.config.audit_idempotence and internal and self.summarizer is None and self.theorem_operator is None:
             # WARNING: Idempotence (C2/L3) is required for multi-round preservation (Theorem 2).
             # Without a summarizer, this check cannot be performed. If the tree was built
             # with R > 1 rounds, the theoretical guarantees from PreservationTheorems.lean
             # (multi_round theorem) may not hold.
             logger.warning(
-                "Idempotence check (C2/L3) requested but no summarizer provided. "
+                "Idempotence check (C2/L3) requested but no summarizer or theorem operator provided. "
                 "This check is REQUIRED for multi-round preservation guarantees (Theorem 2 in Lean). "
                 "If tree was built with R > 1 rounds, oracle preservation cannot be verified. "
-                "Provide a summarizer to enable idempotence checking."
+                "Provide a summarizer or theorem operator to enable idempotence checking."
             )
 
         # Substitution check (C3 Case A) - Check leaf boundary consistency - concurrent
-        if self.config.audit_substitution and len(leaves) >= 2 and self.summarizer is not None:
+        if self.config.audit_substitution and len(leaves) >= 2 and (
+            self.summarizer is not None or self.theorem_operator is not None
+        ):
             # Get adjacent leaf pairs
             adjacent_pairs = self._get_adjacent_leaf_pairs(leaves)
             if adjacent_pairs:
@@ -1222,13 +1407,13 @@ class Auditor:
                     substitution_samples += 1
                     if not result.passed:
                         substitution_violations += 1
-        elif self.config.audit_substitution and len(leaves) >= 2 and self.summarizer is None:
+        elif self.config.audit_substitution and len(leaves) >= 2 and self.summarizer is None and self.theorem_operator is None:
             # WARNING: Substitution check (C3 Case A) requires a summarizer to compare
             # joint vs disjoint summarization paths.
             logger.warning(
-                "Substitution check (C3 Case A) requested but no summarizer provided. "
+                "Substitution check (C3 Case A) requested but no summarizer or theorem operator provided. "
                 "This check verifies joint vs disjoint path consistency (L2 in Lean). "
-                "Provide a summarizer to enable substitution checking."
+                "Provide a summarizer or theorem operator to enable substitution checking."
             )
 
         # Compile report
@@ -1260,6 +1445,12 @@ class Auditor:
             substitution_population=substitution_population,
             sampling_strategy=self.config.sampling_strategy.value,
             sampling_probability=self.config.sampling_probability,
+            operator_capabilities=(
+                self.theorem_operator.capability_report().to_dict()
+                if self.theorem_operator is not None and hasattr(self.theorem_operator, "capability_report")
+                else {}
+            ),
+            compositional_learning_problem=self._compositional_learning_problem(),
             inclusion_probability_map=dict(self._last_inclusion_prob_map),
         )
 
@@ -1516,9 +1707,7 @@ class Auditor:
         self, node: Node, rubric: str
     ) -> Tuple[AuditCheckResult, str, str]:
         """
-        Check if an internal node's summary is consistent with its children.
-
-        Compares concatenated child summaries to parent summary.
+        Check Lean L2 / paper C3 against the theorem-domain node span.
 
         Args:
             node: Internal node to check
@@ -1530,11 +1719,20 @@ class Auditor:
         if node.is_leaf:
             logger.warning(f"Merge check called on leaf node {node.id}")
 
-        # Concatenate child summaries
-        left_summary = node.left_child.summary if node.left_child else ""
-        right_summary = node.right_child.summary if node.right_child else ""
-
-        input_a = format_merge_input(left_summary, right_summary)
+        if node.ops_span:
+            input_a = node.ops_span
+        else:
+            left_span = (
+                (node.left_child.ops_span if node.left_child else None)
+                or (node.left_child.raw_text_span if node.left_child else None)
+                or (node.left_child.summary if node.left_child else "")
+            )
+            right_span = (
+                (node.right_child.ops_span if node.right_child else None)
+                or (node.right_child.raw_text_span if node.right_child else None)
+                or (node.right_child.summary if node.right_child else "")
+            )
+            input_a = self._combine_inputs(left_span, right_span, rubric)
         input_b = node.summary
 
         is_congruent, score, reasoning = self._call_oracle(input_a, input_b, rubric)
@@ -1548,6 +1746,33 @@ class Auditor:
             reasoning=reasoning,
             input_a=input_a,
             input_b=input_b
+        )
+        return result, input_a, input_b
+
+    def _check_joint_to_disjoint_drift(
+        self, node: Node, rubric: str
+    ) -> Tuple[AuditCheckResult, str, str]:
+        """
+        Non-theorem diagnostic: compare parent summary to concatenated child summaries.
+        """
+        if node.is_leaf:
+            logger.warning(f"Joint/disjoint drift check called on leaf node {node.id}")
+
+        left_summary = node.left_child.summary if node.left_child else ""
+        right_summary = node.right_child.summary if node.right_child else ""
+        input_a = self._combine_inputs(left_summary, right_summary, rubric)
+        input_b = node.summary
+
+        is_congruent, score, reasoning = self._call_oracle(input_a, input_b, rubric)
+        passed = is_congruent and score <= self.config.discrepancy_threshold
+        result = AuditCheckResult(
+            node_id=node.id,
+            check_type="joint_to_disjoint_drift",
+            passed=passed,
+            discrepancy_score=score,
+            reasoning=reasoning,
+            input_a=input_a,
+            input_b=input_b,
         )
         return result, input_a, input_b
 
@@ -1570,14 +1795,14 @@ class Auditor:
         Returns:
             AuditCheckResult for the idempotence check
         """
-        if self.summarizer is None:
-            logger.warning("Idempotence check requires summarizer to be configured")
+        if self.summarizer is None and self.theorem_operator is None:
+            logger.warning("Idempotence check requires summarizer or theorem operator to be configured")
             return AuditCheckResult(
                 node_id=node.id,
                 check_type="idempotence",
                 passed=False,  # NOT passed - check wasn't performed
                 discrepancy_score=0.0,
-                reasoning="Skipped: no summarizer configured",
+                reasoning="Skipped: no summarizer or theorem operator configured",
                 skipped=True,
                 skip_reason="no_summarizer",
             )
@@ -1587,7 +1812,7 @@ class Auditor:
 
         # Re-summarize: g(s, rubric)
         try:
-            re_summarized = self.summarizer(original_summary, rubric)
+            re_summarized = self._resummarize(original_summary, rubric)
         except Exception as e:
             logger.error(f"Summarizer failed during idempotence check: {e}")
             return AuditCheckResult(
@@ -1634,14 +1859,14 @@ class Auditor:
         Returns:
             AuditCheckResult for the substitution check
         """
-        if self.summarizer is None:
-            logger.warning("Substitution check requires summarizer to be configured")
+        if self.summarizer is None and self.theorem_operator is None:
+            logger.warning("Substitution check requires summarizer or theorem operator to be configured")
             return AuditCheckResult(
                 node_id=f"{left_node.id}+{right_node.id}",
                 check_type="substitution",
                 passed=False,  # NOT passed - check wasn't performed
                 discrepancy_score=0.0,
-                reasoning="Skipped: no summarizer configured",
+                reasoning="Skipped: no summarizer or theorem operator configured",
                 skipped=True,
                 skip_reason="no_summarizer",
             )
@@ -1651,9 +1876,9 @@ class Auditor:
         raw_right = right_node.raw_text_span or ""
 
         # Joint path: g(u ⊕ v, rubric) - summarize the concatenated raw text directly
-        joint_raw = format_merge_input(raw_left, raw_right)
+        joint_raw = self._combine_inputs(raw_left, raw_right, rubric)
         try:
-            joint_summary = self.summarizer(joint_raw, rubric)
+            joint_summary = self._resummarize(joint_raw, rubric)
         except Exception as e:
             logger.error(f"Summarizer failed on joint text: {e}")
             return AuditCheckResult(
@@ -1666,13 +1891,13 @@ class Auditor:
 
         # Disjoint path: g(g(u) ⊕ g(v)) - summarize parts first, then concatenate and summarize again
         # Use existing summaries if available, otherwise generate them
-        left_summary = left_node.summary if left_node.summary else self.summarizer(raw_left, rubric)
-        right_summary = right_node.summary if right_node.summary else self.summarizer(raw_right, rubric)
+        left_summary = left_node.summary if left_node.summary else self._resummarize(raw_left, rubric)
+        right_summary = right_node.summary if right_node.summary else self._resummarize(raw_right, rubric)
 
         # Concatenate child summaries and re-summarize
-        concat_summaries = format_merge_input(left_summary, right_summary)
+        concat_summaries = self._combine_inputs(left_summary, right_summary, rubric)
         try:
-            disjoint_summary = self.summarizer(concat_summaries, rubric)
+            disjoint_summary = self._resummarize(concat_summaries, rubric)
         except Exception as e:
             logger.error(f"Summarizer failed on disjoint path: {e}")
             return AuditCheckResult(
@@ -1833,7 +2058,7 @@ def compute_violation_bound(
     - M = number of merges (N-1 for binary tree)
     - R = number of re-summarization rounds
     - p_suff = sufficiency violation rate
-    - p_assoc = combined merge-consistency rate (weighted avg of p_bound and p_merge)
+    - p_assoc = combined audit-decomposition rate (weighted avg of p_bound and p_merge)
     - p_idem = idempotence violation rate
 
     This provides a transparent union bound on the probability that the

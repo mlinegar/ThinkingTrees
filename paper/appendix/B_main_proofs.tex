@@ -1,0 +1,119 @@
+\section{Proofs of Propositions and Theorems in the Main Text}
+\label{app:proofs-core}
+
+This section collects the proofs of the corollaries and theorems stated in Section~\ref{sec:theorems}. These results establish three key invariance properties that make hierarchical processing practical: (i)~schedule invariance—the expected oracle is the same whether we use balanced trees or daisy chains; (ii)~fold-of-folds invariance—we can nest hierarchical reductions arbitrarily; and (iii)~multi-round preservation—repeatedly ``normalizing'' summaries does not drift the oracle when on-range stability holds. All three follow from the consistency conditions (C1)--(C3) via structural induction.
+
+The proofs below are written in standard mathematical style but were derived to match the structure of our Lean formalization (Appendix~\ref{app:lean}).
+
+\subsection{Proof Strategy Overview}
+
+The central technique is \textbf{structural induction on the binary tree}. The key insight is that the three local conditions (C1)--(C3) are designed precisely so that their conjunction propagates from leaves to root:
+
+\begin{enumerate}
+    \item \textbf{Base case (leaves):} Condition (C1) directly asserts $\fstar(g(b)) = \fstar(b)$ for each leaf block $b$.
+
+    \item \textbf{Inductive step (internal nodes):} Given that child summaries $g(u_L), g(u_R)$ preserve the oracle values of their underlying spans $S(u_L), S(u_R)$, Condition (C3) ensures that concatenating and re-summarizing preserves the oracle value of the concatenated span $S(u_L) \concat S(u_R) = S(u)$.
+
+    \item \textbf{Multi-round extension:} Once we reach the root, Condition (C2) ensures that applying $g$ again to an already-summarized string is inert at the oracle level.
+\end{enumerate}
+
+The triangle inequality for the metric $\metric$ is used throughout to chain local equivalences into global ones. When conditions hold exactly (zero metric distance), the triangle inequality collapses to equality propagation. When conditions hold approximately, the triangle inequality gives additive error bounds.
+
+Throughout this section we fix a document $x=b_1\concat\cdots\concat b_k\in\Strings$ together with a realized full binary reduction tree $T$ on the leaves $(b_1,\dots,b_k)$. For a node $u\in T$ we write $S(u)$ for the realized string at $u$ and $g(u)$ for the corresponding hierarchical evaluation defined in Appendix~\ref{app:notation}. Expectations with $\E$ average \emph{only} over the internal randomness of $g$ used in the computation of $g(u_L)$, $g(u_R)$, and the parent call at $u$, conditional on the realized subtree below~$u$.
+
+\medskip\noindent
+Every result below works solely with the task pseudometric $\metric$; equalities are always stated after applying $\fstar$. Lemma~\ref{lem:nodewise} and Theorem~\ref{thm:one-pass} already establish nodewise and root preservation under the three consistency conditions. Here we spell out three consequences: schedule invariance (any binary parenthesization on a fixed partition yields the same expected oracle), invariance under ``fold-of-folds'' execution plans, and multi-round preservation provided $g$ is stable on its own range.
+
+\subsection{Theorem~\ref{thm:one-pass}: Inductive Preservation}
+
+\begin{proof}
+We show by structural induction on node height that
+\[
+\E\big[\metric\big(\fstar(g(u)),\fstar(S(u))\big)\big]=0
+\quad\text{for all nodes }u.
+\]
+\emph{Base case:} If $u$ is a leaf with $S(u)=b$, then $g(u)=g(b)$ and Condition~\eqref{eq:leaf_sufficiency} yields the claim.
+\emph{Inductive step:} Let $u$ be internal with children $u_L,u_R$ and assume the claim for $u_L,u_R$. By definition, $S(u)=S(u_L)\concat S(u_R)$ and $g(u)=g(g(u_L)\concat g(u_R))$. Condition~\eqref{eq:leaf_compatibility} applied to the raw inputs $S(u_L),S(u_R)$ gives
+\[
+\E\!\Big[\metric\!\Big(\fstar\big(S(u_L)\concat S(u_R)\big),\ \fstar\big(g(g(u_L)\concat g(u_R))\big)\Big)\Big]=0,
+\]
+which is exactly the desired equality for $u$. Applying the claim to the root $r$ yields
+$\E[\metric(\fstar(g(r)),\fstar(S(r)))] = 0$. Since $S(r)=x$ and $g(r)=Z^{(1)}(x)$, the theorem follows.
+\end{proof}
+
+\subsection{Corollary~\ref{cor:schedule}: Schedule Invariance}
+
+\begin{proof}[Proof of Corollary~\ref{cor:schedule} (Schedule invariance)]
+\phantomsection\label{proof:cor-schedule}
+Let $T$ and $T'$ be any two full binary trees over the same realized leaves $(b_1,\ldots,b_k)$. Conditions~\eqref{eq:leaf_sufficiency} and \eqref{eq:leaf_compatibility} are stated for all strings, so they hold on the realized leaves and internal nodes of both trees. Applying Theorem~\ref{thm:one-pass} to $T$ and to $T'$ yields
+\[
+\E\big[\metric(\fstar(g_T(r)),\fstar(x))\big]=0
+\quad\text{and}\quad
+\E\big[\metric(\fstar(g_{T'}(r')),\fstar(x))\big]=0,
+\]
+where $x=b_1\concat\cdots\concat b_k$. Thus the expected oracle at the root is invariant to the parenthesization.
+\end{proof}
+
+
+\subsection{Corollary~\ref{cor:folds}: Fold-of-Folds Invariance}
+
+\begin{proof}[Proof of Corollary~\ref{cor:folds} (Fold-of-folds invariance)]
+\phantomsection\label{proof:cor-folds}
+Let $(F_1,\ldots,F_J)$ be a contiguous coarsening of the leaves. For each $j$, fix an arbitrary full
+binary within‑fold tree $T_j$ whose leaves, read left to right, concatenate to $F_j$. Let $\widehat T$ be any full
+binary over‑fold tree whose leaves, read left to right, concatenate to $F_1+\cdots+F_J$. Form the
+\emph{composite tree} $T_{\mathrm{comp}}$ with root $r$ by grafting $T_1,\ldots,T_J$ into $\widehat T$ at its $J$ leaves.
+If \eqref{eq:leaf_sufficiency} holds on the realized leaves of $T_{\mathrm{comp}}$ and \eqref{eq:leaf_compatibility} holds at every realized internal node of $T_{\mathrm{comp}}$, then
+\[
+\E\!\Big[\,\metric\!\big(\fstar(g(r)),\ \fstar(x)\big)\,\Big]\;=\;0.
+\]
+
+In particular, the expected oracle at the root is invariant to the choice of the within-fold parenthesizations and to the over-fold parenthesization, provided the realized leaves and internal nodes of $T_{\mathrm{comp}}$ satisfy \eqref{eq:leaf_sufficiency}–\eqref{eq:leaf_compatibility}. Moreover, if \eqref{eq:leaf_idempotence} (on-range stability) also holds, then for the usual two-level "fold-of-folds" computation that first reduces each $F_j$ to $S_j:=g(T_j)$ and then reduces $(S_1,\ldots,S_J)$ along $\widehat T$, we have
+\[
+\E\!\Big[\,\metric\!\big(\fstar(g(\widehat T)),\ \fstar(x)\big)\,\Big]\;=\;0,
+\]
+because all additional $g$ calls at the leaves of $\widehat T$ are re‑applications of $g$ to on‑range strings and are inert at the oracle by \eqref{eq:leaf_idempotence}.
+Build the composite tree $T_{\mathrm{comp}}$ that first runs $T_1,\ldots,T_J$ and then grafts their outputs into $\widehat T$. Every realized leaf or internal node across both levels appears exactly once inside $T_{\mathrm{comp}}$, so Lemma~\ref{lem:nodewise} applied to $T_{\mathrm{comp}}$ yields nodewise preservation and Theorem~\ref{thm:one-pass} gives the displayed equality at the root. For the two-stage implementation, note that each $S_j=g(T_j)$ lies in the range of $g$, so \eqref{eq:leaf_idempotence} implies
+\[
+\E\big[\metric(\fstar(g(S_j)),\fstar(S_j))\big]=0
+\quad\text{for each }j.
+\]
+Thus replacing the leaves of $\widehat T$ by $S_j$ does not change the root oracle in expectation, and the two-stage computation inherits the composite-tree guarantee.
+\end{proof}
+
+
+% \begin{corollary}[Fold‑of‑folds invariance; Corollary~\ref{cor:folds}]
+% \label{cor:folds-appendix}
+% Let $(F_1,\ldots,F_J)$ be a contiguous coarsening of the leaves. Reduce each fold $F_j$ by an arbitrary within‑fold tree $T_j$ to obtain $S_j:=g(T_j)$, then reduce $(S_1,\ldots,S_J)$ by any over‑fold tree $\widehat T$. If \eqref{eq:leaf_sufficiency} holds on all realized leaves across both levels and \eqref{eq:leaf_compatibility} holds at every realized internal node, then
+% \[
+% \E\!\big[\ \metric\big(\fstar\big(g(\widehat T)\big),\ \fstar(x)\big)\big]\;=\;0.
+% \]
+% \end{corollary}
+
+% \begin{proof}
+% Fix $j$ and condition on the $\sigma$‑field below $\mathrm{root}(T_j)$. Because \eqref{eq:leaf_sufficiency} holds on the realized leaves of $T_j$ and \eqref{eq:leaf_compatibility} holds at every realized internal node of $T_j$, Lemma~\ref{lem:nodewise} yields $\E_{\mathrm{root}(T_j)}\!\big[\metric\big(\fstar(S_j),\fstar(F_j)\big)\big]=0$. Now view $\widehat T$ as a tree with leaves $(S_1,\ldots,S_J)$. Since \eqref{eq:leaf_sufficiency} also holds on these realized leaves and \eqref{eq:leaf_compatibility} holds at every realized internal node of $\widehat T$, a second application of Lemma~\ref{lem:nodewise} gives
+% \[
+% \E_{\mathrm{root}(\widehat T)}\!\Big[\ \metric\!\big(\fstar\big(g(\widehat T)\big),\ \fstar(S_1\concat\cdots\concat S_J)\big)\ \Big]\;=\;0.
+% \]
+% By \eqref{eq:leaf_sufficiency}, replacing each $F_j$ by $S_j$ leaves the oracle target unchanged, so $\fstar(S_1\concat\cdots\concat S_J)=\fstar(F_1\concat\cdots\concat F_J)=\fstar(x)$. Taking expectations and using the tower property, the displayed conditional equality lifts to $\E\!\big[\metric\big(\fstar(g(\widehat T)),\fstar(x)\big)\big]=0$, as claimed.
+% \end{proof}
+
+
+\subsection{Theorem~\ref{thm:multi-round}: Multi-Round Preservation}
+
+\begin{proof}[Proof of Theorem~\ref{thm:multi-round} (Multi-round preservation)]
+\phantomsection\label{proof:thm-multi-round}
+Set $\Delta_R(x):=\E[\metric(\fstar(Z^{(R)}(x)),\fstar(x))]$. The base case $\Delta_1(x)=0$ is Theorem~\ref{thm:one-pass}. Assume $\Delta_R(x)=0$. Because $Z^{(R)}(x)$ is supported on the range of $g$, Condition~\eqref{eq:leaf_idempotence} gives
+\[
+\E\big[\metric(\fstar(g(Z^{(R)}(x))),\fstar(Z^{(R)}(x)))\big]=0.
+\]
+Using the triangle inequality and linearity of expectation,
+\begin{align*}
+\Delta_{R+1}(x)
+&= \E\big[\metric(\fstar(Z^{(R+1)}(x)),\fstar(x))\big] \\
+&\le \E\big[\metric(\fstar(g(Z^{(R)}(x))),\fstar(Z^{(R)}(x)))\big]
+  + \E\big[\metric(\fstar(Z^{(R)}(x)),\fstar(x))\big] \\
+&= 0 + \Delta_R(x) = 0.
+\end{align*}
+Thus $\Delta_R(x)=0$ for all $R\ge1$.
+\end{proof}

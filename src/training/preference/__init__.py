@@ -57,6 +57,15 @@ from src.training.preference.genrm_batch import (
     create_genrm_batch_client,
 )
 
+# Large-model DSPy judge (GenRM-free tournament path)
+from src.training.preference.large_judge_dspy import (
+    LargeJudgeComparisonModule,
+)
+from src.training.preference.oracle_judge import (
+    OracleJudgeResult,
+    OraclePairwiseJudge,
+)
+
 __all__ = [
     # Types
     "PreferenceDerivationResult",
@@ -94,6 +103,11 @@ __all__ = [
     "GenRMComparisonRequest",
     "GenRMBatchStats",
     "create_genrm_batch_client",
+    # Large-model DSPy judge
+    "LargeJudgeComparisonModule",
+    # Oracle scorer judge
+    "OracleJudgeResult",
+    "OraclePairwiseJudge",
 ]
 
 

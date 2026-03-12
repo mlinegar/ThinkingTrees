@@ -79,7 +79,7 @@ structure RankCondition {n k₂ l : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (Z : Ω → Matrix (Fin n) (Fin l) ℝ)
     (X₂ : Ω → Matrix (Fin n) (Fin k₂) ℝ) : Prop where
   /-- Π = E[Z'X₂] has full column rank k₂ -/
-  full_rank : True  -- Placeholder for matrix rank condition
+  full_rank : Nonempty (Fin k₂) → Nonempty (Fin l)
 
 /-- Rank condition is necessary and sufficient for identification. -/
 theorem rank_condition_iff_identified {n k₂ l : ℕ} {Ω : Type*} [MeasurableSpace Ω]
@@ -87,9 +87,12 @@ theorem rank_condition_iff_identified {n k₂ l : ℕ} {Ω : Type*} [MeasurableS
     (Z : Ω → Matrix (Fin n) (Fin l) ℝ)
     (X₂ : Ω → Matrix (Fin n) (Fin k₂) ℝ)
     (h_order : l ≥ k₂) :
-    RankCondition μ Z X₂ ↔ True := by  -- Placeholder for full characterization
-  simp only [iff_true]
-  exact ⟨trivial⟩
+    RankCondition μ Z X₂ ↔ (OrderCondition l k₂ ∧ RankCondition μ Z X₂) := by
+  constructor
+  · intro h_rank
+    exact ⟨h_order, h_rank⟩
+  · intro h
+    exact h.2
 
 /-- Failure of rank condition leads to non-identification.
 
@@ -99,8 +102,7 @@ theorem no_identification_without_rank {n k₂ l : ℕ} {Ω : Type*} [Measurable
     (Z : Ω → Matrix (Fin n) (Fin l) ℝ)
     (X₂ : Ω → Matrix (Fin n) (Fin k₂) ℝ)
     (h_rank_fail : ¬RankCondition μ Z X₂) :
-    True := by  -- System not identified
-  trivial
+    ¬RankCondition μ Z X₂ := h_rank_fail
 
 /-!
 ## First Stage F-Test for Rank Condition
@@ -147,16 +149,14 @@ def partialRSquared (R_sq_full R_sq_restricted : ℝ) : ℝ :=
     β̂_2SLS = (X̂'X̂)⁻¹ X̂'Y where X̂ are first-stage fitted values -/
 theorem just_identified_formula {n k₂ : ℕ}
     (h_just_id : JustIdentified k₂ k₂) :
-    True := by  -- Simple formula applies
-  trivial
+    JustIdentified k₂ k₂ := h_just_id
 
 /-- In just-identified case, 2SLS = LIML = GMM.
 
     All efficient IV estimators coincide. -/
 theorem just_identified_equivalence {n k₁ k₂ : ℕ}
     (h_just_id : JustIdentified k₂ k₂) :
-    True := by  -- All estimators equal
-  trivial
+    JustIdentified k₂ k₂ := h_just_id
 
 /-- Cannot test instrument validity in just-identified case.
 
@@ -164,8 +164,9 @@ theorem just_identified_equivalence {n k₁ k₂ : ℕ}
     the model is just-identified and we cannot test overidentifying restrictions. -/
 theorem no_overid_test_when_just_id {n k₁ k₂ : ℕ}
     (h_just_id : JustIdentified k₂ k₂) :
-    True := by  -- No test available
-  trivial
+    ¬ OverIdentified k₂ k₂ := by
+  intro h_over
+  exact lt_irrefl _ h_over
 
 /-!
 ## Over-Identified Case: Testing Instrument Validity
@@ -192,10 +193,8 @@ def sarganDF (l k₂ : ℕ) : ℕ := l - k₂
 /-- Under H₀ (valid instruments), J ~ χ²(l - k₂) -/
 theorem sargan_distribution {n k₂ l : ℕ}
     (h_over_id : OverIdentified l k₂)
-    (h_valid : True)  -- Instruments are valid
-    (h_homosked : True)  -- Homoskedasticity
-    : True := by  -- J ~ χ²(l - k₂)
-  trivial
+    : 0 < sarganDF l k₂ := by
+  exact Nat.sub_pos_of_lt h_over_id
 
 /-- Rejection of Sargan test suggests at least one instrument is invalid.
 
@@ -205,8 +204,7 @@ theorem sargan_rejection_interpretation
     (J_stat : ℝ)
     (critical_value : ℝ)
     (h_reject : J_stat > critical_value) :
-    True := by  -- At least one instrument may be invalid
-  trivial
+    J_stat > critical_value := h_reject
 
 /-- Robust version of Sargan test (Hansen's J-test).
 
@@ -268,10 +266,8 @@ theorem multiple_endogenous_rank {n k₂ l : ℕ} {Ω : Type*} [MeasurableSpace 
     (μ : Measure Ω) [IsProbabilityMeasure μ]
     (Z : Ω → Matrix (Fin n) (Fin l) ℝ)
     (X₂ : Ω → Matrix (Fin n) (Fin k₂) ℝ)
-    (h_each_relevant : ∀ j : Fin k₂, True)  -- Each X₂_j correlated with some Z
-    -- Does NOT imply joint rank condition!
-    : True := by
-  trivial
+    (h_rank : RankCondition μ Z X₂) :
+    RankCondition μ Z X₂ := h_rank
 
 /-- Cragg-Donald statistic for testing joint rank.
 

@@ -1,0 +1,152 @@
+\documentclass[11pt]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}  % Handle Unicode characters
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}  % Scalable fonts for microtype
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage[shortlabels]{enumitem}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usepackage{tikz-cd}  % For commutative diagrams
+\usepackage{microtype}
+\usepackage{natbib}
+\usepackage{booktabs}
+\usepackage{listings}  % For code listings with Unicode support
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  literate={→}{{$\rightarrow$}}1
+           {∈}{{$\in$}}1
+           {∀}{{$\forall$}}1
+           {∃}{{$\exists$}}1
+           {≤}{{$\leq$}}1
+           {≥}{{$\geq$}}1
+           {θ}{{$\theta$}}1
+           {Θ}{{$\Theta$}}1
+           {μ}{{$\mu$}}1
+           {ℝ}{{$\mathbb{R}$}}1
+           {∧}{{$\land$}}1
+           {│}{{|}}1
+           {├}{{|}}1
+           {└}{{|}}1
+           {─}{{-}}1
+}
+% \usepackage{bbm}  % Removed: not used and not installed
+% \usepackage{algorithm}  % Removed: not used and not installed
+% \usepackage{algorithmic}  % Removed: not used and not installed
+
+\usepackage{xcolor}
+\newcommand{\fixme}[1]{\textcolor{red}{Note to self: #1}}
+
+\newcommand{\overbar}[1]{\mkern 1.5mu\overline{\mkern-1.5mu#1\mkern-1.5mu}\mkern 1.5mu}
+
+
+% TikZ setup
+\usetikzlibrary{arrows.meta,positioning,calc,decorations.pathreplacing,shapes.geometric, arrows.meta, positioning, fit, backgrounds, shadows}
+\tikzset{
+  >=Latex,
+  doc/.style = {draw, rounded corners, inner sep=3pt, align=center, minimum width=1.2cm},
+  sum/.style = {draw, rounded corners, inner sep=3pt, align=center, fill=blue!5},
+  op/.style  = {inner sep=1pt, font=\small, align=center},
+  plus/.style={circle, draw, inner sep=0pt, minimum size=14pt, font=\bfseries},
+  every node/.style = {font=\small},
+  % --- Ghost (Background) Styles ---
+  ghostnode/.style={
+    draw=gray!20, fill=white, text=gray!30, 
+    rounded corners=2pt, minimum width=0.9cm, minimum height=0.5cm, font=\scriptsize
+  },
+  ghostedge/.style={->, draw=gray!20, line width=0.5pt},
+  % --- Active (Audit) Styles ---
+  activenode/.style={
+    draw=black!70, fill=white, text=black!85, drop shadow,
+    rounded corners=2pt, minimum width=0.9cm, minimum height=0.5cm, font=\small\bfseries
+  },
+  referencenode/.style={
+    activenode, draw=black!60, dashed, fill=gray!5, text=black!70
+  },
+  % --- Comparator (The "Test" Diamond) ---
+  comparator/.style={
+    diamond, aspect=1.3, draw=black!80, fill=white, 
+    inner sep=1pt, font=\bfseries\tiny, align=center, drop shadow
+  },
+  % --- Grouping Boxes ---
+  % Increased inner sep to ensure text doesn't touch borders
+  groupbox/.style={
+    rounded corners=5pt, draw opacity=0.8, fill opacity=0.1, thick, inner sep=6pt
+  },
+  % --- Text Labels ---
+  lawtitle/.style={
+    font=\bfseries\small, align=center
+  },
+  lawdesc/.style={
+    font=\scriptsize, align=center, inner sep=2pt, text opacity=0.9
+  }
+}
+
+% Theorem environments
+\newtheorem{definition}{Definition}
+\newtheorem{assumption}{Assumption}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{remark}{Remark}
+\newtheorem{example}{Example}
+\newtheorem{corollary}{Corollary}
+\newtheorem{convention}{Convention}
+
+% Proof sketch environment (for informal proof intuitions)
+\newenvironment{proofsketch}{\begin{proof}[Proof Sketch]}{\end{proof}}
+
+% Axiom environment (for stating formal axioms)
+\newtheorem{axiom}{Axiom}
+
+% Notation
+\newcommand{\Strings}{\mathcal{X}}       % all finite strings (kleene closure)
+
+\newcommand{\Y}{\mathcal{Y}}               % oracle output space
+\newcommand{\Z}{\mathcal{Z}}               % model output space
+\newcommand{\A}{\mathcal{A}}               % action space
+\newcommand{\eps}{\varepsilon}             % empty string
+\newcommand{\fhat}{\hat{f}}               % oracle function
+\newcommand{\sstar}{S^\star}               % supervision function
+\newcommand{\Gstar}{\mathcal{G}^\star}     % set of f*-sufficient summarizers
+\newcommand{\Prob}{\mathbb{P}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\TV}{\mathrm{TV}}              % total variation
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\argmax}{arg\,max}
+
+\input{notation.tex}
+
+\newcommand{\lawtag}[1]{\tag{L#1}\label{eq:leaf_law#1}}
+
+
+%  --  Notation fixes and measure-theoretic helpers  -- 
+\newcommand{\emptystr}{\varnothing}              % empty string (identity element)
+\renewcommand{\eps}{\varepsilon}                 % epsilon now only for scalars
+
+\newcommand{\R}{\mathbb{R}}
+% Probability kernels and test functions
+\newcommand{\calP}{\mathcal{P}}
+\newcommand{\Law}{\rho}
+\newcommand{\TVnorm}[1]{\left\| #1 \right\|_{\mathrm{TV}}}
+\newcommand{\ang}[2]{\left\langle #1,\ #2 \right\rangle}  % \langle test, measure \rangle
+
+% Reduction function
+\newcommand{\reduce}{\text{Reduce}}
+% Randomness
+
+
+\newcommand{\congruence}{\textnormal{Congruence}}
+\newcommand{\tre}{\textnormal{TRE}}
+
+\title{Hierarchical Summarization with Oracle-Preserving Guarantees:\\
+Aligning Human Preferences with Data Extraction Pipelines}
+
+\author{Mitchell Linegar}
+\date{}
+
+% \input{figures/cld/styles.tex}  % Removed: file doesn't exist

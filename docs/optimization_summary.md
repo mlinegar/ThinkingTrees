@@ -113,7 +113,6 @@ from src.training import JudgeOptimizer
 ## Files
 - Results: `data/results/manifesto_rile/overnight_20251216_175823/`
 - Pipeline: `experiments/manifesto_rile/run_with_optimization.py`
-- Overnight script: `scripts/run_overnight_test.sh`
 - Oracle test: `experiments/manifesto_rile/test_oracle_approximation.py`
 - Oracle training data: `data/results/manifesto_rile/overnight_20251216_175823/oracle_training_data.json`
 - Oracle checkpoint: `data/oracle_func_checkpoints/`

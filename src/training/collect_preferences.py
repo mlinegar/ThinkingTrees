@@ -321,7 +321,7 @@ def create_data_source(config, task):
         raise ValueError(f"Unknown source type: {ds.source_type}")
 
 
-def create_collector(config, task, summarizer):
+def create_collector(config, task, summarizer, memory=None):
     """Create appropriate preference collector based on judge type."""
     from .preference_config import JudgeType
     from src.training.preference import GenerationConfig
@@ -352,6 +352,7 @@ def create_collector(config, task, summarizer):
             genrm_judge=genrm_judge,
             k=gen.k_candidates,
             generation_configs=generation_configs,
+            memory=memory,
         )
 
     elif judge_settings.judge_type == JudgeType.ORACLE:
@@ -367,6 +368,7 @@ def create_collector(config, task, summarizer):
             k=gen.k_candidates,
             generation_configs=generation_configs,
             tie_margin=judge_settings.tie_margin,
+            memory=memory,
         )
 
     elif judge_settings.judge_type == JudgeType.DSPY:

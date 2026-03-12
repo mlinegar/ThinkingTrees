@@ -96,7 +96,7 @@ def DSLLogisticEstimator {n d : ℕ}
     (data : DSLLogisticData n d)
     (initial_β : Fin d → ℝ)
     (max_iter : ℕ) : Fin d → ℝ :=
-  -- Placeholder: actual implementation would use Newton-Raphson
+  -- Deterministic fallback when an external optimizer is not wired in.
   initial_β
 
 /-- Objective function for GMM: ||sample moment||² -/
@@ -212,6 +212,30 @@ def logisticMomentPair {d : ℕ} : MomentFunction ((Fin d → ℝ) × ℝ) d :=
 /-- DSL logistic regression is consistent.
 
     Under Assumption 1: β̂_DSL →p β* as N → ∞ -/
+theorem DSL_logistic_consistent_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Con : Type*} {d : ℕ}
+    (E : (((Fin d → ℝ) × ℝ × ℝ × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (dbs : DesignBasedSampling (Fin d → ℝ) ℝ Con)
+    (β_star : Fin d → ℝ)
+    (reg : RegularityConditions
+      ((Fin d → ℝ) × ℝ × ℝ × SamplingIndicator × ℝ) d)
+    (h_unbiased :
+      MomentUnbiased (DSLMomentFromData (logisticMomentPair (d := d))) E β_star)
+    (data_seq : ℕ →
+      Ω → List ((Fin d → ℝ) × ℝ × ℝ × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est :
+      IsMEstimatorSeq (DSLMomentFromData (logisticMomentPair (d := d)))
+        data_seq β_hat_seq)
+    : ConvergesInProbability μ β_hat_seq (fun _ => β_star) := by
+  exact DSL_consistent_from_assumptions μ E h_consistent dbs (logisticMomentPair (d := d))
+    β_star reg h_unbiased data_seq β_hat_seq h_est
+
+/-- DSL logistic regression is consistent.
+
+    Under Assumption 1: β̂_DSL →p β* as N → ∞ -/
 theorem DSL_logistic_consistent
     {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
     {Con : Type*} {d : ℕ}
@@ -230,8 +254,33 @@ theorem DSL_logistic_consistent
       IsMEstimatorSeq (DSLMomentFromData (logisticMomentPair (d := d)))
         data_seq β_hat_seq)
     : ConvergesInProbability μ β_hat_seq (fun _ => β_star) := by
-  exact DSL_consistent μ axioms dbs (logisticMomentPair (d := d)) β_star reg h_unbiased data_seq
-    β_hat_seq h_est
+  exact DSL_logistic_consistent_from_assumptions μ axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    dbs β_star reg h_unbiased data_seq β_hat_seq h_est
+
+/-- DSL confidence intervals for log-odds (or transformed odds ratios) are valid.
+
+    This theorem exposes the generic CI coverage statement; users can
+    instantiate `CI_seq` with `oddsRatioCI95` or a Wald CI on β. -/
+theorem DSL_odds_ratio_valid_coverage_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Con : Type*} {d : ℕ}
+    (E : (((Fin d → ℝ) × ℝ × ℝ × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (coverage_axioms : CoverageFromAsymptoticNormal μ d)
+    (dbs : DesignBasedSampling (Fin d → ℝ) ℝ Con)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions
+      ((Fin d → ℝ) × ℝ × ℝ × SamplingIndicator × ℝ) d)
+    (h_unbiased :
+      MomentUnbiased (DSLMomentFromData (logisticMomentPair (d := d))) E β_star)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ) (h_α : 0 < α ∧ α < 1)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    : AsymptoticCoverage μ CI_seq β_star α := by
+  exact DSL_valid_coverage_from_assumptions μ E h_normal coverage_axioms dbs
+    (logisticMomentPair (d := d)) β_star V reg h_unbiased CI_seq α h_α centered_scaled_seq
 
 /-- DSL confidence intervals for log-odds (or transformed odds ratios) are valid.
 
@@ -254,8 +303,9 @@ theorem DSL_odds_ratio_valid_coverage
     (α : ℝ) (h_α : 0 < α ∧ α < 1)
     (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
     : AsymptoticCoverage μ CI_seq β_star α := by
-  exact DSL_valid_coverage μ axioms coverage_axioms dbs (logisticMomentPair (d := d)) β_star V reg
-    h_unbiased CI_seq α h_α centered_scaled_seq
+  exact DSL_odds_ratio_valid_coverage_from_assumptions μ axioms.E
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    coverage_axioms dbs β_star V reg h_unbiased CI_seq α h_α centered_scaled_seq
 
 /-!
 ## Binary Outcome with Binary Predictor

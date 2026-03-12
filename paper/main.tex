@@ -1,0 +1,123 @@
+% !TEX root = main.tex
+% Oracle-Preserving Summarization: A Verified Framework for Scaling Semantic Extraction
+% Job Market Paper - Three Contributions: Theory + Software + Empirics
+
+% Preamble: packages, formatting, title, author info
+\input{preamble.tex}
+
+\begin{document}
+\maketitle
+
+% Abstract
+\input{sections/00_abstract.tex}
+
+%% PART I: CORE FRAMEWORK (Reuse ~80% from existing)
+\input{sections/01_introduction.tex}
+\input{sections/02_framework.tex}
+\input{sections/03_main_theorems.tex}
+\input{sections/04_probabilistic_audit.tex}
+
+%% PART II: SOFTWARE IMPLEMENTATION (NEW)
+\input{sections/05_software.tex}
+\input{sections/06_preference_learning.tex}
+
+%% PART III: EMPIRICAL APPLICATIONS (NEW)
+\input{sections/07_manifesto.tex}
+\input{sections/08_congressional.tex}
+
+%% PART IV: FORMAL VERIFICATION (NEW)
+\input{sections/09_verification.tex}
+
+%% PART V: CONCLUSION AND DISCUSSION
+\input{sections/10_related_work.tex}
+\input{sections/11_conclusion.tex}
+
+%% APPENDICES
+\appendix
+
+\noindent This appendix provides complete technical foundations, detailed proofs, and practical guidance for the Oracle-Preserving Summarization framework. It is organized to support both theoretical understanding and empirical deployment.
+
+\medskip
+
+% Mathematical Foundations
+\noindent\textbf{Appendix~\ref{app:notation}: Notation Recap} collects all notation and definitions.
+\noindent\textbf{Appendix~\ref{app:proofs-core}: Proofs of Main Results} establishes the core guarantees.
+
+% Learning Theory
+\noindent\textbf{Appendix~\ref{app:blackwell}: Score Transport} shows how supervision factors through the oracle.
+\noindent\textbf{Appendix~\ref{sec:dpo}: DPO Bounds} proves DPO equivalence and gap bounds.
+\noindent\textbf{Appendix~\ref{sec:grpo}: GRPO Bounds} extends to Plackett-Luce and DeepSeek-R1 style training.
+\noindent\textbf{Appendix~\ref{app:preference-proofs}: Preference Learning Proofs} provides detailed Lipschitz and equivalence proofs.
+\noindent\textbf{Appendix~\ref{app:adaptive-tree-proofs}: Adaptive Tree Objective Proofs} gives full proofs for expected-tree optimizer transfer under oracle uncertainty.
+\noindent\textbf{Appendix~\ref{app:theorem-backed}: Theorem-Backed Reductions} explains the broadest exact and approximate reduction interface, the codec route, and the collapse to the global $A1/A2/A3$ regime.
+
+% Practical Guidance
+\noindent\textbf{Appendix~\ref{app:practical_audit}: Practical Audit} provides step-by-step procedures.
+\noindent\textbf{Appendix~\ref{app:confidence}: Confidence Intervals} gives Hoeffding bounds and sample size calculations.
+\noindent\textbf{Appendix~\ref{app:clustered-inference}: Clustered and Calibrated Inference} explains how clustered confidence intervals and calibration events feed directly into the final DSL bound object.
+\noindent\textbf{Appendix~\ref{app:measurement-error}: Measurement Error and Proxy-Aware Sampling} gives the transport-plus-measurement decomposition and the exact residual formula for nonclassical IPW mismatch.
+\noindent\textbf{Appendix~\ref{app:measure-audit}: Measure-Theoretic Audit} formalizes concentration inequalities.
+\noindent\textbf{Appendix~\ref{app:sampling}: Sampling Theory} covers IPW estimators and stratification.
+\noindent\textbf{Appendix~\ref{app:bootstrap}: Consistency Bootstrap} describes the DSPy optimization loop.
+
+% Alternative Formulations
+\noindent\textbf{Appendix~\ref{sec:global}: Global Variant} presents an algebraic formulation.
+\noindent\textbf{Appendix~\ref{app:mergeable}: Mergeable Relationship} connects to database theory.
+\noindent\textbf{Appendix~\ref{sec:info-sieve}: Information-Theoretic View} offers an optional perspective.
+
+% Existence, Examples, and Necessity
+\noindent\textbf{Appendix~\ref{app:existence}: Existence} establishes that oracle-preserving summarizers exist.
+\noindent\textbf{Appendix~\ref{sec:examples}: Worked Examples} instantiates the framework for concrete tasks.
+\noindent\textbf{Appendix~\ref{app:pipeline}: Training Pipeline} analyzes multi-stage gap composition.
+\noindent\textbf{Appendix~\ref{app:counterexample}: Counterexample} proves L3 (Idempotence) is independent.
+
+% NEW: Formal Verification
+\noindent\textbf{Appendix~\ref{app:lean}: Lean4 Formalization} documents the 50K+ LOC machine-verified proofs.
+
+% NEW: Software Documentation
+\noindent\textbf{Appendix~\ref{app:software}: Software Documentation} provides API reference and usage guide.
+
+% NEW: Empirical Details
+\noindent\textbf{Appendix~\ref{app:empirical}: Empirical Details} contains full results and robustness checks, including mergeable validation (\S\ref{app:mergeable-validation}).
+
+\medskip
+
+% Include appendix files
+% Mathematical Foundations
+\input{appendix/A_notation_recap.tex}
+\input{appendix/B_main_proofs.tex}
+
+% Learning Theory
+\input{appendix/C_score_transport.tex}
+\input{appendix/D_dpo_bounds.tex}
+\input{appendix/D2_grpo_bounds.tex}
+\input{appendix/R_preference_learning_proofs.tex}
+\input{appendix/T_adaptive_tree_objectives.tex}
+\input{appendix/V_theorem_backed_reductions.tex}
+
+% Practical Guidance
+\input{appendix/E_practical_audit.tex}
+\input{appendix/E2_confidence_intervals.tex}
+\input{appendix/U_clustered_inference.tex}
+\input{appendix/W_measurement_error.tex}
+\input{appendix/Q_measure_theoretic_audit.tex}
+\input{appendix/S_sampling_theory.tex}
+\input{appendix/F_bootstrap.tex}
+
+% Alternative Formulations
+\input{appendix/G_global_variant.tex}
+\input{appendix/H_mergeable.tex}
+\input{appendix/I_information_sieve.tex}
+
+% Existence, Examples, and Necessity
+\input{appendix/J_existence.tex}
+\input{appendix/K_worked_examples.tex}
+\input{appendix/O_training_pipeline.tex}
+\input{appendix/P_counterexample.tex}
+
+% Formal Verification, Software, Empirics
+\input{appendix/L_lean_formalization.tex}
+\input{appendix/M_software_docs.tex}
+\input{appendix/N_empirical_details.tex}
+
+\end{document}

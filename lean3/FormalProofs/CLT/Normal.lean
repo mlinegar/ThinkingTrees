@@ -2,7 +2,7 @@ import Mathlib.Probability.Distributions.Gaussian.Real
 import Mathlib.MeasureTheory.Measure.CharacteristicFunction
 
 /-!
-# FormalProofs/Probability/Normal.lean
+# FormalProofs/CLT/Normal.lean
 
 Standard normal distribution on `ℝ`, expressed via mathlib's `gaussianReal`.
 This avoids re-deriving measure-theoretic facts and directly reuses the

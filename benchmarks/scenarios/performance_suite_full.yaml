@@ -1,0 +1,530 @@
+version: 1
+name: thinkingtrees_performance_full
+output_root: outputs/performance_suite
+defaults:
+  repeats: 1
+  timeout_seconds: 7200
+  cwd: .
+
+cases:
+  - id: micro_chunker
+    layer: micro
+    description: Pure-Python chunking throughput and latency.
+    command:
+      - python3
+      - scripts/run_component_microbench.py
+      - --bench
+      - chunker
+      - --iterations
+      - "800"
+      - --json-out
+      - "{case_dir}/micro_chunker.json"
+    extractors:
+      - type: json_file
+        name: micro
+        path: "{case_dir}/micro_chunker.json"
+    metric_rules:
+      - name: chunker_docs_per_second
+        path: extracts.micro.benchmarks.chunker.metrics.docs_per_second
+        direction: higher
+        max_regression_pct: 10
+      - name: chunker_p95_latency_ms
+        path: extracts.micro.benchmarks.chunker.metrics.latency_ms_p95
+        direction: lower
+        max_regression_pct: 20
+
+  - id: micro_conditional_memory
+    layer: micro
+    description: Local ConditionalMemory write/read microbench.
+    command:
+      - python3
+      - scripts/run_component_microbench.py
+      - --bench
+      - conditional_memory
+      - --iterations
+      - "1200"
+      - --json-out
+      - "{case_dir}/micro_memory.json"
+    extractors:
+      - type: json_file
+        name: micro
+        path: "{case_dir}/micro_memory.json"
+    metric_rules:
+      - name: memory_ops_per_second
+        path: extracts.micro.benchmarks.conditional_memory.metrics.ops_per_second
+        direction: higher
+        max_regression_pct: 12
+      - name: memory_lookup_latency_p95_ms
+        path: extracts.micro.benchmarks.conditional_memory.metrics.lookup_latency_ms_p95
+        direction: lower
+        max_regression_pct: 20
+
+  - id: micro_prompting
+    layer: micro
+    description: Prompt construction and score parser microbench.
+    command:
+      - python3
+      - scripts/run_component_microbench.py
+      - --bench
+      - prompting
+      - --iterations
+      - "3000"
+      - --json-out
+      - "{case_dir}/micro_prompting.json"
+    extractors:
+      - type: json_file
+        name: micro
+        path: "{case_dir}/micro_prompting.json"
+    metric_rules:
+      - name: prompting_iters_per_sec
+        path: extracts.micro.benchmarks.prompting.metrics.iterations_per_second
+        direction: higher
+        max_regression_pct: 10
+      - name: parser_success_rate
+        path: extracts.micro.benchmarks.prompting.metrics.parse_success_rate
+        direction: higher
+        max_regression_pct: 2
+
+  - id: micro_tree_builder
+    layer: micro
+    description: Tree-builder structural overhead with IdentitySummarizer.
+    command:
+      - python3
+      - scripts/run_component_microbench.py
+      - --bench
+      - tree_builder
+      - --iterations
+      - "300"
+      - --json-out
+      - "{case_dir}/micro_tree_builder.json"
+    extractors:
+      - type: json_file
+        name: micro
+        path: "{case_dir}/micro_tree_builder.json"
+    metric_rules:
+      - name: tree_builder_docs_per_sec
+        path: extracts.micro.benchmarks.tree_builder.metrics.docs_per_second
+        direction: higher
+        max_regression_pct: 10
+      - name: tree_builder_p95_latency_ms
+        path: extracts.micro.benchmarks.tree_builder.metrics.latency_ms_p95
+        direction: lower
+        max_regression_pct: 20
+
+  - id: component_task_throughput
+    layer: component
+    description: Task server throughput limits (single/merge/score/DP2).
+    timeout_seconds: 10800
+    command:
+      - python3
+      - scripts/run_pipeline_throughput_limits.py
+      - --steps
+      - task_single,task_merge,task_score,task_dp2
+      - --concurrency-grid
+      - 1,2,4
+      - --min-requests-per-point
+      - "12"
+      - --requests-per-concurrency
+      - "2"
+      - --warmup-requests
+      - "2"
+      - --output-json
+      - "{case_dir}/task_throughput.json"
+      - --output-csv
+      - "{case_dir}/task_throughput.csv"
+      - --auto-start-servers
+      - --clear-ports
+      - --clear-vllm-state
+    extractors:
+      - type: throughput_suite
+        name: throughput
+        path: "{case_dir}/task_throughput.json"
+    metric_rules:
+      - name: task_single_req_per_s
+        path: extracts.throughput.step_summaries.task_single.recommended_req_per_s
+        direction: higher
+        max_regression_pct: 12
+      - name: task_dp2_req_per_s
+        path: extracts.throughput.step_summaries.task_dp2.recommended_req_per_s
+        direction: higher
+        max_regression_pct: 12
+
+  - id: component_genrm_throughput
+    layer: component
+    description: GenRM throughput limits (raw and batched).
+    timeout_seconds: 10800
+    command:
+      - python3
+      - scripts/run_pipeline_throughput_limits.py
+      - --steps
+      - genrm_batch,genrm_raw
+      - --genrm-modes
+      - fast
+      - --concurrency-grid
+      - 1,2
+      - --min-requests-per-point
+      - "8"
+      - --requests-per-concurrency
+      - "2"
+      - --warmup-requests
+      - "2"
+      - --output-json
+      - "{case_dir}/genrm_throughput.json"
+      - --output-csv
+      - "{case_dir}/genrm_throughput.csv"
+      - --auto-start-servers
+      - --clear-ports
+      - --clear-vllm-state
+    extractors:
+      - type: throughput_suite
+        name: throughput
+        path: "{case_dir}/genrm_throughput.json"
+    metric_rules:
+      - name: genrm_batch_fast_req_per_s
+        path: extracts.throughput.step_summaries.genrm_batch_fast.recommended_req_per_s
+        direction: higher
+        max_regression_pct: 15
+      - name: genrm_raw_fast_req_per_s
+        path: extracts.throughput.step_summaries.genrm_raw_fast.recommended_req_per_s
+        direction: higher
+        max_regression_pct: 15
+
+  - id: component_gpu_transitions
+    layer: component
+    description: Dynamic GPU transition latency probe (task <-> GenRM).
+    timeout_seconds: 21600
+    command:
+      - ./scripts/run_training_pipeline.sh
+      - --start-server
+      - --start-genrm
+      - --train-samples
+      - "6"
+      - --val-samples
+      - "2"
+      - --test-samples
+      - "2"
+      - --n-iterations
+      - "1"
+      - --optimizer-budget
+      - light
+      - --routing-policy
+      - affinity_load_aware
+      - --engram-memory
+      - --genrm-init-samples
+      - "4"
+      - --output-dir
+      - "{case_dir}/transition_probe"
+    extractors:
+      - type: pipeline_run
+        name: pipeline
+        path: "{case_dir}/transition_probe"
+    metric_rules:
+      - name: transition_mean_seconds
+        path: extracts.pipeline.summary.gpu_transition_stats.mean_seconds
+        direction: lower
+        max_regression_pct: 20
+      - name: transition_max_seconds
+        path: extracts.pipeline.summary.gpu_transition_stats.max_seconds
+        direction: lower
+        max_regression_pct: 25
+      - name: transition_count
+        path: extracts.pipeline.summary.gpu_transition_stats.count
+        direction: higher
+        max_regression_abs: 1
+
+  - id: component_prefix_cache_metrics
+    layer: component
+    description: Probe /metrics endpoints for prefix cache metric visibility.
+    timeout_seconds: 10800
+    command:
+      - python3
+      - scripts/probe_vllm_prefix_metrics.py
+      - --ports
+      - 8000,8001
+      - --json-out
+      - "{case_dir}/prefix_metrics_probe.json"
+      - --start-server
+      - --start-genrm
+    extractors:
+      - type: json_file
+        name: prefix
+        path: "{case_dir}/prefix_metrics_probe.json"
+    metric_rules:
+      - name: prefix_ports_ok
+        path: extracts.prefix.summary.ports_ok
+        direction: higher
+        max_regression_abs: 0
+      - name: prefix_total_lines
+        path: extracts.prefix.summary.total_prefix_lines
+        direction: higher
+        max_regression_abs: 5
+      - name: prefix_hit_rate_metric_detected
+        path: extracts.prefix.summary.hit_rate_metric_detected_numeric
+        direction: higher
+        max_regression_abs: 0
+
+  - id: integration_perf_baseline
+    layer: integration
+    description: Cold/warm workload baseline via BatchedDocPipeline.
+    timeout_seconds: 10800
+    command:
+      - python3
+      - scripts/run_perf_baseline.py
+      - --samples
+      - "12"
+      - --iterations
+      - "2"
+      - --max-chunk-chars
+      - "8000"
+      - --routing-policy
+      - affinity_load_aware
+      - --port
+      - "8000"
+      - --output
+      - "{case_dir}/perf_baseline.json"
+    extractors:
+      - type: perf_baseline
+        name: perf_baseline
+        path: "{case_dir}/perf_baseline.json"
+    metric_rules:
+      - name: warm_docs_per_second
+        path: extracts.perf_baseline.summary.warm_docs_per_second
+        direction: higher
+        max_regression_pct: 12
+      - name: warm_mae_mean
+        path: extracts.perf_baseline.summary.warm_mae_mean
+        direction: lower
+        max_regression_pct: 15
+
+  - id: integration_arch_gate_manifesto
+    layer: integration
+    description: Architecture gate on manifesto baseline path.
+    timeout_seconds: 7200
+    command:
+      - python3
+      - scripts/bench_arch_gates.py
+      - --run-dir
+      - "{case_dir}/arch_gate"
+      - --manifesto-port
+      - "8000"
+      - --skip-ruler
+    extractors:
+      - type: gate_metrics
+        name: gates
+        path: "{case_dir}/arch_gate/gate_metrics.json"
+    metric_rules:
+      - name: manifesto_mae_gate
+        path: extracts.gates.summary.manifesto_mae
+        direction: lower
+        max_regression_pct: 10
+
+  - id: integration_memory_reuse_pass2
+    layer: integration
+    description: Two-pass pipeline probe validating ConditionalMemory reuse.
+    timeout_seconds: 43200
+    command:
+      - python3
+      - scripts/run_memory_reuse_probe.py
+      - --output-dir
+      - "{case_dir}/memory_reuse"
+      - --json-out
+      - "{case_dir}/memory_reuse_probe.json"
+      - --task
+      - manifesto_rile
+      - --train-samples
+      - "3"
+      - --val-samples
+      - "1"
+      - --test-samples
+      - "1"
+      - --n-iterations
+      - "1"
+      - --optimizer-budget
+      - light
+      - --routing-policy
+      - affinity_load_aware
+      - --genrm-init-samples
+      - "1"
+      - --start-server
+      - --start-genrm
+      - --engram-memory
+      - --keep-servers-between-passes
+      - --extra-arg=--max-metric-calls
+      - --extra-arg=1
+      - --extra-arg=--skip-summarizer-opt
+      - --extra-arg=--skip-oracle-opt
+    extractors:
+      - type: json_file
+        name: reuse
+        path: "{case_dir}/memory_reuse_probe.json"
+    metric_rules:
+      - name: pass2_memory_hit_rate
+        path: extracts.reuse.summary.pass2.conditional_memory.hit_rate
+        direction: higher
+        max_regression_pct: 20
+      - name: pass2_memory_l2_hits
+        path: extracts.reuse.summary.pass2.conditional_memory.l2_hits
+        direction: higher
+        max_regression_abs: 2
+      - name: pass2_l2_hits_delta
+        path: extracts.reuse.summary.deltas.l2_hits_delta
+        direction: higher
+        max_regression_abs: 2
+
+  - id: integration_recovery_path
+    layer: integration
+    description: Deliberate task-port failure injection and recovery probe.
+    enabled: false
+    timeout_seconds: 28800
+    command:
+      - python3
+      - scripts/run_recovery_path_probe.py
+      - --output-dir
+      - "{case_dir}/recovery_probe"
+      - --json-out
+      - "{case_dir}/recovery_probe.json"
+      - --task
+      - manifesto_rile
+      - --train-samples
+      - "6"
+      - --val-samples
+      - "2"
+      - --test-samples
+      - "2"
+      - --n-iterations
+      - "1"
+      - --optimizer-budget
+      - light
+      - --routing-policy
+      - affinity_load_aware
+      - --genrm-init-samples
+      - "2"
+      - --max-metric-calls
+      - "10"
+      - --start-server
+      - --start-genrm
+      - --engram-memory
+      - --require-injection-success
+      - --require-recovery-success
+    extractors:
+      - type: json_file
+        name: recovery
+        path: "{case_dir}/recovery_probe.json"
+    metric_rules:
+      - name: recovery_injection_success
+        path: extracts.recovery.summary.injection.succeeded_numeric
+        direction: higher
+        max_regression_abs: 0
+      - name: recovery_success_numeric
+        path: extracts.recovery.summary.checks.recovery_succeeded_numeric
+        direction: higher
+        max_regression_abs: 0
+      - name: recovery_orchestrator_calls
+        path: extracts.recovery.summary.recovery.orchestrator_recover_calls_after_injection
+        direction: higher
+        max_regression_abs: 1
+      - name: recovery_transition_max_seconds
+        path: extracts.recovery.summary.recovery.transition_max_seconds_after_injection
+        direction: lower
+        max_regression_pct: 25
+
+  - id: e2e_training_pipeline_smoke
+    layer: e2e
+    description: End-to-end training pipeline smoke with GenRM and memory enabled.
+    timeout_seconds: 21600
+    command:
+      - ./scripts/run_training_pipeline.sh
+      - --start-server
+      - --start-genrm
+      - --train-samples
+      - "10"
+      - --val-samples
+      - "4"
+      - --test-samples
+      - "4"
+      - --n-iterations
+      - "1"
+      - --optimizer-budget
+      - light
+      - --conditional-memory-mode
+      - readwrite
+      - --conditional-memory-dir
+      - "{case_dir}/conditional_memory"
+      - --routing-policy
+      - affinity_load_aware
+      - --engram-memory
+      - --output-dir
+      - "{case_dir}/pipeline_run"
+    extractors:
+      - type: pipeline_run
+        name: pipeline
+        path: "{case_dir}/pipeline_run"
+    metric_rules:
+      - name: test_mae
+        path: extracts.pipeline.summary.test.mae
+        direction: lower
+        max_regression_pct: 10
+      - name: test_pearson
+        path: extracts.pipeline.summary.test.pearson_r
+        direction: higher
+        max_regression_pct: 10
+      - name: peak_tok_per_sec
+        path: extracts.pipeline.summary.throughput.peak_tok_per_sec
+        direction: higher
+        max_regression_pct: 15
+      - name: test_frac_neutral
+        path: extracts.pipeline.summary.test.frac_neutral
+        direction: lower
+        max_regression_pct: 20
+
+  - id: e2e_budget_sweep_light_med_heavy
+    layer: e2e
+    description: Budget sweep probe to track quality/spend scaling.
+    timeout_seconds: 43200
+    command:
+      - python3
+      - scripts/run_budget_sweep_probe.py
+      - --output-dir
+      - "{case_dir}/budget_sweep"
+      - --json-out
+      - "{case_dir}/budget_sweep_probe.json"
+      - --task
+      - manifesto_rile
+      - --budgets
+      - light,medium,heavy
+      - --max-metric-calls-map
+      - light=10,medium=20,heavy=30
+      - --train-samples
+      - "8"
+      - --val-samples
+      - "3"
+      - --test-samples
+      - "3"
+      - --n-iterations
+      - "1"
+      - --routing-policy
+      - affinity_load_aware
+      - --genrm-init-samples
+      - "3"
+      - --start-server
+      - --start-genrm
+      - --engram-memory
+      - --keep-servers-between-runs
+      - --require-all-success
+    extractors:
+      - type: json_file
+        name: sweep
+        path: "{case_dir}/budget_sweep_probe.json"
+    metric_rules:
+      - name: sweep_all_success
+        path: extracts.sweep.summary.checks.all_success_numeric
+        direction: higher
+        max_regression_abs: 0
+      - name: sweep_quality_gain_heavy_vs_light
+        path: extracts.sweep.summary.quality_gain_heavy_vs_light
+        direction: higher
+        max_regression_abs: 0.05
+      - name: sweep_duration_ratio_heavy_vs_light
+        path: extracts.sweep.summary.duration_ratio_heavy_vs_light
+        direction: lower
+        max_regression_pct: 30

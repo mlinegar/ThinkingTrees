@@ -1,0 +1,164 @@
+\section{Theorem-Backed Reductions and Assumption Structure}
+\label{app:theorem-backed}
+
+This appendix gives a paper-level description of the most general reduction
+object formalized in Lean. The point is to separate \emph{backend choices} from
+\emph{mathematical obligations}. Once this is done, LLM summaries, learned
+latent sketches, and supplied codecs all fall under the same three-law
+interface.
+
+\subsection{General State-Space View}
+
+Let $\mathcal{S}$ be a \emph{theorem domain}: the objects actually manipulated
+by the reduction procedure. A theorem-backed reduction consists of
+\begin{itemize}[nosep]
+    \item a leaf map $e:\Strings\to\mathcal{S}$,
+    \item a merge map $m:\mathcal{S}\times\mathcal{S}\to\mathcal{S}$,
+    \item a re-summary map $r:\mathcal{S}\to\mathcal{S}$,
+    \item a semantic readout $\psi:\mathcal{S}\to\Y$.
+\end{itemize}
+
+The exact OPS-style obligations on this state space are:
+\begin{align*}
+\text{(TB1)}\qquad &\psi(e(x)) = \fstar(x), \\
+\text{(TB2)}\qquad &\psi(m(e(u),e(v))) = \fstar(u\concat v), \\
+\text{(TB3)}\qquad &\psi(r(s)) = \psi(s)\qquad\text{for on-range }s\in\mathcal{S}.
+\end{align*}
+
+Approximate theorem-backedness replaces these exact equalities by explicit
+budgets in expectation or on audited events.
+
+\begin{proposition}[Broadest exact interface]
+\label{prop:broadest-theorem-backed}
+The exact theorem-backed interface is exactly the state-space analogue of the
+three local laws. In particular, once \textup{(TB1)}--\textup{(TB3)} hold, all
+preservation and optimizer-transfer results proved for OPS apply to the induced
+reduction on $\mathcal{S}$ after replacing the textual oracle $\fstar$ by the
+state semantics $\psi$.
+\end{proposition}
+
+\begin{proof}
+The proof is the same induction as in Appendix~\ref{app:proofs-core}. The leaf
+step uses \textup{(TB1)}. The parent step uses \textup{(TB2)}. Extra
+re-summarization rounds use \textup{(TB3)}. No argument in the inductive
+preservation proof depends on summaries being literal strings; it only uses the
+fact that each realized leaf, merge, and on-range re-application preserves the
+task value. Therefore the same chain of results goes through on $\mathcal{S}$.
+\end{proof}
+
+\paragraph{Two important special cases.}
+\begin{itemize}[nosep]
+    \item \textbf{Direct-summary route.} Take $\mathcal{S}=\Strings$,
+    $e(x)=g(x)$, $m(s,t)=g(s\concat t)$, and $r(s)=g(s)$.
+    \item \textbf{Codec route.} Take $\mathcal{S}$ to be a latent state space,
+    let $e$ be an encoder, let $m$ be a learned or supplied state merge, and
+    let $r$ be re-encode-after-decode on on-range states.
+\end{itemize}
+
+\subsection{Codec-Mediated Reductions}
+
+The codec case is the mathematically clean way to unify learned sketches and
+text-facing summarizers. The backend may carry an internal state, but the only
+question is whether the supplied codec witnesses \textup{(TB1)}--\textup{(TB3)}.
+
+\begin{proposition}[Supplied codec is enough]
+\label{prop:codec-is-enough}
+Suppose we are given a state space $\mathcal{S}$ with encoder
+$e:\Strings\to\mathcal{S}$, decoder $d:\mathcal{S}\to\Strings$, state merge
+$m:\mathcal{S}\times\mathcal{S}\to\mathcal{S}$, and semantic readout
+$\psi:\mathcal{S}\to\Y$. Assume:
+\begin{enumerate}[nosep]
+    \item \emph{leaf preservation:} $\psi(e(x))=\fstar(x)$ for all $x$;
+    \item \emph{merge compatibility:} $\psi(m(e(u),e(v)))=\fstar(u\concat v)$
+    for all $u,v$;
+    \item \emph{re-encoding stability:} $\psi(e(d(s)))=\psi(s)$ for every
+    on-range state $s$.
+\end{enumerate}
+Then the induced reduction with leaf map $e$, merge map $m$, and re-summary map
+$r(s):=e(d(s))$ is exact theorem-backed.
+\end{proposition}
+
+\begin{proof}
+The three assumptions are exactly \textup{(TB1)}--\textup{(TB3)} after setting
+$r(s)=e(d(s))$. So Proposition~\ref{prop:broadest-theorem-backed} applies
+immediately. The point is that we do not need a theorem-domain autoencoder to
+be \emph{learned inside the backend}. We only need a supplied codec with these
+properties.
+\end{proof}
+
+\begin{remark}[Why this unifies LLM and neural routes]
+The direct-summary route is the codec route with the identity decoder.
+Conversely, a learned sketch or latent-state model becomes theorem-backed as
+soon as someone supplies a state semantics and a codec witness satisfying
+Proposition~\ref{prop:codec-is-enough}. So the distinction is not between
+``LLM'' and ``neural'' systems. It is between operators that do and do not come
+with a theorem-domain witness.
+\end{remark}
+
+\subsection{Relation to the Global $A1/A2/A3$ Route}
+
+Appendix~\ref{sec:global} introduced the deterministic global assumptions:
+global sufficiency (Assumption~\ref{ass:app1}), global two-route compatibility
+(Assumption~\ref{ass:app2}), and oracle-level dependence of on-range merges
+(Assumption~\ref{ass:app3}).
+
+\begin{proposition}[Exact all-input collapse to $A1/A2/A3$]
+\label{prop:all-input-collapse}
+For deterministic direct-summary reductions, exact theorem-backedness on all
+one-leaf and two-leaf inputs together with Assumption~\ref{ass:app3} is
+equivalent to the full global regime
+\textup{Assumptions~\ref{ass:app1}--\ref{ass:app3}}.
+\end{proposition}
+
+\begin{proof}
+Assume first that Assumptions~\ref{ass:app1}--\ref{ass:app3} hold. Then global
+sufficiency is exactly the leaf law for every input, and global two-route
+compatibility is exactly the merge law for every pair of inputs. The
+re-summary/on-range dependence part is Assumption~\ref{ass:app3}, so the exact
+theorem-backed conditions hold everywhere.
+
+Conversely, suppose the direct reduction is exact theorem-backed on every
+one-leaf and two-leaf input, and assume Assumption~\ref{ass:app3}. Applying the
+one-leaf statement to an arbitrary $z\in\Strings$ gives
+Assumption~\ref{ass:app1}. Applying the two-leaf statement to an arbitrary pair
+$(u,v)$ gives Assumption~\ref{ass:app2}. Together with the assumed
+Assumption~\ref{ass:app3}, this is exactly the global $A1/A2/A3$ regime.
+\end{proof}
+
+So the local-law bundle is the broadest theorem-backed interface, while the
+global algebraic regime is a stronger deterministic specialization.
+
+\subsection{Mergeable Sketches as a Special Case}
+
+Appendix~\ref{app:mergeable} explained the connection to classical mergeable
+summaries. The theorem-backed perspective sharpens that link.
+
+\begin{proposition}[Exact mergeable sketch plus on-range stability]
+\label{prop:mergeable-sketch-special-case}
+Let $\mathcal{S}$ be a deterministic sketch space with encoder
+$e:\Strings\to\mathcal{S}$, merge $\oplus$, decoder $d$, and readout
+$\psi:\mathcal{S}\to\Y$. Suppose:
+\begin{enumerate}[nosep]
+    \item $\psi(e(x))=\fstar(x)$ for all leaves $x$;
+    \item $\psi(e(u)\oplus e(v))=\fstar(u\concat v)$ for all pairs $(u,v)$;
+    \item $\psi(e(d(s)))=\psi(s)$ for every on-range sketch state $s$.
+\end{enumerate}
+Then the sketch is an exact theorem-backed reduction. If the task is
+commutative and the global assumptions of Appendix~\ref{sec:global} hold, this
+reduces to the classical mergeable-summary picture.
+\end{proposition}
+
+\begin{proof}
+This is Proposition~\ref{prop:codec-is-enough} with $m=\oplus$. The extra
+on-range stability condition is exactly the additional ingredient classical
+mergeability does not provide by itself. It is the OPS-style idempotence
+requirement needed for safe repeated summary calls. In the commutative exact
+regime, Appendix~\ref{app:mergeable} shows that the resulting operator is
+precisely a mergeable summary in the classical sense.
+\end{proof}
+
+\paragraph{Takeaway.}
+The right top-level object is not ``an LLM summarizer'' or ``a neural sketch.''
+It is a compositional reduction operator equipped with either exact local laws,
+approximate local laws, or a stronger route such as
+Assumptions~\ref{ass:app1}--\ref{ass:app3} that compiles into those laws.

@@ -19,18 +19,21 @@ Usage:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 import yaml
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Protocol, runtime_checkable
 
 import aiohttp
 
@@ -172,6 +175,38 @@ class ComparisonResult:
                 "winner": self.winner,
             }
         }
+
+
+@dataclass(frozen=True)
+class BackendCapabilities:
+    """Backend capability summary exposed by server managers."""
+
+    backend: str
+    supports_sleep_mode: bool = False
+    supports_prefix_caching: bool = False
+    openai_compatible: bool = True
+
+
+@runtime_checkable
+class ServerManager(Protocol):
+    """Unified contract for managed inference backends."""
+
+    @property
+    def url(self) -> str:
+        ...
+
+    @property
+    def capabilities(self) -> BackendCapabilities:
+        ...
+
+    async def start(self) -> None:
+        ...
+
+    def stop(self) -> None:
+        ...
+
+    async def health(self, timeout: float = 2.0) -> bool:
+        ...
 
 
 # =============================================================================
@@ -577,6 +612,25 @@ def _prepend_env_path(env: Dict[str, str], key: str, value: str) -> None:
     env[key] = f"{value}:{current}" if current else value
 
 
+def _nvcc_binary_works(nvcc_path: Optional[Path]) -> bool:
+    if nvcc_path is None:
+        return False
+    candidate = Path(nvcc_path)
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        return False
+    try:
+        result = subprocess.run(
+            [str(candidate), "--version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 @lru_cache(maxsize=8)
 def _resolve_venv_site_packages(venv_path: str) -> Optional[Path]:
     root = Path(venv_path)
@@ -592,6 +646,39 @@ def _resolve_venv_site_packages(venv_path: str) -> Optional[Path]:
     return None
 
 
+def _stable_cache_slug(raw: str, *, fallback: str = "profile") -> str:
+    rendered = re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(raw or "").strip().lower())
+    rendered = rendered.strip("-")
+    if not rendered:
+        rendered = fallback
+    return rendered[:48]
+
+
+def _configure_flashinfer_workspace_env(
+    env: Dict[str, str],
+    *,
+    venv_path: str,
+    profile: str,
+) -> None:
+    if env.get("FLASHINFER_WORKSPACE_BASE"):
+        return
+
+    key_parts = [
+        str(Path(venv_path).expanduser()),
+        str(env.get("CUDA_HOME", "")),
+        str(env.get("FLASHINFER_NVCC", "")),
+        str(profile),
+    ]
+    digest = hashlib.sha1("|".join(key_parts).encode("utf-8")).hexdigest()[:12]
+    profile_slug = _stable_cache_slug(Path(str(profile)).name or str(profile), fallback="model")
+    workspace_base = Path(tempfile.gettempdir()) / "thinkingtrees" / "flashinfer" / f"{profile_slug}-{digest}"
+    try:
+        workspace_base.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    env["FLASHINFER_WORKSPACE_BASE"] = str(workspace_base)
+
+
 def _configure_nvfp4_runtime_env(env: Dict[str, str], venv_path: str, profile: str) -> None:
     """Ensure NVFP4/FlashInfer runtime dependencies are discoverable."""
     if "nvfp4" not in str(profile).lower():
@@ -600,26 +687,73 @@ def _configure_nvfp4_runtime_env(env: Dict[str, str], venv_path: str, profile: s
     env.setdefault("VLLM_USE_FLASHINFER_MOE_FP4", "1")
     env.setdefault("VLLM_FLASHINFER_MOE_BACKEND", "throughput")
 
+    current_cuda_home = (
+        Path(str(env.get("CUDA_HOME", ""))).expanduser()
+        if env.get("CUDA_HOME")
+        else None
+    )
+    current_nvcc = (current_cuda_home / "bin" / "nvcc") if current_cuda_home else None
+    if current_cuda_home is not None and not _nvcc_binary_works(current_nvcc):
+        env.pop("CUDA_HOME", None)
+        env.pop("CUDA_PATH", None)
+
     site_packages = _resolve_venv_site_packages(venv_path)
     if site_packages is None:
         logger.warning(
             "Could not locate site-packages for vLLM venv (%s); NVFP4 runtime may fail",
             venv_path,
         )
+        flashinfer_nvcc = Path(env["FLASHINFER_NVCC"]) if env.get("FLASHINFER_NVCC") else None
+        if flashinfer_nvcc is not None and not _nvcc_binary_works(flashinfer_nvcc):
+            env.pop("FLASHINFER_NVCC", None)
+            env.pop("CUDACXX", None)
+        if "FLASHINFER_NVCC" not in env:
+            path_nvcc = shutil.which("nvcc", path=env.get("PATH"))
+            if path_nvcc and _nvcc_binary_works(Path(path_nvcc)):
+                env["FLASHINFER_NVCC"] = path_nvcc
+                env.setdefault("CUDACXX", path_nvcc)
+        _configure_flashinfer_workspace_env(env, venv_path=venv_path, profile=profile)
         return
 
     cu13_root = site_packages / "nvidia" / "cu13"
     if cu13_root.is_dir():
-        if not shutil.which("nvcc") and (cu13_root / "bin" / "nvcc").is_file():
-            env.setdefault("CUDA_HOME", str(cu13_root))
+        cu13_nvcc = cu13_root / "bin" / "nvcc"
+        current_cuda_home = (
+            Path(str(env.get("CUDA_HOME", ""))).expanduser()
+            if env.get("CUDA_HOME")
+            else None
+        )
+        current_nvcc = (current_cuda_home / "bin" / "nvcc") if current_cuda_home else None
+        if _nvcc_binary_works(cu13_nvcc) and not _nvcc_binary_works(current_nvcc):
+            env["CUDA_HOME"] = str(cu13_root)
+        elif current_cuda_home is not None and not _nvcc_binary_works(current_nvcc):
+            env.pop("CUDA_HOME", None)
 
         cuda_home = env.get("CUDA_HOME")
         if cuda_home:
-            _prepend_env_path(env, "PATH", str(Path(cuda_home) / "bin"))
+            cuda_home_path = Path(str(cuda_home)).expanduser()
+            _prepend_env_path(env, "PATH", str(cuda_home_path / "bin"))
+            env["CUDA_PATH"] = str(cuda_home_path)
+            cuda_home_nvcc = cuda_home_path / "bin" / "nvcc"
+            if _nvcc_binary_works(cuda_home_nvcc):
+                env.setdefault("FLASHINFER_NVCC", str(cuda_home_nvcc))
+                env.setdefault("CUDACXX", str(cuda_home_nvcc))
+        else:
+            env.pop("CUDA_PATH", None)
 
         for lib_dir in (cu13_root / "lib64", cu13_root / "lib"):
             if lib_dir.is_dir():
                 _prepend_env_path(env, "LD_LIBRARY_PATH", str(lib_dir))
+
+    flashinfer_nvcc = Path(env["FLASHINFER_NVCC"]) if env.get("FLASHINFER_NVCC") else None
+    if flashinfer_nvcc is not None and not _nvcc_binary_works(flashinfer_nvcc):
+        env.pop("FLASHINFER_NVCC", None)
+        env.pop("CUDACXX", None)
+    if "FLASHINFER_NVCC" not in env:
+        path_nvcc = shutil.which("nvcc", path=env.get("PATH"))
+        if path_nvcc and _nvcc_binary_works(Path(path_nvcc)):
+            env["FLASHINFER_NVCC"] = path_nvcc
+            env.setdefault("CUDACXX", path_nvcc)
 
     if Path("/lib/x86_64-linux-gnu").is_dir():
         _prepend_env_path(env, "LD_LIBRARY_PATH", "/lib/x86_64-linux-gnu")
@@ -627,6 +761,8 @@ def _configure_nvfp4_runtime_env(env: Dict[str, str], venv_path: str, profile: s
     curand_include = site_packages / "nvidia" / "curand" / "include"
     if curand_include.is_dir():
         _prepend_env_path(env, "CPATH", str(curand_include))
+
+    _configure_flashinfer_workspace_env(env, venv_path=venv_path, profile=profile)
 
 
 class VLLMServerManager:
@@ -694,6 +830,15 @@ class VLLMServerManager:
     def model_path(self) -> str:
         """Get the model path."""
         return self._config["path"] if self._config else ""
+
+    @property
+    def capabilities(self) -> BackendCapabilities:
+        return BackendCapabilities(
+            backend="vllm",
+            supports_sleep_mode=True,
+            supports_prefix_caching=bool((self._config or {}).get("enable_prefix_caching", False)),
+            openai_compatible=True,
+        )
 
     async def start(self) -> None:
         """Start the vLLM server and wait for it to be ready."""
@@ -813,6 +958,18 @@ class VLLMServerManager:
             f"Server did not become ready within {self.startup_timeout}s"
         )
 
+    async def health(self, timeout: float = 2.0) -> bool:
+        """Check whether server responds on `/v1/models`."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"http://localhost:{self.port}/v1/models",
+                    timeout=aiohttp.ClientTimeout(total=max(0.25, float(timeout))),
+                ) as resp:
+                    return resp.status == 200
+        except Exception:
+            return False
+
     def stop(self) -> None:
         """Stop the vLLM server."""
         if self._process is None:
@@ -879,6 +1036,8 @@ def load_sglang_config(profile: str, config_path: Optional[Path] = None) -> Dict
     vllm_cfg = cfg.get("vllm", {})
     models = vllm_cfg.get("models", {})
     sglang_cfg = cfg.get("sglang", {})
+    inference_cfg = cfg.get("inference", {}) if isinstance(cfg.get("inference", {}), dict) else {}
+    backend_cfg = inference_cfg.get("backend", {}) if isinstance(inference_cfg.get("backend", {}), dict) else {}
 
     if profile not in models:
         available = list(models.keys())
@@ -886,6 +1045,10 @@ def load_sglang_config(profile: str, config_path: Optional[Path] = None) -> Dict
 
     model_cfg = models[profile]
     runtime = sglang_cfg.get("runtime", {})
+    runtime_overrides = runtime.get("profile_overrides", {}) if isinstance(runtime.get("profile_overrides", {}), dict) else {}
+    profile_override = runtime_overrides.get(profile, {}) if isinstance(runtime_overrides.get(profile, {}), dict) else {}
+    effective_runtime = dict(runtime) if isinstance(runtime, dict) else {}
+    effective_runtime.update(profile_override)
 
     return {
         "profile": profile,
@@ -895,9 +1058,15 @@ def load_sglang_config(profile: str, config_path: Optional[Path] = None) -> Dict
         "host": sglang_cfg.get("host", "0.0.0.0"),
         "port": sglang_cfg.get("port", 30000),
         "mem_fraction_static": sglang_cfg.get("mem_fraction_static", 0.88),
-        "enable_torch_compile": bool(runtime.get("enable_torch_compile", False)),
-        "chunked_prefill_size": runtime.get("chunked_prefill_size", 0),
-        "disable_radix_cache": bool(runtime.get("disable_radix_cache", False)),
+        "enable_torch_compile": bool(effective_runtime.get("enable_torch_compile", False)),
+        "chunked_prefill_size": effective_runtime.get("chunked_prefill_size", 0),
+        "disable_radix_cache": bool(effective_runtime.get("disable_radix_cache", False)),
+        "attention_backend": str(effective_runtime.get("attention_backend", "")).strip(),
+        "disable_cuda_graph": bool(effective_runtime.get("disable_cuda_graph", False)),
+        "cuda_graph_max_bs": int(effective_runtime.get("cuda_graph_max_bs", 0) or 0),
+        "cuda_toolkit_venv_path": str(
+            backend_cfg.get("vllm_venv_path", "/home/mlinegar/vllm-env")
+        ),
     }
 
 
@@ -924,7 +1093,7 @@ class SGLangServerManager:
         profile: str,
         port: int = 30000,
         host: str = "0.0.0.0",
-        venv_path: str = "/home/mlinegar/vllm-env",
+        venv_path: str = "/home/mlinegar/sglang-env",
         startup_timeout: float = 300.0,
         health_check_interval: float = 2.0,
         cuda_devices: Optional[str] = None,
@@ -953,6 +1122,15 @@ class SGLangServerManager:
         """Get the model path."""
         return self._config["path"] if self._config else ""
 
+    @property
+    def capabilities(self) -> BackendCapabilities:
+        return BackendCapabilities(
+            backend="sglang",
+            supports_sleep_mode=False,
+            supports_prefix_caching=not bool((self._config or {}).get("disable_radix_cache", False)),
+            openai_compatible=True,
+        )
+
     async def start(self) -> None:
         """Start the SGLang server and wait for it to be ready."""
         self._config = load_sglang_config(self.profile)
@@ -964,6 +1142,10 @@ class SGLangServerManager:
         logger.info(f"  Port: {self.port}")
         logger.info(f"  Tensor Parallel: {tensor_parallel}")
         logger.info(f"  Mem Fraction Static: {self._config['mem_fraction_static']}")
+        if self._config.get("attention_backend"):
+            logger.info(f"  Attention Backend: {self._config['attention_backend']}")
+        if self._config.get("disable_cuda_graph"):
+            logger.info("  CUDA Graph: disabled")
         if self.cuda_devices:
             logger.info(f"  CUDA Devices: {self.cuda_devices}")
 
@@ -980,6 +1162,13 @@ class SGLangServerManager:
             "--trust-remote-code",
         ]
 
+        nvfp4_profile = (
+            "nvfp4" in str(self.profile).lower()
+            or "nvfp4" in str(self._config.get("path", "")).lower()
+        )
+        if nvfp4_profile:
+            cmd.extend(["--quantization", "modelopt_fp4"])
+
         if self._config.get("enable_torch_compile"):
             cmd.append("--enable-torch-compile")
 
@@ -989,9 +1178,23 @@ class SGLangServerManager:
 
         if self._config.get("disable_radix_cache"):
             cmd.append("--disable-radix-cache")
+        if self._config.get("attention_backend"):
+            cmd.extend(["--attention-backend", str(self._config["attention_backend"])])
+        if self._config.get("disable_cuda_graph"):
+            cmd.append("--disable-cuda-graph")
+        cuda_graph_max_bs = int(self._config.get("cuda_graph_max_bs", 0) or 0)
+        if cuda_graph_max_bs > 0:
+            cmd.extend(["--cuda-graph-max-bs", str(cuda_graph_max_bs)])
 
         # Build environment with optional CUDA device isolation
         env = os.environ.copy()
+        _prepend_env_path(env, "PATH", os.path.join(self.venv_path, "bin"))
+        # Reuse the toolkit path from vLLM env for CUDA/NVCC/curand headers on NVFP4 profiles.
+        _configure_nvfp4_runtime_env(
+            env,
+            venv_path=str(self._config.get("cuda_toolkit_venv_path", "/home/mlinegar/vllm-env")),
+            profile=str(self._config.get("path", self.profile)),
+        )
         if self.cuda_devices:
             env["CUDA_VISIBLE_DEVICES"] = self.cuda_devices
 
@@ -1056,6 +1259,18 @@ class SGLangServerManager:
         raise TimeoutError(
             f"SGLang server did not become ready within {self.startup_timeout}s"
         )
+
+    async def health(self, timeout: float = 2.0) -> bool:
+        """Check whether server responds on `/v1/models`."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"http://localhost:{self.port}/v1/models",
+                    timeout=aiohttp.ClientTimeout(total=max(0.25, float(timeout))),
+                ) as resp:
+                    return resp.status == 200
+        except Exception:
+            return False
 
     def stop(self) -> None:
         """Stop the SGLang server."""

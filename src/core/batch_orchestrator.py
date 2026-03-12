@@ -19,6 +19,7 @@ Usage:
 
 import asyncio
 import logging
+import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -32,11 +33,15 @@ from src.preprocessing.chunker import TextChunk, chunk_for_ops as chunk
 from src.preprocessing.visual_feedback import extract_content_weights_from_chunks
 from src.core.strategy import SummarizationStrategy, TournamentStrategy, tournament_doc_id
 from src.tree.builder import BuildConfig, BuildResult
-from src.core.protocols import format_merge_input
-from src.core.async_utils import gather_with_cleanup, cancel_tasks
+from src.core.async_utils import cancel_tasks
+from src.core.prompting import clean_summary_text, is_degenerate_summary_text
 
 
 logger = logging.getLogger(__name__)
+
+
+class DegenerateSummaryFailure(RuntimeError):
+    """Raised when degenerate summary fallbacks exceed configured limits."""
 
 
 @dataclass
@@ -49,6 +54,7 @@ class PlanMergeTask:
     right_idx: int
     left_is_merge: bool = False
     right_is_merge: bool = False
+    estimated_input_tokens: int = 0  # For size-aware scheduling (DualPath Opt 6)
 
 
 @dataclass
@@ -74,6 +80,12 @@ class DocumentState:
     error: Optional[str] = None
     leaf_failures: int = 0
     merge_failures: int = 0
+    empty_leaf_fallbacks: int = 0
+    empty_merge_fallbacks: int = 0
+    degenerate_leaf_fallbacks: int = 0
+    degenerate_merge_fallbacks: int = 0
+    interpreter_leaf_recoveries: int = 0
+    interpreter_merge_recoveries: int = 0
     plan: Optional[DocPlan] = None
 
 
@@ -123,8 +135,30 @@ class BatchTreeOrchestrator:
             'total_levels': 0,
             'leaf_failures': 0,
             'merge_failures': 0,
+            'degenerate_leaf_fallbacks': 0,
+            'degenerate_merge_fallbacks': 0,
             'documents_with_failures': 0,
         }
+        # Live progress counters (updated during cascading build)
+        self._completed_leaves = 0
+        self._total_leaves = 0
+        self._completed_merges = 0
+        self._total_merges = 0
+
+    @property
+    def completion_fraction(self) -> float:
+        """Fraction of total work completed (0.0 to 1.0).
+
+        Exposed for overlapped GPU phase transitions (DualPath Opt 3):
+        when completion_fraction exceeds a threshold (e.g. 0.85), the GPU
+        orchestrator can begin prewarming GenRM while the tail of tree
+        building finishes on the primary task server.
+        """
+        total = self._total_leaves + self._total_merges
+        if total == 0:
+            return 0.0
+        done = self._completed_leaves + self._completed_merges
+        return min(1.0, done / total)
 
     async def process_documents(
         self,
@@ -138,7 +172,7 @@ class BatchTreeOrchestrator:
         """
         Process multiple documents with global pipelined batching.
 
-        If config.pipelined is False, falls back to level-wise batching.
+        Uses cascading dependency-driven execution for maximum throughput.
 
         Args:
             documents: List of documents to process
@@ -163,37 +197,10 @@ class BatchTreeOrchestrator:
             documents, get_text_fn, get_id_fn, progress_callback
         )
 
-        # Phase 2: Build trees (cascading or level-wise based on config)
-        if self.config.pipelined:
-            logger.info("Phase 2: Building trees with cascading execution...")
-            await self._build_trees_cascading(states, rubric, progress_callback)
-        else:
-            logger.info("Phase 2: Building leaf summaries...")
-            await self._build_all_leaves(states, rubric, progress_callback)
-            logger.info("Phase 3: Building trees level-by-level...")
-            await self._build_trees_levelwise(states, rubric, progress_callback)
-
-        # Phase 4: Convert to BuildResults
-        results = self._create_results(states, rubric)
-
-        # Phase 5: Retry failed documents
-        if max_retries > 0:
-            results = await self._retry_failed_documents(
-                results, documents, rubric, get_text_fn, get_id_fn,
-                progress_callback, max_retries
-            )
-
-        # Log summary of any remaining failures
-        self._log_failures(results, documents, get_id_fn)
-
-        self._build_stats['documents_with_failures'] = sum(
-            1 for state in states
-            if state.error or state.leaf_failures > 0 or state.merge_failures > 0
+        return await self._build_and_finalize(
+            states, documents, rubric, get_text_fn, get_id_fn,
+            progress_callback, max_retries,
         )
-        self._build_stats['documents_processed'] = len(documents)
-        logger.info(f"Batch processing complete: {len(results)} trees built")
-
-        return results
 
     async def _chunk_all_documents(
         self,
@@ -304,6 +311,20 @@ class BatchTreeOrchestrator:
                     left_idx, left_is_merge = current_refs[i]
                     right_idx, right_is_merge = current_refs[i + 1]
 
+                    # Estimate input tokens for size-aware scheduling.
+                    # Leaf nodes use their actual token count; merge nodes
+                    # use the summary size (roughly halved by each merge level).
+                    est_left = 0
+                    est_right = 0
+                    if left_is_merge:
+                        est_left = merges[left_idx].estimated_input_tokens // 2
+                    elif left_idx < len(chunks):
+                        est_left = chunks[left_idx].token_count or len(chunks[left_idx].text) // 4
+                    if right_is_merge:
+                        est_right = merges[right_idx].estimated_input_tokens // 2
+                    elif right_idx < len(chunks):
+                        est_right = chunks[right_idx].token_count or len(chunks[right_idx].text) // 4
+
                     merge_task = PlanMergeTask(
                         doc_idx=state_idx,
                         id=merge_id,
@@ -312,6 +333,7 @@ class BatchTreeOrchestrator:
                         right_idx=right_idx,
                         left_is_merge=left_is_merge,
                         right_is_merge=right_is_merge,
+                        estimated_input_tokens=est_left + est_right,
                     )
                     merges[merge_id] = merge_task
 
@@ -372,77 +394,42 @@ class BatchTreeOrchestrator:
             plan_summary=plan_summary,
         )
 
-    async def _build_all_leaves(
+    async def _build_and_finalize(
         self,
         states: List[DocumentState],
+        documents: List[Any],
         rubric: str,
+        get_text_fn: Callable[[Any], str],
+        get_id_fn: Callable[[Any], str],
         progress_callback: Optional[Callable],
-    ) -> None:
-        """Build leaf nodes for all documents in one big batch."""
-        # Collect all leaf tasks: (state_idx, chunk_idx, chunk_text, doc_id)
-        leaf_tasks_info = []
-        for state_idx, state in enumerate(states):
-            if state.error:
-                continue
-            for chunk_idx, chunk_obj in enumerate(state.chunks):
-                leaf_tasks_info.append((state_idx, chunk_idx, chunk_obj.text, state.doc_id))
+        max_retries: int = 0,
+    ) -> List[BuildResult]:
+        """Build trees from pre-chunked states and finalize results.
 
-        if not leaf_tasks_info:
-            return
+        Shared helper used by both ``process_documents()`` and
+        ``process_documents_unified()``.  Runs cascading tree build,
+        converts to ``BuildResult``, optionally retries failures, and
+        logs a summary.
+        """
+        logger.info("Building trees with cascading execution...")
+        await self._build_trees_cascading(states, rubric, progress_callback)
 
-        # Create coroutines for all leaf summarizations
-        async def summarize_leaf(state_idx: int, chunk_idx: int, text: str, doc_id: str):
-            token = tournament_doc_id.set(str(doc_id))
-            try:
-                summary = await self.strategy.summarize(text, rubric)
-                return state_idx, chunk_idx, leaf(
-                    text, summary=summary, node_id=f"d{state_idx}_leaf_{chunk_idx}"
-                ), None
-            except Exception as e:
-                # Log and mark failure instead of silent fallback to truncated text
-                # Truncated text as summary corrupts data quality silently
-                logger.error(f"Leaf summarization failed for doc {state_idx} chunk {chunk_idx}: {e}")
-                return state_idx, chunk_idx, None, str(e)
-            finally:
-                tournament_doc_id.reset(token)
+        results = self._create_results(states, rubric)
 
-        # Launch all in parallel
-        tasks = [
-            summarize_leaf(state_idx, chunk_idx, text, doc_id)
-            for state_idx, chunk_idx, text, doc_id in leaf_tasks_info
-        ]
+        if max_retries > 0:
+            results = await self._retry_failed_documents(
+                results, documents, rubric, get_text_fn, get_id_fn,
+                progress_callback, max_retries,
+            )
 
-        logger.info(f"  Submitting {len(tasks)} leaf summarization tasks...")
-
-        results = await gather_with_cleanup(tasks, return_exceptions=True)
-
-        # Organize results by document
-        for result in results:
-            if isinstance(result, Exception):
-                logger.error(f"Leaf task failed with exception: {result}")
-                continue
-
-            state_idx, chunk_idx, leaf_node, error = result
-            state = states[state_idx]
-            if error:
-                state.leaf_failures += 1
-                self._build_stats['leaf_failures'] += 1
-                continue
-
-            # Ensure current_level has space
-            while len(state.current_level) <= chunk_idx:
-                state.current_level.append(None)
-            state.current_level[chunk_idx] = leaf_node
-
-        # Fill any gaps (shouldn't happen but be safe)
-        for state in states:
-            state.current_level = [n for n in state.current_level if n is not None]
-
-        completed = len([r for r in results if not isinstance(r, Exception)])
-        logger.info(f"  Completed {completed} leaf summaries")
-
-        if progress_callback:
-            progress_callback("leaf", completed, len(tasks))
+        self._log_failures(results, documents, get_id_fn)
+        self._build_stats['documents_with_failures'] = sum(
+            1 for state in states
+            if state.error or state.leaf_failures > 0 or state.merge_failures > 0
+        )
+        self._build_stats['documents_processed'] = len(documents)
+        logger.info("Batch processing complete: %d trees built", len(results))
+        return results
 
     async def _build_trees_cascading(
         self,
@@ -493,6 +480,12 @@ class BatchTreeOrchestrator:
             total_merges += len(plan.merges)
             max_levels = max(max_levels, plan.max_level)
 
+        # Expose totals for completion_fraction property
+        self._total_leaves = total_leaves
+        self._total_merges = total_merges
+        self._completed_leaves = 0
+        self._completed_merges = 0
+
         self._build_stats['total_merges'] += total_merges
         self._build_stats['total_levels'] = max(self._build_stats['total_levels'], max_levels)
 
@@ -503,6 +496,254 @@ class BatchTreeOrchestrator:
             total_merges,
             max_inflight,
         )
+        leaf_fallback_char_limit = max(
+            240,
+            min(int(getattr(self.config, "max_chunk_chars", 8000) or 8000) // 2, 1200),
+        )
+        merge_fallback_char_limit = max(
+            600,
+            min(int(getattr(self.config, "max_chunk_chars", 8000) or 8000), 2200),
+        )
+        empty_leaf_warn_budget = 12
+        empty_merge_warn_budget = 12
+        leaf_retry_recoveries = 0
+        merge_retry_recoveries = 0
+        leaf_interpreter_recoveries = 0
+        merge_interpreter_recoveries = 0
+        degenerate_leaf_fallbacks = 0
+        degenerate_merge_fallbacks = 0
+        strict_retry_rubric = (
+            f"{rubric}\n\n"
+            "OUTPUT FORMAT REQUIREMENTS:\n"
+            "- Return ONLY the summary text.\n"
+            "- Do not discuss instructions, users, or formatting rules.\n"
+            "- No preamble, no analysis, no markdown, no labels."
+        )
+        fail_on_degenerate_summary = bool(
+            getattr(self.config, "fail_on_degenerate_summary", False)
+        )
+        max_degenerate_leaf_fallbacks = max(
+            0, int(getattr(self.config, "max_degenerate_leaf_fallbacks", 0) or 0)
+        )
+        max_degenerate_merge_fallbacks = max(
+            0, int(getattr(self.config, "max_degenerate_merge_fallbacks", 0) or 0)
+        )
+        interpreter_enabled = str(
+            os.getenv("TT_ENABLE_DEGENERATE_SUMMARY_INTERPRETER", "1")
+        ).strip().lower() not in {"0", "false", "no", "off"}
+        interpreter_source_char_limit = max(
+            800,
+            min(int(getattr(self.config, "max_chunk_chars", 8000) or 8000), 6000),
+        )
+        interpreter_api_base = str(
+            os.getenv("TT_SUMMARY_INTERPRETER_BASE_URL", "")
+        ).strip()
+        interpreter_model = str(
+            os.getenv("TT_SUMMARY_INTERPRETER_MODEL", "default")
+        ).strip() or "default"
+        interpreter_api_key = str(
+            os.getenv("TT_SUMMARY_INTERPRETER_API_KEY", "EMPTY")
+        ).strip() or "EMPTY"
+        interpreter_max_tokens = max(
+            128,
+            int(os.getenv("TT_SUMMARY_INTERPRETER_MAX_TOKENS", "700") or 700),
+        )
+        interpreter_timeout_seconds = max(
+            5.0,
+            float(os.getenv("TT_SUMMARY_INTERPRETER_TIMEOUT_SECONDS", "120") or 120.0),
+        )
+        interpreter_disable_thinking = str(
+            os.getenv("TT_SUMMARY_INTERPRETER_DISABLE_THINKING", "1")
+        ).strip().lower() not in {"0", "false", "no", "off"}
+        interpreter_client: Optional[Any] = None
+        if interpreter_enabled and interpreter_api_base:
+            try:
+                from src.core.llm_client import LLMClient, LLMConfig
+
+                interpreter_client = LLMClient(
+                    LLMConfig(
+                        base_url=interpreter_api_base,
+                        model=interpreter_model,
+                        api_key=interpreter_api_key,
+                        max_tokens=interpreter_max_tokens,
+                        temperature=0.0,
+                        max_retries=1,
+                        timeout=interpreter_timeout_seconds,
+                    ),
+                    enable_cache=False,
+                )
+                logger.info(
+                    "  Second-pass interpreter endpoint enabled: base_url=%s model=%s",
+                    interpreter_api_base,
+                    interpreter_model,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "  Could not initialize second-pass interpreter endpoint (%s). "
+                    "Falling back to primary strategy for interpreter pass.",
+                    exc,
+                )
+                interpreter_client = None
+
+        def _truncate_for_fallback(text: str, *, limit: int) -> str:
+            raw = str(text or "").strip()
+            if not raw:
+                return ""
+            if len(raw) <= limit:
+                return raw
+            marker = "\n...\n"
+            remaining = max(1, limit - len(marker))
+            head_chars = max(1, remaining // 2)
+            tail_chars = max(1, remaining - head_chars)
+            return f"{raw[:head_chars].rstrip()}{marker}{raw[-tail_chars:].lstrip()}"
+
+        def _fallback_leaf_summary(text: str) -> str:
+            cleaned = clean_summary_text(text)
+            if cleaned:
+                return _truncate_for_fallback(cleaned, limit=leaf_fallback_char_limit)
+            return _truncate_for_fallback(str(text or ""), limit=leaf_fallback_char_limit)
+
+        def _fallback_merge_summary(left_summary: str, right_summary: str) -> str:
+            left_clean = clean_summary_text(left_summary) or str(left_summary or "").strip()
+            right_clean = clean_summary_text(right_summary) or str(right_summary or "").strip()
+            if left_clean and right_clean:
+                combined = f"{left_clean}\n\n{right_clean}"
+            else:
+                combined = left_clean or right_clean
+            return _truncate_for_fallback(combined, limit=merge_fallback_char_limit)
+
+        async def _second_pass_interpret(
+            *,
+            mode: str,
+            source_text: str,
+            candidate_output: str,
+        ) -> str:
+            source_clean = _truncate_for_fallback(
+                str(source_text or ""),
+                limit=interpreter_source_char_limit,
+            )
+            candidate_clean = _truncate_for_fallback(
+                str(candidate_output or ""),
+                limit=2400,
+            )
+            if not source_clean:
+                return ""
+            draft_block = candidate_clean or "[EMPTY_OR_DEGENERATE_DRAFT_OUTPUT]"
+
+            interpretation_prompt = (
+                f"MODE: {mode}\n\n"
+                f"RUBRIC:\n{rubric}\n\n"
+                "TASK:\n"
+                "- You are cleaning another model's draft output.\n"
+                "- The draft may contain planning text (e.g., 'Thinking Process').\n"
+                "- Recover the intended final summary and preserve rubric-relevant information.\n"
+                "- If the draft is empty or unusable, produce a clean summary directly from SOURCE_TEXT.\n"
+                "- Return ONLY the cleaned summary text.\n"
+                "- Do not include preamble, analysis, labels, or markdown.\n\n"
+                f"SOURCE_TEXT:\n{source_clean}\n\n"
+                f"DRAFT_OUTPUT_FROM_MODEL:\n{draft_block}\n"
+            )
+            interpreted = ""
+            if interpreter_client is not None:
+                messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You clean draft LLM outputs into final usable summaries."
+                        ),
+                    },
+                    {"role": "user", "content": interpretation_prompt},
+                ]
+                try:
+                    interpreter_kwargs: Dict[str, Any] = {
+                        "max_tokens": interpreter_max_tokens,
+                        "temperature": 0.0,
+                    }
+                    if interpreter_disable_thinking:
+                        # Qwen 3.x/3.5 supports this via chat template kwargs.
+                        interpreter_kwargs["extra_body"] = {
+                            "chat_template_kwargs": {"enable_thinking": False}
+                        }
+                    llm_response = await asyncio.to_thread(
+                        interpreter_client.chat,
+                        messages,
+                        **interpreter_kwargs,
+                    )
+                    interpreted = str(getattr(llm_response, "content", "") or "")
+                except Exception:
+                    # Retry once without model-specific kwargs for compatibility.
+                    try:
+                        llm_response = await asyncio.to_thread(
+                            interpreter_client.chat,
+                            messages,
+                            max_tokens=interpreter_max_tokens,
+                            temperature=0.0,
+                        )
+                        interpreted = str(getattr(llm_response, "content", "") or "")
+                    except Exception:
+                        interpreted = ""
+            else:
+                interpretation_rubric = (
+                    f"{rubric}\n\n"
+                    "SECOND-PASS CLEANUP TASK:\n"
+                    "- The draft output may contain planning text (e.g., 'Thinking Process').\n"
+                    "- Recover the intended final summary and preserve rubric-relevant information.\n"
+                    "- Return ONLY the cleaned summary text.\n"
+                    "- Do not include preamble, analysis, labels, or markdown.\n"
+                    f"- Mode: {mode}.\n"
+                )
+                try:
+                    interpreted = await self.strategy.summarize(
+                        interpretation_prompt,
+                        interpretation_rubric,
+                        temperature=0.0,
+                    )
+                except Exception:
+                    interpreted = ""
+            cleaned = clean_summary_text(interpreted)
+            if not cleaned or is_degenerate_summary_text(cleaned):
+                return ""
+            return cleaned
+
+        def _preview_text(text: Optional[str], limit: int = 220) -> str:
+            normalized = " ".join(str(text or "").split())
+            if len(normalized) <= limit:
+                return normalized
+            return f"{normalized[: limit - 3].rstrip()}..."
+
+        def _maybe_raise_degenerate_failure(
+            *,
+            kind: str,
+            count: int,
+            doc_id: str,
+            item_idx: int,
+            level: Optional[int] = None,
+            raw_summary: Optional[str] = None,
+        ) -> None:
+            if kind == "leaf":
+                limit = max_degenerate_leaf_fallbacks
+            else:
+                limit = max_degenerate_merge_fallbacks
+
+            should_fail = False
+            reason = ""
+            if limit > 0 and count >= limit:
+                should_fail = True
+                reason = f"limit reached ({count}/{limit})"
+            elif fail_on_degenerate_summary and count >= 1:
+                should_fail = True
+                reason = "fail_on_degenerate_summary enabled"
+
+            if not should_fail:
+                return
+
+            level_suffix = "" if level is None else f" level={int(level)}"
+            preview = _preview_text(raw_summary)
+            raise DegenerateSummaryFailure(
+                "Degenerate summary fallback triggered abort: "
+                f"kind={kind} doc_id={doc_id} item={int(item_idx)}{level_suffix} "
+                f"count={int(count)} reason={reason} raw_preview={preview!r}"
+            )
 
         async def summarize_leaf(
             doc_idx: int,
@@ -510,19 +751,84 @@ class BatchTreeOrchestrator:
             text: str,
             doc_id: str,
         ) -> tuple[int, int, Node, Optional[str]]:
+            nonlocal empty_leaf_warn_budget, leaf_retry_recoveries, leaf_interpreter_recoveries
+            nonlocal degenerate_leaf_fallbacks
             token = tournament_doc_id.set(str(doc_id))
             try:
-                summary = await self.strategy.summarize(text, rubric)
+                raw_summary = await self.strategy.summarize(text, rubric)
+                cleaned_summary = clean_summary_text(raw_summary)
+                degenerate_output = is_degenerate_summary_text(cleaned_summary)
+                summary = "" if degenerate_output else cleaned_summary
+                error: Optional[str] = None
+                retry_raw_summary: Optional[str] = None
+
+                if not summary:
+                    try:
+                        retry_raw_summary = await self.strategy.summarize(
+                            text,
+                            strict_retry_rubric,
+                            temperature=0.0,
+                        )
+                    except Exception:
+                        retry_raw_summary = None
+                    retry_cleaned_summary = clean_summary_text(retry_raw_summary)
+                    retry_degenerate = is_degenerate_summary_text(retry_cleaned_summary)
+                    if retry_cleaned_summary and not retry_degenerate:
+                        summary = retry_cleaned_summary
+                        leaf_retry_recoveries += 1
+
+                if not summary and interpreter_enabled:
+                    interpreted_summary = await _second_pass_interpret(
+                        mode="leaf",
+                        source_text=text,
+                        candidate_output=retry_raw_summary or raw_summary or "",
+                    )
+                    if interpreted_summary:
+                        summary = interpreted_summary
+                        leaf_interpreter_recoveries += 1
+                        states[doc_idx].interpreter_leaf_recoveries += 1
+
+                if not summary:
+                    summary = _fallback_leaf_summary(text)
+                    error = (
+                        "degenerate_leaf_summary_output"
+                        if degenerate_output
+                        else "empty_leaf_summary_output"
+                    )
+                    states[doc_idx].empty_leaf_fallbacks += 1
+                    if degenerate_output:
+                        degenerate_leaf_fallbacks += 1
+                        states[doc_idx].degenerate_leaf_fallbacks += 1
+                        self._build_stats['degenerate_leaf_fallbacks'] += 1
+                        _maybe_raise_degenerate_failure(
+                            kind="leaf",
+                            count=degenerate_leaf_fallbacks,
+                            doc_id=str(doc_id),
+                            item_idx=int(leaf_idx),
+                            raw_summary=raw_summary,
+                        )
+                    if empty_leaf_warn_budget > 0:
+                        logger.warning(
+                            "Leaf summary fallback for doc %s chunk %d (%s) raw_preview=%r",
+                            str(doc_id),
+                            int(leaf_idx),
+                            "degenerate_model_output" if degenerate_output else "empty_model_output",
+                            _preview_text(raw_summary),
+                        )
+                        empty_leaf_warn_budget -= 1
                 node_id = f"d{doc_idx}_leaf_{leaf_idx}"
-                return doc_idx, leaf_idx, leaf(text, summary=summary, node_id=node_id), None
+                return doc_idx, leaf_idx, leaf(text, summary=summary, node_id=node_id), error
             except Exception as e:
                 logger.error(f"Leaf summarization failed for doc {doc_idx} chunk {leaf_idx}: {e}")
+                fallback_summary = _fallback_leaf_summary(text)
                 node_id = f"d{doc_idx}_leaf_{leaf_idx}"
-                return doc_idx, leaf_idx, leaf(text, summary="", node_id=node_id), str(e)
+                return doc_idx, leaf_idx, leaf(text, summary=fallback_summary, node_id=node_id), str(e)
             finally:
                 tournament_doc_id.reset(token)
 
         async def execute_merge(doc_idx: int, merge_id: int) -> tuple[int, int, Node]:
+            nonlocal empty_merge_warn_budget, merge_retry_recoveries, merge_interpreter_recoveries
+            nonlocal degenerate_merge_fallbacks
             plan = plans[doc_idx]
             merge_task = plan.merges[merge_id]
 
@@ -531,7 +837,88 @@ class BatchTreeOrchestrator:
 
             token = tournament_doc_id.set(str(states[doc_idx].doc_id))
             try:
-                summary = await self.strategy.merge(left.summary, right.summary, rubric)
+                merge_exception: Optional[Exception] = None
+                merge_degenerate_output = False
+                raw_summary: Optional[str] = None
+                retry_raw_summary: Optional[str] = None
+                try:
+                    raw_summary = await self.strategy.merge(left.summary, right.summary, rubric)
+                    cleaned_summary = clean_summary_text(raw_summary)
+                    merge_degenerate_output = is_degenerate_summary_text(cleaned_summary)
+                    summary = "" if merge_degenerate_output else cleaned_summary
+                except Exception as exc:
+                    merge_exception = exc
+                    summary = ""
+
+                if not summary:
+                    retry_exception: Optional[Exception] = None
+                    try:
+                        retry_raw_summary = await self.strategy.merge(
+                            left.summary,
+                            right.summary,
+                            strict_retry_rubric,
+                            temperature=0.0,
+                        )
+                    except Exception as exc:
+                        retry_exception = exc
+                    retry_cleaned_summary = clean_summary_text(retry_raw_summary)
+                    retry_degenerate_output = is_degenerate_summary_text(retry_cleaned_summary)
+                    if retry_cleaned_summary and not retry_degenerate_output:
+                        summary = retry_cleaned_summary
+                        merge_retry_recoveries += 1
+                    elif merge_exception is None and retry_exception is not None:
+                        merge_exception = retry_exception
+
+                if not summary and interpreter_enabled:
+                    interpreted_summary = await _second_pass_interpret(
+                        mode="merge",
+                        source_text=f"SUMMARY 1:\n{left.summary}\n\nSUMMARY 2:\n{right.summary}",
+                        candidate_output=retry_raw_summary or raw_summary or "",
+                    )
+                    if interpreted_summary:
+                        summary = interpreted_summary
+                        merge_interpreter_recoveries += 1
+                        states[doc_idx].interpreter_merge_recoveries += 1
+
+                if not summary:
+                    summary = _fallback_merge_summary(left.summary, right.summary)
+                    if not summary and merge_exception is not None:
+                        raise merge_exception
+                    states[doc_idx].empty_merge_fallbacks += 1
+                    if merge_degenerate_output:
+                        degenerate_merge_fallbacks += 1
+                        states[doc_idx].degenerate_merge_fallbacks += 1
+                        self._build_stats['degenerate_merge_fallbacks'] += 1
+                        _maybe_raise_degenerate_failure(
+                            kind="merge",
+                            count=degenerate_merge_fallbacks,
+                            doc_id=str(states[doc_idx].doc_id),
+                            item_idx=int(merge_id),
+                            level=int(merge_task.level),
+                            raw_summary=raw_summary,
+                        )
+                    states[doc_idx].merge_failures += 1
+                    self._build_stats['merge_failures'] += 1
+                    if empty_merge_warn_budget > 0:
+                        reason = (
+                            f"exception={merge_exception}"
+                            if merge_exception is not None
+                            else (
+                                "degenerate_model_output"
+                                if merge_degenerate_output
+                                else "empty_model_output"
+                            )
+                        )
+                        logger.warning(
+                            "Merge summary fallback for doc %s merge %d level %d (%s) raw_preview=%r",
+                            str(states[doc_idx].doc_id),
+                            int(merge_id),
+                            int(merge_task.level),
+                            reason,
+                            _preview_text(raw_summary),
+                        )
+                        empty_merge_warn_budget -= 1
+
                 return doc_idx, merge_id, node(
                     left=left,
                     right=right,
@@ -589,8 +976,31 @@ class BatchTreeOrchestrator:
             last_progress_log = now
             last_progress_completed = completed_total
 
+        def _sort_ready_merges() -> None:
+            """Sort ready merges by level (desc) to prioritize critical path.
+
+            Higher-level merges are closer to the root and block more
+            downstream work — scheduling them first reduces wall-clock time
+            (DualPath Opt 6: size-aware merge scheduling).
+            """
+            if len(ready_merges) <= 1:
+                return
+            items = list(ready_merges)
+            items.sort(
+                key=lambda pair: (
+                    -plans[pair[0]].merges[pair[1]].level,
+                    -plans[pair[0]].merges[pair[1]].estimated_input_tokens,
+                )
+            )
+            ready_merges.clear()
+            ready_merges.extend(items)
+
         def pump_ready_queue() -> None:
             nonlocal prefer_merge
+            # Re-sort when new merges have been enqueued
+            if len(ready_merges) > 1:
+                _sort_ready_merges()
+
             while len(pending) < max_inflight and (ready_merges or leaf_queue):
                 choose_merge = False
                 if ready_merges and leaf_queue:
@@ -634,6 +1044,8 @@ class BatchTreeOrchestrator:
                         try:
                             doc_idx, leaf_idx, leaf_node, error = await task
                         except Exception as e:
+                            if isinstance(e, DegenerateSummaryFailure):
+                                raise
                             logger.error(f"Leaf task failed for doc {doc_idx} chunk {item_id}: {e}")
                             states[doc_idx].leaf_failures += 1
                             self._build_stats['leaf_failures'] += 1
@@ -641,6 +1053,7 @@ class BatchTreeOrchestrator:
 
                         completed_leaves[doc_idx][leaf_idx] = leaf_node
                         completed_leaves_count += 1
+                        self._completed_leaves = completed_leaves_count
                         if error:
                             states[doc_idx].leaf_failures += 1
                             self._build_stats['leaf_failures'] += 1
@@ -657,6 +1070,8 @@ class BatchTreeOrchestrator:
                         try:
                             doc_idx, merge_id, merged_node = await task
                         except Exception as e:
+                            if isinstance(e, DegenerateSummaryFailure):
+                                raise
                             logger.error(f"Cascading merge failed for doc {doc_idx} task {item_id}: {e}")
                             states[doc_idx].merge_failures += 1
                             self._build_stats['merge_failures'] += 1
@@ -680,6 +1095,7 @@ class BatchTreeOrchestrator:
 
                         completed_merges[doc_idx][merge_id] = merged_node
                         completed_merges_count += 1
+                        self._completed_merges = completed_merges_count
 
                         for dependent_id in plans[doc_idx].dependents_by_merge.get(merge_id, []):
                             plans[doc_idx].remaining_deps[dependent_id] -= 1
@@ -730,360 +1146,21 @@ class BatchTreeOrchestrator:
         logger.info(
             f"  Cascading build complete: {completed_docs}/{len(docs_to_build)} documents"
         )
+        if leaf_retry_recoveries > 0 or merge_retry_recoveries > 0:
+            logger.info(
+                "  Strict retry recovered %d leaf and %d merge summaries before fallback",
+                int(leaf_retry_recoveries),
+                int(merge_retry_recoveries),
+            )
+        if leaf_interpreter_recoveries > 0 or merge_interpreter_recoveries > 0:
+            logger.info(
+                "  Second-pass interpreter recovered %d leaf and %d merge summaries",
+                int(leaf_interpreter_recoveries),
+                int(merge_interpreter_recoveries),
+            )
 
         if progress_callback:
             progress_callback("pipelined_merge", completed_docs, len(docs_to_build))
-
-    async def _build_trees_levelwise(
-        self,
-        states: List[DocumentState],
-        rubric: str,
-        progress_callback: Optional[Callable],
-    ) -> None:
-        """Build trees level-by-level across all documents."""
-        level_num = 0
-        max_levels = 0
-
-        # Continue until all documents have a single root
-        while True:
-            # Find documents that need merging (more than 1 node)
-            docs_needing_merge = [
-                (idx, state)
-                for idx, state in enumerate(states)
-                if state.error is None and len(state.current_level) > 1
-            ]
-
-            if not docs_needing_merge:
-                break
-
-            level_num += 1
-            max_levels = max(max_levels, level_num)
-
-            logger.info(f"  Level {level_num}: Merging for {len(docs_needing_merge)} documents...")
-
-            # Collect all merge tasks for this level
-            merge_tasks_info = []  # (state_idx, pair_idx, left, right, doc_id)
-
-            for state_idx, state in docs_needing_merge:
-                state.level_num = level_num
-
-                # Pair up nodes
-                for i in range(0, len(state.current_level) - 1, 2):
-                    left = state.current_level[i]
-                    right = state.current_level[i + 1]
-                    pair_idx = i // 2
-                    merge_tasks_info.append((state_idx, pair_idx, left, right, state.doc_id))
-
-            if not merge_tasks_info:
-                break
-
-            # Create merge coroutines
-            async def merge_pair(
-                state_idx: int,
-                pair_idx: int,
-                left: Node,
-                right: Node,
-                level: int,
-                doc_id: str,
-            ):
-                token = tournament_doc_id.set(str(doc_id))
-                try:
-                    summary = await self.strategy.merge(left.summary, right.summary, rubric)
-                    return state_idx, pair_idx, node(
-                        left=left,
-                        right=right,
-                        summary=summary,
-                        node_id=f"d{state_idx}_L{level}_{pair_idx}"
-                    ), None
-                except Exception as e:
-                    # Log and mark failure instead of silent fallback to truncated concatenation
-                    # Truncated text as summary corrupts data quality silently
-                    logger.error(f"Merge failed for doc {state_idx} pair {pair_idx}: {e}")
-                    return state_idx, pair_idx, None, str(e)
-                finally:
-                    tournament_doc_id.reset(token)
-
-            # Launch all merges for this level
-            tasks = [
-                merge_pair(state_idx, pair_idx, left, right, level_num, doc_id)
-                for state_idx, pair_idx, left, right, doc_id in merge_tasks_info
-            ]
-
-            results = await gather_with_cleanup(tasks, return_exceptions=True)
-
-            # Organize results by document
-            next_levels: Dict[int, List[tuple[int, Node]]] = {
-                state_idx: [] for state_idx, _ in docs_needing_merge
-            }
-
-            for result in results:
-                if isinstance(result, Exception):
-                    logger.error(f"Merge task failed: {result}")
-                    continue
-
-                state_idx, pair_idx, merged_node, error = result
-                if error:
-                    states[state_idx].merge_failures += 1
-                    self._build_stats['merge_failures'] += 1
-                    continue
-
-                next_levels[state_idx].append((pair_idx, merged_node))
-
-            self._build_stats['total_merges'] += len(merge_tasks_info)
-
-            # Build next level for each document
-            for state_idx, state in docs_needing_merge:
-                # Get merged nodes sorted by pair index
-                merged = sorted(next_levels.get(state_idx, []), key=lambda x: x[0])
-                new_level = [n for _, n in merged]
-
-                # Handle odd node (carry forward)
-                if len(state.current_level) % 2 == 1:
-                    new_level.append(state.current_level[-1])
-
-                state.current_level = new_level
-
-            completed = len([r for r in results if not isinstance(r, Exception)])
-            logger.info(f"    Completed {completed} merges")
-
-            if progress_callback:
-                progress_callback(f"merge_L{level_num}", completed, len(tasks))
-
-        self._build_stats['total_levels'] = max_levels
-
-    async def _build_trees_pipelined(
-        self,
-        states: List[DocumentState],
-        rubric: str,
-        progress_callback: Optional[Callable],
-    ) -> None:
-        """
-        Build trees with global pipelined execution across all documents.
-
-        Unlike level-wise building which synchronizes all documents at each level,
-        this method submits merges as soon as their dependencies are satisfied,
-        across ALL documents, to maximize throughput.
-        """
-        # Filter documents that need tree building
-        docs_to_build = [
-            (idx, state)
-            for idx, state in enumerate(states)
-            if state.error is None and len(state.current_level) > 1
-        ]
-
-        if not docs_to_build:
-            return
-
-        logger.info(f"  Global pipelined tree building for {len(docs_to_build)} documents...")
-
-        @dataclass
-        class MergeTask:
-            doc_idx: int
-            id: int
-            level: int
-            left_idx: int
-            right_idx: int
-            left_is_merge: bool = False
-            right_is_merge: bool = False
-
-        @dataclass
-        class DocPlan:
-            leaves: List[Node]
-            merges: Dict[int, MergeTask]
-            remaining_deps: Dict[int, int]
-            dependents: Dict[int, List[int]]
-            final_ref: Tuple[int, bool]
-            max_level: int
-
-        plans: Dict[int, DocPlan] = {}
-        completed: Dict[int, Dict[int, Node]] = {}
-
-        total_merges = 0
-        max_levels = 0
-
-        # Build dependency graphs per document
-        for state_idx, state in docs_to_build:
-            leaves = state.current_level
-            merges: Dict[int, MergeTask] = {}
-            remaining_deps: Dict[int, int] = {}
-            dependents: Dict[int, List[int]] = {}
-
-            merge_id = 0
-            level = 0
-            current_refs: List[Tuple[int, bool]] = [(i, False) for i in range(len(leaves))]
-
-            while len(current_refs) > 1:
-                level += 1
-                next_refs: List[Tuple[int, bool]] = []
-                for i in range(0, len(current_refs), 2):
-                    if i + 1 < len(current_refs):
-                        left_idx, left_is_merge = current_refs[i]
-                        right_idx, right_is_merge = current_refs[i + 1]
-
-                        merges[merge_id] = MergeTask(
-                            doc_idx=state_idx,
-                            id=merge_id,
-                            level=level,
-                            left_idx=left_idx,
-                            right_idx=right_idx,
-                            left_is_merge=left_is_merge,
-                            right_is_merge=right_is_merge,
-                        )
-
-                        deps = []
-                        if left_is_merge:
-                            deps.append(left_idx)
-                        if right_is_merge:
-                            deps.append(right_idx)
-
-                        remaining_deps[merge_id] = len(deps)
-                        for dep in deps:
-                            dependents.setdefault(dep, []).append(merge_id)
-
-                        next_refs.append((merge_id, True))
-                        merge_id += 1
-                    else:
-                        next_refs.append(current_refs[i])
-
-                current_refs = next_refs
-
-            final_ref = current_refs[0] if current_refs else (0, False)
-            plans[state_idx] = DocPlan(
-                leaves=leaves,
-                merges=merges,
-                remaining_deps=remaining_deps,
-                dependents=dependents,
-                final_ref=final_ref,
-                max_level=level,
-            )
-            completed[state_idx] = {}
-
-            total_merges += len(merges)
-            max_levels = max(max_levels, level)
-
-        self._build_stats['total_merges'] += total_merges
-        self._build_stats['total_levels'] = max(self._build_stats['total_levels'], max_levels)
-
-        # Scheduler state
-        ready: Deque[Tuple[int, int]] = deque()
-        pending: Dict[asyncio.Task, Tuple[int, int]] = {}
-        failed_docs: set[int] = set()
-
-        for state_idx, plan in plans.items():
-            for merge_id, deps_remaining in plan.remaining_deps.items():
-                if deps_remaining == 0:
-                    ready.append((state_idx, merge_id))
-
-        max_inflight = max(1, self.config.max_concurrent_requests)
-
-        async def execute_merge(state_idx: int, merge_id: int) -> tuple[int, int, Node]:
-            plan = plans[state_idx]
-            merge_task = plan.merges[merge_id]
-
-            left = completed[state_idx][merge_task.left_idx] if merge_task.left_is_merge else plan.leaves[merge_task.left_idx]
-            right = completed[state_idx][merge_task.right_idx] if merge_task.right_is_merge else plan.leaves[merge_task.right_idx]
-
-            token = tournament_doc_id.set(str(states[state_idx].doc_id))
-            try:
-                summary = await self.strategy.merge(left.summary, right.summary, rubric)
-                return state_idx, merge_id, node(
-                    left=left,
-                    right=right,
-                    summary=summary,
-                    node_id=f"d{state_idx}_L{merge_task.level}_{merge_id}"
-                )
-            finally:
-                tournament_doc_id.reset(token)
-
-        def pump_ready_queue() -> None:
-            while ready and len(pending) < max_inflight:
-                state_idx, merge_id = ready.popleft()
-                if state_idx in failed_docs:
-                    continue
-                task = asyncio.create_task(execute_merge(state_idx, merge_id))
-                pending[task] = (state_idx, merge_id)
-
-        pump_ready_queue()
-
-        try:
-            while pending:
-                done, _ = await asyncio.wait(
-                    pending.keys(),
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-
-                for task in done:
-                    state_idx, merge_id = pending.pop(task)
-                    if task.cancelled():
-                        continue
-
-                    try:
-                        state_idx, merge_id, merged_node = await task
-                    except Exception as e:
-                        logger.error(f"Pipelined merge failed for doc {state_idx} task {merge_id}: {e}")
-                        states[state_idx].merge_failures += 1
-                        self._build_stats['merge_failures'] += 1
-                        failed_docs.add(state_idx)
-
-                        # Cancel any in-flight merges for this document
-                        tasks_to_cancel = [
-                            pending_task
-                            for pending_task, (doc_idx, _) in list(pending.items())
-                            if doc_idx == state_idx
-                        ]
-                        for pending_task in tasks_to_cancel:
-                            pending_task.cancel()
-                            del pending[pending_task]
-                        if tasks_to_cancel:
-                            await cancel_tasks(tasks_to_cancel, timeout=self.config.task_cancel_timeout)
-                        continue
-
-                    completed[state_idx][merge_id] = merged_node
-
-                    for dependent_id in plans[state_idx].dependents.get(merge_id, []):
-                        plans[state_idx].remaining_deps[dependent_id] -= 1
-                        if plans[state_idx].remaining_deps[dependent_id] == 0:
-                            ready.append((state_idx, dependent_id))
-
-                pump_ready_queue()
-        finally:
-            if pending:
-                await cancel_tasks(pending.keys(), timeout=self.config.task_cancel_timeout)
-
-        # Finalize roots per document
-        for state_idx, state in docs_to_build:
-            plan = plans.get(state_idx)
-            if plan is None:
-                continue
-
-            root_node: Optional[Node] = None
-            if state_idx in failed_docs:
-                if completed[state_idx]:
-                    root_node = completed[state_idx][max(completed[state_idx].keys())]
-                elif plan.leaves:
-                    root_node = plan.leaves[0]
-            else:
-                final_idx, final_is_merge = plan.final_ref
-                if final_is_merge:
-                    root_node = completed[state_idx].get(final_idx)
-                else:
-                    root_node = plan.leaves[final_idx] if plan.leaves else None
-
-            if root_node is None and plan.leaves:
-                root_node = plan.leaves[0]
-                states[state_idx].merge_failures += 1
-                self._build_stats['merge_failures'] += 1
-
-            if root_node is not None:
-                states[state_idx].current_level = [root_node]
-
-        completed_count = len(docs_to_build) - len(failed_docs)
-        logger.info(
-            f"  Global pipelined build complete: {completed_count}/{len(docs_to_build)} documents"
-        )
-
-        if progress_callback:
-            progress_callback("pipelined_merge", completed_count, len(docs_to_build))
 
     def _create_results(
         self,
@@ -1133,6 +1210,15 @@ class BatchTreeOrchestrator:
             if state.leaf_failures or state.merge_failures:
                 tree.metadata['leaf_failures'] = state.leaf_failures
                 tree.metadata['merge_failures'] = state.merge_failures
+            if state.empty_leaf_fallbacks or state.empty_merge_fallbacks:
+                tree.metadata['empty_leaf_fallbacks'] = int(state.empty_leaf_fallbacks)
+                tree.metadata['empty_merge_fallbacks'] = int(state.empty_merge_fallbacks)
+            if state.degenerate_leaf_fallbacks or state.degenerate_merge_fallbacks:
+                tree.metadata['degenerate_leaf_fallbacks'] = int(state.degenerate_leaf_fallbacks)
+                tree.metadata['degenerate_merge_fallbacks'] = int(state.degenerate_merge_fallbacks)
+            if state.interpreter_leaf_recoveries or state.interpreter_merge_recoveries:
+                tree.metadata['interpreter_leaf_recoveries'] = int(state.interpreter_leaf_recoveries)
+                tree.metadata['interpreter_merge_recoveries'] = int(state.interpreter_merge_recoveries)
 
             # Filter preferences for this document (if any)
             doc_id = str(state.doc_id)
@@ -1156,6 +1242,149 @@ class BatchTreeOrchestrator:
             ))
 
         return results
+
+    # -----------------------------------------------------------------
+    # Unified tree integration
+    # -----------------------------------------------------------------
+
+    async def process_documents_unified(
+        self,
+        documents: List[Any],
+        rubric: str,
+        unified_trees: Dict[int, List[Any]],
+        get_text_fn: Optional[Callable[[Any], str]] = None,
+        get_id_fn: Optional[Callable[[Any], str]] = None,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
+        max_retries: int = 0,
+    ) -> List[BuildResult]:
+        """Process documents using pre-built unified tree topologies.
+
+        This mirrors ``process_documents()`` but instead of chunking text via
+        ``chunk_for_ops()``, it derives ``TextChunk`` objects and merge plans
+        from pre-built ``EmbeddingTreeNode`` lists (one per document).
+
+        The LLM leaf-summarisation and cascading merge calls go through the
+        **same** ``_build_trees_cascading()`` infrastructure, ensuring all
+        requests are globally pooled across documents.
+
+        Args:
+            documents: List of documents to process.
+            rubric: Information preservation criteria.
+            unified_trees: Mapping from document index to its pre-built
+                ``EmbeddingTreeNode`` list (bottom-up order, as returned by
+                ``build_unified_tree()``).
+            get_text_fn: Extract text from document (default: ``str(doc)``).
+            get_id_fn: Extract ID from document (default: index-based).
+            progress_callback: Optional ``callback(phase, completed, total)``.
+            max_retries: Retry count for failed documents.
+
+        Returns:
+            List of ``BuildResult``, one per document.
+        """
+        if get_text_fn is None:
+            get_text_fn = lambda doc: str(doc) if isinstance(doc, str) else getattr(doc, 'text', str(doc))
+        if get_id_fn is None:
+            get_id_fn = lambda doc: str(hash(doc))
+
+        # Phase 1: Convert unified trees into DocumentStates with TextChunks
+        logger.info("Phase 1 (unified): Converting %d pre-built trees to chunks...", len(documents))
+        states = self._chunk_from_unified_trees(
+            documents, unified_trees, get_text_fn, get_id_fn, progress_callback,
+        )
+
+        results = await self._build_and_finalize(
+            states, documents, rubric, get_text_fn, get_id_fn,
+            progress_callback, max_retries,
+        )
+
+        # Enrich results with unified tree metadata
+        for i, result in enumerate(results):
+            nodes = unified_trees.get(i)
+            if nodes and not result.errors:
+                result.tree.metadata['unified_tree'] = True
+                result.tree.metadata['unified_tree_node_count'] = len(nodes)
+                leaves = [n for n in nodes if getattr(n, 'is_leaf', False)]
+                result.tree.metadata['chunk_boundaries'] = [
+                    {'char_start': n.char_start, 'char_end': n.char_end}
+                    for n in leaves
+                ]
+
+        return results
+
+    def _chunk_from_unified_trees(
+        self,
+        documents: List[Any],
+        unified_trees: Dict[int, List[Any]],
+        get_text_fn: Callable[[Any], str],
+        get_id_fn: Callable[[Any], str],
+        progress_callback: Optional[Callable],
+    ) -> List[DocumentState]:
+        """Convert pre-built unified trees into DocumentState objects.
+
+        For each document whose index appears in *unified_trees*, leaf nodes
+        are converted to ``TextChunk`` objects and a ``DocPlan`` merge graph
+        is derived via the existing ``_create_doc_plan()`` helper.
+        """
+        states: List[DocumentState] = []
+        total_chunks = 0
+
+        for i, doc in enumerate(documents):
+            doc_id = get_id_fn(doc)
+            state_idx = len(states)
+
+            nodes = unified_trees.get(i)
+            if not nodes:
+                # Fallback: chunk the text the standard way
+                try:
+                    text = get_text_fn(doc)
+                    if not text or not text.strip():
+                        states.append(DocumentState(doc_id=doc_id, sample=doc, error="No text content"))
+                        continue
+                    chunks = chunk(text, max_chars=self.config.max_chunk_chars, strategy=self.config.chunk_strategy)
+                    if not chunks:
+                        states.append(DocumentState(doc_id=doc_id, sample=doc, error="Chunking failed"))
+                        continue
+                    plan = self._create_doc_plan(state_idx, doc_id, chunks)
+                    states.append(DocumentState(doc_id=doc_id, sample=doc, chunks=chunks, plan=plan))
+                    total_chunks += len(chunks)
+                except Exception as e:
+                    logger.error("Failed to chunk document %s: %s", doc_id, e)
+                    states.append(DocumentState(doc_id=doc_id, sample=doc, error=str(e)))
+                continue
+
+            # Build TextChunks from unified tree leaf nodes
+            try:
+                leaves = [n for n in nodes if getattr(n, 'is_leaf', False)]
+                if not leaves:
+                    states.append(DocumentState(doc_id=doc_id, sample=doc, error="Unified tree has no leaves"))
+                    continue
+
+                chunks = []
+                for leaf_idx, leaf_node in enumerate(leaves):
+                    text_span = getattr(leaf_node, 'text_span', '') or ''
+                    chunks.append(TextChunk(
+                        text=text_span,
+                        chunk_index=leaf_idx,
+                        start_char=getattr(leaf_node, 'char_start', 0),
+                        end_char=getattr(leaf_node, 'char_end', len(text_span)),
+                        token_count=len(text_span) // 4,  # rough estimate
+                    ))
+
+                plan = self._create_doc_plan(state_idx, doc_id, chunks)
+                states.append(DocumentState(doc_id=doc_id, sample=doc, chunks=chunks, plan=plan))
+                total_chunks += len(chunks)
+
+            except Exception as e:
+                logger.error("Failed to convert unified tree for document %s: %s", doc_id, e)
+                states.append(DocumentState(doc_id=doc_id, sample=doc, error=str(e)))
+
+        self._build_stats['total_chunks'] = total_chunks
+        logger.info("  Converted %d documents into %d total chunks (unified)", len(documents), total_chunks)
+
+        if progress_callback:
+            progress_callback("chunk", len(documents), len(documents))
+
+        return states
 
     async def _retry_failed_documents(
         self,
@@ -1204,11 +1433,7 @@ class BatchTreeOrchestrator:
             )
 
             # Build trees for retry batch
-            if self.config.pipelined:
-                await self._build_trees_cascading(retry_states, rubric, None)
-            else:
-                await self._build_all_leaves(retry_states, rubric, None)
-                await self._build_trees_levelwise(retry_states, rubric, None)
+            await self._build_trees_cascading(retry_states, rubric, None)
 
             # Convert to results
             retry_results = self._create_results(retry_states, rubric)

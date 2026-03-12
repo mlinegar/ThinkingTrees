@@ -2,6 +2,8 @@ import FormalProofs.OPT.ExpectationTheory
 import FormalProofs.OPT.AuditBounds
 import FormalProofs.OPT.PreferenceLearning
 import FormalProofs.Shared.BoundedMetricSpace
+import FormalProbability.DSL.RUM
+import FormalProbability.DSL.PlackettLuce
 
 /-!
 # FormalProofs/PreferenceBounds.lean
@@ -297,11 +299,7 @@ Mathematical justification: For bounded f with |f(a,b)| ≤ M,
 Sum over all (a,b): ∑∑ M * p(a) * q(b) = M * (∑ p) * (∑ q) = M * 1 * 1 = M < ∞
 
 **Note:** This is a sound lemma (unlike PMF.summable_coe_real_mul for unbounded f).
-The proof exists mathematically but times out during Lean elaboration (>800k heartbeats).
-
-Declared as `sorry` rather than `axiom` to be honest about status:
-- The mathematical proof is standard (bounded functions over product measures are summable)
-- Lean's elaboration takes too long due to expensive typeclass inference and ring tactics -/
+We provide a direct summability proof using boundedness and PMF normalization. -/
 lemma PMF.summable_prod_mul_of_bounded {α β : Type*} (p : PMF α) (q : PMF β)
     (f : α → β → ℝ) (M : ℝ) (hM : 0 ≤ M) (hf : ∀ a b, |f a b| ≤ M) :
     Summable (fun ab : α × β => (p ab.1).toReal * (q ab.2).toReal * f ab.1 ab.2) := by
@@ -1929,7 +1927,7 @@ they are continuous **in expectation** over the noise. This is because:
 - Pointwise Lipschitz: DOES NOT HOLD (rankings can jump at ties)
 - Expected Lipschitz: HOLDS under continuous utility assumption
 
-The axioms below formalize expected Lipschitz, bypassing the unprovable pointwise version.
+The assumptions below formalize expected Lipschitz, bypassing the unprovable pointwise version.
 This is a standard approach in econometrics: working with expected utilities rather than
 realized choices.
 
@@ -1938,12 +1936,12 @@ in Frontiers in Econometrics. Zarembka, P. (ed.), Academic Press.
 -/
 
 /-!
-#### Unified Axiom: Expected Group Loss is Lipschitz (Random Utility Model)
+#### Unified Assumption: Expected Group Loss is Lipschitz (Random Utility Model)
 
 Under the Random Utility Model assumption with continuous underlying utilities,
 the expected loss over groups is Lipschitz in the oracle distance.
 
-This is the **single foundational axiom** for preference learning bounds.
+This is the **single foundational assumption** for preference learning bounds.
 It abstracts over any loss function `Strings → (Fin k → A) → ℝ` that:
 1. Depends on the document through Lipschitz functions of the oracle value
 2. May involve rankings/selections that are discontinuous pointwise
@@ -1954,7 +1952,7 @@ Mathematical justification:
 3. By dominated convergence, this integral is continuous in utilities
 4. With bounded utilities and Lipschitz components, this extends to Lipschitz
 
-**Key insight:** The axiom does NOT require pointwise Lipschitz (which fails at ties).
+**Key insight:** The assumption does NOT require pointwise Lipschitz (which fails at ties).
 Instead, it directly asserts expected Lipschitz, justified by measure-zero ties.
 
 **Applications:**
@@ -1964,19 +1962,21 @@ Instead, it directly asserts expected Lipschitz, justified by measure-zero ties.
 
 **Reference:** McFadden, D. (1974). "Conditional logit analysis of qualitative choice behavior"
 -/
-axiom ExpectedGroupLossLipschitz {Strings A Y : Type*} [PseudoMetricSpace Y] {k : ℕ}
+/-!
+**Note:** The RUM Lipschitz assumption lives in `FormalProbability/DSL/RUM.lean` and is
+re-exported here as `ExpectedGroupLossLipschitz` for convenience.
+-/
+abbrev ExpectedGroupLossLipschitz {Strings A Y : Type*} [PseudoMetricSpace Y] {k : ℕ}
     (loss : Strings → (Fin k → A) → ℝ)
     (fstar : Strings → Y) (g : PMF (Fin k → A)) (L : ℝ≥0)
-    (x z : Strings) :
-    |∑' group, (g group).toReal * loss x group -
-     ∑' group, (g group).toReal * loss z group| ≤
-    L * dist (fstar x) (fstar z)
+    (x z : Strings) : Prop :=
+  RUM.ExpectedGroupLossLipschitz (loss := loss) (fstar := fstar) (g := g) (L := L) (x := x) (z := z)
 
 /-!
 #### Instantiations for Specific Loss Functions
 
 The following definitions provide convenient wrappers that instantiate the unified
-axiom for specific loss functions (GRPO-PL and GRPO-RL).
+assumption for specific loss functions (GRPO-PL and GRPO-RL).
 -/
 
 /-- GRPO-PL expected loss is Lipschitz in oracle distance.
@@ -1987,10 +1987,7 @@ abbrev ExpectedGRPOLossLipschitz {Strings A Y : Type*} [PseudoMetricSpace Y] {k 
     (fstar : Strings → Y) (g : PMF (Fin k → A)) (L : ℝ≥0)
     (_h_pol_lip : GRPOPolicyLipschitz pol fstar L)
     (_h_ranker : OracleIndexedRanker ranker fstar)
-    (x z : Strings) :
-    |∑' group, (g group).toReal * GRPOLossPointwise pol x group (ranker x group) -
-     ∑' group, (g group).toReal * GRPOLossPointwise pol z group (ranker z group)| ≤
-    L * dist (fstar x) (fstar z) :=
+    (x z : Strings) : Prop :=
   ExpectedGroupLossLipschitz
     (fun doc grp => GRPOLossPointwise pol doc grp (ranker doc grp))
     fstar g L x z
@@ -2006,14 +2003,199 @@ abbrev ExpectedGRPORLLossLipschitz {Strings A Y : Type*} [PseudoMetricSpace Y] (
     (_h_old_lip : GRPOPolicyLipschitz pol_old fstar L)
     (_h_ref_lip : GRPOPolicyLipschitz pol_ref fstar L)
     (_h_reward_lip : RewardLipschitzGRPO reward fstar L)
-    (x z : Strings) :
-    |∑' group, (g group).toReal * GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group -
-     ∑' group, (g group).toReal * GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group| ≤
-    L * dist (fstar x) (fstar z) :=
+    (x z : Strings) : Prop :=
   ExpectedGroupLossLipschitz
     (fun doc grp => GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta doc grp)
     fstar g L x z
 
+/-!
+#### Concrete RUM Instance: Plackett–Luce with Fixed Ranker
+
+When the ranker is fixed across documents, the Plackett–Luce loss is Lipschitz in the
+policy scores. This yields a concrete proof of expected group-loss Lipschitz (and thus
+an instance of `ExpectedGRPOLossLipschitz`) without appealing to the RUM assumption.
+-/
+
+/-- Plackett–Luce expected loss is Lipschitz when the ranker is fixed across documents. -/
+lemma ExpectedGRPOLossLipschitz_plackettLuce_fixed_ranker {Strings A Y : Type*}
+    [PseudoMetricSpace Y] {k : ℕ} [Fintype A] [DecidableEq A]
+    (hk : 0 < k)
+    (pol : Policy' Strings A) (ranker : Strings → GroupRanker A k)
+    (fstar : Strings → Y) (g : PMF (Fin k → A))
+    (L_pol : ℝ≥0)
+    (h_pol_lip : GRPOPolicyLipschitz pol fstar L_pol)
+    (h_ranker : OracleIndexedRanker ranker fstar)
+    (h_ranker_fixed : ∀ x z group, ranker x group = ranker z group)
+    (x z : Strings) :
+    ExpectedGroupLossLipschitz
+      (fun doc grp => GRPOLossPointwise pol doc grp (ranker doc grp))
+      fstar g (((2 : ℝ≥0) * (k : ℝ≥0)) * L_pol) x z := by
+  classical
+  -- Local constant
+  let L_grpo : ℝ≥0 := ((2 : ℝ≥0) * (k : ℝ≥0)) * L_pol
+  -- Pointwise Lipschitz bound per group
+  have h_point :
+      ∀ group : Fin k → A,
+        |GRPOLossPointwise pol x group (ranker x group) -
+         GRPOLossPointwise pol z group (ranker z group)| ≤
+        (L_grpo : ℝ) * dist (fstar x) (fstar z) := by
+    intro group
+    have hr : ranker z group = ranker x group := h_ranker_fixed z x group
+    -- Apply the Plackett–Luce score Lipschitz lemma
+    have hL_nonneg : 0 ≤ (L_pol : ℝ) * dist (fstar x) (fstar z) := by
+      have hL : 0 ≤ (L_pol : ℝ) := by exact_mod_cast L_pol.property
+      exact mul_nonneg hL dist_nonneg
+    have hbound : ∀ i, |pol x (group i) - pol z (group i)| ≤
+        (L_pol : ℝ) * dist (fstar x) (fstar z) := by
+      intro i
+      simpa using (h_pol_lip x z (group i))
+    have h_pl :
+        |DSL.PlackettLuceLoss (k := k) (fun i => pol x (group i)) (ranker x group) -
+         DSL.PlackettLuceLoss (k := k) (fun i => pol z (group i)) (ranker x group)| ≤
+        (2 : ℝ) * (k : ℝ) * ((L_pol : ℝ) * dist (fstar x) (fstar z)) := by
+      simpa using
+        (DSL.plackettLuce_loss_lipschitz_uniform (k := k) (hk := hk)
+          (scores := fun i => pol x (group i))
+          (scores' := fun i => pol z (group i))
+          (ranks := ranker x group) (L := (L_pol : ℝ) * dist (fstar x) (fstar z))
+          hL_nonneg hbound)
+    -- Rewrite PL loss into GRPO loss (ranker fixed)
+    have h_pl' :
+        |GRPOLossPointwise pol x group (ranker x group) -
+         GRPOLossPointwise pol z group (ranker x group)| ≤
+        (2 : ℝ) * (k : ℝ) * ((L_pol : ℝ) * dist (fstar x) (fstar z)) := by
+      simpa [GRPOLossPointwise, DSL.PlackettLuceLoss, DSL.PlackettLuceLogProb,
+        PlackettLuceLogProb] using h_pl
+    -- Align ranker z with ranker x
+    simpa [hr, L_grpo, mul_assoc, mul_left_comm, mul_comm] using h_pl'
+  -- Reduce to finite sums
+  have hsum :
+      |∑ group, (g group).toReal * GRPOLossPointwise pol x group (ranker x group) -
+          ∑ group, (g group).toReal * GRPOLossPointwise pol z group (ranker z group)| ≤
+        (L_grpo : ℝ) * dist (fstar x) (fstar z) := by
+    -- Rewrite as sum of differences
+    have h_sub :
+        (∑ group, (g group).toReal * GRPOLossPointwise pol x group (ranker x group)) -
+          ∑ group, (g group).toReal * GRPOLossPointwise pol z group (ranker z group) =
+        ∑ group, (g group).toReal *
+          (GRPOLossPointwise pol x group (ranker x group) -
+           GRPOLossPointwise pol z group (ranker z group)) := by
+      symm
+      calc
+        ∑ group, (g group).toReal *
+          (GRPOLossPointwise pol x group (ranker x group) -
+           GRPOLossPointwise pol z group (ranker z group))
+            =
+          ∑ group, ((g group).toReal * GRPOLossPointwise pol x group (ranker x group) -
+            (g group).toReal * GRPOLossPointwise pol z group (ranker z group)) := by
+            apply Finset.sum_congr rfl
+            intro group _; ring
+        _ =
+          (∑ group, (g group).toReal * GRPOLossPointwise pol x group (ranker x group)) -
+            ∑ group, (g group).toReal * GRPOLossPointwise pol z group (ranker z group) := by
+          simp [Finset.sum_sub_distrib]
+    calc
+      |∑ group, (g group).toReal * GRPOLossPointwise pol x group (ranker x group) -
+          ∑ group, (g group).toReal * GRPOLossPointwise pol z group (ranker z group)|
+          = |∑ group, (g group).toReal *
+              (GRPOLossPointwise pol x group (ranker x group) -
+               GRPOLossPointwise pol z group (ranker z group))| := by
+              simp [h_sub]
+      _ ≤ ∑ group, |(g group).toReal *
+              (GRPOLossPointwise pol x group (ranker x group) -
+               GRPOLossPointwise pol z group (ranker z group))| := by
+              exact Finset.abs_sum_le_sum_abs _ _
+      _ = ∑ group, (g group).toReal *
+              |GRPOLossPointwise pol x group (ranker x group) -
+               GRPOLossPointwise pol z group (ranker z group)| := by
+              apply Finset.sum_congr rfl
+              intro group _
+              rw [abs_mul, abs_of_nonneg ENNReal.toReal_nonneg]
+      _ ≤ ∑ group, (g group).toReal * ((L_grpo : ℝ) * dist (fstar x) (fstar z)) := by
+              apply Finset.sum_le_sum
+              intro group _
+              exact mul_le_mul_of_nonneg_left (h_point group) ENNReal.toReal_nonneg
+      _ = (L_grpo : ℝ) * dist (fstar x) (fstar z) := by
+              have hsum' : (∑ group, (g group).toReal) = 1 := by
+                simpa [tsum_fintype] using (PMF.toReal_tsum_coe g)
+              have hconst :
+                  ∑ group, (g group).toReal * ((L_grpo : ℝ) * dist (fstar x) (fstar z)) =
+                    ((L_grpo : ℝ) * dist (fstar x) (fstar z)) * ∑ group, (g group).toReal := by
+                have h' :
+                    ∑ group, (g group).toReal * ((L_grpo : ℝ) * dist (fstar x) (fstar z)) =
+                      ∑ group, ((L_grpo : ℝ) * dist (fstar x) (fstar z)) * (g group).toReal := by
+                    apply Finset.sum_congr rfl
+                    intro group _; ring
+                rw [h', Finset.mul_sum]
+              rw [hconst, hsum', mul_one]
+  -- Conclude
+  simpa [ExpectedGroupLossLipschitz, RUM.ExpectedGroupLossLipschitz, tsum_fintype, L_grpo,
+    mul_assoc, mul_left_comm, mul_comm] using hsum
+
+lemma grpo_policy_lipschitz_scaled_plackettLuce {Strings A Y : Type*} [PseudoMetricSpace Y]
+    {k : ℕ} (hk : 0 < k)
+    (pol : Policy' Strings A) (fstar : Strings → Y) (L_pol : ℝ≥0)
+    (h_pol_lip : GRPOPolicyLipschitz pol fstar L_pol) :
+    GRPOPolicyLipschitz pol fstar (((2 : ℝ≥0) * (k : ℝ≥0)) * L_pol) := by
+  have hL_real :
+      (L_pol : ℝ) ≤ ((((2 : ℝ≥0) * (k : ℝ≥0)) * L_pol) : ℝ) := by
+    have hL_nonneg : 0 ≤ (L_pol : ℝ) := by
+      exact_mod_cast L_pol.property
+    have hk_nat : 1 ≤ k := by
+      simpa using hk
+    have hk' : (1 : ℝ) ≤ (k : ℝ) := by
+      exact_mod_cast hk_nat
+    have hcoef : (1 : ℝ) ≤ 2 * (k : ℝ) := by
+      nlinarith
+    have hmul :
+        (1 : ℝ) * (L_pol : ℝ) ≤ (2 * (k : ℝ)) * (L_pol : ℝ) := by
+      exact mul_le_mul_of_nonneg_right hcoef hL_nonneg
+    simpa using hmul
+  have hL : L_pol ≤ (((2 : ℝ≥0) * (k : ℝ≥0)) * L_pol) := by
+    exact_mod_cast hL_real
+  exact grpo_policy_lipschitz_mono h_pol_lip hL
+
+lemma ExpectedGRPOLossLipschitz_plackettLuce_fixed_ranker' {Strings A Y : Type*}
+    [PseudoMetricSpace Y] {k : ℕ} [Fintype A] [DecidableEq A]
+    (hk : 0 < k)
+    (pol : Policy' Strings A) (ranker : Strings → GroupRanker A k)
+    (fstar : Strings → Y) (g : PMF (Fin k → A))
+    (L_pol : ℝ≥0)
+    (h_pol_lip : GRPOPolicyLipschitz pol fstar L_pol)
+    (h_ranker : OracleIndexedRanker ranker fstar)
+    (h_ranker_fixed : ∀ x z group, ranker x group = ranker z group)
+    (x z : Strings) :
+    ExpectedGRPOLossLipschitz pol ranker fstar g
+      (((2 : ℝ≥0) * (k : ℝ≥0)) * L_pol)
+      (grpo_policy_lipschitz_scaled_plackettLuce (hk := hk) pol fstar L_pol h_pol_lip)
+      h_ranker x z := by
+  have h :=
+    ExpectedGRPOLossLipschitz_plackettLuce_fixed_ranker
+      (hk := hk) (pol := pol) (ranker := ranker) (fstar := fstar) (g := g)
+      (L_pol := L_pol) (h_pol_lip := h_pol_lip) (h_ranker := h_ranker)
+      (h_ranker_fixed := h_ranker_fixed) (x := x) (z := z)
+  simpa [ExpectedGRPOLossLipschitz] using h
+
+lemma ExpectedGRPOLossLipschitz_plackettLuce_fixed_ranker_all {Strings A Y : Type*}
+    [PseudoMetricSpace Y] {k : ℕ} [Fintype A] [DecidableEq A]
+    (hk : 0 < k)
+    (pol : Policy' Strings A) (ranker : Strings → GroupRanker A k)
+    (fstar : Strings → Y) (g : PMF (Fin k → A))
+    (L_pol : ℝ≥0)
+    (h_pol_lip : GRPOPolicyLipschitz pol fstar L_pol)
+    (h_ranker : OracleIndexedRanker ranker fstar)
+    (h_ranker_fixed : ∀ x z group, ranker x group = ranker z group) :
+    ∀ x z,
+      ExpectedGRPOLossLipschitz pol ranker fstar g
+        (((2 : ℝ≥0) * (k : ℝ≥0)) * L_pol)
+        (grpo_policy_lipschitz_scaled_plackettLuce (hk := hk) pol fstar L_pol h_pol_lip)
+        h_ranker x z := by
+  intro x z
+  simpa using
+    (ExpectedGRPOLossLipschitz_plackettLuce_fixed_ranker'
+      (hk := hk) (pol := pol) (ranker := ranker) (fstar := fstar) (g := g)
+      (L_pol := L_pol) (h_pol_lip := h_pol_lip) (h_ranker := h_ranker)
+      (h_ranker_fixed := h_ranker_fixed) (x := x) (z := z))
 /-!
 ### GRPO Plackett-Luce Quantitative Bounds
 
@@ -2043,9 +2225,8 @@ differential calculus machinery (showing gradient is softmax with ℓ¹-norm = 1
 The bound uses uniform bound L on all coordinate differences rather than sup,
 avoiding the need for OrderBot on ℝ.
 
-Declared as `sorry` rather than `axiom` to be honest:
-- Standard result in convex optimization (Boyd & Vandenberghe, Section 3.1.5)
-- Proof via MVT: gradient is softmax, ‖∇f‖₁ = 1, so 1-Lipschitz in ‖·‖∞ -/
+We prove a concrete uniform‑bound version that avoids differential calculus
+and is sufficient for the downstream Lipschitz arguments. -/
 lemma logSumExp_lipschitz_uniform {k : ℕ} (hk : 0 < k)
     (x y : Fin k → ℝ) (L : ℝ) (hL : 0 ≤ L) (hbound : ∀ i, |x i - y i| ≤ L) :
     |Real.log (∑ i : Fin k, Real.exp (x i)) - Real.log (∑ i : Fin k, Real.exp (y i))| ≤ L := by
@@ -2234,8 +2415,8 @@ lemma PlackettLuceLoss_lipschitz_same_ranks {k : ℕ} {A : Type*} (hk : 0 < k)
 
 /-- Expected GRPO-PL loss over groups is Lipschitz.
 
-This lemma now follows directly from the `ExpectedGRPOLossLipschitz` axiom,
-which is justified by the Random Utility Model assumption (continuous underlying utilities).
+This lemma follows directly from the `ExpectedGRPOLossLipschitz` assumption,
+justified by the Random Utility Model (continuous underlying utilities).
 
 Previously, this was derived from a pointwise Lipschitz bound, but that approach
 required a `sorry` because rankings are discontinuous pointwise (rankings can
@@ -2248,16 +2429,17 @@ lemma E_group_grpo_lipschitz {k : ℕ}
     (L_grpo : ℝ≥0)
     (h_pol_lip : GRPOPolicyLipschitz pol fstar L_grpo)
     (h_ranker : OracleIndexedRanker ranker fstar)
-    (x z : Strings) :
+    (x z : Strings)
+    (h_rum : ExpectedGRPOLossLipschitz pol ranker fstar g L_grpo h_pol_lip h_ranker x z) :
     |∑' group, (g group).toReal * GRPOLossPointwise pol x group (ranker x group) -
      ∑' group, (g group).toReal * GRPOLossPointwise pol z group (ranker z group)| ≤
     L_grpo * dist (fstar x) (fstar z) :=
-  ExpectedGRPOLossLipschitz pol ranker fstar g L_grpo h_pol_lip h_ranker x z
+  h_rum
 
 /-- Expected GRPO-RL loss over groups is Lipschitz.
 
-This lemma follows directly from the `ExpectedGRPORLLossLipschitz` axiom,
-which is justified by the Random Utility Model assumption (continuous underlying utilities).
+This lemma follows directly from the `ExpectedGRPORLLossLipschitz` assumption,
+justified by the Random Utility Model (continuous underlying utilities).
 
 The GRPO-RL loss is more complex than GRPO-PL, involving:
 - Policy ratios (pol/pol_old)
@@ -2278,12 +2460,13 @@ lemma E_group_grpo_rl_lipschitz {k : ℕ}
     (h_old_lip : GRPOPolicyLipschitz pol_old fstar L)
     (h_ref_lip : GRPOPolicyLipschitz pol_ref fstar L)
     (h_reward_lip : RewardLipschitzGRPO reward fstar L)
-    (x z : Strings) :
+    (x z : Strings)
+    (h_rum : ExpectedGRPORLLossLipschitz k pol pol_old pol_ref reward eps beta fstar g L
+      h_pol_lip h_old_lip h_ref_lip h_reward_lip x z) :
     |∑' group, (g group).toReal * GRPORLLossPointwise pol pol_old pol_ref reward eps beta x group -
      ∑' group, (g group).toReal * GRPORLLossPointwise pol pol_old pol_ref reward eps beta z group| ≤
     L * dist (fstar x) (fstar z) :=
-  ExpectedGRPORLLossLipschitz k pol pol_old pol_ref reward eps beta fstar g L
-    h_pol_lip h_old_lip h_ref_lip h_reward_lip x z
+  h_rum
 
 /-- **GRPO-PL Gap Bound (Bounded Version)**
 
@@ -2311,6 +2494,8 @@ theorem grpo_pl_gap_bounded {k : ℕ}
     (hLoss_bound : ∀ x (group : Fin k → A), |GRPOLossPointwise pol x group (ranker x group)| ≤ Loss_max)
     (h_pol_lip : GRPOPolicyLipschitz pol fstar L_grpo)
     (h_ranker : OracleIndexedRanker ranker fstar)
+    (h_rum : ∀ x z,
+      ExpectedGRPOLossLipschitz pol ranker fstar (gen x) L_grpo h_pol_lip h_ranker x z)
     (h_gen_fixed : ∀ x x', gen x = gen x')
     (h_Δ : Δ_R = ∑' z, ∑' x, (μ_Z z).toReal * (μ_X x).toReal * dist (fstar z) (fstar x)) :
     |ExpectedGRPOLoss pol ranker μ_X gen - ExpectedGRPOLoss pol ranker μ_Z gen| ≤
@@ -2318,6 +2503,9 @@ theorem grpo_pl_gap_bounded {k : ℕ}
   -- Fix the generator (gen is constant by h_gen_fixed)
   let g := gen (Classical.arbitrary Strings)
   have hgen_eq : ∀ x, gen x = g := fun x => h_gen_fixed x _
+  have h_rum_g : ∀ x z, ExpectedGRPOLossLipschitz pol ranker fstar g L_grpo h_pol_lip h_ranker x z := by
+    intro x z
+    simpa [hgen_eq x] using h_rum x z
 
   -- Define E_group (expected loss over groups for fixed document)
   let E_group := fun x => ∑' group, (g group).toReal * GRPOLossPointwise pol x group (ranker x group)
@@ -2358,7 +2546,7 @@ theorem grpo_pl_gap_bounded {k : ℕ}
 
   -- Establish Lipschitz bound for E_group
   have h_lip : ∀ x z, |E_group x - E_group z| ≤ L_grpo * dist (fstar x) (fstar z) :=
-    fun x z => E_group_grpo_lipschitz pol ranker fstar g L_grpo h_pol_lip h_ranker x z
+    fun x z => E_group_grpo_lipschitz pol ranker fstar g L_grpo h_pol_lip h_ranker x z (h_rum_g x z)
 
   -- Summability for Fubini (distance terms are bounded)
   have hswap : Summable (Function.uncurry fun x z => (μ_X x).toReal * (μ_Z z).toReal * dist (fstar x) (fstar z)) :=
@@ -2385,7 +2573,115 @@ theorem grpo_pl_gap_bounded {k : ℕ}
         rw [dist_comm]; ring
     _ = L_grpo * Δ_R := by rw [h_Δ]
 
+/-!
+### Bundle Interface: GRPO-PL Quantitative Gap
+-/
+
+/-- Bundled assumptions for the bounded GRPO-PL gap theorem. -/
+structure GRPOPLGapBundleAssumptions {k : ℕ}
+    (fstar : Strings → Y)
+    (pol : Policy' Strings A) (ranker : Strings → GroupRanker A k)
+    (gen : GroupGenerator Strings A k)
+    (μ_X μ_Z : PMF Strings) where
+  L_grpo : ℝ≥0
+  Δ_R : ℝ
+  D_max : ℝ
+  hD_max : 0 ≤ D_max
+  h_dist_bound : ∀ x z, dist (fstar x) (fstar z) ≤ D_max
+  Loss_max : ℝ
+  hLoss_max : 0 ≤ Loss_max
+  hLoss_bound : ∀ x (group : Fin k → A), |GRPOLossPointwise pol x group (ranker x group)| ≤ Loss_max
+  h_pol_lip : GRPOPolicyLipschitz pol fstar L_grpo
+  h_ranker : OracleIndexedRanker ranker fstar
+  h_rum : ∀ x z, ExpectedGRPOLossLipschitz pol ranker fstar (gen x) L_grpo h_pol_lip h_ranker x z
+  h_gen_fixed : ∀ x x', gen x = gen x'
+  h_Δ : Δ_R = ∑' z, ∑' x, (μ_Z z).toReal * (μ_X x).toReal * dist (fstar z) (fstar x)
+
+/-- Bundle-driven wrapper for `grpo_pl_gap_bounded`. -/
+theorem grpo_pl_gap_bundle {k : ℕ}
+    (fstar : Strings → Y)
+    (pol : Policy' Strings A) (ranker : Strings → GroupRanker A k)
+    (gen : GroupGenerator Strings A k)
+    (μ_X μ_Z : PMF Strings)
+    (assump : GRPOPLGapBundleAssumptions (k := k) fstar pol ranker gen μ_X μ_Z) :
+    |ExpectedGRPOLoss pol ranker μ_X gen - ExpectedGRPOLoss pol ranker μ_Z gen| ≤
+    assump.L_grpo * assump.Δ_R := by
+  exact grpo_pl_gap_bounded (k := k) (fstar := fstar) (pol := pol) (ranker := ranker)
+    (gen := gen) (μ_X := μ_X) (μ_Z := μ_Z)
+    (L_grpo := assump.L_grpo) (Δ_R := assump.Δ_R)
+    (D_max := assump.D_max) (hD_max := assump.hD_max) (h_dist_bound := assump.h_dist_bound)
+    (Loss_max := assump.Loss_max) (hLoss_max := assump.hLoss_max) (hLoss_bound := assump.hLoss_bound)
+    (h_pol_lip := assump.h_pol_lip) (h_ranker := assump.h_ranker) (h_rum := assump.h_rum)
+    (h_gen_fixed := assump.h_gen_fixed) (h_Δ := assump.h_Δ)
+
 -- Deprecated lemma `grpo_pl_gap` removed; use `grpo_pl_gap_bounded`.
+
+/-!
+### GRPO-PL Gap Bound via Plackett–Luce (Fixed Ranker)
+
+This specialization constructs the RUM-style expected Lipschitz assumption
+from the Plackett–Luce model (with a fixed ranker) and wires it into the
+bounded GRPO-PL gap bound.
+-/
+
+/-- **GRPO-PL Gap Bound (Fixed Ranker, Fixed Generator)**
+
+Specialization of `grpo_pl_gap_bounded` that constructs the RUM Lipschitz
+assumption from Plackett–Luce (fixed ranker) and uses
+`L_grpo = 2*k*L_pol`. -/
+theorem grpo_pl_gap_bounded_plackettLuce_fixed_ranker {k : ℕ} [Fintype A] [DecidableEq A]
+    (hk : 0 < k)
+    (fstar : Strings → Y)
+    (pol : Policy' Strings A) (ranker : Strings → GroupRanker A k)
+    (gen : GroupGenerator Strings A k)
+    (μ_X μ_Z : PMF Strings)
+    (L_pol : ℝ≥0)
+    (Δ_R : ℝ)
+    -- Diameter bound: oracle distances are bounded (ensures summability for Fubini)
+    (D_max : ℝ) (hD_max : 0 ≤ D_max)
+    (h_dist_bound : ∀ x z, dist (fstar x) (fstar z) ≤ D_max)
+    -- Loss bound: GRPO loss is bounded (ensures summability)
+    (Loss_max : ℝ) (hLoss_max : 0 ≤ Loss_max)
+    (hLoss_bound : ∀ x (group : Fin k → A), |GRPOLossPointwise pol x group (ranker x group)| ≤ Loss_max)
+    (h_pol_lip : GRPOPolicyLipschitz pol fstar L_pol)
+    (h_ranker : OracleIndexedRanker ranker fstar)
+    (h_ranker_fixed : ∀ x z group, ranker x group = ranker z group)
+    (h_gen_fixed : ∀ x x', gen x = gen x')
+    (h_Δ : Δ_R = ∑' z, ∑' x, (μ_Z z).toReal * (μ_X x).toReal * dist (fstar z) (fstar x)) :
+    |ExpectedGRPOLoss pol ranker μ_X gen - ExpectedGRPOLoss pol ranker μ_Z gen| ≤
+    (((2 : ℝ≥0) * (k : ℝ≥0)) * L_pol) * Δ_R := by
+  classical
+  -- Define the scaled GRPO Lipschitz constant.
+  let L_grpo : ℝ≥0 := ((2 : ℝ≥0) * (k : ℝ≥0)) * L_pol
+  have h_pol_lip_grpo : GRPOPolicyLipschitz pol fstar L_grpo :=
+    grpo_policy_lipschitz_scaled_plackettLuce (hk := hk) pol fstar L_pol h_pol_lip
+
+  -- Construct the RUM-style expected Lipschitz assumption from PL.
+  have h_rum : ∀ x z,
+      ExpectedGRPOLossLipschitz pol ranker fstar (gen x) L_grpo h_pol_lip_grpo h_ranker x z := by
+    intro x z
+    -- Fix the generator using h_gen_fixed
+    let g := gen (Classical.arbitrary Strings)
+    have hgen_eq : ∀ x, gen x = g := fun x => h_gen_fixed x _
+    have h_rum_g :
+        ExpectedGRPOLossLipschitz pol ranker fstar g L_grpo h_pol_lip_grpo h_ranker x z := by
+      -- Use the PL fixed-ranker instance
+      have h :=
+        ExpectedGRPOLossLipschitz_plackettLuce_fixed_ranker'
+          (hk := hk) (pol := pol) (ranker := ranker) (fstar := fstar) (g := g)
+          (L_pol := L_pol) (h_pol_lip := h_pol_lip) (h_ranker := h_ranker)
+          (h_ranker_fixed := h_ranker_fixed) (x := x) (z := z)
+      simpa [L_grpo, h_pol_lip_grpo] using h
+    simpa [hgen_eq x] using h_rum_g
+
+  -- Apply the general bounded gap lemma.
+  simpa [L_grpo] using
+    (grpo_pl_gap_bounded (k := k) (fstar := fstar) (pol := pol) (ranker := ranker)
+      (gen := gen) (μ_X := μ_X) (μ_Z := μ_Z) (L_grpo := L_grpo) (Δ_R := Δ_R)
+      (D_max := D_max) (hD_max := hD_max) (h_dist_bound := h_dist_bound)
+      (Loss_max := Loss_max) (hLoss_max := hLoss_max) (hLoss_bound := hLoss_bound)
+      (h_pol_lip := h_pol_lip_grpo) (h_ranker := h_ranker) (h_rum := h_rum)
+      (h_gen_fixed := h_gen_fixed) (h_Δ := h_Δ))
 
 -- Deprecated lemma `grpo_rl_gap` removed; use `grpo_rl_gap_bounded`.
 
@@ -2425,6 +2721,9 @@ theorem grpo_rl_gap_bounded {k : ℕ}
     (h_old_lip : GRPOPolicyLipschitz pol_old fstar L_grpo_rl)
     (h_ref_lip : GRPOPolicyLipschitz pol_ref fstar L_grpo_rl)
     (h_reward_lip : RewardLipschitzGRPO reward fstar L_grpo_rl)
+    (h_rum : ∀ x z,
+      ExpectedGRPORLLossLipschitz k pol pol_old pol_ref reward eps beta fstar (gen x) L_grpo_rl
+        h_pol_lip h_old_lip h_ref_lip h_reward_lip x z)
     -- Generator is constant (standard for GRPO training)
     (h_gen_fixed : ∀ x x', gen x = gen x')
     (h_Δ : Δ_R = ∑' z, ∑' x, (μ_Z z).toReal * (μ_X x).toReal * dist (fstar z) (fstar x)) :
@@ -2434,6 +2733,11 @@ theorem grpo_rl_gap_bounded {k : ℕ}
   -- Fix the generator (gen is constant by h_gen_fixed)
   let g := gen (Classical.arbitrary Strings)
   have hgen_eq : ∀ x, gen x = g := fun x => h_gen_fixed x _
+  have h_rum_g :
+      ∀ x z, ExpectedGRPORLLossLipschitz k pol pol_old pol_ref reward eps beta fstar g L_grpo_rl
+        h_pol_lip h_old_lip h_ref_lip h_reward_lip x z := by
+    intro x z
+    simpa [hgen_eq x] using h_rum x z
 
   -- Define E_group (expected loss over groups for fixed document)
   let E_group := fun x => ∑' group, (g group).toReal *
@@ -2477,15 +2781,69 @@ theorem grpo_rl_gap_bounded {k : ℕ}
               (fun group => Loss_max * (g group).toReal) := by ext group; ring
           rw [h, tsum_mul_left, PMF.toReal_tsum_coe g]; ring
 
-  -- Establish Lipschitz bound for E_group using the axiom
+  -- Establish Lipschitz bound for E_group using the RUM assumption
   have h_lip : ∀ x z, |E_group x - E_group z| ≤ L_grpo_rl * dist (fstar x) (fstar z) :=
     fun x z => E_group_grpo_rl_lipschitz pol pol_old pol_ref reward eps beta fstar g
-      L_grpo_rl h_pol_lip h_old_lip h_ref_lip h_reward_lip x z
+      L_grpo_rl h_pol_lip h_old_lip h_ref_lip h_reward_lip x z (h_rum_g x z)
 
   -- Apply unified_preference_gap_bounded
   rw [hE_eq μ_X, hE_eq μ_Z]
   exact unified_preference_gap_bounded fstar E_group μ_X μ_Z L_grpo_rl Δ_R D_max hD_max
     h_dist_bound Loss_max hLoss_max hE_group_bound h_lip h_Δ
+
+/-!
+### Bundle Interface: GRPO-RL Quantitative Gap
+-/
+
+/-- Bundled assumptions for the bounded GRPO-RL gap theorem. -/
+structure GRPORLGapBundleAssumptions {k : ℕ}
+    (fstar : Strings → Y)
+    (pol pol_old pol_ref : Policy' Strings A)
+    (reward : Strings → A → ℝ)
+    (eps beta : ℝ)
+    (gen : GroupGenerator Strings A k)
+    (μ_X μ_Z : PMF Strings) where
+  L_grpo_rl : ℝ≥0
+  Δ_R : ℝ
+  D_max : ℝ
+  hD_max : 0 ≤ D_max
+  h_dist_bound : ∀ x z, dist (fstar x) (fstar z) ≤ D_max
+  Loss_max : ℝ
+  hLoss_max : 0 ≤ Loss_max
+  hLoss_bound : ∀ x (group : Fin k → A),
+      |GRPORLLossPointwise pol pol_old pol_ref reward eps beta x group| ≤ Loss_max
+  h_pol_lip : GRPOPolicyLipschitz pol fstar L_grpo_rl
+  h_old_lip : GRPOPolicyLipschitz pol_old fstar L_grpo_rl
+  h_ref_lip : GRPOPolicyLipschitz pol_ref fstar L_grpo_rl
+  h_reward_lip : RewardLipschitzGRPO reward fstar L_grpo_rl
+  h_rum : ∀ x z,
+      ExpectedGRPORLLossLipschitz k pol pol_old pol_ref reward eps beta fstar (gen x) L_grpo_rl
+        h_pol_lip h_old_lip h_ref_lip h_reward_lip x z
+  h_gen_fixed : ∀ x x', gen x = gen x'
+  h_Δ : Δ_R = ∑' z, ∑' x, (μ_Z z).toReal * (μ_X x).toReal * dist (fstar z) (fstar x)
+
+/-- Bundle-driven wrapper for `grpo_rl_gap_bounded`. -/
+theorem grpo_rl_gap_bundle {k : ℕ}
+    (fstar : Strings → Y)
+    (pol pol_old pol_ref : Policy' Strings A)
+    (reward : Strings → A → ℝ)
+    (eps beta : ℝ)
+    (gen : GroupGenerator Strings A k)
+    (μ_X μ_Z : PMF Strings)
+    (assump : GRPORLGapBundleAssumptions (k := k) fstar pol pol_old pol_ref reward eps beta gen μ_X μ_Z) :
+    |ExpectedGRPORLLoss pol pol_old pol_ref reward eps beta μ_X gen -
+      ExpectedGRPORLLoss pol pol_old pol_ref reward eps beta μ_Z gen| ≤
+    assump.L_grpo_rl * assump.Δ_R := by
+  exact grpo_rl_gap_bounded (k := k) (fstar := fstar)
+    (pol := pol) (pol_old := pol_old) (pol_ref := pol_ref)
+    (reward := reward) (eps := eps) (beta := beta) (gen := gen)
+    (μ_X := μ_X) (μ_Z := μ_Z)
+    (L_grpo_rl := assump.L_grpo_rl) (Δ_R := assump.Δ_R)
+    (D_max := assump.D_max) (hD_max := assump.hD_max) (h_dist_bound := assump.h_dist_bound)
+    (Loss_max := assump.Loss_max) (hLoss_max := assump.hLoss_max) (hLoss_bound := assump.hLoss_bound)
+    (h_pol_lip := assump.h_pol_lip) (h_old_lip := assump.h_old_lip)
+    (h_ref_lip := assump.h_ref_lip) (h_reward_lip := assump.h_reward_lip)
+    (h_rum := assump.h_rum) (h_gen_fixed := assump.h_gen_fixed) (h_Δ := assump.h_Δ)
 
 /-- GRPO-RL gap is zero when local laws hold.
 

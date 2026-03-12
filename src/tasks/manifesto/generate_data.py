@@ -376,7 +376,7 @@ def generate_synthetic_data(args) -> None:
     import dspy
     from src.config.dspy_config import configure_dspy
     from src.config.settings import load_settings
-    from src.training.synthetic_data import (
+    from src.training.synthetic import (
         SyntheticDataGenerator,
         ChallengeGenerator,
         ReferenceGenerator,

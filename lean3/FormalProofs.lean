@@ -39,14 +39,43 @@ import FormalProofs.OPT.ExpectationTheory
 
 -- Layer 4: Global Theory
 import FormalProofs.OPT.GlobalAssumptions
+import FormalProofs.OPT.MergeableReduction
+import FormalProofs.OPT.SketchFlipMergeBridge
+import FormalProofs.OPT.SketchSummaryOperators
+import FormalProofs.OPT.SketchRecovery
+import FormalProofs.OPT.SketchRecoveryInstances
+import FormalProofs.OPT.HLLIdempotence
+import FormalProofs.OPT.TheoremBackingAssumptions
+import FormalProofs.OPT.TheoremBackingStructure
+import FormalProofs.OPT.TheoremBackingConsequences
+import FormalProofs.OPT.TheoremBackingMeasurementError
+import FormalProofs.OPT.TheoremBackingApproxMeasurementError
+import FormalProofs.OPT.OptimizationPerturbation
+import FormalProofs.OPT.ApproximateLocalLaws
+import FormalProofs.OPT.RegularizedObjective
+import FormalProofs.OPT.AdaptiveChunkingBridge
+import FormalProofs.OPT.RUMSufficientConditions
+import FormalProofs.OPT.BigramSketch
+import FormalProofs.OPT.BagOfWordsLDARecovery
+import FormalProofs.OPT.LeafLocalMixtureUtilityGap
+import FormalProofs.OPT.TopicBigramOracle
+import FormalProofs.OPT.MarkovPathDGP
+import FormalProofs.OPT.ExactUtilityTransport
+import FormalProofs.OPT.ExactUtilityTransportInstances
+import FormalProofs.OPT.RidgeRegressionToy
+import FormalProofs.OPT.SegmentLDAPipelineToy
 
 -- Layer 5: Applications
 import FormalProofs.OPT.ScoreTransport
 import FormalProofs.OPT.PreferenceLearning
 import FormalProofs.OPT.PreferenceBounds
 import FormalProofs.OPT.TrainingPipeline
+import FormalProofs.OPT.CutBudgetGuidance
 import FormalProofs.OPT.CounterexampleExistence
 import FormalProofs.OPT.AuditBounds
+import FormalProofs.OPT.AuditSizes
+import FormalProofs.OPT.SerflingAudit
+import FormalProofs.OPT.AdversarialChunkingExample
 
 -- Layer 6: Main Theorems (curated exports)
 import FormalProofs.OPT.MainTheorems
@@ -63,6 +92,7 @@ import FormalProofs.DSL.IPWTheory
 import FormalProofs.DSL.ClusteredVariance
 import FormalProofs.DSL.JudgeCalibration
 import FormalProofs.DSL.TreeIPW
+import FormalProofs.DSL.MergeableCertificates
 
 -- ============================================================================
 -- Documentation
@@ -83,7 +113,7 @@ This file re-exports all modules in dependency order, organized into five main s
 ## Proof Status
 
 ✅ **656+ theorems/lemmas** - All proved (no sorry)
-⚠️ **1 axiom** - Modeling assumption: Random Utility Model (McFadden 1974)
+⚠️ **1 modeling assumption** - Random Utility Model Lipschitz property (McFadden 1974)
 
 ## Quick Navigation
 

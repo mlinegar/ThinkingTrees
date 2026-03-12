@@ -13,6 +13,16 @@ import yaml
 DEFAULT_TASK_MODEL_URL = "http://localhost:8000/v1"
 DEFAULT_GENRM_URL = "http://localhost:8001/v1"
 DEFAULT_EMBEDDING_URL = "http://localhost:8003/v1"
+DEFAULT_EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"
+
+DEFAULT_INFERENCE_BACKEND: Dict[str, Any] = {
+    "task_backend": "vllm",
+    "genrm_backend": "vllm",
+    "fallback_backend": "vllm",
+    "routing_policy": "affinity_load_aware",
+    "metrics_poll_seconds": 2.0,
+    "sglang_venv_path": "/home/mlinegar/sglang-env",
+}
 
 
 def default_settings_path() -> Path:
@@ -126,12 +136,43 @@ def get_embedding_url(settings: Optional[Dict[str, Any]] = None) -> str:
     return DEFAULT_EMBEDDING_URL
 
 
+def get_embedding_model(settings: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Get the embedding-model id served by the embedding endpoint.
+
+    Priority:
+    1. EMBEDDING_MODEL environment variable
+    2. settings.yaml servers.embedding_model
+    3. settings.yaml chunking.adaptive.embedding_proxy.model (backward-compatible fallback)
+    4. Default: Qwen/Qwen3-Embedding-8B
+    """
+    env_model = os.environ.get("EMBEDDING_MODEL")
+    if env_model:
+        return str(env_model).strip()
+
+    if settings is None:
+        settings = load_settings()
+
+    servers = settings.get("servers", {}) if isinstance(settings, dict) else {}
+    if isinstance(servers, dict) and servers.get("embedding_model"):
+        return str(servers["embedding_model"]).strip()
+
+    chunking = settings.get("chunking", {}) if isinstance(settings, dict) else {}
+    adaptive = chunking.get("adaptive", {}) if isinstance(chunking, dict) else {}
+    proxy = adaptive.get("embedding_proxy", {}) if isinstance(adaptive, dict) else {}
+    if isinstance(proxy, dict) and proxy.get("model"):
+        return str(proxy["model"]).strip()
+
+    return DEFAULT_EMBEDDING_MODEL
+
+
 def get_server_urls(settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
     """
-    Get all server URLs as a dict.
+    Get server endpoints (and embedding model id) as a dict.
 
     Returns:
-        Dict with 'task_model_url' and 'genrm_url' keys.
+        Dict with 'task_model_url', 'genrm_url', 'embedding_url', and
+        'embedding_model' keys.
     """
     if settings is None:
         settings = load_settings()
@@ -140,6 +181,84 @@ def get_server_urls(settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]
         "task_model_url": get_task_model_url(settings),
         "genrm_url": get_genrm_url(settings),
         "embedding_url": get_embedding_url(settings),
+        "embedding_model": get_embedding_model(settings),
+    }
+
+
+def _normalize_backend_name(raw: Any, *, default: str = "vllm") -> str:
+    rendered = str(raw or "").strip().lower()
+    if rendered in {"vllm", "sglang"}:
+        return rendered
+    return default
+
+
+def _normalize_fallback_backend_name(raw: Any, *, default: str = "vllm") -> str:
+    rendered = str(raw or "").strip().lower()
+    if rendered in {"none", "off", "disabled"}:
+        return "none"
+    if rendered in {"vllm", "sglang"}:
+        return rendered
+    return default
+
+
+def get_inference_backend_config(settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Return normalized inference backend settings.
+
+    Priority:
+    1. Environment variables (TT_*).
+    2. settings.yaml inference.backend.
+    3. Built-in defaults.
+    """
+    if settings is None:
+        settings = load_settings()
+
+    backend_cfg: Dict[str, Any] = dict(DEFAULT_INFERENCE_BACKEND)
+    inference = settings.get("inference", {}) if isinstance(settings, dict) else {}
+    if isinstance(inference, dict):
+        raw_backend = inference.get("backend", {})
+        if isinstance(raw_backend, dict):
+            backend_cfg.update(raw_backend)
+
+    env_task_backend = os.environ.get("TT_TASK_BACKEND")
+    env_genrm_backend = os.environ.get("TT_GENRM_BACKEND")
+    env_fallback_backend = os.environ.get("TT_FALLBACK_BACKEND")
+    env_routing_policy = os.environ.get("TT_ROUTING_POLICY")
+    env_metrics_poll = os.environ.get("TT_METRICS_POLL_SECONDS")
+    env_sglang_venv = os.environ.get("TT_SGLANG_VENV_PATH")
+
+    if env_task_backend:
+        backend_cfg["task_backend"] = env_task_backend
+    if env_genrm_backend:
+        backend_cfg["genrm_backend"] = env_genrm_backend
+    if env_fallback_backend:
+        backend_cfg["fallback_backend"] = env_fallback_backend
+    if env_routing_policy:
+        backend_cfg["routing_policy"] = env_routing_policy
+    if env_metrics_poll:
+        backend_cfg["metrics_poll_seconds"] = env_metrics_poll
+    if env_sglang_venv:
+        backend_cfg["sglang_venv_path"] = env_sglang_venv
+
+    routing_policy = str(backend_cfg.get("routing_policy", "affinity_load_aware") or "").strip().lower()
+    if routing_policy not in {"round_robin", "document_affinity", "affinity_load_aware"}:
+        routing_policy = "affinity_load_aware"
+
+    try:
+        metrics_poll_seconds = float(backend_cfg.get("metrics_poll_seconds", 2.0))
+    except (TypeError, ValueError):
+        metrics_poll_seconds = 2.0
+    metrics_poll_seconds = max(0.25, metrics_poll_seconds)
+
+    return {
+        "task_backend": _normalize_backend_name(backend_cfg.get("task_backend"), default="vllm"),
+        "genrm_backend": _normalize_backend_name(backend_cfg.get("genrm_backend"), default="vllm"),
+        "fallback_backend": _normalize_fallback_backend_name(
+            backend_cfg.get("fallback_backend"),
+            default="vllm",
+        ),
+        "routing_policy": routing_policy,
+        "metrics_poll_seconds": metrics_poll_seconds,
+        "sglang_venv_path": str(backend_cfg.get("sglang_venv_path") or DEFAULT_INFERENCE_BACKEND["sglang_venv_path"]),
     }
 
 

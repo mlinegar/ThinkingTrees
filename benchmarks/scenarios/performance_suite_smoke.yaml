@@ -1,0 +1,96 @@
+version: 1
+name: thinkingtrees_performance_smoke
+output_root: outputs/performance_suite
+defaults:
+  repeats: 1
+  timeout_seconds: 1800
+  cwd: .
+
+cases:
+  - id: micro_chunker
+    layer: micro
+    description: Smoke chunker throughput/latency check.
+    command:
+      - python3
+      - scripts/run_component_microbench.py
+      - --bench
+      - chunker
+      - --iterations
+      - "120"
+      - --json-out
+      - "{case_dir}/micro_chunker.json"
+    extractors:
+      - type: json_file
+        name: micro
+        path: "{case_dir}/micro_chunker.json"
+    metric_rules:
+      - name: chunker_docs_per_second
+        path: extracts.micro.benchmarks.chunker.metrics.docs_per_second
+        direction: higher
+        max_regression_pct: 12
+
+  - id: micro_conditional_memory
+    layer: micro
+    description: Smoke conditional-memory read/write latency check.
+    command:
+      - python3
+      - scripts/run_component_microbench.py
+      - --bench
+      - conditional_memory
+      - --iterations
+      - "200"
+      - --json-out
+      - "{case_dir}/micro_memory.json"
+    extractors:
+      - type: json_file
+        name: micro
+        path: "{case_dir}/micro_memory.json"
+    metric_rules:
+      - name: memory_ops_per_second
+        path: extracts.micro.benchmarks.conditional_memory.metrics.ops_per_second
+        direction: higher
+        max_regression_pct: 15
+
+  - id: micro_prompting
+    layer: micro
+    description: Smoke prompting and score parsing throughput check.
+    command:
+      - python3
+      - scripts/run_component_microbench.py
+      - --bench
+      - prompting
+      - --iterations
+      - "300"
+      - --json-out
+      - "{case_dir}/micro_prompting.json"
+    extractors:
+      - type: json_file
+        name: micro
+        path: "{case_dir}/micro_prompting.json"
+    metric_rules:
+      - name: prompting_iters_per_sec
+        path: extracts.micro.benchmarks.prompting.metrics.iterations_per_second
+        direction: higher
+        max_regression_pct: 12
+
+  - id: micro_tree_builder
+    layer: micro
+    description: Smoke tree-builder structural overhead check.
+    command:
+      - python3
+      - scripts/run_component_microbench.py
+      - --bench
+      - tree_builder
+      - --iterations
+      - "80"
+      - --json-out
+      - "{case_dir}/micro_tree_builder.json"
+    extractors:
+      - type: json_file
+        name: micro
+        path: "{case_dir}/micro_tree_builder.json"
+    metric_rules:
+      - name: tree_builder_docs_per_sec
+        path: extracts.micro.benchmarks.tree_builder.metrics.docs_per_second
+        direction: higher
+        max_regression_pct: 12

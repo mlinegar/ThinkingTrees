@@ -1,0 +1,171 @@
+\section{Connection to Preference Learning}\label{sec:preference}
+
+A central application of Oracle-Preserving Summarization is enabling preference learning at scale. When documents are too long for direct annotation, researchers typically either truncate (losing information) or rely on costly human reading of full texts. OPS provides a third option: summarize hierarchically, audit the pipeline, and collect preferences from the summaries with provable equivalence to full-document preferences.
+
+This section develops the connection between OPS and modern preference learning methods, building on the theoretical results in Section~\ref{sec:theorems}. The formal proofs are in Appendices~\ref{sec:dpo} and~\ref{sec:grpo}, with additional detail in Appendix~\ref{app:preference-proofs}; here we focus on the practical implications.
+
+\subsection{The Factorization Assumption}
+
+The key theoretical assumption is that preferences depend on documents only through their oracle values (Assumption~\ref{ass:CF}). In the preference learning context, this means:
+
+\begin{assumption}[Oracle-indexed preferences]\label{ass:pref}
+Given documents $x_1, x_2$ with oracle values $y_1 = \fstar(x_1)$, $y_2 = \fstar(x_2)$, the probability that a human prefers response $a_1$ to $a_2$ depends only on $(y_1, y_2, a_1, a_2)$, not on the raw texts.
+\end{assumption}
+
+This assumption is satisfied when:
+\begin{itemize}[nosep]
+    \item The task is well-defined (e.g., ``which summary better captures the events in the document?'')
+    \item The rubric specifies what aspects matter for comparison
+    \item Annotators are trained to focus on task-relevant features
+\end{itemize}
+
+It may be violated when preferences depend on surface style, phrasing, or other features outside the oracle's scope. In such cases, OPS still provides valid summaries, but the training equivalence theorem no longer applies.
+
+\subsection{DPO on Summaries}
+
+Direct Preference Optimization (DPO) \citep{RafailovEtAl2023DPO} optimizes a policy $\pi_\theta$ using pairwise preferences:
+\[
+\mathcal{L}_{\mathrm{DPO}}(\pi_\theta) = -\E_{(x, a_w, a_l)} \left[ \log \sigma\left( \beta \log \frac{\pi_\theta(a_w|x)}{\pi_{\mathrm{ref}}(a_w|x)} - \beta \log \frac{\pi_\theta(a_l|x)}{\pi_{\mathrm{ref}}(a_l|x)} \right) \right],
+\]
+where $(a_w, a_l)$ are the preferred and dispreferred responses, and $\sigma$ is the sigmoid function.
+
+Theorem~\ref{thm:dpo-equiv} establishes that when the hierarchy satisfies the three consistency conditions:
+\[
+\arg\min_\pi \mathcal{L}_{\mathrm{DPO}}(\pi; X) = \arg\min_\pi \mathcal{L}_{\mathrm{DPO}}(\pi; Z^{(R)}).
+\]
+
+\textbf{Practical implication:} Collect preferences by showing annotators the OPS summaries $Z^{(R)}$ instead of full documents $X$. The resulting DPO-trained policy is identical to one trained on full documents.
+
+\subsection{Extension to GRPO}
+
+Group Relative Policy Optimization (GRPO) generalizes DPO from pairwise comparisons to $k$-wise rankings using the Plackett-Luce model:
+\[
+P(\text{ranking } \pi_1 \succ \pi_2 \succ \cdots \succ \pi_k) = \prod_{i=1}^k \frac{\exp(s_{\pi_i})}{\sum_{j \ge i} \exp(s_{\pi_j})}.
+\]
+
+Theorem~\ref{thm:grpo-pl} extends the equivalence to GRPO:
+\[
+\arg\min_\pi \mathcal{L}_{\mathrm{GRPO}}(\pi; X) = \arg\min_\pi \mathcal{L}_{\mathrm{GRPO}}(\pi; Z^{(R)}).
+\]
+
+This is particularly useful for:
+\begin{itemize}[nosep]
+    \item \textbf{Best-of-$n$ selection}: Rank $n$ candidate summaries by oracle score
+    \item \textbf{Tournament evaluation}: Pairwise comparisons aggregated into rankings
+    \item \textbf{Multi-agent comparison}: Compare outputs from different models
+\end{itemize}
+
+\subsection{GRPO-RL and DeepSeek-R1 Style Training}
+
+The most recent state-of-the-art models like DeepSeek-R1 use a variant of GRPO that combines:
+\begin{enumerate}[nosep]
+    \item \textbf{Group sampling}: Generate $k$ responses per prompt
+    \item \textbf{Z-score normalized advantages}: $A_i = (r_i - \bar{r}) / \sigma_r$
+    \item \textbf{PPO-style clipping}: $\min(\rho_i A_i, \text{clip}(\rho_i, 1-\epsilon, 1+\epsilon) A_i)$
+    \item \textbf{KL penalty}: $\beta \cdot D_{\mathrm{KL}}(\pi_\theta \| \pi_{\mathrm{ref}})$
+\end{enumerate}
+
+Theorem~\ref{thm:grpo-rl} establishes that this objective also satisfies training equivalence:
+\[
+\mathcal{L}_{\mathrm{GRPO-RL}}(\pi; X) = \mathcal{L}_{\mathrm{GRPO-RL}}(\pi; Z^{(R)}).
+\]
+
+The Lean~4 formalization (Section~\ref{sec:verification}) verifies this result using the Random Utility Model assumption for expected Lipschitz continuity.
+
+\subsection{The Unified Gap Bound}
+
+When conditions hold only approximately (nonzero distortion $\Delta_R$), Theorem~\ref{thm:unified-gap} provides a quantitative bound:
+\[
+\left| \E[\mathcal{L}(\pi; X)] - \E[\mathcal{L}(\pi; Z)] \right| \le L \cdot \Delta_R.
+\]
+
+The method-specific Lipschitz constants are:
+\begin{itemize}[nosep]
+    \item \textbf{DPO:} $L = 2|\beta| L_{\mathrm{pol}}$
+    \item \textbf{GRPO-PL:} $L = L_{\mathrm{grpo}}$
+    \item \textbf{GRPO-RL:} $L = L_{\mathrm{grpo-rl}}$
+\end{itemize}
+
+This bound connects directly to the probabilistic audit: measuring $\Delta_R$ via the audit statistics provides an upper bound on the training gap.
+
+\subsection{Optimizing Tree Objectives When the Oracle Is Imperfect}
+
+The exact equivalence theorems are the cleanest case, but they are not the only
+case worth studying. In practice we often optimize an \emph{expected tree
+objective}: sample or choose a reduction tree, compute the preference loss on
+the resulting summary, and optimize the average of that loss over the tree
+policy. We may also face oracle uncertainty: the expensive scorer or judge we
+use in theory may itself only approximate the true latent quantity we care
+about.
+
+The formalization shows that these two issues compose cleanly. If, for each
+candidate policy, the expected gap between the true objective and the tree
+objective is small, then any exact minimizer of the expected tree objective is a
+near-minimizer for the true objective. The slack is simply
+\[
+\text{expected oracle uncertainty} + \text{expected tree-transport error}.
+\]
+Theorem~\ref{thm:expected-tree-opt} states this generically; the Lean
+formalization instantiates it for DPO, GRPO-PL, and GRPO-RL under stochastic
+adaptive approximate local laws.
+
+\textbf{Practical implication:} we do not need to pretend that the oracle is
+literally exact. We only need an envelope for how far it may be from the true
+latent state, and an audit or theorem-backed bound for how much the tree can
+change the oracle-indexed loss. Once those two pieces are in hand, optimizing
+the tree objective remains justified.
+
+Appendix~\ref{app:adaptive-tree-proofs} gives the high-probability version of
+the same statement.
+If a data-dependent training or audit pipeline only certifies the expected-tree
+objective on a good event, then the probability that the selected optimizer
+fails the corresponding near-optimality guarantee is no larger than the failure
+probability of that event. So the full stochastic story is still modular:
+oracle uncertainty contributes additively to optimization slack, while
+data-dependent certification contributes only through the confidence level.
+
+\paragraph{Method-specific transport terms.}
+For the three preference-learning families we study, the tree-transport term is
+the same one that appears in the approximate gap bounds:
+\begin{itemize}[nosep]
+    \item \textbf{DPO:} expected transport is controlled by
+    $2|\beta|L_{\mathrm{pol}}$ times the expected local-law budget.
+    \item \textbf{GRPO-PL:} expected transport is controlled by
+    $L_{\mathrm{grpo}}$ times the expected local-law budget.
+    \item \textbf{GRPO-RL:} expected transport is controlled by
+    $L_{\mathrm{grpo-rl}}$ times the expected local-law budget.
+\end{itemize}
+
+So the exact-regime story and the noisy-oracle story fit together without any
+new conceptual machinery. The same audit quantities that bound summary-induced
+drift also tell us how much optimization error the tree can introduce.
+
+\subsection{Practical Workflow}
+
+The recommended workflow for preference learning with OPS is:
+
+\begin{enumerate}
+    \item \textbf{Build hierarchies}: Use \texttt{TreeBuilder} to create OPS summaries of your corpus.
+    \item \textbf{Audit}: Run \texttt{TreeAuditor} to estimate violation rates and verify $\Delta_R$ is acceptable.
+    \item \textbf{Collect preferences}: Have annotators compare summaries (not full documents).
+    \item \textbf{Train}: Use standard DPO/GRPO training on the (summary, preference) pairs.
+    \item \textbf{Deploy}: The trained policy applies to both summaries and full documents.
+\end{enumerate}
+
+This workflow dramatically reduces annotation cost: annotators read compressed summaries instead of full documents, while the theoretical guarantees ensure the trained policy is equivalent to one trained on full documents.
+
+\subsection{Limitations}
+
+The training equivalence assumes Assumption~\ref{ass:pref} holds. Common violations include:
+\begin{itemize}[nosep]
+    \item \textbf{Style preferences}: Annotators prefer responses with certain writing styles unrelated to content.
+    \item \textbf{Length bias}: Annotators systematically prefer longer or shorter responses.
+    \item \textbf{Formatting}: Preferences for bullet points, headers, or other structural features.
+\end{itemize}
+
+When these biases exist, OPS summaries may not capture the full preference signal. In such cases, consider:
+\begin{itemize}[nosep]
+    \item Expanding the oracle rubric to include relevant stylistic features
+    \item Training annotators to focus on content
+    \item Using the gap bound (Theorem~\ref{thm:unified-gap}) to quantify potential drift
+\end{itemize}

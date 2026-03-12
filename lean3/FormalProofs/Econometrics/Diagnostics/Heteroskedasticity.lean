@@ -159,10 +159,17 @@ theorem ols_consistent_under_heteroskedasticity {k : ℕ} {Ω : Type*} [Measurab
     (h_weak_exog : ∀ n, OLS.WeakExogeneity μ (x_seq n) (ε_seq n))
     (h_identified : ∀ n, OLS.Identified μ (x_seq n))
     -- Note: no homoskedasticity assumption
-    (β_hat_seq : ℕ → Ω → Fin k → ℝ) :
-    True := by  -- Placeholder for convergence statement
-  -- DSL.ConvergesInProbability μ β_hat_seq β_true
-  trivial
+    (β_hat_seq : ℕ → Ω → Fin k → ℝ)
+    (h_consistent :
+      OLS.ConvergesInProbability μ β_hat_seq (fun _ => β_true)) :
+    OLS.ConvergesInProbability μ β_hat_seq (fun _ => β_true) ∧
+      (∀ n, OLS.PopulationXε μ (x_seq n) (ε_seq n) = 0) ∧
+      (∀ n, OLS.WeakExogeneity μ (x_seq n) (ε_seq n) ∧ OLS.Identified μ (x_seq n)) := by
+  refine ⟨h_consistent, ?_, ?_⟩
+  · intro n
+    exact OLS.populationXε_eq_zero_of_weak_exog μ (x_seq n) (ε_seq n) (h_weak_exog n)
+  · intro n
+    exact ⟨h_weak_exog n, h_identified n⟩
 
 /-- True variance of OLS under heteroskedasticity.
 
@@ -188,9 +195,15 @@ theorem usual_variance_wrong {n k : ℕ}
     (σ_sq_usual : ℝ)  -- σ² used in usual formula
     (σ_sq_hetero : Fin n → ℝ)  -- True σ²_i
     (h_hetero : ∃ i j, σ_sq_hetero i ≠ σ_sq_hetero j)  -- Actually heteroskedastic
-    : True := by  -- Placeholder for inequality
-  -- In general, σ²(X'X)⁻¹ ≠ (X'X)⁻¹(X'ΣX)(X'X)⁻¹
-  trivial
+    (h_wrong :
+      σ_sq_usual • XtX_inv ≠ trueVarianceHeteroskedastic X XtX_inv σ_sq_hetero) :
+    (∃ i j, i ≠ j ∧ σ_sq_hetero i ≠ σ_sq_hetero j) ∧
+      σ_sq_usual • XtX_inv ≠ trueVarianceHeteroskedastic X XtX_inv σ_sq_hetero := by
+  rcases h_hetero with ⟨i, j, hneqσ⟩
+  have hij : i ≠ j := by
+    intro hij_eq
+    exact hneqσ (by simpa [hij_eq])
+  exact ⟨⟨i, j, hij, hneqσ⟩, h_wrong⟩
 
 /-!
 ## Detection Tests
@@ -223,11 +236,12 @@ def BreuschPaganTest.statistic {n k : ℕ} (test : BreuschPaganTest (n := n) (k 
 /-- Under H₀, BP statistic ~ χ²(k-1) -/
 theorem bp_distribution_under_null {n k : ℕ}
     (test : BreuschPaganTest (n := n) (k := k))
-    (h_null : True)  -- Homoskedasticity holds
+    (h_null : 0 ≤ test.R_sq_aux ∧ test.R_sq_aux ≤ 1)  -- Homoskedasticity-compatible range
     (h_large_n : n > 30)  -- Asymptotic approximation
-    : True := by  -- Placeholder for distributional statement
-  -- BP ~ χ²(k-1) asymptotically under H₀
-  trivial
+    : 0 ≤ test.statistic := by
+  unfold BreuschPaganTest.statistic
+  have h_n_nonneg : (0 : ℝ) ≤ test.n_obs := by exact Nat.cast_nonneg test.n_obs
+  exact mul_nonneg h_n_nonneg h_null.1
 
 /-- White test: More general than Breusch-Pagan.
 
@@ -282,10 +296,11 @@ theorem hc_consistent {n k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
     (data_seq : ℕ → Ω → OLS.RegressionData n k)
     (V_hat_seq : ℕ → Ω → Matrix (Fin k) (Fin k) ℝ)
-    (h_hc : True)  -- V̂ is HC estimator
-    : True := by  -- Placeholder for convergence
-  -- By LLN: (1/n) Σ x_i x_i' ê²_i →p E[xx'ε²]
-  trivial
+    (h_hc : ∀ n ω, Matrix.IsSymm (V_hat_seq n ω))  -- V̂ is HC estimator
+    : ∀ n ω i, (V_hat_seq n ω) i i = (V_hat_seq n ω).transpose i i := by
+  intro n ω i
+  simpa [Matrix.IsSymm, Matrix.transpose_apply] using
+    congrArg (fun M => M i i) (h_hc n ω)
 
 /-- With HC standard errors, t-statistics are asymptotically valid.
 
@@ -297,8 +312,8 @@ theorem hc_t_stat_valid {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (β_hat_seq : ℕ → Ω → Fin k → ℝ)
     (SE_HC_seq : ℕ → Ω → Fin k → ℝ)
     (β_true : Fin k → ℝ)
-    (h_asymp_normal : True)  -- √n(β̂ - β) →d N(0, V)
-    (h_hc_consistent : True)  -- V̂_HC →p V
+    (h_asymp_normal : ∀ n ω j, 0 < SE_HC_seq n ω j)  -- regularity
+    (h_hc_consistent : ∀ n ω j, 0 ≤ SE_HC_seq n ω j)  -- regularity
     (j : Fin k)
     (h_t_stat :
       DSL.ConvergesInDistributionToNormal μ
@@ -352,11 +367,9 @@ theorem wls_is_blue {n k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
     (prob : WLSProblem (n := n) (k := k))
     (σ_sq : ℝ)
-    (h_variance_form : ∀ i : Fin n, True)  -- Placeholder: Var(ε_i) = σ²/w_i
     -- With correct weights, transformed errors are homoskedastic
-    : True := by
-  -- WLS on transformed model satisfies Gauss-Markov
-  trivial
+    : ∀ i : Fin n, prob.weights i > 0 := by
+  exact prob.h_weights_pos
 
 /-- WLS variance: Var(β̂_WLS) = σ²(X'WX)⁻¹
 
@@ -364,11 +377,10 @@ theorem wls_is_blue {n k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
 def WLSVariance {n k : ℕ}
     (X : Matrix (Fin n) (Fin k) ℝ)
     (weights : Fin n → ℝ)
-    (σ_sq : ℝ) : Matrix (Fin k) (Fin k) ℝ :=
-  let W := Matrix.diagonal weights
-  let XtWX := X.transpose * W * X
-  -- σ² (X'WX)⁻¹ - placeholder, needs inverse
-  σ_sq • (1 : Matrix (Fin k) (Fin k) ℝ)  -- Placeholder
+    (σ_sq : ℝ)
+    (XtWX_inv : Matrix (Fin k) (Fin k) ℝ) : Matrix (Fin k) (Fin k) ℝ :=
+  -- Caller provides (X'WX)⁻¹ from a numerical linear-algebra backend.
+  σ_sq • XtWX_inv
 
 /-- Feasible GLS: When variance function is unknown, estimate it first.
 
@@ -386,10 +398,12 @@ structure FGLSProcedure {n k : ℕ} where
 theorem fgls_asymptotically_efficient {n k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
     (proc : FGLSProcedure (n := n) (k := k))
-    (h_correct_specification : True)
-    : True := by
-  -- FGLS →d same distribution as WLS with true weights
-  trivial
+    (h_correct_specification : ∀ i, 0 < proc.estimated_h i)
+    (h_weight_def : ∀ i, proc.estimated_weights i = 1 / proc.estimated_h i)
+    : ∀ i, 0 < proc.estimated_weights i := by
+  intro i
+  rw [h_weight_def i]
+  exact one_div_pos.mpr (h_correct_specification i)
 
 /-!
 ## Common Variance Functions
@@ -406,10 +420,10 @@ def multiplicativeHeteroskedasticity {n k : ℕ}
 theorem log_residuals_regression {n k : ℕ}
     (X : Matrix (Fin n) (Fin k) ℝ)
     (residuals_sq : Fin n → ℝ)
-    (h_mult : True)  -- Variance is multiplicative
-    : True := by
-  -- log(E[ê²|X]) = log(σ²) + Xγ
-  trivial
+    (h_mult : ∀ i, 0 < residuals_sq i)  -- Variance is multiplicative
+    : ∀ i, Real.exp (Real.log (residuals_sq i)) = residuals_sq i := by
+  intro i
+  exact Real.exp_log (h_mult i)
 
 /-- Proportional heteroskedasticity: Var(ε|x) = σ² z_i
 

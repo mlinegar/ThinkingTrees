@@ -1,0 +1,390 @@
+\section{Empirical Details}\label{app:empirical}
+
+This appendix provides additional details for the empirical applications in Sections~\ref{sec:manifesto} and \ref{sec:congressional}.
+
+\subsection{Mergeable Aggregation Validation Suite}\label{app:mergeable-validation}
+
+This subsection consolidates our simulation-based validation of merge-safe aggregation under adaptive chunking.
+The objective is to separate four effects that are often confounded in practice:
+\begin{enumerate}[nosep]
+    \item merge-rule correctness,
+    \item sketch sufficiency (\(m\) versus \(k\)),
+    \item chunk/selection quality under budget,
+    \item confidence-interval calibration (coverage).
+\end{enumerate}
+
+\paragraph{Why this matters.}
+For non-additive targets (e.g., event-existence or threshold counts), naive repeated aggregation can be biased even when local predictions are good.
+If chunking and retention are adaptive, severe undercoverage can arise even when point estimates look reasonable.
+The merge-safe diagnostics below are designed to identify structural failure rather than only sampling noise.
+
+\paragraph{Target family and setup.}
+We evaluate targets of the form
+\[
+\theta_k \;=\; P(\texttt{count}\ge k \mid \texttt{spike}),
+\]
+where \(\texttt{count}\) is the number of threshold-exceeding local events in a document/sequence.
+Each run chunks a sequence, retains a budgeted subset of chunks, merges kept chunks with a top-\(m\) sketch, and estimates \(\theta_k\).
+The key theoretical regimes are:
+\begin{itemize}[nosep]
+    \item \(m<k\): unsupported (information-limited),
+    \item \(m=k\): exact-supported,
+    \item \(m>k\): over-supported.
+\end{itemize}
+
+\paragraph{Simulation families.}
+The suite consists of:
+\begin{enumerate}[nosep]
+    \item \(m\times k\) phase sweeps with naive baselines,
+    \item chunk-quality sweeps over leaf size and budget,
+    \item nonlanguage scenario sweeps (ICU, intrusion, manufacturing, ECG),
+    \item empirical CI-coverage sweeps (Wilson intervals per replicate).
+\end{enumerate}
+
+\paragraph{Headline findings.}
+\begin{enumerate}[nosep]
+    \item \textbf{Sufficiency dominates:} unsupported \(m<k\) has large excess bias; over-supported \(m>k\) is close to \(m=k\).
+    \item \textbf{Chunk quality and budget are distinct:} fine leaves alone do not guarantee recovery if budget is too small.
+    \item \textbf{Not language-specific:} the same structural pattern appears in nonlanguage settings.
+    \item \textbf{Coverage recovers with support:} low-budget undercoverage moves toward nominal as alignment and retained mass improve.
+\end{enumerate}
+
+\paragraph{Representative numeric summary.}
+All values below are from generated artifacts in \texttt{outputs/}.
+
+\begin{center}
+\begin{tabular}{p{0.37\linewidth}p{0.57\linewidth}}
+\toprule
+\textbf{Experiment} & \textbf{Representative result} \\
+\midrule
+\(m\times k\) phase sweep &
+Naive baselines are high-bias (majority \(0.4375\), mean-of-means \(0.5391\) MAE).
+For \(k=5\), unsupported-minus-exact penalty is about \(+0.45\). \\
+\addlinespace
+Chunk quality (fixed + top-proxy, \(k=m=5\)) &
+\(\texttt{size}=1, b\le4\): target-capture \(=0.00\), abs-bias \(\approx0.20\).
+\(\texttt{size}=1, b=6\): target-capture \(=1.00\), abs-bias \(\approx0.036\). \\
+\addlinespace
+Nonlanguage suite &
+Network intrusion (aligned): abs-bias \(\approx0.25\to0.043\) as \(b:1\to8\).
+Misspecified chunking remains worse at high budget (\(\approx0.094\)). \\
+\addlinespace
+Coverage suite (95\% nominal) &
+Aligned coverage improves strongly with budget:
+ICU \(0.050\to0.950\), intrusion \(0.000\to0.983\), ECG \(0.317\to0.967\). \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Complexity ladder and failure signatures.}
+We also run a staged ladder that adds one modeling requirement at a time:
+\(S1\) recover \(P(\texttt{spike})\), \(S2\) add \(P(\texttt{count}\ge2\mid\texttt{spike})\),
+\(S3\) add \(P(\texttt{boundary}\mid\texttt{spike})\), \(S4\) add \(P(\texttt{count}\ge3\mid\texttt{spike})\),
+and \(S5\) move to generic-\(k\) targets.
+The positive controls remain stable (one-pass oracle \(0.0272\to0.0348\to0.0370\to0.0261\);
+full model \(0.0311\to0.0389\to0.0335\to0.0268\), aggregate MAE across stages).
+Failures are sharply component-specific:
+\begin{enumerate}[nosep]
+    \item \textbf{Missing boundary statistic:} in \(S4\), \texttt{full\_model\_missing\_boundary\_stat}
+    has low error on non-boundary targets (\(\approx0.03\)--\(0.04\)) but boundary-target MAE \(=0.6500\).
+    \item \textbf{Missing third-order statistic:} in \(S4\), \texttt{full\_model\_missing\_three\_stat}
+    has non-3rd-target MAE \(\approx0.03\)--\(0.04\) but \(P(\texttt{count}\ge3\mid\texttt{spike})\) MAE \(=0.2997\).
+    \item \textbf{Wrong chunker/selection:} \texttt{right\_rule\_wrong\_chunker} remains high-bias despite merge-safe rules
+    (\(0.6085\) in \(S1\), \(0.4706\) in \(S2\), \(0.3902\) in \(S4\)).
+    \item \textbf{Insufficient sketch order:} in \(S5\), \texttt{full\_model\_limited\_sketch} (top-3)
+    is low-bias on supported targets (\(k=2:0.0373\), \(k=3:0.0257\)) and degrades once unsupported
+    (\(k=4:0.0805\), \(k=5:0.1277\)).
+\end{enumerate}
+
+\paragraph{Failure taxonomy (compact map).}
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.27\linewidth}p{0.20\linewidth}p{0.38\linewidth}@{}}
+\toprule
+\textbf{Method / ablation} & \textbf{Violated requirement} & \textbf{Observed signature} \\
+\midrule
+\texttt{one\_pass\_oracle}, \texttt{full\_model\_aligned}
+& none (positive controls) &
+Stable low aggregate MAE across stages (\(\approx 0.03\) to \(0.04\)); tracks one-pass reference. \\
+\addlinespace
+\texttt{right\_rule\_wrong\_chunker}
+& evidence retention under adaptive chunking/selection &
+Broad failure despite merge-safe rules: aggregate MAE \(0.6085\) (S1), \(0.4706\) (S2), \(0.3902\) (S4). \\
+\addlinespace
+\texttt{missing\_boundary\_stat}
+& target-specific sufficient statistic for boundary event &
+Selective failure: boundary MAE \(0.6500\) while non-boundary targets remain \(\approx 0.03\)--\(0.04\). \\
+\addlinespace
+\texttt{missing\_three\_stat}
+& target-specific sufficient statistic for \(\texttt{count}\ge 3\) &
+Selective failure: \(P(\texttt{count}\ge 3\mid\texttt{spike})\) MAE \(0.2997\), other targets \(\approx 0.03\)--\(0.04\). \\
+\addlinespace
+\texttt{limited\_sketch}
+& sketch-order sufficiency (\(m\ge k\)) &
+Support boundary in S5: low-bias for supported \(k\) (\(k=2,3\)), jump when unsupported (\(k=4,5\)). \\
+\addlinespace
+\texttt{naive\_majority}, \texttt{naive\_mean\_of\_means}
+& non-additive merge semantics &
+High and unstable aggregate MAE as complexity rises (e.g., majority \(0.4257\to0.5849\to0.8206\), S2\(\to\)S4\(\to\)S5). \\
+\bottomrule
+\end{tabular}
+\normalsize
+\end{center}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{../outputs/mergeable_complexity_ladder.png}
+    \caption{Complexity ladder and failure signatures. Left: aggregate MAE as target complexity increases.
+    Right: stage-\(4\) parameter-specific MAE heatmap showing that missing sufficient statistics fail exactly the corresponding target component.}
+    \label{fig:mergeable-complexity-ladder}
+\end{figure}
+
+\paragraph{Interpretation for deployment.}
+The same decision rule emerges across all settings:
+\begin{enumerate}[nosep]
+    \item ensure sketch sufficiency (\(m\ge k\)),
+    \item monitor capture diagnostics in addition to bias,
+    \item treat low-budget undercoverage as structural failure,
+    \item increase retained chunk budget/alignment before increasing model complexity.
+\end{enumerate}
+
+\paragraph{Artifacts and scripts.}
+Primary scripts:
+\begin{itemize}[nosep]
+    \item \texttt{scripts/plot\_mergeable\_k\_m\_phase.py}
+    \item \texttt{scripts/plot\_mergeable\_chunk\_quality\_sweep.py}
+    \item \texttt{scripts/plot\_mergeable\_nonlanguage\_suite.py}
+    \item \texttt{scripts/plot\_mergeable\_nonlanguage\_coverage.py}
+    \item \texttt{scripts/plot\_mergeable\_complexity\_ladder.py}
+\end{itemize}
+
+Primary outputs:
+\begin{itemize}[nosep]
+    \item \texttt{outputs/mergeable\_k\_m\_phase\_summary.json}
+    \item \texttt{outputs/mergeable\_chunk\_quality\_sweep\_summary.json}
+    \item \texttt{outputs/mergeable\_nonlanguage\_suite\_summary.json}
+    \item \texttt{outputs/mergeable\_nonlanguage\_coverage\_summary.json}
+    \item \texttt{outputs/mergeable\_complexity\_ladder\_summary.json}
+\end{itemize}
+
+\subsection{Data Preprocessing}
+
+\subsubsection{Manifesto Project}
+
+\paragraph{Source.}
+Manifesto Project Dataset (version 2024a) from \url{https://manifesto-project.wzb.eu/}.
+
+\paragraph{Preprocessing Steps.}
+\begin{enumerate}[nosep]
+    \item Download raw manifesto texts via Manifesto Corpus API
+    \item Convert to UTF-8, normalize whitespace
+    \item Remove headers/footers, page numbers
+    \item Tokenize using \texttt{cl100k\_base} (GPT-4 tokenizer)
+    \item Filter to documents with $\ge 1000$ tokens
+\end{enumerate}
+
+\paragraph{Dataset Statistics.}
+[TBD: Fill in after data collection]
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Statistic & Value \\
+\midrule
+Countries & TBD \\
+Parties & TBD \\
+Documents & TBD \\
+Mean tokens & TBD \\
+Median tokens & TBD \\
+Max tokens & TBD \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{Congressional Record}
+
+\paragraph{Source.}
+Congressional Record from \url{https://www.congress.gov/}.
+
+\paragraph{Preprocessing Steps.}
+\begin{enumerate}[nosep]
+    \item Download via bulk data API
+    \item Parse XML to extract speaker, date, chamber
+    \item Filter to floor speeches (exclude extensions of remarks)
+    \item Tokenize using \texttt{cl100k\_base}
+    \item Filter to speeches with $\ge 500$ tokens
+\end{enumerate}
+
+\paragraph{Dataset Statistics.}
+[TBD: Fill in after data collection]
+
+\subsection{Full Results Tables}
+
+\subsubsection{Manifesto RILE Results}
+
+[TBD: Tables with full results]
+
+\paragraph{Audit Statistics by Country.}
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Country & $\hat{p}_{\text{suff}}$ & $\hat{p}_{\text{assoc}}$ & $\hat{p}_{\text{idem}}$ \\
+\midrule
+TBD & & & \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Correlation with Expert Scores.}
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Method & Pearson $r$ & MAE & RMSE \\
+\midrule
+Direct (full doc) & TBD & TBD & TBD \\
+Truncation & TBD & TBD & TBD \\
+OPS & TBD & TBD & TBD \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{Congressional Record Results}
+
+[TBD: Tables with full results]
+
+\subsection{Robustness Checks}
+
+\subsubsection{Chunk Size Sensitivity}
+
+We vary chunk size from 1000 to 8000 tokens and measure:
+\begin{itemize}[nosep]
+    \item Violation rates at each chunk size
+    \item Correlation with direct scoring
+    \item Compression ratio
+\end{itemize}
+
+[TBD: Results table/figure]
+
+\subsubsection{Model Sensitivity}
+
+We compare results across models:
+\begin{itemize}[nosep]
+    \item GPT-4o
+    \item GPT-4-turbo
+    \item Claude-3-Opus
+    \item Llama-3-70B
+\end{itemize}
+
+[TBD: Results table]
+
+\subsubsection{Oracle Sensitivity}
+
+We compare oracle approximations:
+\begin{itemize}[nosep]
+    \item Expert human coders (gold standard)
+    \item GPT-4o with detailed rubric
+    \item Ensemble of 3 models
+\end{itemize}
+
+[TBD: Results table]
+
+\subsection{Rubric Sensitivity Analysis}
+
+\subsubsection{Manifesto RILE Rubric Variants}
+
+We test rubric variants:
+\begin{enumerate}[nosep]
+    \item Minimal: Just left/right categories
+    \item Standard: Full Manifesto Project codebook
+    \item Expanded: Additional context on party system
+\end{enumerate}
+
+[TBD: Comparison of violation rates and correlation]
+
+\subsubsection{Congressional Record Rubric Variants}
+
+For each policy dimension, we test:
+\begin{enumerate}[nosep]
+    \item Binary: Support/oppose only
+    \item Ordinal: 5-point scale
+    \item Continuous: -100 to +100 scale
+\end{enumerate}
+
+[TBD: Comparison]
+
+\subsection{Computational Costs}
+
+\subsubsection{API Costs}
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Operation & Tokens/doc & Cost/doc & Total cost \\
+\midrule
+Tree building & TBD & TBD & TBD \\
+Auditing & TBD & TBD & TBD \\
+Preference collection & TBD & TBD & TBD \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{Time Costs}
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Operation & Time/doc & Parallelism \\
+\midrule
+Tree building & TBD & TBD \\
+Auditing & TBD & TBD \\
+Full pipeline & TBD & TBD \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Error Analysis}
+
+\subsubsection{Sufficiency Failures}
+
+Examples of leaf summaries that violated sufficiency:
+
+\paragraph{Example 1.}
+[TBD: Specific example with analysis]
+
+\paragraph{Example 2.}
+[TBD: Specific example with analysis]
+
+\subsubsection{Merge Consistency Failures}
+
+Examples of merge operations that violated consistency:
+
+[TBD: Examples with analysis]
+
+\subsubsection{Common Failure Patterns}
+
+Based on error analysis, common failure patterns include:
+\begin{itemize}[nosep]
+    \item [TBD: Pattern 1]
+    \item [TBD: Pattern 2]
+    \item [TBD: Pattern 3]
+\end{itemize}
+
+\subsection{Reproducibility}
+
+\paragraph{Code.}
+All code is available at \url{https://github.com/[repo]/ThinkingTrees}.
+
+\paragraph{Data.}
+Manifesto data available via API with registration. Congressional Record data is public.
+
+\paragraph{Models.}
+Results use OpenAI API models. Exact model versions:
+\begin{itemize}[nosep]
+    \item \texttt{gpt-4o-2024-05-13}
+    \item [TBD: Other models used]
+\end{itemize}
+
+\paragraph{Random Seeds.}
+All experiments use \texttt{temperature=0.0} for reproducibility. Where stochasticity is needed, we report means over 5 seeds.
+
+\paragraph{Compute.}
+Experiments run on [TBD: hardware description]. Total compute time: TBD.

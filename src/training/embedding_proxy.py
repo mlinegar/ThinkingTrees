@@ -8,19 +8,27 @@ new labels arrive.
 
 from __future__ import annotations
 
+from array import array
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
 import logging
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+import sys
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
+import zlib
 
+import numpy as np
 import requests
+from src.core.conditional_memory import canonical_hash, get_default_memory
 try:
     import torch
 except Exception:  # pragma: no cover - optional dependency path
     torch = None
+
+if TYPE_CHECKING:
+    from src.core.conditional_memory import ConditionalMemory
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +59,22 @@ def _safe_optional_float(value: Any) -> Optional[float]:
     return converted
 
 
-def _stable_text_key(text: str) -> str:
-    """Stable (deterministic) key for embedding cache."""
-    import hashlib
+def _encode_embedding_f32z(vector: Sequence[float]) -> tuple[bytes, Dict[str, Any]]:
+    arr = array("f", (float(v) for v in vector))
+    if sys.byteorder != "little":
+        arr.byteswap()
+    raw = arr.tobytes()
+    compressed = zlib.compress(raw)
+    return compressed, {"dtype": "float32", "byteorder": "little", "dim": int(len(arr))}
 
-    return hashlib.sha256((text or "").encode("utf-8", errors="ignore")).hexdigest()
+
+def _decode_embedding_f32z(blob: bytes) -> List[float]:
+    raw = zlib.decompress(bytes(blob))
+    arr = array("f")
+    arr.frombytes(raw)
+    if sys.byteorder != "little":
+        arr.byteswap()
+    return [float(v) for v in arr]
 
 
 def _solve_linear_system(a: List[List[float]], b: List[float]) -> Optional[List[float]]:
@@ -297,6 +316,26 @@ class EmbeddingMILSGDProxyModel:
             deltas.append(_clamp01(y_hat - y_minus))
         return {"bag_score": y_hat, "deltas": deltas}
 
+    def get_mil_attention_scores(
+        self, embeddings: Sequence[Sequence[float]],
+    ) -> List[float]:
+        """Get per-window MIL relevance scores for adaptive windowing.
+
+        Returns a list of per-window relevance probabilities in [0, 1], where
+        high values indicate windows that are informative for the target task
+        (e.g. RILE scoring) and should receive finer windowing.
+
+        These scores can be used as the ``score_windows`` callback in
+        ``build_unified_tree()`` to drive content-aware adaptive windowing.
+
+        Args:
+            embeddings: Per-window embedding vectors (one per window).
+
+        Returns:
+            Per-window relevance scores in [0, 1].
+        """
+        return [self.predict_from_embedding(emb) for emb in embeddings]
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "model_type": "embedding_mil_sgd_proxy",
@@ -384,6 +423,7 @@ class VLLMEmbeddingClient:
         timeout_seconds: float = 60.0,
         batch_size: int = 32,
         cache_enabled: bool = True,
+        memory: Optional["ConditionalMemory"] = None,
     ):
         self.api_base = (api_base or "").rstrip("/")
         self.model = model
@@ -392,6 +432,8 @@ class VLLMEmbeddingClient:
         self.batch_size = max(1, int(batch_size))
         self.cache_enabled = bool(cache_enabled)
         self._cache: Dict[str, List[float]] = {}
+        self._memory = memory if memory is not None else get_default_memory()
+        self._model_verified = False
 
     @property
     def embeddings_url(self) -> str:
@@ -406,8 +448,10 @@ class VLLMEmbeddingClient:
         return f"{self.api_base}/v1/models"
 
     def resolve_model(self) -> str:
-        if self.model:
+        response = None
+        if self.model and self._model_verified:
             return self.model
+
         response = requests.get(
             self.models_url,
             headers={"Authorization": f"Bearer {self.api_key}"},
@@ -418,10 +462,39 @@ class VLLMEmbeddingClient:
         data = payload.get("data", [])
         if not data:
             raise RuntimeError("Embedding endpoint returned no models")
-        model_name = str(data[0].get("id", "")).strip()
-        if not model_name:
-            raise RuntimeError("Embedding endpoint returned empty model id")
-        self.model = model_name
+
+        served_ids: List[str] = []
+        for row in data:
+            model_id = str(row.get("id", "")).strip()
+            if model_id:
+                served_ids.append(model_id)
+
+        if not served_ids:
+            raise RuntimeError("Embedding endpoint returned empty model ids")
+
+        if self.model:
+            requested = str(self.model).strip()
+            if requested in served_ids:
+                self._model_verified = True
+                return requested
+
+            if len(served_ids) == 1:
+                logger.warning(
+                    "Requested embedding model '%s' not found on endpoint; using served id '%s'.",
+                    requested,
+                    served_ids[0],
+                )
+                self.model = served_ids[0]
+                self._model_verified = True
+                return self.model
+
+            raise RuntimeError(
+                "Requested embedding model id not served by endpoint. "
+                f"requested={requested!r} served={served_ids!r}"
+            )
+
+        self.model = served_ids[0]
+        self._model_verified = True
         return self.model
 
     def embed_texts(self, texts: Sequence[str]) -> List[List[float]]:
@@ -430,22 +503,40 @@ class VLLMEmbeddingClient:
             return []
 
         model = self.resolve_model()
+        namespace = None
+        if self._memory is not None:
+            namespace = f"embed:{model}:{self._memory.namespace_version}"
         outputs: List[Optional[List[float]]] = [None] * len(texts)
         pending_texts: List[str] = []
         pending_indices: List[int] = []
+        pending_keys: List[str] = []
 
         for idx, text in enumerate(texts):
             raw_text = str(text or "")
-            key = _stable_text_key(raw_text)
+            key = canonical_hash(raw_text)
             if self.cache_enabled and key in self._cache:
                 outputs[idx] = list(self._cache[key])
                 continue
+            if self._memory is not None and namespace is not None:
+                entry = self._memory.get(namespace, key)
+                if entry is not None and entry.value_type == "f32z":
+                    try:
+                        vector = _decode_embedding_f32z(entry.value)
+                    except Exception:
+                        vector = None
+                    if vector is not None:
+                        outputs[idx] = vector
+                        if self.cache_enabled:
+                            self._cache[key] = vector
+                        continue
             pending_texts.append(raw_text)
             pending_indices.append(idx)
+            pending_keys.append(key)
 
         for start in range(0, len(pending_texts), self.batch_size):
             batch_texts = pending_texts[start : start + self.batch_size]
             batch_indices = pending_indices[start : start + self.batch_size]
+            batch_keys = pending_keys[start : start + self.batch_size]
 
             response = requests.post(
                 self.embeddings_url,
@@ -476,8 +567,19 @@ class VLLMEmbeddingClient:
                 global_idx = batch_indices[local_idx]
                 outputs[global_idx] = vector
                 if self.cache_enabled:
-                    key = _stable_text_key(batch_texts[local_idx])
-                    self._cache[key] = vector
+                    self._cache[batch_keys[local_idx]] = vector
+                if self._memory is not None and namespace is not None:
+                    try:
+                        blob, meta = _encode_embedding_f32z(vector)
+                        self._memory.set(
+                            namespace,
+                            batch_keys[local_idx],
+                            value_type="f32z",
+                            value=blob,
+                            meta=meta,
+                        )
+                    except Exception:
+                        pass
 
         finalized: List[List[float]] = []
         for idx, vector in enumerate(outputs):
@@ -522,36 +624,39 @@ def fit_embedding_ridge_proxy(
     if any(len(vec) != dim for vec in embeddings):
         raise ValueError("Inconsistent embedding dimensions in fit data")
 
-    # Include intercept term as the first coefficient.
-    m = dim + 1
-    xtx = [[0.0 for _ in range(m)] for _ in range(m)]
-    xty = [0.0 for _ in range(m)]
-
-    for ex, vec in zip(cleaned, embeddings):
-        x = [1.0] + [float(v) for v in vec]
-        y = float(ex.target_score)
-        for i in range(m):
-            xty[i] += x[i] * y
-            row_i = xtx[i]
-            xi = x[i]
-            for j in range(m):
-                row_i[j] += xi * x[j]
-
+    # Dual-form ridge solve: robust when embedding dim >> sample count.
+    # Avoids the previous O(d^2) pure-Python accumulation over ~4k dimensions.
     ridge = max(0.0, float(ridge_lambda))
-    for i in range(m):
-        if i == 0:
-            xtx[i][i] += 1e-8
-        else:
-            xtx[i][i] += ridge
+    x_mat = np.asarray(embeddings, dtype=np.float64)
+    y_vec = np.asarray([float(ex.target_score) for ex in cleaned], dtype=np.float64)
 
-    solution = _solve_linear_system(xtx, xty)
-    if solution is None:
+    x_mean = x_mat.mean(axis=0)
+    y_mean = float(y_vec.mean()) if y_vec.size else 0.5
+    x_centered = x_mat - x_mean
+    y_centered = y_vec - y_mean
+
+    n_samples = int(x_centered.shape[0])
+    if n_samples <= 0:
+        raise ValueError("No valid examples for embedding proxy fit")
+
+    gram = x_centered @ x_centered.T
+    diag_reg = ridge if ridge > 0.0 else 1e-8
+    gram[np.diag_indices_from(gram)] += float(diag_reg)
+
+    try:
+        alpha = np.linalg.solve(gram, y_centered)
+    except np.linalg.LinAlgError:
+        alpha = np.linalg.lstsq(gram, y_centered, rcond=None)[0]
+
+    weights_arr = x_centered.T @ alpha
+    bias = float(y_mean - np.dot(x_mean, weights_arr))
+    if (not np.isfinite(bias)) or (not np.all(np.isfinite(weights_arr))):
         mean_target = sum(ex.target_score for ex in cleaned) / float(len(cleaned))
-        logger.warning("Embedding ridge solve failed; using intercept-only fallback")
-        solution = [mean_target] + [0.0] * dim
+        logger.warning("Embedding ridge solve produced non-finite values; using intercept-only fallback")
+        bias = float(mean_target)
+        weights_arr = np.zeros((dim,), dtype=np.float64)
 
-    bias = float(solution[0])
-    weights = [float(w) for w in solution[1:]]
+    weights = [float(w) for w in weights_arr.tolist()]
     return EmbeddingRidgeProxyModel(
         weights=weights,
         bias=bias,

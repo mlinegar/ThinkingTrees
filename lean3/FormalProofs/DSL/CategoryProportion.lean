@@ -259,11 +259,12 @@ def proportionSE {n : ℕ}
     (μ_hat : ℝ)
     (π : ℝ)
     (n_sampled : ℕ)
+    (σ_pred_sq_est : ℝ)
     : ℝ :=
   -- Estimated variance components
   let σ_Y_sq := μ_hat * (1 - μ_hat)  -- Bernoulli variance
-  -- Need to estimate σ_pred_sq from sampled data
-  let σ_pred_sq := σ_Y_sq  -- Placeholder: actual estimation needed
+  -- Caller-provided estimate of prediction-error variance from sampled labels.
+  let σ_pred_sq := σ_pred_sq_est
   Real.sqrt (proportionVariance data σ_Y_sq σ_pred_sq π)
 
 /-- 95% confidence interval for proportion -/
@@ -462,6 +463,25 @@ def proportionMomentFn {Obs : Type*} : MomentFunction (Obs × ℝ) 1 :=
   fun D β => fun _ => proportionMoment D.2 (β ⟨0, by decide⟩)
 
 /-- DSL proportion estimator is consistent under M-estimation conditions. -/
+theorem DSL_proportion_unbiased_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Con : Type*}
+    (E : ((Obs × ℝ × ℝ × SamplingIndicator × ℝ) → Fin 1 → ℝ) → Fin 1 → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ 1 E)
+    (dbs : DesignBasedSampling Obs ℝ Con)
+    (β_star : Fin 1 → ℝ)  -- True proportion parameter
+    (reg : RegularityConditions (Obs × ℝ × ℝ × SamplingIndicator × ℝ) 1)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData (proportionMomentFn (Obs := Obs)))
+      E β_star)
+    (data_seq : ℕ → Ω → List (Obs × ℝ × ℝ × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin 1 → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData (proportionMomentFn (Obs := Obs)))
+      data_seq β_hat_seq)
+    : ConvergesInProbability μ β_hat_seq (fun _ => β_star) := by
+  exact DSL_consistent_from_assumptions μ E h_consistent dbs (proportionMomentFn (Obs := Obs))
+    β_star reg h_unbiased data_seq β_hat_seq h_est
+
+/-- DSL proportion estimator is consistent under M-estimation conditions. -/
 theorem DSL_proportion_unbiased
     {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
     {Obs Con : Type*}
@@ -476,8 +496,30 @@ theorem DSL_proportion_unbiased
     (h_est : IsMEstimatorSeq (DSLMomentFromData (proportionMomentFn (Obs := Obs)))
       data_seq β_hat_seq)
     : ConvergesInProbability μ β_hat_seq (fun _ => β_star) := by
-  exact DSL_consistent μ axioms dbs (proportionMomentFn (Obs := Obs)) β_star reg h_unbiased data_seq
-    β_hat_seq h_est
+  exact DSL_proportion_unbiased_from_assumptions μ axioms.E
+    (mEstimatorConsistency_of_axioms μ 1 axioms)
+    dbs β_star reg h_unbiased data_seq β_hat_seq h_est
+
+/-- DSL proportion CI has valid coverage.
+    P(μ ∈ CI) → 0.95 as N → ∞ -/
+theorem DSL_proportion_valid_coverage_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Con : Type*}
+    (E : ((Obs × ℝ × ℝ × SamplingIndicator × ℝ) → Fin 1 → ℝ) → Fin 1 → ℝ)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ 1 E)
+    (coverage_axioms : CoverageFromAsymptoticNormal μ 1)
+    (dbs : DesignBasedSampling Obs ℝ Con)
+    (β_star : Fin 1 → ℝ)
+    (V : Matrix (Fin 1) (Fin 1) ℝ)
+    (reg : RegularityConditions (Obs × ℝ × ℝ × SamplingIndicator × ℝ) 1)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData (proportionMomentFn (Obs := Obs)))
+      E β_star)
+    (CI_seq : ℕ → Ω → Fin 1 → ℝ × ℝ)
+    (α : ℝ) (h_α : 0 < α ∧ α < 1)
+    (centered_scaled_seq : ℕ → Ω → Fin 1 → ℝ)
+    : AsymptoticCoverage μ CI_seq β_star α := by
+  exact DSL_valid_coverage_from_assumptions μ E h_normal coverage_axioms dbs
+    (proportionMomentFn (Obs := Obs)) β_star V reg h_unbiased CI_seq α h_α centered_scaled_seq
 
 /-- DSL proportion CI has valid coverage.
     P(μ ∈ CI) → 0.95 as N → ∞ -/
@@ -496,8 +538,9 @@ theorem DSL_proportion_valid_coverage
     (α : ℝ) (h_α : 0 < α ∧ α < 1)
     (centered_scaled_seq : ℕ → Ω → Fin 1 → ℝ)
     : AsymptoticCoverage μ CI_seq β_star α := by
-  exact DSL_valid_coverage μ axioms coverage_axioms dbs (proportionMomentFn (Obs := Obs)) β_star V reg
-    h_unbiased CI_seq α h_α centered_scaled_seq
+  exact DSL_proportion_valid_coverage_from_assumptions μ axioms.E
+    (mEstimatorAsymptoticNormal_of_axioms μ 1 axioms)
+    coverage_axioms dbs β_star V reg h_unbiased CI_seq α h_α centered_scaled_seq
 
 end DSL
 

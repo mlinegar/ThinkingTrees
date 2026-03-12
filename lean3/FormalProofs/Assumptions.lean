@@ -1,5 +1,6 @@
 import FormalProofs.OPT.LocalLaws
 import FormalProofs.OPT.GlobalAssumptions
+import FormalProofs.OPT.ScoreTransport
 import FormalProofs.OPT.PreferenceLearning
 import FormalProofs.OPT.PreferenceBounds
 
@@ -132,6 +133,54 @@ abbrev A2_TwoRouteIdentity := @A2_global
 abbrev A3_MergeFunction := @A3_global
 
 /-!
+## Section 2b: Deterministic Global↔Local IFF Bridges
+
+These aliases expose the strongest deterministic equivalences currently
+formalized between global assumptions and local laws.
+-/
+
+/-- Deterministic L1 IFF: local C1 on a tree is exactly leafwise oracle sufficiency. -/
+abbrev det_l1_iff_leafwise := @L1_deterministic_iff_leafwise
+
+/-- Deterministic L3 IFF: local C2/L3 is exactly in-range oracle sufficiency. -/
+abbrev det_l3_iff_inrange := @L3_deterministic_iff_inRange
+
+/-- Global A1 IFF deterministic L1 over all trees. -/
+abbrev a1_iff_l1_all_trees := @A1_iff_L1_for_all_trees
+
+/-- Deterministic C3/L2 IFF on a two-leaf tree equals pointwise A2 at `(u,v)`. -/
+abbrev det_l2_two_leaf_iff_a2_pointwise := @L2_deterministic_two_leaf_iff_A2_pointwise
+
+/-- Global A2 IFF deterministic C3/L2 on all two-leaf trees. -/
+abbrev a2_iff_l2_two_leaf_trees := @A2_iff_L2_on_two_leaf_trees
+
+/-- Under A1+A3, global A2 IFF deterministic C3/L2 on all trees. -/
+abbrev a2_iff_l2_all_trees_given_a1a3 := @A2_iff_L2_on_all_trees_of_A1_A3
+
+/-- Under A1+A3, deterministic C3/L2 on all trees IFF checking only two-leaf trees. -/
+abbrev l2_all_trees_iff_two_leaf_trees_given_a1a3 := @L2_on_all_trees_iff_two_leaf_trees_of_A1_A3
+
+/-- Under surjectivity, deterministic C1/L1(all trees) IFF deterministic C2/L3. -/
+abbrev l1_all_trees_iff_l3_surjective := @L1_on_all_trees_iff_L3_of_surjective
+
+/-- Under A3+surjectivity, `(A1 ∧ A2)` IFF `(C2/L3 ∧ C3/L2 on all trees)`. -/
+abbrev a1a2_iff_l3_l2_all_trees_given_a3_surjective :=
+  @A1_A2_iff_L3_and_L2_on_all_trees_of_A3_surjective
+
+/-- Under A3+surjectivity, `(A1 ∧ A2)` IFF `(C2/L3 ∧ C3/L2 on two-leaf trees)`. -/
+abbrev a1a2_iff_l3_l2_two_leaf_given_a3_surjective :=
+  @A1_A2_iff_L3_and_L2_on_two_leaf_trees_of_A3_surjective
+
+/-- Weaker deterministic A1: global sufficiency only on the summary range. -/
+abbrev A1_OnSummaryRange := @A1_on_summary_range
+
+/-- Non-surjective converse: deterministic C2/L3 IFF A1 on summary range. -/
+abbrev a1_on_summary_range_iff_l3 := @L3_iff_A1_on_summary_range
+
+/-- Under surjective summaries, global A1 IFF deterministic C2/L3. -/
+abbrev a1_iff_l3_surjective := @A1_iff_L3_of_surjective
+
+/-!
 ## Section 3: Oracle-Measurability Assumptions
 
 For preference learning equivalence, we need loss functions and generators
@@ -156,6 +205,25 @@ abbrev OracleIndexedRanking := @OracleIndexedRanker
 
 /-- **Oracle-Measurable Reward**: Reward depends on x only through f*(x). -/
 abbrev OracleMeasurableRewardFn := @OracleMeasurableReward
+
+/-!
+## Section 3b: Sufficient-Statistic IFF Bridges (Doob-Dynkin)
+
+These aliases expose the strongest "if and only if" connections currently formalized
+for oracle sufficiency/transport in the OPT module.
+-/
+
+/-- Pointwise oracle factorization through summaries: `f*(X) = h(Z)` for measurable `h`. -/
+abbrev OracleFactorizationPointwise := @OracleFactorization'
+
+/-- Oracle sigma containment: `σ(f*(X)) ⊆ σ(Z)`. -/
+abbrev OracleSigmaContainment := @OracleSigmaSubset'
+
+/-- Doob-Dynkin oracle IFF (pointwise): factorization iff sigma containment. -/
+abbrev doob_dynkin_oracle_iff := @oracle_factorization_iff_sigma_subset
+
+/-- Doob-Dynkin oracle IFF (a.e.): factorization a.e. iff sigma-Z a.e.-measurability. -/
+abbrev doob_dynkin_oracle_ae_iff := @oracle_factorization_ae_iff_aestronglyMeasurable
 
 /-!
 ## Section 4: Lipschitz Assumptions (for Quantitative Bounds)
@@ -201,29 +269,39 @@ where V_i is a continuous deterministic utility and ε_i is i.i.d. noise.
 - Normal noise → Probit model
 - Any continuous noise → Expected Lipschitz holds
 
-### Axioms
+### Assumptions
 
-The following axioms state that expected GRPO losses are Lipschitz.
-They are **modeling assumptions**, not technical lemmas.
+The following assumptions state that expected GRPO losses are Lipschitz.
+They are **modeling assumptions**, not technical lemmas, and live in
+`FormalProbability/DSL/RUM.lean` (re-exported here).
 
 Reference: McFadden, D. (1974). "Conditional logit analysis of qualitative choice behavior"
 in Frontiers in Econometrics. Zarembka, P. (ed.), Academic Press.
 -/
 
-/-- **Random Utility Model Axiom**: Expected group loss is Lipschitz.
+/-- **Random Utility Model Assumption**: Expected group loss is Lipschitz.
 
 Under continuous underlying utilities with i.i.d. noise (e.g., Gumbel → Plackett-Luce),
 the expected loss over groups is Lipschitz in oracle distance.
 
-This is the **single foundational axiom** for preference learning bounds.
+This is the **single foundational assumption** for preference learning bounds.
 It replaces the unprovable pointwise Lipschitz bound. -/
-abbrev ExpectedGroupLossLipschitzAxiom := @ExpectedGroupLossLipschitz
+abbrev ExpectedGroupLossLipschitzAssumption
+    {Strings A Y : Type*} [PseudoMetricSpace Y] {k : ℕ} :=
+  @ExpectedGroupLossLipschitz Strings A Y _ k
+abbrev ExpectedGroupLossLipschitzAxiom := @ExpectedGroupLossLipschitzAssumption
 
 /-- Instantiation for GRPO-PL (Plackett-Luce ranking loss). -/
-abbrev ExpectedGRPOLossLipschitzAxiom := @ExpectedGRPOLossLipschitz
+abbrev ExpectedGRPOLossLipschitzAssumption
+    {Strings A Y : Type*} [PseudoMetricSpace Y] {k : ℕ} :=
+  @ExpectedGRPOLossLipschitz Strings A Y _ k
+abbrev ExpectedGRPOLossLipschitzAxiom := @ExpectedGRPOLossLipschitzAssumption
 
 /-- Instantiation for GRPO-RL (PPO-style clipped surrogate + KL). -/
-abbrev ExpectedGRPORLLossLipschitzAxiom := @ExpectedGRPORLLossLipschitz
+abbrev ExpectedGRPORLLossLipschitzAssumption
+    {Strings A Y : Type*} [PseudoMetricSpace Y] :=
+  @ExpectedGRPORLLossLipschitz Strings A Y _
+abbrev ExpectedGRPORLLossLipschitzAxiom := @ExpectedGRPORLLossLipschitzAssumption
 
 /-!
 ## Section 5: Main Implication Theorems
@@ -240,6 +318,14 @@ These theorems show: Assumptions ⟹ Conclusions
 This is the foundational result: local laws imply zero expected distortion
 after any number of summarization rounds. -/
 abbrev local_laws_imply_zero_distortion := @multi_round_proper
+
+/-- **C2/L3 Round-Inertness Characterization**:
+on-range idempotence is equivalent to one-step normalization inertness. -/
+abbrev l3_iff_round_inert := @L3_iff_RoundInert
+
+/-- **ZR Step Inertness from L3**:
+under C2/L3, the `R -> R+1` normalization term vanishes on `ZR`. -/
+abbrev l3_implies_zr_step_inert := @L3_implies_ZR_step_inert
 
 /-- **Main Theorem 2: DPO Training Equivalence**
 

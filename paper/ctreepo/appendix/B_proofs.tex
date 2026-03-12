@@ -1,0 +1,278 @@
+\section{Full Proofs}\label{app:proofs}
+
+\subsection{Proof of Proposition~\ref{prop:m_lt_k}}\label{app:proof-m-lt-k}
+
+\begin{proof}
+Fix integers $k,m$ with $1 \le m < k$.
+Consider documents represented by binary event indicators
+$r = (r_1, \dots, r_n) \in \{0,1\}^n$ and count functional
+$C(r) = \sum_{j=1}^n r_j$.
+Define target $\tau_k(r) := \One\{C(r) \ge k\}$.
+Let $S_m(r)$ denote any top-$m$ sketch that retains only the $m$ largest event indicators.
+
+Construct two documents:
+\[
+r^{-} = (\underbrace{1,\dots,1}_{m\ \text{times}}, 0, \dots, 0), \qquad
+r^{+} = (\underbrace{1,\dots,1}_{k\ \text{times}}, 0, \dots, 0),
+\]
+with common length $n \ge k$. Then $C(r^-) = m < k$ and $C(r^+) = k \ge k$, so
+$\tau_k(r^-) = 0$ and $\tau_k(r^+) = 1$.
+However, both sequences have at least $m$ unit entries, and all top-$m$ retained entries are ones.
+Hence $S_m(r^-) = S_m(r^+)$.
+Therefore two inputs with identical sketch state yield different target values.
+No estimator that depends only on $S_m(\cdot)$ can recover $\tau_k$ without ambiguity.
+\end{proof}
+
+\subsection{Proof of Theorem~\ref{thm:one-pass} (Preservation)}\label{app:proof-preservation}
+
+\begin{proof}
+Fix a realized full binary tree $T$ over document $x$.
+For each node $u$, define latent raw span $S(u)$ recursively by setting $S(u) = b$ when $u$ is a leaf containing block $b$, and setting $S(u) = S(u_L) \concat S(u_R)$ when $u$ is an internal node with children $(u_L, u_R)$.
+Define stored summary $s_u$ recursively by setting $s_u = g(S(u))$ at leaves and $s_u = g(s_{u_L} \concat s_{u_R})$ at internal nodes.
+Let $r$ be the root and set $Z^{(1)}(x) := s_r$.
+Assume C1 and C3 hold almost surely on all realized calls.
+
+We show $s_u \sim S(u)$ for every node $u$ by structural induction on node height.
+
+\textbf{Base case.} If $u$ is a leaf, C1 gives $s_u = g(S(u)) \sim S(u)$.
+
+\textbf{Inductive step.} Let $u$ be an internal node with children $u_L, u_R$ and assume $s_{u_L} \sim S(u_L)$ and $s_{u_R} \sim S(u_R)$.
+By context compatibility (Assumption~\ref{ass:context}), applied first to right-concatenation with $s_{u_R}$ and then to left-concatenation with $S(u_L)$:
+\[
+s_{u_L} \concat s_{u_R} \sim S(u_L) \concat s_{u_R} \sim S(u_L) \concat S(u_R) = S(u).
+\]
+C3 is stated universally over $\Strings$ and therefore applies to $s_{u_L}$ and $s_{u_R}$ even though they are themselves summaries (elements of $\operatorname{range}(g)$). The first link of C3 gives
+\[
+g(s_{u_L} \concat s_{u_R}) \sim s_{u_L} \concat s_{u_R}.
+\]
+Since $s_u = g(s_{u_L} \concat s_{u_R})$, transitivity gives $s_u \sim S(u)$.
+
+At root $r$, we have $s_r \sim S(r) = x$, hence
+\[
+\metric\!\big(\fstar(Z^{(1)}(x)), \fstar(x)\big) = 0
+\]
+almost surely, so $\E[\metric(\fstar(Z^{(1)}(x)), \fstar(x))] = 0$.
+
+\textbf{Multi-round extension (add C2).}
+Define rounds by $Z^{(R+1)}(x) := g(Z^{(R)}(x))$ for $R \ge 1$.
+Because $Z^{(1)}(x) = s_r \in \operatorname{range}(g)$ and $g$ maps into its range, each $Z^{(R)}(x)$ is in $\operatorname{range}(g)$.
+By C2: $Z^{(R+1)}(x) \sim Z^{(R)}(x)$ for all $R \ge 1$.
+We prove $Z^{(R)}(x) \sim x$ by induction on $R$.
+Base $R = 1$ holds from the nodewise equivalence argument above.
+If $Z^{(R)}(x) \sim x$ and $Z^{(R+1)}(x) \sim Z^{(R)}(x)$, transitivity yields $Z^{(R+1)}(x) \sim x$.
+Thus $\E[\metric(\fstar(Z^{(R)}(x)), \fstar(x))] = 0$ for all $R \ge 1$.
+\end{proof}
+
+\subsection{Proof of Proposition~\ref{prop:mergeable-reduction} (Reduction to Classical Mergeable Sketches)}\label{app:proof-mergeable}
+
+\begin{proof}
+Assume Assumption~\ref{ass:context}, and deterministic $g$ with A1--A3 as stated in Proposition~\ref{prop:mergeable-reduction}. Define
+\[
+\oplus_g(s,t):=g(s\concat t).
+\]
+We must show merge-route equivalence and associativity modulo oracle.
+
+\textbf{(i) Merge-route equivalence.}
+For any $u,v$,
+\[
+g(u\concat v)\sim \oplus_g(g(u),g(v))
+  \iff g(u\concat v)\sim g(g(u)\concat g(v)).
+\]
+By A1 on $u\concat v$, $g(u\concat v)\sim u\concat v$.
+By A2, $u\concat v\sim g(g(u)\concat g(v))$.
+Transitivity yields the claim.
+
+\textbf{(ii) Associativity modulo oracle.}
+For any $a,b,c$, we need
+\[
+\oplus_g(\oplus_g(a,b),c)\sim \oplus_g(a,\oplus_g(b,c)),
+\]
+i.e.
+\[
+g(g(a\concat b)\concat c)\sim g(a\concat g(b\concat c)).
+\]
+By A1, outer $g$ can be removed on both sides modulo $\sim$, so it suffices to compare
+$g(a\concat b)\concat c$ and $a\concat g(b\concat c)$.
+Again by A1, $g(a\concat b)\sim a\concat b$ and $g(b\concat c)\sim b\concat c$.
+Using context compatibility (Assumption~\ref{ass:context}), these imply
+\[
+g(a\concat b)\concat c \sim (a\concat b)\concat c,\qquad
+a\concat g(b\concat c)\sim a\concat(b\concat c).
+\]
+Since concatenation is associative, $(a\concat b)\concat c = a\concat(b\concat c)$, hence both sides are equivalent to the same middle string, so they are equivalent to each other.
+Therefore $\oplus_g$ is associative modulo oracle.
+
+Thus $g$ satisfies the classical mergeable-summary conditions under induced merge $\oplus_g$.
+\end{proof}
+
+\subsection{Supporting Lemmas for the Gap Bound}\label{app:supporting-lemmas}
+
+Before proving the main equivalence and gap theorems, we establish the Lipschitz chain for DPO and the coupling structure that enables the expectation bound.
+
+\begin{lemma}[Sigmoid is 1-Lipschitz]\label{lem:sigmoid-lip}
+$|\sigma(t_1) - \sigma(t_2)| \le |t_1 - t_2|$ for all $t_1, t_2 \in \R$, where $\sigma(t) = (1 + e^{-t})^{-1}$. Standard calculus: $|\sigma'(t)| = \sigma(t)(1-\sigma(t)) \le 1/4$.
+\end{lemma}
+
+\begin{lemma}[$-\log\sigma$ is 1-Lipschitz]\label{lem:neglogsig-lip}
+$|{-}\log\sigma(t_1) - ({-}\log\sigma(t_2))| \le |t_1 - t_2|$ for all $t_1, t_2 \in \R$. Standard calculus: $|\frac{d}{dt}(-\log\sigma(t))| = |1 - \sigma(t)| < 1$.
+\end{lemma}
+
+\begin{lemma}[DPO pointwise loss is Lipschitz]\label{lem:dpo-lip}
+Define the DPO pointwise loss for a preferred--dispreferred pair $(a_w, a_l)$:
+\[
+\ell_{\mathrm{DPO}}(x, a_w, a_l) := -\log\sigma\!\left(\beta\left[\log\frac{\pi_\theta(a_w|x)}{\pi_{\mathrm{ref}}(a_w|x)} - \log\frac{\pi_\theta(a_l|x)}{\pi_{\mathrm{ref}}(a_l|x)}\right]\right).
+\]
+If the policy log-ratio $x \mapsto \log\frac{\pi_\theta(a|x)}{\pi_{\mathrm{ref}}(a|x)}$ is $L_{\mathrm{pol}}$-Lipschitz in $\metric(\fstar(x), \fstar(x'))$ for every action $a$, then
+\[
+|\ell_{\mathrm{DPO}}(x, a_w, a_l) - \ell_{\mathrm{DPO}}(x', a_w, a_l)| \le 2|\beta|\, L_{\mathrm{pol}} \cdot \metric(\fstar(x), \fstar(x')).
+\]
+\end{lemma}
+
+\begin{proof}
+Define the logit difference $\Delta(x) := \log\frac{\pi_\theta(a_w|x)}{\pi_{\mathrm{ref}}(a_w|x)} - \log\frac{\pi_\theta(a_l|x)}{\pi_{\mathrm{ref}}(a_l|x)}$. By the triangle inequality on the two log-ratio terms, each $L_{\mathrm{pol}}$-Lipschitz:
+\[
+|\Delta(x) - \Delta(x')| \le 2 L_{\mathrm{pol}} \cdot \metric(\fstar(x), \fstar(x')).
+\]
+Composing: $\ell_{\mathrm{DPO}}(x, a_w, a_l) = (-\log\sigma)(\beta \cdot \Delta(x))$. By Lemma~\ref{lem:neglogsig-lip}, $-\log\sigma$ is 1-Lipschitz, and scaling by $|\beta|$ gives the claimed constant $2|\beta| L_{\mathrm{pol}}$.
+\end{proof}
+
+\begin{lemma}[DPO loss is oracle-measurable]\label{lem:dpo-oracle-meas}
+If $\pi_\theta(a|\cdot)$ and $\pi_{\mathrm{ref}}(a|\cdot)$ are oracle-measurable---meaning $\metric(\fstar(x), \fstar(x')) = 0$ implies $\pi_\theta(a|x) = \pi_\theta(a|x')$ and $\pi_{\mathrm{ref}}(a|x) = \pi_{\mathrm{ref}}(a|x')$ for all $a$---and the pair generator is oracle-indexed---meaning $\metric(\fstar(x), \fstar(x')) = 0$ implies $\mathrm{gen}(x) = \mathrm{gen}(x')$---then the expected DPO loss $\E_{(a_w,a_l) \sim \mathrm{gen}(x)}[\ell_{\mathrm{DPO}}(x, a_w, a_l)]$ depends on $x$ only through $\fstar(x)$.
+\end{lemma}
+
+\begin{proof}
+If $\metric(\fstar(x), \fstar(x')) = 0$, then by oracle-measurability of the policies, $\pi_\theta(a|x) = \pi_\theta(a|x')$ and $\pi_{\mathrm{ref}}(a|x) = \pi_{\mathrm{ref}}(a|x')$ for all $a$, so $\ell_{\mathrm{DPO}}(x, a_w, a_l) = \ell_{\mathrm{DPO}}(x', a_w, a_l)$ for all pairs. Since $\mathrm{gen}(x) = \mathrm{gen}(x')$, the expectation over pairs is identical.
+\end{proof}
+
+\begin{lemma}[Zero distortion implies pointwise equality on support]\label{lem:zero-dist-support}
+Let $\mu_Z$ be the distribution of $Z^{(R)}(x)$ for fixed $x$, and suppose $\E[\metric(\fstar(Z^{(R)}(x)), \fstar(x))] = 0$. Since $\metric \ge 0$, we have $\metric(\fstar(z), \fstar(x)) = 0$ for all $z$ in the support of $\mu_Z$.
+\end{lemma}
+
+\begin{proof}
+Suppose for contradiction that $\metric(\fstar(z_0), \fstar(x)) > 0$ for some $z_0$ with $\mu_Z(z_0) > 0$. Then
+\[
+\E[\metric(\fstar(Z), \fstar(x))] = \sum_z \mu_Z(z)\,\metric(\fstar(z), \fstar(x)) \ge \mu_Z(z_0) \cdot \metric(\fstar(z_0), \fstar(x)) > 0,
+\]
+contradicting $\E[\metric(\fstar(Z), \fstar(x))] = 0$.
+\end{proof}
+
+\subsection{Proof of Theorem~\ref{thm:pref-equiv} and Theorem~\ref{thm:unified-gap} (Equivalence and Gap Bounds)}\label{app:proof-equivalence}
+
+We prove the results in increasing generality: first the method-agnostic exact equivalence, then the unified gap bound, then the DPO Lipschitz instantiation.
+
+\paragraph{Step 1: Method-agnostic exact equivalence.}
+
+\begin{proof}[Proof of Theorem~\ref{thm:pref-equiv}]
+Fix a preference learning method with population integrand $\mathcal{J}_\theta(x) = \E_{a \sim \mathrm{gen}(x)}[\ell(x, a)]$, where $\ell$ is the method-specific loss and $\mathrm{gen}$ is the pair or group generator.
+
+Assume (i) oracle-measurability of $\ell$: $\metric(\fstar(x), \fstar(x')) = 0$ implies $\ell(x,a) = \ell(x',a)$ for all $a$; and (ii) oracle-indexing of the generator: $\metric(\fstar(x), \fstar(x')) = 0$ implies $\mathrm{gen}(x) = \mathrm{gen}(x')$. Together these give oracle-measurability of the integrand: there exists $\phi_\theta: \Y \to \R$ such that $\mathcal{J}_\theta(x) = \phi_\theta(\fstar(x))$.
+
+Assume also Assumption~\ref{ass:context} and that C1--C3 hold on realized calls. By Theorem~\ref{thm:multi-round}, $\E[\metric(\fstar(Z^{(R)}), \fstar(x))] = 0$. By Lemma~\ref{lem:zero-dist-support}, $\metric(\fstar(z), \fstar(x)) = 0$ for all $z$ in the support of $Z^{(R)}$. Therefore
+\[
+\mathcal{J}_\theta(z) = \phi_\theta(\fstar(z)) = \phi_\theta(\fstar(x)) = \mathcal{J}_\theta(x)
+\]
+for all $z$ in the support. Taking expectations:
+\[
+\E[\mathcal{J}_\theta(Z^{(R)})] = \E[\mathcal{J}_\theta(X)].
+\]
+Since this holds for all $\theta$, the argmin sets are identical.
+
+For DPO, oracle-measurability of the loss follows from Lemma~\ref{lem:dpo-oracle-meas}. For GRPO-PL, the argument is identical with the Plackett-Luce ranking loss $\ell_{\mathrm{PL}}(x, \sigma) = -\sum_{i=1}^k \log \frac{\exp(s_{\sigma(i)}(x))}{\sum_{j \ge i} \exp(s_{\sigma(j)}(x))}$ in place of the Bradley-Terry loss, and with the ranker assumed oracle-indexed. For GRPO-RL, the objective includes clipped surrogate ratios and a KL penalty, but both depend on $x$ only through oracle-measurable policies and rewards, so the same factorization applies.
+\end{proof}
+
+\paragraph{Step 2: Unified gap bound.}
+
+\begin{proof}[Proof of Theorem~\ref{thm:unified-gap}]
+Let $\mu_X$ and $\mu_Z$ denote the distributions of $X$ and $Z^{(R)}$ respectively. Define the expected integrand $E_\theta(x) := \E_{a \sim \mathrm{gen}(x)}[\ell(x, a)]$.
+
+Assume an $L$-Lipschitz condition: $|E_\theta(x) - E_\theta(z)| \le L \cdot \metric(\fstar(x), \fstar(z))$ for all $x, z$.
+
+Because $Z = Z^{(R)}(X)$ is a function of $X$, we can write the gap using the conditional distribution $\mu_{Z|X}$:
+\begin{align*}
+\E_X[E_\theta(X)] - \E_Z[E_\theta(Z)]
+&= \sum_x \mu_X(x) \left[ E_\theta(x) - \sum_z \mu_{Z|X=x}(z)\, E_\theta(z) \right].
+\end{align*}
+Taking absolute values and applying the Lipschitz bound pointwise:
+\begin{align*}
+\left|\E_X[E_\theta(X)] - \E_Z[E_\theta(Z)]\right|
+&\le \sum_x \mu_X(x) \sum_z \mu_{Z|X=x}(z)\, |E_\theta(x) - E_\theta(z)| \\
+&\le L \sum_x \mu_X(x) \sum_z \mu_{Z|X=x}(z)\, \metric(\fstar(x), \fstar(z)) \\
+&= L \cdot \E\!\left[\metric(\fstar(X), \fstar(Z^{(R)}))\right] =: L \cdot \Delta_R.
+\end{align*}
+The interchange of sum and absolute value uses absolute convergence, which holds because $E_\theta$ is bounded.
+\end{proof}
+
+\paragraph{Step 3: DPO Lipschitz constant.}
+
+Instantiating the unified gap bound for DPO requires verifying the Lipschitz condition on $E_\theta$. Lemma~\ref{lem:dpo-lip} establishes that the pointwise DPO loss is $2|\beta|L_{\mathrm{pol}}$-Lipschitz. When the generator is oracle-indexed (hence constant on oracle equivalence classes), the expected integrand inherits the same Lipschitz constant: for any $x, x'$ with $\mathrm{gen}(x) = \mathrm{gen}(x')$,
+\[
+|E_\theta(x) - E_\theta(x')| = \left|\sum_{(a_w, a_l)} \mathrm{gen}(x)(a_w, a_l)\, [\ell_{\mathrm{DPO}}(x, a_w, a_l) - \ell_{\mathrm{DPO}}(x', a_w, a_l)]\right| \le 2|\beta|\,L_{\mathrm{pol}} \cdot \metric(\fstar(x), \fstar(x')),
+\]
+where the last step uses Lemma~\ref{lem:dpo-lip} inside the sum and the fact that the generator weights sum to~1.
+
+For GRPO-PL and GRPO-RL, the Lipschitz condition on the expected group loss uses the \texttt{ExpectedGroupLossLipschitz} axiom, justified via the Random Utility Model (Section~\ref{sec:verification}). In each case, the axiom asserts that the expected loss over group samples is Lipschitz in oracle distance, with the constant determined by the method-specific structure (Plackett-Luce ranking for GRPO-PL; clipped surrogate plus KL penalty for GRPO-RL).
+
+\subsection{Proof of Theorem~\ref{thm:e2e} (Audited Preference-Gap Bound)}\label{app:proof-e2e}
+
+The audited preference-gap bound composes two independently established results: design-based unbiasedness of the distortion estimator, and deterministic Lipschitz transport from distortion to the preference gap.
+
+\begin{proof}
+\textbf{Part (a): Distortion objects and HT unbiasedness.}
+Fix a realized tree-population $\mathcal{U}$ with $N := |\mathcal{U}|$. For each unit $i \in \mathcal{U}$, define
+\[
+d_i^{\star}:=\metric\!\big(\fstar(s_i),\fstar(S(i))\big),\qquad
+d_i^{J}:=\metric\!\big(f(s_i),f(S(i))\big),
+\]
+and corresponding finite-population means
+\[
+\mu_{\mathrm{dist}}^{\star}:=\frac{1}{N}\sum_{i\in\mathcal{U}} d_i^{\star},\qquad
+\mu_{\mathrm{dist}}^{J}:=\frac{1}{N}\sum_{i\in\mathcal{U}} d_i^{J}.
+\]
+Let $Z_i \in \{0,1\}$ be the inclusion indicator with propensity $\pi_i := \Prob(Z_i=1\mid\mathcal{F})$ and $0<\pi_i\le 1$. The unclipped HT estimator for judge distortion is
+\[
+\hat{\mu}_{\mathrm{HT}}^{J}:=\frac{1}{N}\sum_{i\in\mathcal{U}} \frac{Z_i}{\pi_i}d_i^{J}.
+\]
+Conditional unbiasedness is immediate:
+\[
+\E\!\left[\hat{\mu}_{\mathrm{HT}}^{J}\mid\mathcal{F}\right]
+=\frac{1}{N}\sum_{i\in\mathcal{U}}\frac{\E[Z_i\mid\mathcal{F}]}{\pi_i}d_i^{J}
+=\frac{1}{N}\sum_{i\in\mathcal{U}} d_i^{J}
+=\mu_{\mathrm{dist}}^{J}.
+\]
+
+\textbf{Part (b): Method transport.}
+By Theorem~\ref{thm:unified-gap}, for the method-specific constant $C_{\mathrm{meth}}$,
+\[
+|G_{\mathrm{meth}}| \le C_{\mathrm{meth}}\,\mu_{\mathrm{dist}}^{\star}.
+\]
+
+\textbf{Part (c): Envelope decomposition.}
+Let $\hat{\mu}_{\mathrm{dist}}$ denote the deployed distortion estimator (possibly clipped). Suppose on an event $\mathcal{E}$ we have the three envelope inequalities:
+\[
+C_{\mathrm{meth}}\!\left|\mu_{\mathrm{dist}}^{\star}-\mu_{\mathrm{dist}}^{J}\right|\le B_{\mathrm{cal}},\quad
+C_{\mathrm{meth}}\!\left|\mu_{\mathrm{dist}}^{J}-\hat{\mu}_{\mathrm{HT}}^{J}\right|\le B_{\mathrm{est}},\quad
+C_{\mathrm{meth}}\!\left|\hat{\mu}_{\mathrm{HT}}^{J}-\hat{\mu}_{\mathrm{dist}}\right|\le B_{\mathrm{clip}}.
+\]
+Then on $\mathcal{E}$,
+\begin{align*}
+|G_{\mathrm{meth}}|
+&\le C_{\mathrm{meth}}\,\mu_{\mathrm{dist}}^{\star} \\
+&\le C_{\mathrm{meth}}\,\hat{\mu}_{\mathrm{dist}}
+ + C_{\mathrm{meth}}\!\left|\mu_{\mathrm{dist}}^{\star}-\mu_{\mathrm{dist}}^{J}\right|
+ + C_{\mathrm{meth}}\!\left|\mu_{\mathrm{dist}}^{J}-\hat{\mu}_{\mathrm{HT}}^{J}\right|
+ + C_{\mathrm{meth}}\!\left|\hat{\mu}_{\mathrm{HT}}^{J}-\hat{\mu}_{\mathrm{dist}}\right| \\
+&\le C_{\mathrm{meth}}\,\hat{\mu}_{\mathrm{dist}} + B_{\mathrm{cal}} + B_{\mathrm{est}} + B_{\mathrm{clip}}.
+\end{align*}
+The middle step is the telescoping decomposition
+\[
+\mu_{\mathrm{dist}}^{\star}
+=\hat{\mu}_{\mathrm{dist}}
++(\mu_{\mathrm{dist}}^{\star}-\mu_{\mathrm{dist}}^{J})
++(\mu_{\mathrm{dist}}^{J}-\hat{\mu}_{\mathrm{HT}}^{J})
++(\hat{\mu}_{\mathrm{HT}}^{J}-\hat{\mu}_{\mathrm{dist}})
+\]
+followed by triangle inequality and $\hat{\mu}_{\mathrm{dist}}\ge 0$ (nonnegative distortions with nonnegative weights). This is exactly the stated audited bound.
+
+\textbf{Part (d): High-probability form.}
+If $\Prob(\mathcal{E}) \ge 1-\delta$, the same inequality holds with probability at least $1-\delta$. In practice, $\mathcal{E}$ is formed by intersecting concentration/calibration events; e.g., when separate events $\mathcal{E}_{\mathrm{cal}},\mathcal{E}_{\mathrm{est}},\mathcal{E}_{\mathrm{clip}}$ are used, one may set $\mathcal{E}:=\mathcal{E}_{\mathrm{cal}}\cap\mathcal{E}_{\mathrm{est}}\cap\mathcal{E}_{\mathrm{clip}}$ and apply a union bound to obtain an explicit confidence level.
+\end{proof}

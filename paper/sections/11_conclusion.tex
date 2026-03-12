@@ -1,0 +1,64 @@
+\section{Conclusion and Outlook}\label{sec:conclusion}
+
+We have presented Oracle-Preserving Summarization (OPS), a framework that addresses the central dilemma of long-document processing: how to scale semantic extraction to massive corpora without losing the ability to verify the results. By treating hierarchical summarization not as a black-box compression but as an algebraic reduction, we allow practitioners to audit the fidelity of the entire pipeline by inspecting only its atomic parts.
+
+\subsection{Summary of Contributions}
+
+\paragraph{Contribution 1: Theory.}
+We introduced three consistency conditions---Sufficiency, Idempotence, and Merge Consistency---that can be checked locally yet guarantee global oracle preservation. The key theorems (Inductive Preservation, Schedule Invariance, Multi-round Preservation) show that local compliance implies global fidelity. We extended these results to preference learning, proving that DPO, GRPO-PL, and GRPO-RL training on oracle-preserving summaries achieves the same optimum as training on full documents. The unified gap bound quantifies degradation when conditions hold only approximately, and the new expected-tree optimizer-transfer theorem shows that in adaptive settings the remaining optimization error is exactly ``oracle uncertainty plus tree-transport error.''
+
+\paragraph{Contribution 2: Formalization.}
+All theoretical results are machine-verified in more than 50,000 lines of Lean~4 code across 123 files. The formalization uses a single justified axiom (Expected Lipschitz from Random Utility Models) and includes constructive counterexamples proving necessity of assumptions. It now also covers the adaptive-tree optimizer-transfer results used to justify tree-based preference optimization under oracle uncertainty. This raises the standard for theoretical claims in the alignment literature and provides a foundation for future extensions.
+
+\paragraph{Contribution 3: Software.}
+We released \textsc{ThinkingTrees}, an open-source Python package implementing the full OPS pipeline. The package provides hierarchical tree construction, probabilistic auditing with Hoeffding bounds, DSPy-first optimization, and preference learning integration. The plugin architecture supports arbitrary tasks and datasets.
+
+\paragraph{Contribution 4: Applications.}
+We demonstrated OPS on two political science applications: RILE scoring of party manifestos and policy position extraction from the Congressional Record. These applications show that OPS scales text-as-data methods to long documents while providing auditable quality guarantees.
+
+\subsection{Limitations}
+
+The approach has clear limits:
+
+\begin{itemize}[nosep]
+    \item \textbf{Factorization assumption}: The strongest equivalences hold only when supervision strictly factors through the task oracle. If annotators reward presentational features lost during summarization, alignment may drift.
+
+    \item \textbf{Decomposability}: The framework applies to tasks where the oracle is well-defined on bounded spans. Open-ended creative summarization, where quality depends on global coherence, falls outside our scope.
+
+    \item \textbf{Context-compatibility}: Merge consistency can fail if summaries drop context that later merges rely on. Such failures appear as violations in the audit and must be addressed by prompt tuning or stronger models.
+
+    \item \textbf{Idempotence is substantive}: Without on-range stability, additional clean-up rounds can silently flip labels, a failure mode our audit detects but cannot prevent without condition satisfaction.
+\end{itemize}
+
+\subsection{Future Directions}
+
+Several directions merit exploration:
+
+\paragraph{Multimodal extension.}
+Extending OPS to documents with images, tables, and figures requires defining oracles and summarizers on multimodal inputs. The theoretical framework generalizes naturally; the challenge is designing rubrics and audits for visual content.
+
+\paragraph{Real-time auditing.}
+For streaming applications, online audits that update violation estimates incrementally would enable continuous quality monitoring without batch processing.
+
+\paragraph{Federated summarization.}
+When documents are distributed across institutions, hierarchical summarization can proceed locally with only summaries shared. This raises questions about privacy-preserving audits and distributed optimization.
+
+\paragraph{Active learning.}
+The consistency bootstrap already implements a form of active learning. Deeper integration with uncertainty quantification could prioritize which edges to audit or which examples to request human feedback on.
+
+\paragraph{Causal inference.}
+When text is a treatment or outcome variable, OPS summaries could preserve causal identification conditions. Connecting to the Design-based Supervised Learning literature \citep{EgamiEtAl2024} would enable valid causal inference from compressed text.
+
+\subsection{Methodological Implications}
+
+For applied researchers, the blueprint is simple but demanding:
+\begin{enumerate}[nosep]
+    \item Build hierarchies that pass the edge-wise audit
+    \item Optimize models to satisfy the three conditions
+    \item Report estimated violation rates alongside codebooks and regression tables
+\end{enumerate}
+
+The result is a pipeline whose guarantees align with the research design, whose failures are interpretable, and whose outputs can be trusted to mean what the researcher claims they mean. We hope OPS contributes to more rigorous, scalable, and reproducible text-as-data research.
+
+\bibliographystyle{plainnat}
+\bibliography{refs}

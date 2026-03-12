@@ -121,7 +121,7 @@ structure NormalErrors {n : ℕ} {Ω : Type*} [MeasurableSpace Ω]
   /-- Homoskedasticity -/
   toHomoskedasticity : Homoskedasticity μ ε σ_sq
   /-- Errors are jointly normally distributed -/
-  normal_distribution : True  -- Placeholder for multivariate normal
+  normal_distribution : ∀ i, Integrable (fun ω => (ε ω i)^2) μ
 
 /-- Bundle of assumptions for unbiasedness (MLR.1-4).
 

@@ -40,6 +40,8 @@ A score of 0 indicates a centrist position with balanced left/right emphasis.
 
 Output requirements:
 - Return exactly one numeric score in the range [-100, +100].
+- Estimate as precisely as possible on the continuous scale (avoid coarse buckets/threshold bins).
+- If document metadata (year/country/party) is provided, use it only as contextual background.
 - Formatting examples (do not copy; compute the actual score): -12, 0, 37.5
 - Do not return reasoning, labels (e.g., "Score:"), markdown/backticks/code fences, or extra text.
 """

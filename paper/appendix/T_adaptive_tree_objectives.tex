@@ -1,0 +1,175 @@
+\section{Adaptive Tree Objective Proofs}
+\label{app:adaptive-tree-proofs}
+
+This appendix isolates the adaptive-tree optimizer-transfer results used in the
+main text. The point of separating them is organizational: they rely on the
+same basic preference-learning machinery as the earlier DPO and GRPO sections,
+but they answer a different question. The earlier appendices show that
+summarization preserves or approximately preserves a given objective. This
+appendix shows that one may \emph{optimize} a stochastic tree objective
+directly, even when the oracle is only an approximation to the true latent
+target.
+
+\subsection{Expected Tree Objectives and Oracle Uncertainty}
+
+Training under adaptive tree construction often targets the \emph{expected tree
+objective}
+\[
+\widehat{\mathcal{L}}_{\tau}(\theta)
+:=
+\E_{T \sim \tau(x)}[\mathcal{L}_{\mathrm{tree}}(\theta;T)],
+\]
+where $\tau(x)$ is a distribution over admissible trees for document $x$.
+
+\begin{theorem}[Expected-tree optimizer transfer]
+\label{thm:app-expected-tree-transfer}
+Let $\Theta_{\mathrm{adm}}$ be any admissible parameter class. Suppose that for
+each $\theta \in \Theta_{\mathrm{adm}}$,
+\[
+\E_{T \sim \tau(x)}
+\left[
+  \left|
+    \mathcal{L}_{\mathrm{true}}(\theta) -
+    \mathcal{L}_{\mathrm{tree}}(\theta;T)
+  \right|
+\right]
+\le \varepsilon_{\tau}(\theta).
+\]
+If $\widehat{\theta} \in \arg\min_{\theta \in \Theta_{\mathrm{adm}}}
+\widehat{\mathcal{L}}_{\tau}(\theta)$, then
+\[
+\mathcal{L}_{\mathrm{true}}(\widehat{\theta})
+\le
+\mathcal{L}_{\mathrm{true}}(\theta)
+  + \varepsilon_{\tau}(\widehat{\theta})
+  + \varepsilon_{\tau}(\theta)
+\quad
+\text{for all } \theta \in \Theta_{\mathrm{adm}}.
+\]
+\end{theorem}
+
+\begin{proof}
+Write
+$\widehat{\mathcal{L}}_{\tau}(\theta)
+= \E_{T}[\mathcal{L}_{\mathrm{tree}}(\theta;T)]$.
+By Jensen,
+\[
+\left|
+\mathcal{L}_{\mathrm{true}}(\theta) - \widehat{\mathcal{L}}_{\tau}(\theta)
+\right|
+\le
+\E_T\!\left[
+\left|
+\mathcal{L}_{\mathrm{true}}(\theta)-\mathcal{L}_{\mathrm{tree}}(\theta;T)
+\right|
+\right]
+\le \varepsilon_{\tau}(\theta).
+\]
+So the expected tree objective is a nonuniform perturbation of the true
+objective. Applying the standard perturbation argument to an exact minimizer of
+$\widehat{\mathcal{L}}_{\tau}$ gives
+\[
+\widehat{\mathcal{L}}_{\tau}(\widehat{\theta})
+\le
+\widehat{\mathcal{L}}_{\tau}(\theta)
+\]
+for every admissible $\theta$, and the two one-sided perturbation bounds then
+yield
+\[
+\mathcal{L}_{\mathrm{true}}(\widehat{\theta})
+\le
+\widehat{\mathcal{L}}_{\tau}(\widehat{\theta})
+  + \varepsilon_{\tau}(\widehat{\theta})
+\le
+\widehat{\mathcal{L}}_{\tau}(\theta)
+  + \varepsilon_{\tau}(\widehat{\theta})
+\le
+\mathcal{L}_{\mathrm{true}}(\theta)
+  + \varepsilon_{\tau}(\widehat{\theta})
+  + \varepsilon_{\tau}(\theta),
+\]
+which is the desired claim.
+\end{proof}
+
+\paragraph{Where the slack comes from.}
+In our setting the quantity $\varepsilon_{\tau}(\theta)$ decomposes naturally as
+\[
+\varepsilon_{\tau}(\theta)
+=
+\E_T[\varepsilon_{\mathrm{oracle}}(\theta,T)]
+\;+\;
+\E_T[\varepsilon_{\mathrm{transport}}(T)].
+\]
+The first term measures oracle misspecification relative to the true latent
+target. The second measures objective drift caused by summarization and tree
+reduction. The total optimization slack is therefore exactly
+``oracle misspecification plus summary-induced drift,'' averaged over the tree
+policy.
+
+\paragraph{Method-specific corollaries.}
+The abstract theorem specializes directly to the three preference-learning
+families studied in the paper:
+\begin{itemize}[nosep]
+    \item \textbf{DPO}: the transport term is
+    $2|\beta|L_{\mathrm{pol}}$ times the expected local-law budget.
+    \item \textbf{GRPO-PL}: the transport term is
+    $L_{\mathrm{grpo}}$ times the expected local-law budget.
+    \item \textbf{GRPO-RL}: the transport term is
+    $L_{\mathrm{grpo-rl}}$ times the expected local-law budget.
+\end{itemize}
+
+\begin{theorem}[High-probability expected-tree optimizer transfer]
+\label{thm:app-expected-tree-transfer-hp}
+Let $G$ be a good event with $\Pr(G^c)\le \delta$, and let
+$\widehat{\theta}(\omega)$ be a data-dependent optimizer selection rule. Assume
+that whenever $\omega \in G$, the selected parameter
+$\widehat{\theta}(\omega)$ exactly minimizes the expected tree objective
+$\widehat{\mathcal{L}}_{\tau}$ over the admissible class. If
+\[
+\E_{T \sim \tau(x)}
+\left[
+  \left|
+    \mathcal{L}_{\mathrm{true}}(\theta) -
+    \mathcal{L}_{\mathrm{tree}}(\theta;T)
+  \right|
+\right]
+\le \varepsilon_{\tau}(\theta)
+\]
+for every admissible $\theta$, then
+\[
+\Pr\!\left(
+\widehat{\theta}(\omega)
+\notin
+\varepsilon_{\tau}\text{-}\arg\min \mathcal{L}_{\mathrm{true}}
+\right)
+\,\le\,
+\delta.
+\]
+Equivalently, with probability at least $1-\delta$, the selected optimizer
+satisfies
+\[
+\mathcal{L}_{\mathrm{true}}(\widehat{\theta}(\omega))
+\le
+\mathcal{L}_{\mathrm{true}}(\theta)
+  + \varepsilon_{\tau}(\widehat{\theta}(\omega))
+  + \varepsilon_{\tau}(\theta)
+\quad
+\text{for all admissible } \theta.
+\]
+\end{theorem}
+
+\begin{proof}
+On the event $G$, Theorem~\ref{thm:app-expected-tree-transfer} applies
+pointwise to the selected optimizer $\widehat{\theta}(\omega)$, so failure of
+the displayed near-optimality statement is impossible on $G$. Therefore the
+failure event is contained in $G^c$, and its probability is at most
+$\Pr(G^c)\le \delta$.
+\end{proof}
+
+\paragraph{Interpretation.}
+This is the form used with audits, held-out certification events, or any other
+data-dependent procedure that certifies the local-law or transport budget only
+with high probability. Confidence uncertainty contributes only through the
+failure probability of the certifying event, while optimization slack still
+decomposes additively into expected oracle uncertainty and expected
+tree-transport error.

@@ -74,10 +74,12 @@ structure ShortModel (n k₁ : ℕ) where
   u : Fin n → ℝ  -- Composite error: u = X₂β₂ + ε
 
 /-- Extract short model from true model by omitting X₂ -/
-def TrueModel.toShortModel {n k₁ k₂ : ℕ} (m : TrueModel n k₁ k₂) : ShortModel n k₁ where
+def TrueModel.toShortModel {n k₁ k₂ : ℕ}
+    (m : TrueModel n k₁ k₂)
+    (β₁_tilde : Fin k₁ → ℝ) : ShortModel n k₁ where
   X₁ := m.X₁
   Y := m.Y
-  β₁_tilde := fun j => 0  -- Placeholder, actual value from OLS
+  β₁_tilde := β₁_tilde
   u := fun i => ∑ j, m.X₂ i j * m.β₂_true j + m.ε i
 
 /-!
@@ -136,11 +138,23 @@ theorem omitted_variable_bias {n k₁ k₂ : ℕ}
         fun j => m.β₁_true j +
           ∑ l : Fin k₂, (auxiliaryCoefficient m.X₁ m.X₂ X₁tX₁_inv j l) * m.β₂_true l +
           ∑ i : Fin k₁, X₁tX₁_inv j i * (∑ t : Fin n, m.X₁.transpose i t * m.ε t)) :
-    shortOLS m.X₁ m.Y X₁tX₁_inv =
-      fun j => m.β₁_true j +
-        ∑ l : Fin k₂, (auxiliaryCoefficient m.X₁ m.X₂ X₁tX₁_inv j l) * m.β₂_true l +
-        ∑ i : Fin k₁, X₁tX₁_inv j i * (∑ t : Fin n, m.X₁.transpose i t * m.ε t) := by
-  exact h_bias
+    ∀ j,
+      shortOLS m.X₁ m.Y X₁tX₁_inv j - m.β₁_true j =
+        (∑ l : Fin k₂, (auxiliaryCoefficient m.X₁ m.X₂ X₁tX₁_inv j l) * m.β₂_true l) +
+          ∑ i : Fin k₁, X₁tX₁_inv j i * (∑ t : Fin n, m.X₁.transpose i t * m.ε t) := by
+  intro j
+  have hj := congrArg (fun f => f j) h_bias
+  set b : ℝ := ∑ l : Fin k₂, (auxiliaryCoefficient m.X₁ m.X₂ X₁tX₁_inv j l) * m.β₂_true l
+  set e : ℝ := ∑ i : Fin k₁, X₁tX₁_inv j i * (∑ t : Fin n, m.X₁.transpose i t * m.ε t)
+  have hj' : shortOLS m.X₁ m.Y X₁tX₁_inv j = m.β₁_true j + b + e := by
+    simpa [b, e] using hj
+  calc
+    shortOLS m.X₁ m.Y X₁tX₁_inv j - m.β₁_true j
+        = (m.β₁_true j + b + e) - m.β₁_true j := by simpa [hj']
+    _ = b + e := by ring
+    _ = (∑ l : Fin k₂, (auxiliaryCoefficient m.X₁ m.X₂ X₁tX₁_inv j l) * m.β₂_true l) +
+          ∑ i : Fin k₁, X₁tX₁_inv j i * (∑ t : Fin n, m.X₁.transpose i t * m.ε t) := by
+            simp [b, e]
 
 /-- Expected value of OLS estimator from short regression.
 
@@ -159,10 +173,12 @@ theorem omitted_variable_bias_expectation {n k₁ k₂ : ℕ} {Ω : Type*} [Meas
       ∀ ω₀ j, ∫ ω, shortOLS (m ω).X₁ (m ω).Y X₁tX₁_inv j ∂μ =
         (m ω₀).β₁_true j + ∑ l : Fin k₂,
           (auxiliaryCoefficient (m ω₀).X₁ (m ω₀).X₂ X₁tX₁_inv j l) * (m ω₀).β₂_true l) :
-    ∀ ω₀ j, ∫ ω, shortOLS (m ω).X₁ (m ω).Y X₁tX₁_inv j ∂μ =
-      (m ω₀).β₁_true j + ∑ l : Fin k₂,
+    ∀ ω₀ j, (∫ ω, shortOLS (m ω).X₁ (m ω).Y X₁tX₁_inv j ∂μ) - (m ω₀).β₁_true j =
+      ∑ l : Fin k₂,
         (auxiliaryCoefficient (m ω₀).X₁ (m ω₀).X₂ X₁tX₁_inv j l) * (m ω₀).β₂_true l := by
-  exact h_expectation
+  intro ω₀ j
+  have h_eq := h_expectation ω₀ j
+  linarith
 
 /-- The bias in coefficient j from omitting X₂ -/
 def biasInCoefficient {n k₁ k₂ : ℕ}
@@ -280,9 +296,11 @@ theorem proxy_reduces_bias {n k₁ k₂ : ℕ}
     (β₂ : Fin k₂ → ℝ)
     (h_uncorr_error : X₁.transpose * proxy.measurement_error = 0)
     -- If X₁ is uncorrelated with measurement error
-    : True := by
-  -- Then including Z₂ eliminates the bias from X₂*
-  trivial
+    : auxiliaryCoefficient X₁ proxy.measurement_error X₁tX₁_inv = 0 := by
+  unfold auxiliaryCoefficient
+  rw [Matrix.mul_assoc]
+  rw [h_uncorr_error]
+  simp
 
 /-!
 ## Examples: Direction of Bias
@@ -336,11 +354,24 @@ theorem bias_bound {n k₁ k₂ : ℕ}
     (h_δ_bound : ∀ l, |auxiliaryCoefficient X₁ X₂ X₁tX₁_inv j l| ≤ δ_bound)
     (h_β₂_bound : ∀ l, |β₂ l| ≤ β₂_bound)
     (h_δ_pos : δ_bound ≥ 0)
-    (h_β₂_pos : β₂_bound ≥ 0)
-    (h_bound :
-      |biasInCoefficient X₁ X₂ X₁tX₁_inv β₂ j| ≤ k₂ * δ_bound * β₂_bound) :
+    (h_β₂_pos : β₂_bound ≥ 0) :
     |biasInCoefficient X₁ X₂ X₁tX₁_inv β₂ j| ≤ k₂ * δ_bound * β₂_bound := by
-  exact h_bound
+  unfold biasInCoefficient
+  calc
+    |∑ l : Fin k₂, auxiliaryCoefficient X₁ X₂ X₁tX₁_inv j l * β₂ l|
+        ≤ ∑ l : Fin k₂, |auxiliaryCoefficient X₁ X₂ X₁tX₁_inv j l * β₂ l| := by
+            simpa using
+              (Finset.abs_sum_le_sum_abs
+                (s := (Finset.univ : Finset (Fin k₂)))
+                (f := fun l => auxiliaryCoefficient X₁ X₂ X₁tX₁_inv j l * β₂ l))
+    _ = ∑ l : Fin k₂, |auxiliaryCoefficient X₁ X₂ X₁tX₁_inv j l| * |β₂ l| := by
+            simp [abs_mul]
+    _ ≤ ∑ l : Fin k₂, δ_bound * β₂_bound := by
+            refine Finset.sum_le_sum ?_
+            intro l hl
+            exact mul_le_mul (h_δ_bound l) (h_β₂_bound l) (abs_nonneg _) h_δ_pos
+    _ = k₂ * δ_bound * β₂_bound := by
+            simp [mul_assoc, mul_left_comm, mul_comm]
 
 end Diagnostics
 

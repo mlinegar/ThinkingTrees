@@ -1,0 +1,133 @@
+\section{Global Compatibility Variant and Algebraic Structure}\label{sec:global}
+
+This section records a \emph{global} counterpart to the local, auditable laws used in the main text. The point is conceptual: if the two-route identities were to hold \emph{for all} pairs in $\Strings\times\Strings$, and if on-range parent calls depended only on child oracle values, then concatenation induces a \emph{merge law on oracle values}. All equalities below are stated in the task metric $\metric$: when we write that two oracle outputs are ``equal,'' this always means their $\metric$–distance is zero.
+
+\subsection{Proof Strategy Overview}
+
+The global variant proofs reveal an elegant algebraic structure: concatenation on strings induces an associative operation on oracle values.
+
+\paragraph{The Key Insight: Quotient Structure.}
+The task metric $\metric$ on $\Y$ defines an equivalence relation: $y \sim y'$ iff $\metric(y, y') = 0$. The proofs show that:
+\begin{enumerate}
+    \item Concatenation respects this equivalence (Proposition~\ref{prop:congruence-strings})
+    \item The induced operation on equivalence classes is associative (Proposition~\ref{prop:odot})
+\end{enumerate}
+
+\paragraph{Proof Technique: Route Comparison.}
+Both propositions use the same technique: compare two ``routes'' from a source to a target:
+\begin{itemize}
+    \item \textbf{Direct route:} Compute $\fstar(a \concat b)$ directly
+    \item \textbf{Summary route:} Compute $\fstar(g(g(a) \concat g(b)))$ via summaries
+\end{itemize}
+The global two-route compatibility (Assumption~\ref{ass:app2}) guarantees these routes arrive at the same oracle value.
+
+\paragraph{Triangle Inequality Chaining.}
+When comparing two oracle values that arise via different paths, we chain triangle inequalities through intermediate values that are ``known'' to be equal (by the global assumptions).
+
+\begin{remark}[How to read ``equal at the oracle'']
+We will say $y$ and $y'$ in $\Y$ are \emph{equal at the oracle} if $\metric(y,y')=0$. This can be thought of as identifying outcomes that the task metric cannot distinguish. More formally, this is the same as passing to the equivalence relation $y\sim y'$ iff $\metric(y,y')=0$ and reading all statements modulo $\sim$.
+\end{remark}
+
+\paragraph{Global laws.} We fix a \emph{deterministic} summarizer $g:\Strings\to\Strings$ and assume three global properties.
+
+\begin{assumption}[Global $\fstar$–sufficiency]\label{ass:app1}
+For every $z\in\Strings$,
+\[
+\metric\!\big(\fstar(g(z)),\,\fstar(z)\big)=0.
+\]
+\end{assumption}
+
+\begin{assumption}[Global two-route compatibility]\label{ass:app2}
+For every $u,v\in\Strings$,
+\[
+\metric\!\Big(\fstar(u\concat v),\ \fstar\!\big(g\big(g(u)\concat g(v)\big)\big)\Big)=0.
+\]
+\end{assumption}
+
+\begin{assumption}[On-range merge depends only on child oracles]\label{ass:app3}
+There exists a measurable map $M:\Y\times\Y\to\Y$ such that for all $u,v\in\Strings$,
+\[
+\metric\!\Big(\fstar\!\big(g\big(g(u)\concat g(v)\big)\big),\ M\big(\fstar(g(u)),\,\fstar(g(v))\big)\Big)=0,
+\]
+and $M$ is \emph{well-defined at the oracle level}: whenever $\metric(y_i,y_i')=0$ for $i=1,2$, then
+\[
+\metric\!\big(M(y_1,y_2),\,M(y_1',y_2')\big)=0.
+\]
+\end{assumption}
+
+The first law says a one-pass summary preserves the task value (globally, not just on realized leaves). The second is the global version of the edgewise two-route equality, with the \emph{parent} summary explicit. The third law formalizes that, once inputs are on the range of $g$, the parent’s oracle depends only on the two child oracle values; it also says this dependence respects ``equality at the oracle'' (outputs cannot change when inputs are changed within $\metric$–zero).
+
+\medskip
+
+We now state two consequences. 
+
+
+\begin{proposition}[Concatenation is a congruence for oracle equality on strings]\label{prop:congruence-strings}
+If $a,a',b,b'\in\Strings$ satisfy $\metric\!\big(\fstar(a),\fstar(a')\big)=0$ and $\metric\!\big(\fstar(b),\fstar(b')\big)=0$, then
+\[
+\metric\!\big(\fstar(a\concat b),\ \fstar(a'\concat b')\big)=0.
+\]
+\end{proposition}
+
+\begin{proof}
+Let $U:=g\big(g(a)\concat g(b)\big)$ and $U':=g\big(g(a')\concat g(b')\big)$. By two applications of the triangle inequality,
+\[
+\metric\!\big(\fstar(a\concat b),\fstar(a'\concat b')\big)\ \le\ 
+\underbrace{\metric\!\big(\fstar(a\concat b),\fstar(U)\big)}_{\text{(I)}}\ +\
+\underbrace{\metric\!\big(\fstar(U),\fstar(U')\big)}_{\text{(II)}}\ +\
+\underbrace{\metric\!\big(\fstar(U'),\fstar(a'\concat b')\big)}_{\text{(III)}}.
+\]
+By Assumption~\ref{ass:app2}, terms (I) and (III) are zero. For (II), Assumption~\ref{ass:app3} gives
+\[
+\metric\!\Big(\fstar(U),\,M\big(\fstar(g(a)),\fstar(g(b))\big)\Big)=0,\qquad
+\metric\!\Big(\fstar(U'),\,M\big(\fstar(g(a')),\,\fstar(g(b'))\big)\Big)=0.
+\]
+Assumption~\ref{ass:app1} and the premises yield
+\[
+\metric\!\big(\fstar(g(a)),\fstar(g(a'))\big)\le \metric\!\big(\fstar(g(a)),\fstar(a)\big)+\metric\!\big(\fstar(a),\fstar(a')\big)+\metric\!\big(\fstar(a'),\fstar(g(a'))\big)=0,
+\]
+and analogously $\metric\!\big(\fstar(g(b)),\fstar(g(b'))\big)=0$. The oracle-level well-definedness in Assumption~\ref{ass:app3} therefore implies
+\[
+\metric\!\Big(M\big(\fstar(g(a)),\fstar(g(b))\big),\ M\big(\fstar(g(a')),\,\fstar(g(b'))\big)\Big)=0,
+\]
+which forces (II)$=0$ by triangle inequality. Hence the whole right-hand side is zero.
+\end{proof}
+
+\begin{proposition}[A merge law on oracle values (associative up to $\metric$)]\label{prop:odot}
+Define, for oracle values that actually arise on-range, the binary operation
+\[
+y_1\ \odot\ y_2\ :=\ M(y_1,y_2).
+\]
+Then for all $y_1,y_2,y_3$ in the on-range set $\fstar(g(\Strings))$, we have
+\[
+\metric\!\Big((y_1\odot y_2)\odot y_3,\ y_1\odot(y_2\odot y_3)\Big)=0,
+\]
+and $y_0:=\fstar(g(\emptystr))$ is a two-sided identity in the same $\metric$–sense:
+\[
+\metric(y_0\odot y,\ y)=\metric(y\odot y_0,\ y)=0\quad\text{for all on-range }y.
+\]
+Consequently, concatenation on $\Strings$ descends, via $\fstar$, to an associative merge on oracle values \emph{up to the task metric}.
+\end{proposition}
+
+\begin{proof}
+Pick $a,b,c\in\Strings$ with $y_1=\fstar(g(a))$, $y_2=\fstar(g(b))$, $y_3=\fstar(g(c))$. By Assumption~\ref{ass:app3},
+\[
+(y_1\odot y_2)\odot y_3\ \text{ is oracle-equal to }\ \fstar\!\big(g\big(g\big(g(a)\concat g(b)\big)\ \concat\ g(c)\big)\big),
+\]
+and
+\[
+y_1\odot(y_2\odot y_3)\ \text{ is oracle-equal to }\ \fstar\!\big(g\big(g\big(a\big)\ \concat\ g\big(g(b)\concat g(c)\big)\big)\big).
+\]
+Applying Assumption~\ref{ass:app2} twice yields
+\[
+\metric\!\Big((y_1\odot y_2)\odot y_3,\ \fstar\big((a\concat b)\concat c\big)\Big)=0,\qquad
+\metric\!\Big(y_1\odot (y_2\odot y_3),\ \fstar\big(a\concat(b\concat c)\big)\Big)=0.
+\]
+Since concatenation on $\Strings$ is literally associative, $(a\concat b)\concat c=a\concat(b\concat c)$, hence the two targets of the displays are equal and therefore at $\metric$–distance zero from one another. The identity statements follow in the same way with $b=c=\emptystr$ and Assumptions~\ref{ass:app1}–\ref{ass:app3}.
+\end{proof}
+
+\begin{remark}[Dropping the parent $g$ at a merge]
+By Assumption~\ref{ass:app1}, $\metric\!\big(\fstar\!\big(g(g(u)\concat g(v))\big),\,\fstar\!\big(g(u)\concat g(v)\big)\big)=0$ for all $u,v$. Thus, in Assumption~\ref{ass:app2}, one may replace the right-hand side by $\fstar\!\big(g(u)\concat g(v)\big)$ without changing any conclusion in the $\metric$–sense. We keep the explicit parent call to mirror the deployed pipeline.
+\end{remark}
+
+\paragraph{What this variant does \emph{not} assume.} We have not assumed that $M$ is literally associative on \emph{all} of $\Y$, nor that $\fstar$ embeds $\Strings$ into $\Y$ as a strict monoid. Propositions~\ref{prop:congruence-strings}–\ref{prop:odot} assert the exact strength warranted by the applications: along on-range values produced by $g$, and with equalities read in the task metric, the two-route global laws make concatenation behave as an associative merge on oracle values. This global structure can be useful when the task semantics truly admit a merge law (e.g., counts); the main-text guarantees, however, require only the local, auditable laws.

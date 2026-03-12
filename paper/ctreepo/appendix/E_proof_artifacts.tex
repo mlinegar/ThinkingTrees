@@ -1,0 +1,202 @@
+\section{Proof Map and Lean Crosswalk}\label{app:proof-artifacts}
+
+\subsection{Result Map}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{0.33\linewidth}p{0.22\linewidth}p{0.38\linewidth}}
+\toprule
+Paper result & Full proof location & Lean anchor(s) \\
+\midrule
+Theorem~\ref{thm:one-pass}, Corollaries~\ref{cor:schedule}, \ref{cor:folds} &
+Appendix~\ref{app:proof-preservation} &
+\texttt{one\_pass}, \texttt{schedule\_invariance}, \texttt{fold\_of\_folds}
+in \texttt{lean3/FormalProofs/OPT/PreservationTheorems.lean} \\
+
+Theorem~\ref{thm:multi-round} &
+Appendix~\ref{app:proof-preservation} &
+\texttt{multi\_round\_proper} (plus wrappers
+\texttt{multi\_round\_bounded}, \texttt{multi\_round\_typeclass})
+in \texttt{lean3/FormalProofs/OPT/ExpectationTheory.lean} \\
+
+Theorem~\ref{thm:fixed-partition} &
+Appendix~\ref{app:fixed-partition} &
+Corollary by instantiating \texttt{multi\_round\_proper} to the deterministic
+tree map $x \mapsto \mathcal{T}_\Pi(x)$; named re-export
+\texttt{fixed\_partition\_extension\_instantiation} in
+\texttt{lean3/FormalProofs/OPT/MainTheorems.lean} \\
+
+Proposition~\ref{prop:mergeable-reduction} &
+Appendix~\ref{app:proof-mergeable} &
+\texttt{prop3\_mergeable\_classical}
+(\texttt{GlobalAssumptions.lean}), and
+\texttt{ops\_reduction\_to\_classical\_mergeable}
+(\texttt{MergeableReduction.lean}) \\
+
+Theorem~\ref{thm:pref-equiv} &
+Appendix~\ref{app:proof-equivalence} &
+\texttt{preference\_learning\_equivalence},
+\texttt{grpo\_equivalence},
+\texttt{grpo\_rl\_equivalence}
+in \texttt{lean3/FormalProofs/OPT/PreferenceLearning.lean};
+\texttt{dpo\_equivalence}
+in \texttt{lean3/FormalProofs/OPT/PreferenceBounds.lean} \\
+
+Theorem~\ref{thm:unified-gap} &
+Appendix~\ref{app:proof-equivalence} &
+\texttt{unified\_preference\_gap\_bounded}
+in \texttt{lean3/FormalProofs/OPT/PreferenceBounds.lean} \\
+
+Example~\ref{ex:c2-independent} (C2 independence) &
+Appendix~\ref{app:counterexample} &
+\texttt{thm10\_1\_L3\_not\_derivable}
+in \texttt{lean3/FormalProofs/OPT/CounterexampleExistence.lean} \\
+
+Theorem~\ref{thm:e2e} &
+Appendix~\ref{app:proof-e2e} &
+\texttt{treepo\_objective\_unbiased},
+\texttt{treepo\_distortion\_unbiased},
+\texttt{dpo\_treepo\_end\_to\_end\_certificate},
+\texttt{grpo\_pl\_treepo\_end\_to\_end\_certificate},
+\texttt{grpo\_pl\_treepo\_end\_to\_end\_gen\_certificate},
+\texttt{grpo\_rl\_treepo\_end\_to\_end\_certificate}
+in \texttt{lean3/FormalProofs/DSL/TreePOEndToEnd.lean} \\
+\bottomrule
+\end{tabular}
+\caption{Paper-to-Lean crosswalk with theorem-level anchors.}
+\end{table}
+
+\subsection{Assumption Alignment Notes}
+
+\paragraph{(1) Law naming map (paper vs Lean).}
+In Lean, the local-law names are
+\[
+\text{C1} \leftrightarrow \text{L1},\qquad
+\text{C2} \leftrightarrow \text{L3},\qquad
+\text{C3} \leftrightarrow \text{L2},
+\]
+as defined in \texttt{lean3/FormalProofs/OPT/LocalLaws.lean}.
+
+\paragraph{(2) C3/context packaging difference.}
+The paper presents C3 as a two-link merge chain with context compatibility
+(Assumption~\ref{ass:context}) used explicitly in proofs.
+Lean's \texttt{L2} is packaged directly as internal-node zero distortion
+\[
+E[D(\texttt{reduce }g\ \texttt{node},\ S(\texttt{node}))]=0,
+\]
+so some context propagation steps are absorbed into the local hypothesis form.
+This is a presentation/packaging difference, not a change in the certified target.
+
+\paragraph{(3) Boundedness in formal multi-round proofs.}
+The main axiom-free Lean theorem \texttt{multi\_round\_proper} carries explicit boundedness
+inputs \texttt{M, hM, hbound} for summability. The paper's narrative statements are matched
+either by supplying these bounds directly or via the typeclass wrapper
+\texttt{multi\_round\_typeclass} on bounded metric spaces.
+
+\paragraph{(4) Audited bound (Theorem~\ref{thm:e2e}) vs Lean decomposition.}
+The paper states the audited gap with explicit envelopes
+$B_{\mathrm{cal}}, B_{\mathrm{est}}, B_{\mathrm{clip}}$ and event-level guarantees.
+Lean's DSL layer formalizes both the deterministic envelope algebra and the
+high-probability event composition, including
+\texttt{treepo\_gap\_with\_calibration\_and\_estimation},
+\texttt{treepo\_gap\_with\_calibration\_estimation\_clipping},
+\texttt{dsl\_abs\_gap\_bound\_from\_estimate\_high\_prob}, and
+\texttt{dsl\_abs\_gap\_bound\_from\_clipped\_estimate\_high\_prob}
+in \texttt{lean3/FormalProofs/DSL/TreeIPW.lean}.
+The paper-level $B_{\mathrm{cal}},B_{\mathrm{est}},B_{\mathrm{clip}}$ notation
+is a naming layer over these formal objects.
+
+\paragraph{(5) Fixed-partition theorem status in Lean.}
+Appendix~\ref{app:fixed-partition} is represented in Lean as a deterministic-instantiation corollary of
+\texttt{multi\_round\_proper}; the named re-export is
+\texttt{fixed\_partition\_extension\_instantiation} in \texttt{OPT/MainTheorems.lean}.
+This is a packaging choice; the assumption profile is the same (local laws on realized calls plus boundedness side conditions when required).
+
+\paragraph{(6) Distortion-symbol mapping note.}
+Lean distinguishes document-level $\Delta_R$ objects (see \texttt{coupling\_delta\_eq\_delta\_r\_zr}
+and \texttt{delta\_r\_zr\_zero\_of\_local\_laws} re-exported in
+\texttt{OPT/MainTheorems.lean}) from generic audited-population means used in DSL envelopes.
+The paper follows the same distinction: audited unit-population means $\mu_{\mathrm{dist}}^\star,\mu_{\mathrm{dist}}^J$
+coincide with $\Delta_R$ only under an explicit unit/coupling identification.
+
+\subsection{Formalization Coverage (Explicit)}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{p{0.31\linewidth}p{0.16\linewidth}p{0.46\linewidth}}
+\toprule
+Component & Status & Lean artifact(s) \\
+\midrule
+Local laws $\Rightarrow$ one-pass / multi-round preservation &
+Fully mechanized &
+\texttt{one\_pass}, \texttt{multi\_round\_proper} (+ wrappers) \\
+
+Schedule / fold-of-folds invariance &
+Fully mechanized &
+\texttt{schedule\_invariance}, \texttt{fold\_of\_folds} \\
+
+Preference-objective equivalence (DPO, GRPO-PL, GRPO-RL) &
+Fully mechanized &
+\texttt{dpo\_equivalence},
+\texttt{grpo\_equivalence},
+\texttt{grpo\_rl\_equivalence},
+\texttt{preference\_learning\_equivalence} \\
+
+Unified Lipschitz gap transport &
+Fully mechanized &
+\texttt{unified\_preference\_gap\_bounded} \\
+
+HT/IPW unbiasedness and method-specific TreePO end-to-end certificates &
+Fully mechanized &
+\texttt{treepo\_objective\_unbiased},
+\texttt{treepo\_distortion\_unbiased},
+\texttt{dpo\_treepo\_end\_to\_end\_certificate},
+\texttt{grpo\_pl\_treepo\_end\_to\_end\_certificate},
+\texttt{grpo\_pl\_treepo\_end\_to\_end\_gen\_certificate},
+\texttt{grpo\_rl\_treepo\_end\_to\_end\_certificate} \\
+
+Calibration/estimation/clipping envelope algebra and one-shot
+high-probability composition &
+Fully mechanized &
+\texttt{treepo\_gap\_with\_calibration\_and\_estimation},
+\texttt{treepo\_gap\_with\_calibration\_estimation\_clipping},
+\texttt{dsl\_abs\_gap\_bound\_from\_estimate\_high\_prob},
+\texttt{dsl\_abs\_gap\_bound\_from\_clipped\_estimate\_high\_prob},
+\texttt{dsl\_bound\_valid\_from\_events},
+\texttt{computeDSLBound\_valid\_from\_events} \\
+
+Fixed-partition extension &
+Mechanized by instantiation &
+Corollary from \texttt{multi\_round\_proper}; re-exported as
+\texttt{fixed\_partition\_extension\_instantiation} \\
+
+Calibration representativeness assumption for judge transport &
+Mechanized assumption object &
+\texttt{CalibrationRMSEBound} (alias \texttt{CalibrationAxioms}) in
+\texttt{DSL/JudgeCalibration.lean};
+re-export \texttt{calibration\_rmse\_representativeness} in
+\texttt{DSL/MainTheorems.lean} \\
+
+Choice of concrete calibration dataset/protocol and numeric
+hyperparameters (e.g., $z$, clipping threshold, split of $\delta$ budget) &
+Paper/deployment choice &
+Not a theorem target; supplied as external inputs to mechanized envelopes \\
+\bottomrule
+\end{tabular}
+\caption{Explicit mechanization boundary: what is theorem-mechanized versus what is deployment input.}
+\end{table}
+
+\subsection{Reproducibility Commands}
+
+\begin{verbatim}
+# Rebuild manuscript PDF
+cd paper/ctreepo
+latexmk -pdf -interaction=nonstopmode main_new.tex
+
+# Build core Lean theorem bundles
+cd ../../lean3
+lake build FormalProofs.OPT.MainTheorems
+lake build FormalProofs.DSL.MainTheorems
+\end{verbatim}

@@ -40,6 +40,16 @@ def Exp {α : Type*} (p : PMF α) (f : α → ℝ) : ℝ := ∑' z, (p z).toReal
 /-- Expectation in ENNReal (extended non-negative reals) -/
 def ExpENN {α : Type*} (p : PMF α) (f : α → ENNReal) : ENNReal := ∑' z, p z * f z
 
+/-- Expectation under a point mass. -/
+lemma Exp_pure {α : Type*} (f : α → ℝ) (x : α) :
+    Exp (PMF.pure x) f = f x := by
+  unfold Exp
+  simp only [PMF.pure_apply]
+  rw [tsum_eq_single x]
+  · simp
+  · intro z hz
+    simp [hz]
+
 /-!
 ## ExpENN Properties
 -/
@@ -161,6 +171,108 @@ lemma tsum_eq_zero_of_nonneg {α : Type*} (f : α → ℝ) (hf : ∀ x, 0 ≤ f 
     exact ne_of_gt ( lt_of_lt_of_le ( lt_of_le_of_ne ( hf _ ) ( Ne.symm h_sum.choose_spec ) ) ( Summable.le_tsum h_summable _ fun x _ => hf x ) )
 
 /-!
+## L1 Implications
+-/
+
+/-- If L1 holds and expected distortion is summable at a realized leaf, distortion is 0 on support. -/
+lemma L1_implies_dist_zero_on_support (g : Summarizer Strings) (T : BinTree Strings) (fstar : Strings → Y)
+    (h1 : L1 g T fstar) (b : Strings) (hb : b ∈ leaves T)
+    (h_summable : Summable (fun z => (g b z).toReal * D fstar z b)) :
+    ∀ z ∈ (g b).support, D fstar z b = 0 := by
+  have h_sum_zero : ∑' z, (g b z).toReal * D fstar z b = 0 := by
+    exact h1 b hb
+  have h_term_zero : ∀ z, (g b z).toReal * D fstar z b = 0 :=
+    tsum_eq_zero_of_nonneg (fun z => (g b z).toReal * D fstar z b)
+      (fun z => mul_nonneg ENNReal.toReal_nonneg dist_nonneg) h_summable h_sum_zero
+  intro z hz
+  have hz_ne0 : (g b) z ≠ 0 := by
+    simpa [PMF.mem_support_iff] using hz
+  have hz_toReal_pos : 0 < (g b z).toReal :=
+    ENNReal.toReal_pos hz_ne0 (PMF.apply_ne_top (g b) z)
+  have hz_mul : (g b z).toReal * D fstar z b = 0 := h_term_zero z
+  rcases mul_eq_zero.mp hz_mul with hz_toReal | hz_dist
+  · exfalso
+    exact (ne_of_gt hz_toReal_pos) hz_toReal
+  · exact hz_dist
+
+/-- Under summability, L1 is equivalent to the (a.s.) support-level "sufficient statistic" form:
+every realized leaf is summarized only to strings with zero oracle distortion. -/
+theorem L1_iff_dist_zero_on_support (g : Summarizer Strings) (T : BinTree Strings) (fstar : Strings → Y)
+    (h_summable : ∀ b, b ∈ leaves T → Summable (fun z => (g b z).toReal * D fstar z b)) :
+    L1 g T fstar ↔ ∀ b, b ∈ leaves T → ∀ z ∈ (g b).support, D fstar z b = 0 := by
+  constructor
+  · intro h1 b hb
+    exact L1_implies_dist_zero_on_support g T fstar h1 b hb (h_summable b hb)
+  · intro h_support b hb
+    unfold Eg
+    convert tsum_zero with z
+    by_cases hz : z ∈ (g b).support
+    · have h_dist_zero : D fstar z b = 0 := h_support b hb z hz
+      simp [h_dist_zero]
+    · simp [PMF.mem_support_iff] at hz
+      simp [hz]
+
+/-!
+## L2 Implications
+-/
+
+/-- If L2 holds and expected distortion is summable at a realized internal node,
+distortion is 0 on the support of the hierarchical reduction at that node. -/
+lemma L2_implies_dist_zero_on_support (g : Summarizer Strings) (T : BinTree Strings) (fstar : Strings → Y)
+    (h2 : L2 g T fstar) (p : BinTree Strings × BinTree Strings) (hp : p ∈ internal_nodes T)
+    (h_summable : Summable (fun z =>
+      (reduce g (BinTree.node p.1 p.2) z).toReal * D fstar z (S (BinTree.node p.1 p.2)))) :
+    ∀ z ∈ (reduce g (BinTree.node p.1 p.2)).support, D fstar z (S (BinTree.node p.1 p.2)) = 0 := by
+  have h_sum_zero : ∑' z,
+      (reduce g (BinTree.node p.1 p.2) z).toReal * D fstar z (S (BinTree.node p.1 p.2)) = 0 := by
+    simpa [L2, Egu] using (h2 p hp)
+  have h_term_zero : ∀ z,
+      (reduce g (BinTree.node p.1 p.2) z).toReal * D fstar z (S (BinTree.node p.1 p.2)) = 0 :=
+    tsum_eq_zero_of_nonneg
+      (fun z => (reduce g (BinTree.node p.1 p.2) z).toReal * D fstar z (S (BinTree.node p.1 p.2)))
+      (fun z => mul_nonneg ENNReal.toReal_nonneg dist_nonneg) h_summable h_sum_zero
+  intro z hz
+  have hz_ne0 : (reduce g (BinTree.node p.1 p.2)) z ≠ 0 := by
+    simpa [PMF.mem_support_iff] using hz
+  have hz_toReal_pos : 0 < (reduce g (BinTree.node p.1 p.2) z).toReal :=
+    ENNReal.toReal_pos hz_ne0 (PMF.apply_ne_top (reduce g (BinTree.node p.1 p.2)) z)
+  have hz_mul : (reduce g (BinTree.node p.1 p.2) z).toReal * D fstar z (S (BinTree.node p.1 p.2)) = 0 :=
+    h_term_zero z
+  rcases mul_eq_zero.mp hz_mul with hz_toReal | hz_dist
+  · exfalso
+    exact (ne_of_gt hz_toReal_pos) hz_toReal
+  · exact hz_dist
+
+/-- Under summability, L2 is equivalent to the support-level "merge sufficiency" form:
+every realized internal-node reduction is supported only on strings with zero oracle distortion
+from the node's realized string `S(node)`. -/
+theorem L2_iff_dist_zero_on_support (g : Summarizer Strings) (T : BinTree Strings) (fstar : Strings → Y)
+    (h_summable : ∀ p, p ∈ internal_nodes T → Summable (fun z =>
+      (reduce g (BinTree.node p.1 p.2) z).toReal * D fstar z (S (BinTree.node p.1 p.2)))) :
+    L2 g T fstar ↔
+      ∀ p, p ∈ internal_nodes T →
+        ∀ z ∈ (reduce g (BinTree.node p.1 p.2)).support, D fstar z (S (BinTree.node p.1 p.2)) = 0 := by
+  constructor
+  · intro h2 p hp
+    exact L2_implies_dist_zero_on_support g T fstar h2 p hp (h_summable p hp)
+  · intro h_support p hp
+    unfold L2 at *
+    -- unpack the pair for definitional simp on `let (T_L, T_R) := p`
+    rcases p with ⟨T_L, T_R⟩
+    have hdist : ∀ z ∈ (reduce g (BinTree.node T_L T_R)).support,
+        D fstar z (S (BinTree.node T_L T_R)) = 0 :=
+      h_support (T_L, T_R) hp
+    -- Show expected distortion is 0 by pointwise zeroing
+    unfold Egu
+    convert tsum_zero with z
+    by_cases hz : z ∈ (reduce g (BinTree.node T_L T_R)).support
+    · have h_dist_zero : D fstar z (S (BinTree.node T_L T_R)) = 0 := hdist z hz
+      simp [h_dist_zero]
+    · have hpz : reduce g (BinTree.node T_L T_R) z = 0 := by
+        simpa [PMF.mem_support_iff] using hz
+      simp [hpz]
+
+/-!
 ## L3 Implications
 -/
 
@@ -176,6 +288,91 @@ lemma L3_implies_dist_zero_on_support (g : Summarizer Strings) (fstar : Strings 
         exact PMF.apply_ne_top (g Z) z ) ) ( lt_of_le_of_ne ( dist_nonneg ) ( Ne.symm h_sum_zero ) );
     · exact h_summable;
     · exact fun _ _ => mul_nonneg ( ENNReal.toReal_nonneg ) ( dist_nonneg )
+
+/-- Under summability, L3 is equivalent to the support-level "sufficient statistic" form:
+any in-range string is summarized only to strings with zero oracle distortion. -/
+theorem L3_iff_dist_zero_on_support (g : Summarizer Strings) (fstar : Strings → Y)
+    (h_summable : ∀ Z, InRange g Z → Summable (fun z => (g Z z).toReal * D fstar z Z)) :
+    L3 g fstar ↔ ∀ Z, InRange g Z → ∀ z ∈ (g Z).support, D fstar z Z = 0 := by
+  constructor
+  · intro h3 Z hZ
+    exact L3_implies_dist_zero_on_support g fstar h3 Z hZ (h_summable Z hZ)
+  · intro h_support Z hZ
+    unfold Eg
+    convert tsum_zero with z
+    by_cases hz : z ∈ (g Z).support
+    · have h_dist_zero : D fstar z Z = 0 := h_support Z hZ z hz
+      simp [h_dist_zero]
+    · simp [PMF.mem_support_iff] at hz
+      simp [hz]
+
+/-- When the oracle space is bounded, summability of distortion expectations is automatic. -/
+lemma summable_distortion_typeclass {Strings Y : Type*} [Monoid Strings] [BoundedPseudoMetricSpace Y]
+    (g : Summarizer Strings) (fstar : Strings → Y) (x : Strings) :
+    Summable (fun z => (g x z).toReal * D fstar z x) := by
+  let M : ℝ := BoundedPseudoMetricSpace.diameterBound (α := Y)
+  have hM : 0 ≤ M := BoundedPseudoMetricSpace.diameterBound_nonneg (α := Y)
+  have hbound : ∀ z, D fstar z x ≤ M := fun z => by
+    unfold D
+    exact BoundedPseudoMetricSpace.dist_le (fstar z) (fstar x)
+  exact summable_D_of_bounded (p := g x) (fstar := fstar) (x := x) M hM hbound
+
+/-- When the oracle space is bounded, summability of distortion under hierarchical reduction is automatic. -/
+lemma summable_distortion_reduce_typeclass {Strings Y : Type*} [Monoid Strings] [BoundedPseudoMetricSpace Y]
+    (g : Summarizer Strings) (fstar : Strings → Y) (u : BinTree Strings) :
+    Summable (fun z => (reduce g u z).toReal * D fstar z (S u)) := by
+  let M : ℝ := BoundedPseudoMetricSpace.diameterBound (α := Y)
+  have hM : 0 ≤ M := BoundedPseudoMetricSpace.diameterBound_nonneg (α := Y)
+  have hbound : ∀ z, D fstar z (S u) ≤ M := fun z => by
+    unfold D
+    exact BoundedPseudoMetricSpace.dist_le (fstar z) (fstar (S u))
+  exact summable_D_of_bounded (p := reduce g u) (fstar := fstar) (x := S u) M hM hbound
+
+/-- Typeclass-friendly version of `L1_implies_dist_zero_on_support` (no explicit summability). -/
+lemma L1_implies_dist_zero_on_support_typeclass {Strings Y : Type*} [Monoid Strings] [BoundedPseudoMetricSpace Y]
+    (g : Summarizer Strings) (T : BinTree Strings) (fstar : Strings → Y)
+    (h1 : L1 g T fstar) (b : Strings) (hb : b ∈ leaves T) :
+    ∀ z ∈ (g b).support, D fstar z b = 0 :=
+  L1_implies_dist_zero_on_support (g := g) (T := T) (fstar := fstar) h1 b hb
+    (summable_distortion_typeclass g fstar b)
+
+/-- Typeclass-friendly version of `L1_iff_dist_zero_on_support` (no explicit summability). -/
+theorem L1_iff_dist_zero_on_support_typeclass {Strings Y : Type*} [Monoid Strings] [BoundedPseudoMetricSpace Y]
+    (g : Summarizer Strings) (T : BinTree Strings) (fstar : Strings → Y) :
+    L1 g T fstar ↔ ∀ b, b ∈ leaves T → ∀ z ∈ (g b).support, D fstar z b = 0 :=
+  L1_iff_dist_zero_on_support (g := g) (T := T) (fstar := fstar)
+    (fun b hb => summable_distortion_typeclass g fstar b)
+
+/-- Typeclass-friendly version of `L2_implies_dist_zero_on_support` (no explicit summability). -/
+lemma L2_implies_dist_zero_on_support_typeclass {Strings Y : Type*} [Monoid Strings] [BoundedPseudoMetricSpace Y]
+    (g : Summarizer Strings) (T : BinTree Strings) (fstar : Strings → Y)
+    (h2 : L2 g T fstar) (p : BinTree Strings × BinTree Strings) (hp : p ∈ internal_nodes T) :
+    ∀ z ∈ (reduce g (BinTree.node p.1 p.2)).support, D fstar z (S (BinTree.node p.1 p.2)) = 0 :=
+  L2_implies_dist_zero_on_support (g := g) (T := T) (fstar := fstar) h2 p hp
+    (summable_distortion_reduce_typeclass g fstar (BinTree.node p.1 p.2))
+
+/-- Typeclass-friendly version of `L2_iff_dist_zero_on_support` (no explicit summability). -/
+theorem L2_iff_dist_zero_on_support_typeclass {Strings Y : Type*} [Monoid Strings] [BoundedPseudoMetricSpace Y]
+    (g : Summarizer Strings) (T : BinTree Strings) (fstar : Strings → Y) :
+    L2 g T fstar ↔
+      ∀ p, p ∈ internal_nodes T →
+        ∀ z ∈ (reduce g (BinTree.node p.1 p.2)).support, D fstar z (S (BinTree.node p.1 p.2)) = 0 :=
+  L2_iff_dist_zero_on_support (g := g) (T := T) (fstar := fstar)
+    (fun p hp => summable_distortion_reduce_typeclass g fstar (BinTree.node p.1 p.2))
+
+/-- Typeclass-friendly version of `L3_implies_dist_zero_on_support` (no explicit summability). -/
+lemma L3_implies_dist_zero_on_support_typeclass {Strings Y : Type*} [Monoid Strings] [BoundedPseudoMetricSpace Y]
+    (g : Summarizer Strings) (fstar : Strings → Y) (h3 : L3 g fstar) (Z : Strings) (hZ : InRange g Z) :
+    ∀ z ∈ (g Z).support, D fstar z Z = 0 :=
+  L3_implies_dist_zero_on_support (g := g) (fstar := fstar) h3 Z hZ
+    (summable_distortion_typeclass g fstar Z)
+
+/-- Typeclass-friendly version of `L3_iff_dist_zero_on_support` (no explicit summability). -/
+theorem L3_iff_dist_zero_on_support_typeclass {Strings Y : Type*} [Monoid Strings] [BoundedPseudoMetricSpace Y]
+    (g : Summarizer Strings) (fstar : Strings → Y) :
+    L3 g fstar ↔ ∀ Z, InRange g Z → ∀ z ∈ (g Z).support, D fstar z Z = 0 :=
+  L3_iff_dist_zero_on_support (g := g) (fstar := fstar)
+    (fun Z _ => summable_distortion_typeclass g fstar Z)
 
 /-- If L3 holds, then each term in the expected distortion sum is zero -/
 lemma L3_implies_term_zero (g : Summarizer Strings) (fstar : Strings → Y) (h3 : L3 g fstar) (Z : Strings) (hZ : InRange g Z)
@@ -199,6 +396,69 @@ lemma L3_implies_ExpENN_zero (g : Summarizer Strings) (fstar : Strings → Y) (h
         exact L3_implies_dist_zero_on_support g fstar h3 Z hZ h_summable;
       aesop;
     exact ENNReal.tsum_eq_zero.mpr fun _ => h_zero_terms _
+
+/-!
+## Round Inertness and L3
+
+This packages "extra normalization rounds are inert" at the one-step level:
+for any distribution supported in `range(g)`, applying one more summarization
+step contributes zero expected oracle distortion to the current state.
+-/
+
+/-- One-step round inertness for distributions supported in the range of `g`. -/
+def RoundInert (g : Summarizer Strings) (fstar : Strings → Y) : Prop :=
+  ∀ p : PMF Strings, (∀ z ∈ p.support, InRange g z) →
+    Exp p (fun z => Eg g (fun w => D fstar w z) z) = 0
+
+/-- L3 implies one-step round inertness on any in-range distribution. -/
+theorem L3_implies_RoundInert (g : Summarizer Strings) (fstar : Strings → Y)
+    (h3 : L3 g fstar) :
+    RoundInert g fstar := by
+  intro p h_range
+  unfold Exp
+  convert tsum_zero with z
+  by_cases hz : z ∈ p.support
+  · have hEg_zero : Eg g (fun w => D fstar w z) z = 0 := h3 z (h_range z hz)
+    simp [hEg_zero]
+  · have hpz : p z = 0 := by
+      simpa [PMF.mem_support_iff] using hz
+    simp [hpz]
+
+/-- One-step round inertness implies L3 (by testing point masses). -/
+theorem RoundInert_implies_L3 (g : Summarizer Strings) (fstar : Strings → Y)
+    (h_inert : RoundInert g fstar) :
+    L3 g fstar := by
+  intro Z hZ
+  have h_step : Exp (PMF.pure Z) (fun z => Eg g (fun w => D fstar w z) z) = 0 := by
+    apply h_inert (PMF.pure Z)
+    intro z hz
+    rw [PMF.support_pure, Set.mem_singleton_iff] at hz
+    simpa [hz] using hZ
+  simpa [Exp_pure] using h_step
+
+/-- Characterization: L3 is equivalent to one-step round inertness. -/
+theorem L3_iff_RoundInert (g : Summarizer Strings) (fstar : Strings → Y) :
+    L3 g fstar ↔ RoundInert g fstar := by
+  constructor
+  · exact L3_implies_RoundInert g fstar
+  · exact RoundInert_implies_L3 g fstar
+
+/-- Any ZR state is one-step inert under `RoundInert` (for `R ≥ 1`).
+
+This is the direct `ZR` bridge: if round inertness holds for all in-range
+distributions, then it holds in particular for `ZR g x R T`. -/
+theorem RoundInert_on_ZR (g : Summarizer Strings) (x : Strings) (R : ℕ)
+    (T : BinTree Strings) (fstar : Strings → Y)
+    (h_inert : RoundInert g fstar) (hR : R ≥ 1) :
+    Exp (ZR g x R T) (fun z => Eg g (fun w => D fstar w z) z) = 0 :=
+  h_inert (ZR g x R T) (ZR_support_in_range g x R T hR)
+
+/-- `L3` implies one-step `ZR` inertness (`R -> R+1` normalization term is zero). -/
+theorem L3_implies_ZR_step_inert (g : Summarizer Strings) (x : Strings) (R : ℕ)
+    (T : BinTree Strings) (fstar : Strings → Y)
+    (h3 : L3 g fstar) (hR : R ≥ 1) :
+    Exp (ZR g x R T) (fun z => Eg g (fun w => D fstar w z) z) = 0 :=
+  RoundInert_on_ZR g x R T fstar (L3_implies_RoundInert g fstar h3) hR
 
 /-!
 ## Helper Lemmas for Multi-Round

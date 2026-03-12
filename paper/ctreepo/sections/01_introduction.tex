@@ -1,0 +1,52 @@
+\section{Introduction}\label{sec:introduction}
+
+Long-document preference optimization is attractive precisely where it is most fragile: the tasks researchers care about often depend on interactions distributed across a document, while the models and annotation workflows available in practice can only inspect short spans at a time. A party manifesto may sound left on environmental policy and right on industrial policy; the final judgment depends on how those positions combine, not on either chapter in isolation. The central methodological question is therefore not just whether we can summarize a long document, but whether we can do so \emph{without changing the task signal that downstream optimization is meant to preserve}.
+
+\paragraph{A concrete failure mode.}
+Suppose we split a manifesto into chapter summaries, then merge those summaries up a tree so an annotator can score only the root summary. If the merge summary drops ``opposes fossil fuel extraction'' from the environment chapter and ``private-sector energy markets'' from the economics chapter, the final compressed text may read as mildly progressive rather than internally tensioned. The summary is shorter and locally plausible, but it no longer supports the same RILE judgment as the full document.
+
+\paragraph{What this paper asks.}
+Which information must survive each local merge so that summary-based preference optimization remains faithful to full-document optimization? C-TreePO answers this by treating recursive summarization as a \emph{compression tree}: a fixed hierarchy over contiguous spans in which every node stores a bounded summary and every edge can be audited locally. The paper's claim is that if the right local checks pass, then the global preference object is preserved.
+
+\subsection{The Object We Preserve}
+
+The object of interest is an \emph{oracle} judgment: the task value that would be produced by the expensive, full-information procedure the researcher actually trusts. In political measurement this may be an expert RILE score; in document extraction it may be a gold-standard event label; in preference learning it may be the rubric-governed supervision signal that separates acceptable from unacceptable outputs. A summary is useful only if it preserves this object.
+
+Formally, we posit an oracle $\fstar$ that maps a document $x$ to the task value $\fstar(x) \in \Y$. The summarizer $g$ is not the target object; it is a compression mechanism whose only job is to discard text irrelevant to $\fstar$ while retaining the evidence $\fstar$ needs. In this sense, the summary is a task-specific sufficient statistic for the oracle value.
+
+This framing connects two literatures that usually talk past each other. Work such as \citet{BenoitEtAl2025} shows that LLMs can recover useful long-document measurements, while Design-based Supervised Learning \citep{EgamiEtAl2024} emphasizes that replacing gold-standard supervision with cheaper surrogates can bias downstream claims even when predictive accuracy looks good. C-TreePO is aimed at the gap between them: it asks when hierarchical compression preserves the task value the downstream procedure actually uses.
+
+\subsection{The Core Idea}
+
+A useful analogy comes from mergeable sketches in data systems. There, the goal is to replace raw shards with compact local states whose pairwise merges still preserve the global query. C-TreePO keeps the same structural question but changes the object: the state is now a textual summary, the query is a task oracle, and the failure mode is loss of cross-span semantic information rather than algebraic merge error.
+
+C-TreePO therefore treats the LLM summarizer as a \emph{learned mergeable sketch}. Each leaf summary must preserve the task-relevant evidence in its source span. Each internal merge must preserve the cross-span interactions that become visible only when two child summaries are combined. Optional clean-up passes must not change the task signal already stored in a summary. The paper names these three requirements Sufficiency (C1), Idempotence (C2), and Merge Consistency (C3), and then asks what they buy us locally and globally.
+
+\paragraph{A running example.}
+Throughout the paper we use the scoring of party manifestos on a left--right (RILE) scale as a concrete reference point. The oracle $\fstar$ is the RILE score that an expert panel would assign after reading the full text: a single number in $[-100,+100]$ encoding the party's overall ideological stance. This task is typical of the settings C-TreePO addresses: the oracle is well-defined on bounded spans, the target depends on cross-section interactions, and full-document oracle evaluation is expensive.
+
+\subsection{Result Ladder}
+
+The technical story is a nested ladder rather than a single monolithic theorem:
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Local laws $\rightarrow$ root preservation.} Under the \emph{Preservation Stack} (C1, C3, and context compatibility), local leaf and merge checks compose to root-level oracle preservation and schedule invariance. Adding C2 yields safe extra re-summarization rounds.
+    \item \textbf{Preserved oracle $\rightarrow$ same training target.} Under the \emph{Optimization Stack}, which adds factorization and oracle-measurability/indexing assumptions, DPO, GRPO-PL, and GRPO-RL on summaries target the same population argmin set as training on full documents.
+    \item \textbf{Approximate preservation $\rightarrow$ empirical certificate.} Under the \emph{Certificate Stack}, which adds transport, calibration, and sampling assumptions, sampled node audits yield a finite-sample bound on preference-objective drift.
+\end{enumerate}
+
+Controlled toy examples and current mechanism checks are consistent with the predicted failure boundary: if the retained state cannot represent the interaction the oracle depends on, the error is structural and additional data do not fix it. We also show that the merge law itself can be learned from the same local oracle feedback used for auditing.
+
+\paragraph{What this paper is not.}
+C-TreePO is a \emph{certification and data-estimation framework}, not a new optimization algorithm. It enables standard preference optimizers to operate on compressed representations with explicit certificates. At system scale, multiple C-Trees form the \emph{Semantic Forests} layer, which is the focus of a separate systems paper on orchestration, deployment, and throughput analysis.
+
+\subsection{Why Hierarchical Compression?}
+
+Two practical constraints motivate the hierarchy. First, some documents are longer than the model or annotation context window, so the document must be split before any summary can be produced. Second, even when context is available, researchers often choose to compress for cost, storage, or relabeling reasons. In both cases, the object that downstream optimization sees is no longer the full document but a recursively merged summary.
+
+The practical question is therefore: \emph{when does this compressed object support the same task judgment as the full text?} C-TreePO answers by auditing a small set of local checks instead of repeatedly querying the oracle on the full document. The same checks that certify the pipeline also indicate how it fails and where it should be improved.
+
+\subsection{Paper Roadmap}
+
+Section~\ref{sec:framework} defines the compression tree, the three local laws, and the named assumption bundles used throughout the paper. Section~\ref{sec:example} opens with a RILE pass/fail example and then isolates the same mechanism in a controlled toy sketch with a sharp sufficiency boundary. Section~\ref{sec:theorems} gives the result ladder from root preservation to preference-objective equivalence to audited gap certificates. Section~\ref{sec:estimation} turns the local laws into an operational audit. Section~\ref{sec:empirical} reports current mechanism checks. Section~\ref{sec:verification} separates structural assumptions from the additional modeling ingredients used only for quantitative transport. Sections~\ref{sec:related} and \ref{sec:conclusion} situate the paper and mark the scope boundary with the Semantic Forests systems layer.
+
+Throughout, we focus on decomposable, information-centric tasks: event extraction, coding tuples, structured aggregation, and guided abstractive summaries with explicit rubrics where the oracle space $\Y$ is well-defined on bounded spans of text.

@@ -5,7 +5,7 @@ Registers `manifesto_rile` so the training pipeline can target CMP RILE
 scoring directly without relying on document-analysis defaults.
 """
 
-from typing import Optional
+from typing import Any, Callable, Dict, Optional
 
 from src.tasks.prompting import (
     PromptBuilders,
@@ -33,8 +33,8 @@ def _build_score_prompt(summary: str, task_context: str) -> list[dict[str, str]]
             "role": "system",
             "content": (
                 "You are an expert CMP manifesto coder. "
-                "Return exactly one numeric RILE score between -100 and +100 "
-                "(format examples, do not copy: -12, 0, 37.5)."
+                "Return exactly one numeric RILE score between -100 and +100. "
+                "Estimate as precisely as possible on the continuous scale (do not default to coarse bins)."
             ),
         },
         {
@@ -42,7 +42,8 @@ def _build_score_prompt(summary: str, task_context: str) -> list[dict[str, str]]
             "content": (
                 f"{task_context}\n\n"
                 f"SUMMARY:\n{summary}\n\n"
-                "Output only the numeric RILE score in [-100, +100] (no labels like 'Score:', no extra text, no code fences)."
+                "Output only the numeric RILE score in [-100, +100] "
+                "(no labels like 'Score:', no extra text, no code fences)."
             ),
         },
     ]
@@ -60,11 +61,17 @@ class ManifestoRILETask(ScoringTask):
         use_cot_summarizer: bool = False,
         use_cot_scorer: bool = False,
         use_cot_merge: Optional[bool] = None,
+        scorer_max_tokens: int = 96,
+        scorer_temperature: float = 0.0,
+        scorer_strict_parse: bool = True,
         **_: Optional[object],
     ):
         if use_cot_merge is None:
             use_cot_merge = use_cot_summarizer
         self._use_cot_merge = use_cot_merge
+        scorer_max_tokens = max(1, int(scorer_max_tokens))
+        scorer_temperature = float(scorer_temperature)
+        scorer_strict_parse = bool(scorer_strict_parse)
 
         prompt_builders = PromptBuilders(
             summarize=default_summarize_prompt,
@@ -87,7 +94,12 @@ class ManifestoRILETask(ScoringTask):
             rubric=RILE_PRESERVATION_RUBRIC.strip(),
             task_context=RILE_TASK_CONTEXT.strip(),
             prompt_builders=prompt_builders,
-            predictor_factory=lambda: RILEScorer(use_cot=use_cot_scorer),
+            predictor_factory=lambda: RILEScorer(
+                use_cot=use_cot_scorer,
+                max_tokens=scorer_max_tokens,
+                temperature=scorer_temperature,
+                strict_parse=scorer_strict_parse,
+            ),
             summarizer_factory=lambda: GenericSummarizer(use_cot=use_cot_summarizer),
             oracle_scorer_factory=scorer.value_extractor,
         )
@@ -95,3 +107,48 @@ class ManifestoRILETask(ScoringTask):
     def create_merge_summarizer(self):
         """Use a dedicated merge module instead of reusing the leaf summarizer."""
         return MergeSummarizer(use_cot=self._use_cot_merge)
+
+    def describe_local_law_oracle(self) -> Dict[str, Any]:
+        return {
+            "available": True,
+            "exact": False,
+            "model_backed": True,
+            "kind": "task_oracle_model_backed",
+            "spec": f"{self.name}:rile_task_oracle",
+        }
+
+    def create_local_law_oracle(
+        self,
+        *,
+        port: Optional[int] = None,
+        model: Optional[str] = None,
+        max_tokens: int = 64,
+        temperature: float = 0.0,
+        strict_parse: bool = True,
+    ) -> Callable[[str], float]:
+        from src.config.dspy_config import configure_dspy, create_vllm_lm
+
+        if port is not None or model:
+            scorer_lm = create_vllm_lm(
+                port=int(port) if port is not None else 8000,
+                model=model,
+                temperature=float(temperature),
+                max_tokens=max(1, int(max_tokens)),
+            )
+            configure_dspy(lm=scorer_lm)
+
+        scorer = RILEScorer(
+            max_tokens=max(1, int(max_tokens)),
+            temperature=float(temperature),
+            strict_parse=bool(strict_parse),
+        )
+
+        def _score_span(text: str) -> float:
+            result = scorer(text=text, task_context=RILE_TASK_CONTEXT)
+            score01 = 0.5
+            if isinstance(result, dict):
+                score01 = float(result.get("score", 0.5))
+            raw = self.denormalize_score(score01)
+            return float(0.0 if raw is None else raw)
+
+        return _score_span

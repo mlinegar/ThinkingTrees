@@ -1,0 +1,175 @@
+version: 1
+name: thinkingtrees_performance_overnight_quick
+output_root: outputs/performance_suite
+
+defaults:
+  repeats: 1
+  timeout_seconds: 1800
+  cwd: .
+
+cases:
+  - id: micro_conditional_memory_quick
+    layer: micro
+    description: Quick conditional-memory microbench (Engram-related path).
+    timeout_seconds: 900
+    command:
+      - ./venv/bin/python
+      - scripts/run_component_microbench.py
+      - --bench
+      - conditional_memory
+      - --iterations
+      - "500"
+      - --json-out
+      - "{case_dir}/micro_memory.json"
+    extractors:
+      - type: json_file
+        name: micro
+        path: "{case_dir}/micro_memory.json"
+
+  - id: micro_tree_builder_quick
+    layer: micro
+    description: Quick tree-builder microbench for merge-path overhead.
+    timeout_seconds: 900
+    command:
+      - ./venv/bin/python
+      - scripts/run_component_microbench.py
+      - --bench
+      - tree_builder
+      - --iterations
+      - "140"
+      - --json-out
+      - "{case_dir}/micro_tree_builder.json"
+    extractors:
+      - type: json_file
+        name: micro
+        path: "{case_dir}/micro_tree_builder.json"
+
+  - id: component_dualpath_task_quick
+    layer: component
+    description: Quick DualPath throughput sweep (task_single + task_dp2).
+    timeout_seconds: 1200
+    command:
+      - ./venv/bin/python
+      - scripts/run_pipeline_throughput_limits.py
+      - --steps
+      - task_single,task_dp2
+      - --task-replica-url
+      - http://localhost:8002/v1
+      - --concurrency-grid
+      - 1,2
+      - --min-requests-per-point
+      - "6"
+      - --requests-per-concurrency
+      - "2"
+      - --warmup-requests
+      - "1"
+      - --output-json
+      - "{case_dir}/dualpath_throughput.json"
+      - --output-csv
+      - "{case_dir}/dualpath_throughput.csv"
+      - --auto-start-servers
+      - --clear-ports
+      - --clear-vllm-state
+    extractors:
+      - type: throughput_suite
+        name: throughput
+        path: "{case_dir}/dualpath_throughput.json"
+
+  - id: integration_engram_memory_reuse_quick
+    layer: integration
+    description: Two-pass probe to validate ConditionalMemory/Engram reuse.
+    timeout_seconds: 2400
+    command:
+      - ./venv/bin/python
+      - scripts/run_memory_reuse_probe.py
+      - --output-dir
+      - "{case_dir}/memory_reuse"
+      - --json-out
+      - "{case_dir}/memory_reuse_probe.json"
+      - --task
+      - manifesto_rile
+      - --train-samples
+      - "1"
+      - --val-samples
+      - "1"
+      - --test-samples
+      - "1"
+      - --n-iterations
+      - "1"
+      - --optimizer-budget
+      - light
+      - --routing-policy
+      - affinity_load_aware
+      - --genrm-init-samples
+      - "0"
+      - --start-server
+      - --engram-memory
+      - --keep-servers-between-passes
+      - --timeout-seconds-per-pass
+      - "900"
+      - --extra-arg=--max-metric-calls
+      - --extra-arg=1
+      - --extra-arg=--skip-summarizer-opt
+      - --extra-arg=--skip-oracle-opt
+    extractors:
+      - type: json_file
+        name: reuse
+        path: "{case_dir}/memory_reuse_probe.json"
+
+  - id: integration_backend_gate_vllm_quick
+    layer: integration
+    description: RILE + RULER quick gate on vLLM (single shared port).
+    timeout_seconds: 1200
+    command:
+      - ./scripts/run_backend_parity_gate.sh
+      - --vllm-only
+      - --profile
+      - nemotron-30b-nvfp4
+      - --port
+      - "8000"
+      - --manifesto-ids
+      - "51320_198306"
+      - "51620_198306"
+      - --ruler-phase
+      - S0_smoke
+      - --ruler-max-units
+      - "1"
+      - --ruler-max-problems
+      - "12"
+      - --output-root
+      - "{case_dir}/backend_gate"
+      - --run-id
+      - run
+    extractors:
+      - type: json_file
+        name: gate_vllm
+        path: "{case_dir}/backend_gate/run/comparison_summary.json"
+
+  - id: integration_backend_gate_sglang_quick
+    layer: integration
+    description: RILE + RULER quick gate on SGLang (single shared port).
+    timeout_seconds: 1200
+    command:
+      - ./scripts/run_backend_parity_gate.sh
+      - --sglang-only
+      - --profile
+      - nemotron-30b-nvfp4
+      - --port
+      - "8000"
+      - --manifesto-ids
+      - "51320_198306"
+      - "51620_198306"
+      - --ruler-phase
+      - S0_smoke
+      - --ruler-max-units
+      - "1"
+      - --ruler-max-problems
+      - "12"
+      - --output-root
+      - "{case_dir}/backend_gate"
+      - --run-id
+      - run
+    extractors:
+      - type: json_file
+        name: gate_sglang
+        path: "{case_dir}/backend_gate/run/comparison_summary.json"

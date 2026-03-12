@@ -233,6 +233,28 @@ def linearMomentPair {d : ℕ} : MomentFunction ((Fin d → ℝ) × ℝ) d :=
   fun D β => linearMoment D.2 D.1 β
 
 /-- DSL linear regression is consistent under M-estimation conditions. -/
+theorem DSL_linear_unbiased_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Con : Type*} {d : ℕ}
+    (E : (((Fin d → ℝ) × ℝ × ℝ × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (dbs : DesignBasedSampling (Fin d → ℝ) ℝ Con)
+    (β_star : Fin d → ℝ)
+    (reg : RegularityConditions
+      ((Fin d → ℝ) × ℝ × ℝ × SamplingIndicator × ℝ) d)
+    (h_unbiased :
+      MomentUnbiased (DSLMomentFromData (linearMomentPair (d := d))) E β_star)
+    (data_seq : ℕ →
+      Ω → List ((Fin d → ℝ) × ℝ × ℝ × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est :
+      IsMEstimatorSeq (DSLMomentFromData (linearMomentPair (d := d)))
+        data_seq β_hat_seq)
+    : ConvergesInProbability μ β_hat_seq (fun _ => β_star) := by
+  exact DSL_consistent_from_assumptions μ E h_consistent dbs (linearMomentPair (d := d)) β_star reg
+    h_unbiased data_seq β_hat_seq h_est
+
+/-- DSL linear regression is consistent under M-estimation conditions. -/
 theorem DSL_linear_unbiased
     {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
     {Con : Type*} {d : ℕ}
@@ -251,8 +273,33 @@ theorem DSL_linear_unbiased
       IsMEstimatorSeq (DSLMomentFromData (linearMomentPair (d := d)))
         data_seq β_hat_seq)
     : ConvergesInProbability μ β_hat_seq (fun _ => β_star) := by
-  exact DSL_consistent μ axioms dbs (linearMomentPair (d := d)) β_star reg h_unbiased data_seq
-    β_hat_seq h_est
+  exact DSL_linear_unbiased_from_assumptions μ axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    dbs β_star reg h_unbiased data_seq β_hat_seq h_est
+
+/-- DSL standard errors provide valid coverage.
+
+    Under Assumption 1, the 95% CI achieves nominal coverage
+    asymptotically, regardless of prediction accuracy. -/
+theorem DSL_linear_valid_coverage_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Con : Type*} {d : ℕ}
+    (E : (((Fin d → ℝ) × ℝ × ℝ × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (coverage_axioms : CoverageFromAsymptoticNormal μ d)
+    (dbs : DesignBasedSampling (Fin d → ℝ) ℝ Con)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions
+      ((Fin d → ℝ) × ℝ × ℝ × SamplingIndicator × ℝ) d)
+    (h_unbiased :
+      MomentUnbiased (DSLMomentFromData (linearMomentPair (d := d))) E β_star)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ) (h_α : 0 < α ∧ α < 1)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    : AsymptoticCoverage μ CI_seq β_star α := by
+  exact DSL_valid_coverage_from_assumptions μ E h_normal coverage_axioms dbs (linearMomentPair (d := d))
+    β_star V reg h_unbiased CI_seq α h_α centered_scaled_seq
 
 /-- DSL standard errors provide valid coverage.
 
@@ -275,8 +322,9 @@ theorem DSL_linear_valid_coverage
     (α : ℝ) (h_α : 0 < α ∧ α < 1)
     (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
     : AsymptoticCoverage μ CI_seq β_star α := by
-  exact DSL_valid_coverage μ axioms coverage_axioms dbs (linearMomentPair (d := d)) β_star V reg
-    h_unbiased CI_seq α h_α centered_scaled_seq
+  exact DSL_linear_valid_coverage_from_assumptions μ axioms.E
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    coverage_axioms dbs β_star V reg h_unbiased CI_seq α h_α centered_scaled_seq
 
 end DSL
 

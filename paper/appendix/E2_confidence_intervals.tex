@@ -1,0 +1,223 @@
+\section{Confidence Intervals and Statistical Guarantees}
+\label{app:confidence}
+
+This appendix provides rigorous statistical guarantees for the probabilistic audit, including Hoeffding bounds for confidence intervals and sample size calculations.
+
+\subsection{Proof Strategy Overview}
+
+The statistical guarantees for the probabilistic audit rest on two core ideas:
+
+\paragraph{Exponential Concentration via Hoeffding.}
+Bounded random variables concentrate exponentially around their mean. The key insight is that for a random variable $X \in [a, b]$, the moment generating function $\E[e^{sX}]$ is bounded by a sub-Gaussian quantity. Averaging $n$ independent bounded variables reduces variance by $1/n$, and the exponential tail bound translates this into confidence intervals that shrink as $1/\sqrt{n}$.
+
+\paragraph{Union Bounds for Simultaneous Control.}
+When controlling multiple violation rates simultaneously (sufficiency, merge consistency, idempotence), we apply a union bound: if each individual failure probability is $\delta/k$, the probability of \emph{any} failure is at most $\delta$. This inflates the required sample size logarithmically in $k$, but provides joint guarantees.
+
+\subsection{Hoeffding's Inequality}
+
+The audit relies on Hoeffding's inequality to construct confidence intervals for violation rates.
+
+\begin{theorem}[Hoeffding's Inequality]
+Let $X_1, \ldots, X_n$ be independent random variables with $X_i \in [a_i, b_i]$. Let $S_n = \sum_{i=1}^n X_i$ and $\mu = \E[S_n]$. Then for any $t > 0$:
+\[
+\Pr(S_n - \mu \ge t) \le \exp\left( -\frac{2t^2}{\sum_{i=1}^n (b_i - a_i)^2} \right).
+\]
+\end{theorem}
+
+\begin{proof}
+Let $Y_i=X_i-\E[X_i]$ so that $\E[Y_i]=0$ and $Y_i\in[a_i-\E[X_i],\,b_i-\E[X_i]]$ with range width at most $b_i-a_i$. By Hoeffding's lemma,
+$\E[e^{sY_i}]\le \exp\!\left(s^2(b_i-a_i)^2/8\right)$. Independence yields
+\[
+\E\!\left[e^{s(S_n-\mu)}\right]=\prod_{i=1}^n \E[e^{sY_i}]
+\le \exp\!\left(\frac{s^2}{8}\sum_{i=1}^n (b_i-a_i)^2\right).
+\]
+By Markov's inequality,
+\[
+\Pr(S_n-\mu\ge t)\le \exp\!\left(-st+\frac{s^2}{8}\sum_{i=1}^n (b_i-a_i)^2\right).
+\]
+Optimizing in $s$ at $s^*=4t/\sum_i(b_i-a_i)^2$ gives the stated bound.
+\end{proof}
+
+For our audit, each indicator $I_i \in \{0, 1\}$, so $a_i = 0$ and $b_i = 1$.
+
+\begin{corollary}[Audit Confidence Interval]
+Let $\hat{p} = \frac{1}{n} \sum_{i=1}^n I_i$ be the empirical violation rate from $n$ i.i.d. samples. For any $\delta \in (0, 1)$:
+\[
+\Pr\left( |p - \hat{p}| > \sqrt{\frac{\log(2/\delta)}{2n}} \right) \le \delta,
+\]
+where $p = \E[I_i]$ is the true violation rate.
+\end{corollary}
+
+\begin{proof}
+Apply Hoeffding's inequality with $t = n\epsilon$ where $\epsilon = \sqrt{\frac{\log(2/\delta)}{2n}}$. The two-sided bound follows from a union bound over upper and lower tails.
+\end{proof}
+
+\subsection{Confidence Intervals for Each Condition}
+
+\paragraph{Sufficiency.}
+From $n_\ell$ sampled leaves:
+\[
+\hat{p}_{\text{suff}} \pm \sqrt{\frac{\log(2/\delta)}{2n_\ell}}
+\]
+is a $(1-\delta)$-confidence interval for the true sufficiency violation rate.
+
+\paragraph{Merge Consistency.}
+From $n_m = n_{\text{bound}} + n_{\text{merge}}$ sampled merge operations:
+\[
+\hat{p}_{\text{assoc}} \pm \sqrt{\frac{\log(2/\delta)}{2n_m}}
+\]
+is a $(1-\delta)$-confidence interval for the true merge consistency violation rate.
+
+\paragraph{Idempotence.}
+From $n_s$ sampled re-summarizations:
+\[
+\hat{p}_{\text{idem}} \pm \sqrt{\frac{\log(2/\delta)}{2n_s}}
+\]
+is a $(1-\delta)$-confidence interval for the true idempotence violation rate.
+
+\subsection{Sample Size Calculations}
+
+Given a target confidence level $(1-\delta)$ and desired precision $\epsilon$, the required sample size is:
+\[
+n \ge \frac{\log(2/\delta)}{2\epsilon^2}.
+\]
+
+\begin{example}
+To achieve 95\% confidence ($\delta = 0.05$) with precision $\epsilon = 0.01$:
+\[
+n \ge \frac{\log(40)}{2 \cdot 0.01^2} = \frac{3.69}{0.0002} \approx 18,\!445.
+\]
+For precision $\epsilon = 0.05$:
+\[
+n \ge \frac{\log(40)}{2 \cdot 0.05^2} \approx 738.
+\]
+\end{example}
+
+\subsection{Confidence Bound for Global Distortion}
+
+The union bound from Appendix~\ref{app:practical_audit} provides:
+\[
+\Delta_R \le N \cdot p_{\text{suff}} + M \cdot p_{\text{assoc}} + (R-1) \cdot p_{\text{idem}}.
+\]
+
+Using the plug-in estimators with confidence intervals:
+
+\begin{theorem}[Confidence Bound for $\Delta_R$]
+Let $\hat{\Delta}_R = N \hat{p}_{\text{suff}} + M \hat{p}_{\text{assoc}} + (R-1) \hat{p}_{\text{idem}}$ be the plug-in estimate. Define:
+\[
+\epsilon_{\text{suff}} = \sqrt{\frac{\log(6/\delta)}{2n_\ell}}, \quad
+\epsilon_{\text{assoc}} = \sqrt{\frac{\log(6/\delta)}{2n_m}}, \quad
+\epsilon_{\text{idem}} = \sqrt{\frac{\log(6/\delta)}{2n_s}}.
+\]
+Then with probability at least $1-\delta$:
+\[
+\Delta_R \le \hat{\Delta}_R + N \epsilon_{\text{suff}} + M \epsilon_{\text{assoc}} + (R-1) \epsilon_{\text{idem}}.
+\]
+\end{theorem}
+
+\begin{proof}
+From Appendix~\ref{app:practical_audit},
+$
+\Delta_R \le N p_{\text{suff}} + M p_{\text{assoc}} + (R-1) p_{\text{idem}}.
+$
+Apply Hoeffding's inequality with failure probability $\delta/3$ to each violation rate to obtain
+$
+\Pr(|p_{\text{suff}}-\hat p_{\text{suff}}|>\epsilon_{\text{suff}})\le \delta/3
+$
+and similarly for $p_{\text{assoc}}$ and $p_{\text{idem}}$. By the union bound, with probability at least $1-\delta$ all three inequalities hold. On that event,
+\[
+\Delta_R \le N (\hat{p}_{\text{suff}} + \epsilon_{\text{suff}})
+      + M (\hat{p}_{\text{assoc}} + \epsilon_{\text{assoc}})
+      + (R-1) (\hat{p}_{\text{idem}} + \epsilon_{\text{idem}})
+ = \hat{\Delta}_R + N \epsilon_{\text{suff}} + M \epsilon_{\text{assoc}} + (R-1) \epsilon_{\text{idem}}.
+\]
+\end{proof}
+
+\subsection{Connection to Preference Learning Bounds}
+
+The unified gap bound (Theorem~\ref{thm:unified-gap}) states:
+\[
+|\mathcal{L}^X(\pi) - \mathcal{L}^Z(\pi)| \le L \cdot \Delta_R.
+\]
+
+Combining with the confidence bound for $\Delta_R$:
+
+\begin{corollary}[Confidence Bound for Preference Learning Gap]
+With probability at least $1-\delta$:
+\[
+|\mathcal{L}^X(\pi) - \mathcal{L}^Z(\pi)| \le L \cdot \left( \hat{\Delta}_R + N \epsilon_{\text{suff}} + M \epsilon_{\text{assoc}} + (R-1) \epsilon_{\text{idem}} \right).
+\]
+\end{corollary}
+
+This provides a fully computable upper bound on the preference learning gap from audit measurements.
+
+\subsection{Stratified Sampling}
+
+When the tree has heterogeneous structure (varying depths, block sizes), stratified sampling can improve precision.
+
+\begin{definition}[Stratified Estimator]
+Partition nodes into $K$ strata with weights $w_k$ (e.g., proportion of nodes). Sample $n_k$ nodes from stratum $k$ and compute:
+\[
+\hat{p}_{\text{stratified}} = \sum_{k=1}^K w_k \hat{p}_k,
+\]
+where $\hat{p}_k$ is the within-stratum empirical rate.
+\end{definition}
+
+\begin{theorem}[Stratified Confidence Interval]
+The stratified estimator has variance:
+\[
+\text{Var}(\hat{p}_{\text{stratified}}) = \sum_{k=1}^K \frac{w_k^2 p_k(1-p_k)}{n_k}.
+\]
+Optimal allocation sets $n_k \propto w_k \sqrt{p_k(1-p_k)}$, which in practice is approximated by $n_k \propto w_k$.
+\end{theorem}
+
+\begin{proof}
+Within stratum $k$, the estimator $\hat p_k=\frac{1}{n_k}\sum_{i=1}^{n_k} I_{ki}$ averages i.i.d.\ Bernoulli$(p_k)$ variables, so
+$\mathrm{Var}(\hat p_k)=p_k(1-p_k)/n_k$. Samples are independent across strata, hence
+\[
+\mathrm{Var}(\hat p_{\text{stratified}})=\mathrm{Var}\!\left(\sum_{k=1}^K w_k \hat p_k\right)
+=\sum_{k=1}^K w_k^2\,\mathrm{Var}(\hat p_k)
+=\sum_{k=1}^K \frac{w_k^2 p_k(1-p_k)}{n_k}.
+\]
+To minimize variance under $\sum_k n_k=n$, apply Lagrange multipliers to
+$\sum_k w_k^2 p_k(1-p_k)/n_k+\lambda(\sum_k n_k-n)$, yielding
+$n_k\propto w_k\sqrt{p_k(1-p_k)}$. When $p_k$ is unknown, proportional allocation
+$n_k\propto w_k$ is a practical approximation.
+\end{proof}
+
+\paragraph{Stratification by Depth.}
+One natural stratification is by tree depth:
+\begin{itemize}[nosep]
+    \item Stratum 1: Leaf nodes (depth 0)
+    \item Stratum 2: First-level merges (depth 1)
+    \item Stratum 3: Higher-level merges (depth $\ge 2$)
+\end{itemize}
+This captures potential heterogeneity in violation rates across tree levels.
+
+\subsection{Sequential Testing}
+
+For online auditing, sequential testing allows early stopping when confidence is achieved.
+
+\begin{definition}[Sequential Probability Ratio Test]
+At each sample $n$, compute:
+\[
+\Lambda_n = \prod_{i=1}^n \frac{p_1^{I_i}(1-p_1)^{1-I_i}}{p_0^{I_i}(1-p_0)^{1-I_i}},
+\]
+where $p_0$ is the null hypothesis (acceptable rate) and $p_1$ is the alternative (unacceptable rate).
+\end{definition}
+
+Stop and reject $H_0$ if $\Lambda_n > B$; stop and accept $H_0$ if $\Lambda_n < A$, where $A$ and $B$ are chosen to achieve desired Type I and Type II error rates.
+
+\subsection{Implementation in ThinkingTrees}
+
+The \texttt{TreeAuditor} class implements these bounds:
+
+\begin{lstlisting}
+def hoeffding_ci(self, n: int, p_hat: float, delta: float = 0.05) -> float:
+    """Compute half-width of Hoeffding confidence interval."""
+    return np.sqrt(np.log(2 / delta) / (2 * n))
+
+def required_samples(self, epsilon: float, delta: float = 0.05) -> int:
+    """Compute samples needed for given precision and confidence."""
+    return int(np.ceil(np.log(2 / delta) / (2 * epsilon**2)))
+\end{lstlisting}

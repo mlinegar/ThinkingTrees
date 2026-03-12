@@ -17,7 +17,7 @@ import FormalProofs.CLT.Normal
 import FormalProofs.CLT.LevyContinuity
 
 /-!
-# FormalProofs/Probability/CLT.lean
+# FormalProofs/CLT/CLT.lean
 
 Building blocks toward a first-principles CLT proof via characteristic functions.
 

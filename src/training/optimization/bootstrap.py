@@ -12,6 +12,7 @@ Bootstrap optimizers are best for:
 """
 
 import logging
+import copy
 from typing import Callable, List, Optional
 
 import dspy
@@ -20,6 +21,48 @@ from .base import AbstractOptimizer
 from .registry import register_optimizer
 
 logger = logging.getLogger(__name__)
+
+
+def _prepare_iterative_bootstrap_student(student: dspy.Module, optimizer_name: str) -> dspy.Module:
+    """
+    Return a student module acceptable to DSPy bootstrap optimizers.
+
+    DSPy's bootstrap-based teleprompters assert that the input student is
+    "uncompiled". In multi-iteration pipeline runs we intentionally pass the
+    previously optimized module back in, so we defensively clear the compiled
+    marker (on a copied module when possible) before each compile step.
+    """
+    prepared = student
+    try:
+        if hasattr(student, "deepcopy"):
+            prepared = student.deepcopy()
+        else:
+            prepared = copy.deepcopy(student)
+    except Exception:
+        prepared = student
+
+    if getattr(prepared, "_compiled", False):
+        try:
+            setattr(prepared, "_compiled", False)
+        except Exception:
+            pass
+        logger.info(
+            "%s: cleared pre-existing _compiled flag for iterative optimization",
+            optimizer_name,
+        )
+
+    if hasattr(prepared, "predictors"):
+        try:
+            for predictor in list(prepared.predictors()):
+                if getattr(predictor, "_compiled", False):
+                    try:
+                        setattr(predictor, "_compiled", False)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    return prepared
 
 
 @register_optimizer("bootstrap")
@@ -75,6 +118,7 @@ class BootstrapOptimizer(AbstractOptimizer):
 
         # Build optimizer kwargs
         opt_kwargs = self._build_kwargs()
+        student_for_compile = _prepare_iterative_bootstrap_student(student, self.name)
 
         try:
             optimizer = dspy.BootstrapFewShot(
@@ -84,10 +128,14 @@ class BootstrapOptimizer(AbstractOptimizer):
 
             # BootstrapFewShot uses student/teacher/trainset signature
             if teacher is None:
-                teacher = student.deepcopy() if hasattr(student, 'deepcopy') else None
+                teacher = (
+                    student_for_compile.deepcopy()
+                    if hasattr(student_for_compile, 'deepcopy')
+                    else None
+                )
 
             compiled = optimizer.compile(
-                student,
+                student_for_compile,
                 teacher=teacher,
                 trainset=trainset,
             )
@@ -173,6 +221,7 @@ class BootstrapRandomSearchOptimizer(AbstractOptimizer):
 
         # Build optimizer kwargs
         opt_kwargs = self._build_kwargs()
+        student_for_compile = _prepare_iterative_bootstrap_student(student, self.name)
 
         try:
             from dspy.teleprompt import BootstrapFewShotWithRandomSearch
@@ -184,7 +233,7 @@ class BootstrapRandomSearchOptimizer(AbstractOptimizer):
 
             # RandomSearch uses student/trainset signature
             compiled = optimizer.compile(
-                student,
+                student_for_compile,
                 trainset=trainset,
             )
             return compiled

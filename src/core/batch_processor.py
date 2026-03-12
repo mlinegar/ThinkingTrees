@@ -11,15 +11,9 @@ we CAN parallelize across multiple documents AND pool requests from the same
 level across many trees.
 
 Architecture:
-    ┌─────────────────────────────────────────────────────────────┐
-    │                    BatchOrchestrator                         │
-    │  Manages N concurrent documents, pools their requests        │
-    └─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
                    ┌─────────────────────┐
-                   │    Request Pool     │
-                   │  (async queue)      │
+                   │  AsyncBatchLLMClient │
+                   │  (request pooling)  │
                    └─────────────────────┘
                               │
                               ▼
@@ -35,12 +29,15 @@ Architecture:
 """
 
 import asyncio
+import hashlib
 import logging
 import math
 import os
+import re as _re
 import time
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Any, Callable, Awaitable, Tuple, Union, Set
+from enum import Enum
+from typing import List, Dict, Optional, Any, Callable, Awaitable, Tuple, Union, Set, TYPE_CHECKING
 import aiohttp
 
 from src.preprocessing.chunker import chunk_for_ops
@@ -48,7 +45,39 @@ from src.core.data_models import Node
 from src.config.constants import LOG_TRUNCATE_LENGTH
 from src.core.async_utils import cancel_tasks
 
+if TYPE_CHECKING:
+    from src.core.vllm_metrics import VLLMMetricsCollector
+
 logger = logging.getLogger(__name__)
+
+_PORT_RE = _re.compile(r":(\d+)")
+
+
+def _extract_port(url: str) -> Optional[int]:
+    """Extract port number from a base URL like ``http://localhost:8000/v1``."""
+    m = _PORT_RE.search(url)
+    return int(m.group(1)) if m else None
+
+
+class RoutingPolicy(str, Enum):
+    """Explicit multi-server routing policies."""
+
+    ROUND_ROBIN = "round_robin"
+    DOCUMENT_AFFINITY = "document_affinity"
+    AFFINITY_LOAD_AWARE = "affinity_load_aware"
+
+
+def parse_routing_policy(value: Optional[str]) -> RoutingPolicy:
+    """Parse routing policy strings with a safe default."""
+    rendered = str(value or "").strip().lower()
+    valid = {
+        RoutingPolicy.ROUND_ROBIN.value,
+        RoutingPolicy.DOCUMENT_AFFINITY.value,
+        RoutingPolicy.AFFINITY_LOAD_AWARE.value,
+    }
+    if rendered in valid:
+        return RoutingPolicy(rendered)
+    return RoutingPolicy.AFFINITY_LOAD_AWARE
 
 
 # =============================================================================
@@ -62,9 +91,11 @@ class BatchRequest:
     messages: List[Dict[str, str]]
     max_tokens: int = 8192
     temperature: float = 0.7
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
 
     # Tracking
     document_id: Optional[str] = None
+    routing_key: Optional[str] = None
     request_type: str = "summarize"  # summarize, audit, score
     priority: int = 0  # Higher = more urgent
 
@@ -241,6 +272,7 @@ class AsyncBatchLLMClient:
         # Request pool
         self._request_queue: asyncio.Queue[BatchRequest] = None
         self._pending_futures: Dict[str, asyncio.Future] = {}
+        self._inflight_request_tasks: Dict[str, asyncio.Task] = {}
 
         # Concurrency control
         self._semaphore: asyncio.Semaphore = None
@@ -248,6 +280,14 @@ class AsyncBatchLLMClient:
 
         # Statistics
         self.stats = BatchStats()
+        self._recovery_attempts: int = 0
+        self._recovery_successes: int = 0
+        self._recovery_failures: int = 0
+        self._recovery_skipped_cooldown: int = 0
+        self._retry_attempts: int = 0
+        self._retry_after_recovery: int = 0
+        self._error_status_counts: Dict[str, int] = {}
+        self._error_type_counts: Dict[str, int] = {}
 
         # State
         self._running = False
@@ -259,6 +299,11 @@ class AsyncBatchLLMClient:
     def model(self) -> str:
         """Get model name (auto-detected if not set)."""
         return self._model or "unknown"
+
+    @property
+    def pending_count(self) -> int:
+        """Number of in-flight requests awaiting responses."""
+        return len(self._pending_futures)
 
     def _response_cache_allows(self, request: BatchRequest) -> bool:
         if self._response_cache is None or self._response_cache_mode == "off":
@@ -364,6 +409,37 @@ class AsyncBatchLLMClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.stop()
 
+    @property
+    def diagnostics(self) -> Dict[str, Any]:
+        request_types = (
+            sorted(self._response_cache_request_types)
+            if self._response_cache_request_types is not None
+            else None
+        )
+        return {
+            "base_url": str(self.base_url),
+            "model": str(self.model),
+            "pending_count": int(self.pending_count),
+            "inflight_task_count": int(len(self._inflight_request_tasks)),
+            "response_cache": {
+                "enabled": bool(self._response_cache is not None and self._response_cache_mode != "off"),
+                "mode": str(self._response_cache_mode),
+                "request_types": request_types,
+            },
+            "recovery": {
+                "attempts": int(self._recovery_attempts),
+                "successes": int(self._recovery_successes),
+                "failures": int(self._recovery_failures),
+                "skipped_cooldown": int(self._recovery_skipped_cooldown),
+                "retry_attempts": int(self._retry_attempts),
+                "retry_after_recovery": int(self._retry_after_recovery),
+            },
+            "errors": {
+                "status_counts": dict(self._error_status_counts),
+                "type_counts": dict(self._error_type_counts),
+            },
+        }
+
     async def submit(self, request: BatchRequest) -> str:
         """
         Submit a request to the pool.
@@ -440,18 +516,33 @@ class AsyncBatchLLMClient:
         future = self._pending_futures[request_id]
 
         try:
-            response = await asyncio.wait_for(future, timeout=timeout)
+            # Shield future so timeout does not cancel the producer-side future.
+            response = await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
             del self._pending_futures[request_id]
             return response
         except asyncio.TimeoutError:
-            logger.error(f"Request {request_id} timed out after {timeout:.0f}s "
-                        f"({len(self._pending_futures)} still pending)")
-            del self._pending_futures[request_id]
-            return BatchResponse(
+            inflight_task = self._inflight_request_tasks.pop(request_id, None)
+            cancelled_inflight = False
+            if inflight_task is not None and not inflight_task.done():
+                inflight_task.cancel()
+                cancelled_inflight = True
+            logger.error(
+                "Request %s timed out after %.0fs (%d still pending, cancelled_inflight=%s)",
+                request_id,
+                timeout,
+                len(self._pending_futures),
+                cancelled_inflight,
+            )
+            response = BatchResponse(
                 request_id=request_id,
                 content="",
-                error=f"Timeout after {timeout}s"
+                error=f"Timeout after {timeout}s",
             )
+            if request_id in self._pending_futures:
+                del self._pending_futures[request_id]
+            if not future.done():
+                future.set_result(response)
+            return response
 
     async def call(self, request: BatchRequest) -> BatchResponse:
         """Submit and await in one call (convenience method)."""
@@ -506,138 +597,180 @@ class AsyncBatchLLMClient:
 
     async def _send_single(self, request: BatchRequest):
         """Send a single request with semaphore control."""
-        async with self._semaphore:
-            start_time = time.time()
-            payload = {
-                "model": self._model,
-                "messages": request.messages,
-                "max_tokens": request.max_tokens,
-                "temperature": request.temperature,
-            }
+        request_task = asyncio.current_task()
+        if request_task is not None:
+            self._inflight_request_tasks[request.request_id] = request_task
+        try:
+            async with self._semaphore:
+                start_time = time.time()
+                payload = {
+                    "model": self._model,
+                    "messages": request.messages,
+                    "max_tokens": request.max_tokens,
+                    "temperature": request.temperature,
+                }
+                if request.chat_template_kwargs:
+                    payload["chat_template_kwargs"] = dict(request.chat_template_kwargs)
 
-            max_attempts = 2  # Initial try + one retry after recovery.
-            for attempt in range(max_attempts):
-                try:
-                    async with self._session.post(
-                        f"{self.base_url}/chat/completions",
-                        json=payload,
-                        headers={"Authorization": f"Bearer {self.api_key}"}
-                    ) as resp:
-                        latency = (time.time() - start_time) * 1000
-                        if resp.status == 200:
-                            data = await resp.json()
-                            content = data["choices"][0]["message"]["content"]
-                            usage = data.get("usage", {})
+                max_attempts = 2  # Initial try + one retry after recovery.
+                for attempt in range(max_attempts):
+                    try:
+                        async with self._session.post(
+                            f"{self.base_url}/chat/completions",
+                            json=payload,
+                            headers={"Authorization": f"Bearer {self.api_key}"}
+                        ) as resp:
+                            latency = (time.time() - start_time) * 1000
+                            if resp.status == 200:
+                                data = await resp.json()
+                                content = data["choices"][0]["message"]["content"]
+                                usage = data.get("usage", {})
+
+                                response = BatchResponse(
+                                    request_id=request.request_id,
+                                    content=content,
+                                    usage=usage,
+                                    latency_ms=latency,
+                                )
+                                self.stats.completed_requests += 1
+                                self.stats.total_latency_ms += latency
+                                self.stats.total_tokens += usage.get("total_tokens", 0)
+                                self.stats.prompt_tokens += usage.get("prompt_tokens", 0)
+                                self.stats.completion_tokens += usage.get("completion_tokens", 0)
+                                if (
+                                    self._response_cache is not None
+                                    and self._response_cache_mode in {"write", "readwrite"}
+                                    and self._response_cache_allows(request)
+                                ):
+                                    try:
+                                        from src.core.response_cache import CachedChatResponse, FileResponseCache
+
+                                        cache_key = request.cache_key
+                                        if not cache_key:
+                                            from src.core.response_cache import make_chat_cache_key
+
+                                            cache_key = make_chat_cache_key(
+                                                model=self.model,
+                                                messages=request.messages,
+                                                max_tokens=request.max_tokens,
+                                                temperature=request.temperature,
+                                                extra={"request_type": request.request_type},
+                                            )
+                                        if cache_key:
+                                            self._response_cache.set(
+                                                cache_key,
+                                                CachedChatResponse(
+                                                    content=content,
+                                                    usage={str(k): int(v) for k, v in dict(usage or {}).items()},
+                                                    model=str(data.get("model") or self.model),
+                                                    created_at=FileResponseCache.now_iso(),
+                                                ),
+                                            )
+                                            self.stats.cache_writes += 1
+                                    except Exception:
+                                        pass
+                                if request.future and not request.future.done():
+                                    request.future.set_result(response)
+                                return
+
+                            # Non-200 response.
+                            body_text = await resp.text()
+                            body_text_lower = str(body_text).lower()
+                            if (
+                                resp.status == 400
+                                and "chat_template_kwargs" in payload
+                                and (
+                                    "chat_template_kwargs" in body_text_lower
+                                    or "enable_thinking" in body_text_lower
+                                )
+                            ):
+                                payload.pop("chat_template_kwargs", None)
+                                logger.warning(
+                                    "Server %s rejected chat_template_kwargs; retrying request %s without thinking-control payload",
+                                    self.base_url,
+                                    request.request_id,
+                                )
+                                continue
+                            error_msg = f"HTTP {resp.status}: {body_text[:LOG_TRUNCATE_LENGTH]}"
+                            status_key = str(resp.status)
+                            self._error_status_counts[status_key] = self._error_status_counts.get(status_key, 0) + 1
+                            recoverable_status = resp.status in {408, 429, 500, 502, 503, 504}
+                            if attempt < (max_attempts - 1) and recoverable_status:
+                                self._retry_attempts += 1
+                                recovered = await self._maybe_recover_server(
+                                    reason=f"http_{resp.status}"
+                                )
+                                if recovered:
+                                    self._retry_after_recovery += 1
+                                    logger.warning(
+                                        "Recovered %s after %s; retrying request %s",
+                                        self.base_url,
+                                        error_msg.split(":", 1)[0],
+                                        request.request_id,
+                                    )
+                                    continue
 
                             response = BatchResponse(
                                 request_id=request.request_id,
-                                content=content,
-                                usage=usage,
+                                content="",
+                                error=error_msg,
                                 latency_ms=latency,
                             )
-                            self.stats.completed_requests += 1
-                            self.stats.total_latency_ms += latency
-                            self.stats.total_tokens += usage.get("total_tokens", 0)
-                            self.stats.prompt_tokens += usage.get("prompt_tokens", 0)
-                            self.stats.completion_tokens += usage.get("completion_tokens", 0)
-                            if (
-                                self._response_cache is not None
-                                and self._response_cache_mode in {"write", "readwrite"}
-                                and self._response_cache_allows(request)
-                            ):
-                                try:
-                                    from src.core.response_cache import CachedChatResponse, FileResponseCache
-
-                                    cache_key = request.cache_key
-                                    if not cache_key:
-                                        from src.core.response_cache import make_chat_cache_key
-
-                                        cache_key = make_chat_cache_key(
-                                            model=self.model,
-                                            messages=request.messages,
-                                            max_tokens=request.max_tokens,
-                                            temperature=request.temperature,
-                                            extra={"request_type": request.request_type},
-                                        )
-                                    if cache_key:
-                                        self._response_cache.set(
-                                            cache_key,
-                                            CachedChatResponse(
-                                                content=content,
-                                                usage={str(k): int(v) for k, v in dict(usage or {}).items()},
-                                                model=str(data.get("model") or self.model),
-                                                created_at=FileResponseCache.now_iso(),
-                                            ),
-                                        )
-                                        self.stats.cache_writes += 1
-                                except Exception:
-                                    pass
+                            self.stats.failed_requests += 1
                             if request.future and not request.future.done():
                                 request.future.set_result(response)
                             return
 
-                        # Non-200 response.
-                        body_text = await resp.text()
-                        error_msg = f"HTTP {resp.status}: {body_text[:LOG_TRUNCATE_LENGTH]}"
-                        recoverable_status = resp.status in {408, 429, 500, 502, 503, 504}
-                        if attempt < (max_attempts - 1) and recoverable_status:
-                            recovered = await self._maybe_recover_server(
-                                reason=f"http_{resp.status}"
-                            )
+                    except aiohttp.ClientError as e:
+                        err_key = type(e).__name__
+                        self._error_type_counts[err_key] = self._error_type_counts.get(err_key, 0) + 1
+                        if attempt < (max_attempts - 1):
+                            self._retry_attempts += 1
+                            recovered = await self._maybe_recover_server(reason=type(e).__name__)
                             if recovered:
+                                self._retry_after_recovery += 1
                                 logger.warning(
                                     "Recovered %s after %s; retrying request %s",
                                     self.base_url,
-                                    error_msg.split(":", 1)[0],
+                                    type(e).__name__,
                                     request.request_id,
                                 )
                                 continue
-
-                        response = BatchResponse(
-                            request_id=request.request_id,
-                            content="",
-                            error=error_msg,
-                            latency_ms=latency,
+                        self._handle_request_error(
+                            request,
+                            f"{type(e).__name__}: {str(e) or 'Connection failed'}",
                         )
-                        self.stats.failed_requests += 1
-                        if request.future and not request.future.done():
-                            request.future.set_result(response)
                         return
-
-                except aiohttp.ClientError as e:
-                    if attempt < (max_attempts - 1):
-                        recovered = await self._maybe_recover_server(reason=type(e).__name__)
-                        if recovered:
-                            logger.warning(
-                                "Recovered %s after %s; retrying request %s",
-                                self.base_url,
-                                type(e).__name__,
-                                request.request_id,
-                            )
-                            continue
-                    self._handle_request_error(
-                        request,
-                        f"{type(e).__name__}: {str(e) or 'Connection failed'}",
-                    )
-                    return
-                except asyncio.TimeoutError:
-                    if attempt < (max_attempts - 1):
-                        recovered = await self._maybe_recover_server(reason="timeout")
-                        if recovered:
-                            logger.warning(
-                                "Recovered %s after timeout; retrying request %s",
-                                self.base_url,
-                                request.request_id,
-                            )
-                            continue
-                    self._handle_request_error(request, "Request timed out")
-                    return
-                except Exception as e:
-                    self._handle_request_error(
-                        request,
-                        f"{type(e).__name__}: {str(e) or 'Unknown error'}",
-                    )
-                    return
+                    except asyncio.TimeoutError:
+                        self._error_type_counts["TimeoutError"] = self._error_type_counts.get("TimeoutError", 0) + 1
+                        if attempt < (max_attempts - 1):
+                            self._retry_attempts += 1
+                            recovered = await self._maybe_recover_server(reason="timeout")
+                            if recovered:
+                                self._retry_after_recovery += 1
+                                logger.warning(
+                                    "Recovered %s after timeout; retrying request %s",
+                                    self.base_url,
+                                    request.request_id,
+                                )
+                                continue
+                        self._handle_request_error(request, "Request timed out")
+                        return
+                    except Exception as e:
+                        err_key = type(e).__name__
+                        self._error_type_counts[err_key] = self._error_type_counts.get(err_key, 0) + 1
+                        self._handle_request_error(
+                            request,
+                            f"{type(e).__name__}: {str(e) or 'Unknown error'}",
+                        )
+                        return
+        except asyncio.CancelledError:
+            self._error_type_counts["CancelledError"] = self._error_type_counts.get("CancelledError", 0) + 1
+            if request.future and not request.future.done():
+                self._handle_request_error(request, "Request cancelled")
+            return
+        finally:
+            self._inflight_request_tasks.pop(request.request_id, None)
 
     async def _maybe_recover_server(self, *, reason: str) -> bool:
         """Run recovery callback at most once per cooldown window."""
@@ -649,9 +782,11 @@ class AsyncBatchLLMClient:
             self._recovery_lock = asyncio.Lock()
         async with self._recovery_lock:
             if (now - self._last_recovery_attempt) < self.recovery_cooldown_seconds:
+                self._recovery_skipped_cooldown += 1
                 return False
             self._last_recovery_attempt = now
 
+        self._recovery_attempts += 1
         try:
             logger.warning(
                 "Attempting batch-client server recovery for %s (%s)",
@@ -660,12 +795,15 @@ class AsyncBatchLLMClient:
             )
             recovered = await asyncio.to_thread(self.recover_base_url_callback, self.base_url)
         except Exception as exc:
+            self._recovery_failures += 1
             logger.warning("Batch-client server recovery callback failed for %s: %s", self.base_url, exc)
             return False
 
         if recovered:
+            self._recovery_successes += 1
             logger.info("Batch-client server recovery succeeded for %s", self.base_url)
             return True
+        self._recovery_failures += 1
         logger.warning("Batch-client server recovery reported failure for %s", self.base_url)
         return False
 
@@ -676,9 +814,15 @@ class AsyncBatchLLMClient:
 
 class MultiServerBatchClient:
     """
-    Load balances requests across multiple vLLM servers.
+    Load balances requests across multiple vLLM/SGLang servers.
 
-    Uses round-robin scheduling to distribute requests evenly.
+    Uses explicit routing policies:
+    - round_robin
+    - document_affinity
+    - affinity_load_aware
+
+    The default policy (`affinity_load_aware`) preserves current behavior:
+    stable affinity by document/request key with load-based spillover.
     Aggregates stats from all underlying clients.
     """
 
@@ -688,9 +832,14 @@ class MultiServerBatchClient:
         max_concurrent_per_server: int = 200,
         batch_size: int = 50,
         batch_timeout: float = 0.1,
+        request_timeout: float = 300.0,
         api_key: str = "EMPTY",
         recover_base_url_callback: Optional[Callable[[str], bool]] = None,
         recovery_cooldown_seconds: float = 120.0,
+        metrics_collector: Optional["VLLMMetricsCollector"] = None,
+        routing_policy: Union[RoutingPolicy, str] = RoutingPolicy.AFFINITY_LOAD_AWARE,
+        load_imbalance_threshold: float = 2.0,
+        min_pending_before_spillover: int = 50,
     ):
         """
         Initialize multi-server client.
@@ -700,13 +849,32 @@ class MultiServerBatchClient:
             max_concurrent_per_server: Max concurrent requests per server
             batch_size: Requests per batch
             batch_timeout: Max wait to fill batch
+            request_timeout: Per-request HTTP timeout in seconds
             api_key: API key for Authorization header
+            metrics_collector: Optional VLLMMetricsCollector for load-aware routing
         """
         self.servers = servers
         self.clients: List[AsyncBatchLLMClient] = []
         self._counter = 0  # Round-robin counter
         self._lock: Optional[asyncio.Lock] = None  # Created in start()
         self._request_client_map: Dict[str, AsyncBatchLLMClient] = {}  # request_id -> client (O(1) lookup)
+        self._metrics_collector = metrics_collector
+        self.routing_policy = (
+            routing_policy
+            if isinstance(routing_policy, RoutingPolicy)
+            else parse_routing_policy(str(routing_policy))
+        )
+        self.load_imbalance_threshold = max(1.1, float(load_imbalance_threshold))
+        self.min_pending_before_spillover = max(1, int(min_pending_before_spillover))
+        self._routing_counts: Dict[str, int] = {}
+        self._routing_policy_counts: Dict[str, int] = {
+            RoutingPolicy.ROUND_ROBIN.value: 0,
+            RoutingPolicy.DOCUMENT_AFFINITY.value: 0,
+            RoutingPolicy.AFFINITY_LOAD_AWARE.value: 0,
+        }
+        self._affinity_total: int = 0
+        self._affinity_without_key: int = 0
+        self._affinity_spillovers: int = 0
 
         # Create a client for each server
         for server_url in servers:
@@ -715,11 +883,13 @@ class MultiServerBatchClient:
                 max_concurrent=max_concurrent_per_server,
                 batch_size=batch_size,
                 batch_timeout=batch_timeout,
+                request_timeout=request_timeout,
                 api_key=api_key,
                 recover_base_url_callback=recover_base_url_callback,
                 recovery_cooldown_seconds=recovery_cooldown_seconds,
             )
             self.clients.append(client)
+            self._routing_counts[str(server_url)] = 0
 
     @property
     def stats(self) -> BatchStats:
@@ -729,16 +899,29 @@ class MultiServerBatchClient:
             combined.total_requests += client.stats.total_requests
             combined.completed_requests += client.stats.completed_requests
             combined.failed_requests += client.stats.failed_requests
+            combined.cache_hits += client.stats.cache_hits
+            combined.cache_misses += client.stats.cache_misses
+            combined.cache_writes += client.stats.cache_writes
             combined.total_tokens += client.stats.total_tokens
             combined.prompt_tokens += client.stats.prompt_tokens
             combined.completion_tokens += client.stats.completion_tokens
             combined.total_latency_ms += client.stats.total_latency_ms
             combined.batches_sent += client.stats.batches_sent
-        # Use wall clock from first client
-        if self.clients:
-            combined.wall_clock_start = self.clients[0].stats.wall_clock_start
-            combined.wall_clock_end = self.clients[0].stats.wall_clock_end
+        starts = [c.stats.wall_clock_start for c in self.clients if c.stats.wall_clock_start > 0]
+        if starts:
+            combined.wall_clock_start = min(starts)
+        ends = [c.stats.wall_clock_end for c in self.clients if c.stats.wall_clock_end > 0]
+        if ends:
+            combined.wall_clock_end = max(ends)
         return combined
+
+    @property
+    def pending_depths(self) -> Dict[str, int]:
+        """Current in-flight request counts by server URL."""
+        return {
+            str(client.base_url): int(client.pending_count)
+            for client in self.clients
+        }
 
     async def start(self):
         """Start all underlying clients."""
@@ -759,152 +942,152 @@ class MultiServerBatchClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.stop()
 
-    def _get_next_client(self) -> AsyncBatchLLMClient:
-        """Get next client using round-robin."""
+    def _round_robin_client(self) -> AsyncBatchLLMClient:
         client = self.clients[self._counter % len(self.clients)]
         self._counter += 1
         return client
 
+    @staticmethod
+    def _affinity_key_for_request(request: BatchRequest) -> Optional[str]:
+        if request.routing_key:
+            return str(request.routing_key)
+        if request.document_id:
+            return str(request.document_id)
+        return None
+
+    @staticmethod
+    def _stable_shard_index(key: str, n: int) -> int:
+        if n <= 0:
+            raise ValueError(f"Invalid shard count: {n}")
+        digest = hashlib.sha256(str(key).encode("utf-8", "surrogatepass")).digest()
+        value = int.from_bytes(digest[:8], "big", signed=False)
+        return int(value % n)
+
+    def _client_load(self, client: AsyncBatchLLMClient) -> int:
+        """Best-effort load proxy for routing.
+
+        Prefers backend queue depth from the metrics collector when available,
+        otherwise falls back to local HTTP in-flight futures.
+        """
+        if self._metrics_collector is not None:
+            port = _extract_port(client.base_url)
+            if port is not None:
+                metrics = self._metrics_collector.get(port)
+                if metrics.reachable:
+                    return int(metrics.num_requests_waiting)
+        return int(client.pending_count)
+
+    def _affinity_client(self, request: BatchRequest, *, load_aware: bool) -> AsyncBatchLLMClient:
+        if len(self.clients) <= 1:
+            return self.clients[0]
+
+        affinity_key = self._affinity_key_for_request(request)
+        if affinity_key is None:
+            self._affinity_without_key += 1
+            return self._round_robin_client()
+
+        self._affinity_total += 1
+        preferred_idx = self._stable_shard_index(affinity_key, len(self.clients))
+        preferred = self.clients[preferred_idx]
+        if not load_aware:
+            return preferred
+
+        loads = [self._client_load(c) for c in self.clients]
+        min_pending = min(loads) if loads else 0
+        preferred_load = self._client_load(preferred)
+        if (
+            preferred_load >= self.min_pending_before_spillover
+            and preferred_load > (min_pending * self.load_imbalance_threshold)
+        ):
+            self._affinity_spillovers += 1
+            return self._least_loaded_client()
+        return preferred
+
+    def _get_client_for_request(self, request: BatchRequest) -> AsyncBatchLLMClient:
+        """Route request using the configured routing policy."""
+        policy_name = self.routing_policy.value
+        self._routing_policy_counts[policy_name] = self._routing_policy_counts.get(policy_name, 0) + 1
+        if self.routing_policy == RoutingPolicy.ROUND_ROBIN:
+            client = self._round_robin_client()
+        elif self.routing_policy == RoutingPolicy.DOCUMENT_AFFINITY:
+            client = self._affinity_client(request, load_aware=False)
+        elif self.routing_policy == RoutingPolicy.AFFINITY_LOAD_AWARE:
+            client = self._affinity_client(request, load_aware=True)
+        else:
+            client = self._round_robin_client()
+
+        base_url = str(client.base_url)
+        self._routing_counts[base_url] = self._routing_counts.get(base_url, 0) + 1
+        return client
+
+    def _least_loaded_client(self) -> AsyncBatchLLMClient:
+        """Return the least-loaded server.
+
+        Uses real vLLM queue depth from metrics collector when available,
+        falling back to local pending request count.
+        """
+        return min(self.clients, key=self._client_load)
+
     async def submit(self, request: BatchRequest) -> str:
-        """Submit request to next available server (round-robin)."""
-        client = self._get_next_client()
+        """Submit request to server selected by document-affinity routing."""
+        client = self._get_client_for_request(request)
         request_id = await client.submit(request)
         # Store mapping for O(1) lookup in await_response
         self._request_client_map[request_id] = client
         return request_id
 
-    async def await_response(self, request_id: str) -> BatchResponse:
-        """Wait for response using O(1) client lookup."""
+    async def await_response(
+        self,
+        request_id: str,
+        timeout: float = 600.0,
+    ) -> BatchResponse:
+        """Wait for response using O(1) client lookup.
+
+        Args:
+            request_id: Request identifier returned by ``submit``.
+            timeout: Maximum wait time in seconds.
+        """
         # Direct lookup using stored mapping
         client = self._request_client_map.get(request_id)
         if client is None:
             raise KeyError(f"Unknown request_id: {request_id}")
 
-        response = await client.await_response(request_id)
-        # Clean up mapping after response received
-        del self._request_client_map[request_id]
-        return response
+        try:
+            response = await client.await_response(request_id, timeout=timeout)
+            return response
+        finally:
+            # Clean up mapping after response resolution (success/timeout/error).
+            self._request_client_map.pop(request_id, None)
 
     async def call(self, request: BatchRequest) -> BatchResponse:
         """Submit and await in one call (no mapping needed, direct to client)."""
-        client = self._get_next_client()
+        client = self._get_client_for_request(request)
         # call() handles submit+await internally on the same client
         return await client.call(request)
+
+    @property
+    def routing_stats(self) -> Dict[str, Any]:
+        return {
+            "policy": self.routing_policy.value,
+            "by_server": dict(self._routing_counts),
+            "policy_counts": dict(self._routing_policy_counts),
+            "affinity_total": int(self._affinity_total),
+            "affinity_without_key": int(self._affinity_without_key),
+            "affinity_spillovers": int(self._affinity_spillovers),
+        }
+
+    @property
+    def diagnostics(self) -> Dict[str, Any]:
+        return {
+            "routing": self.routing_stats,
+            "pending_depths": self.pending_depths,
+            "servers": [c.diagnostics for c in self.clients],
+        }
 
 
 # =============================================================================
 # Multi-Document Batch Orchestrator
 # =============================================================================
-
-class BatchOrchestrator:
-    """
-    Orchestrates batched processing across multiple documents.
-
-    Key strategy:
-    - Process documents in waves
-    - At each tree level, collect ALL requests across ALL documents
-    - Send them as one big batch to vLLM
-    - This maximizes GPU utilization
-
-    Example with 100 documents, 10 chunks each:
-    - Level 0 (leaves): 1000 summarization requests batched together
-    - Level 1: ~500 merge requests batched
-    - Level 2: ~250 merge requests batched
-    - etc.
-    """
-
-    def __init__(
-        self,
-        client: Union[AsyncBatchLLMClient, MultiServerBatchClient],
-        max_concurrent_documents: int = 50,
-    ):
-        """
-        Initialize orchestrator.
-
-        Args:
-            client: Async batch LLM client (single or multi-server)
-            max_concurrent_documents: Max documents to process simultaneously
-        """
-        self.client = client
-        self.max_concurrent_documents = max_concurrent_documents
-
-        # Statistics
-        self.documents_processed = 0
-        self.total_requests = 0
-
-    async def process_documents(
-        self,
-        documents: List[Any],
-        process_fn: Callable[[Any, AsyncBatchLLMClient], Awaitable[Any]],
-        progress_callback: Optional[Callable[[int, int], None]] = None,
-    ) -> List[Any]:
-        """
-        Process multiple documents with batched LLM calls.
-
-        Args:
-            documents: List of documents to process
-            process_fn: Async function(doc, client) -> result
-            progress_callback: Optional callback(completed, total)
-
-        Returns:
-            List of results in same order as input
-        """
-        results = [None] * len(documents)
-        completed = 0
-        total_waves = (len(documents) + self.max_concurrent_documents - 1) // self.max_concurrent_documents
-        show_per_doc = len(documents) <= 20  # Show per-doc status for small batches
-
-        # Process in waves of max_concurrent_documents
-        for wave_start in range(0, len(documents), self.max_concurrent_documents):
-            wave_end = min(wave_start + self.max_concurrent_documents, len(documents))
-            wave_docs = documents[wave_start:wave_end]
-            wave_indices = list(range(wave_start, wave_end))
-            wave_num = wave_start // self.max_concurrent_documents + 1
-
-            logger.info(f"Wave {wave_num}/{total_waves}: Processing {len(wave_docs)} documents...")
-            wave_start_time = time.time()
-
-            # Process wave concurrently
-            tasks = [
-                process_fn(doc, self.client)
-                for doc in wave_docs
-            ]
-            wave_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            wave_elapsed = time.time() - wave_start_time
-            wave_failures = sum(1 for r in wave_results if isinstance(r, Exception))
-
-            # Store results and optionally show per-doc status
-            for idx, result in zip(wave_indices, wave_results):
-                if isinstance(result, Exception):
-                    logger.error(f"  ✗ Doc {idx}: {str(result)[:LOG_TRUNCATE_LENGTH]}")
-                    results[idx] = None
-                else:
-                    results[idx] = result
-                    # Show per-doc status for small batches (domain-agnostic)
-                    if show_per_doc:
-                        # Use generic doc_id
-                        doc_id = getattr(result, 'doc_id', None)
-                        if doc_id:
-                            # Get predicted/truth scores using canonical field names
-                            pred = getattr(result, 'estimated_score', None)
-                            truth = getattr(result, 'reference_score', None)
-                            leaves = getattr(result, 'tree_leaves', 0)
-                            pred_str = f"{pred:.1f}" if pred is not None else "?"
-                            truth_str = f"{truth:.1f}" if truth is not None else "?"
-                            logger.info(f"  ✓ {doc_id}: pred={pred_str}, truth={truth_str}, leaves={leaves}")
-
-                completed += 1
-                if progress_callback:
-                    progress_callback(completed, len(documents))
-
-            # Wave summary
-            logger.info(f"Wave {wave_num}/{total_waves}: Done in {wave_elapsed:.1f}s "
-                       f"({len(wave_docs) - wave_failures}/{len(wave_docs)} succeeded)")
-
-        self.documents_processed += len(documents)
-        return results
-
 
 # =============================================================================
 # Batch Audit Checks
@@ -977,44 +1160,3 @@ def run_batched(coro):
     This function exists for backwards compatibility.
     """
     return asyncio.run(coro)
-
-
-async def process_samples_batched(
-    samples: List[Any],
-    process_fn: Callable[[Any, AsyncBatchLLMClient], Awaitable[Any]],
-    base_url: str = "http://localhost:8000/v1",
-    max_concurrent: int = 200,
-    max_concurrent_documents: int = 50,
-    progress_callback: Optional[Callable[[int, int], None]] = None,
-) -> List[Any]:
-    """
-    High-level function to process samples with batching.
-
-    Args:
-        samples: List of samples to process
-        process_fn: Async function(sample, client) -> result
-        base_url: vLLM server URL
-        max_concurrent: Max concurrent LLM requests
-        max_concurrent_documents: Max concurrent documents
-        progress_callback: Progress callback(completed, total)
-
-    Returns:
-        List of results
-    """
-    async with AsyncBatchLLMClient(
-        base_url=base_url,
-        max_concurrent=max_concurrent,
-    ) as client:
-        orchestrator = BatchOrchestrator(
-            client=client,
-            max_concurrent_documents=max_concurrent_documents,
-        )
-
-        results = await orchestrator.process_documents(
-            documents=samples,
-            process_fn=process_fn,
-            progress_callback=progress_callback,
-        )
-
-        logger.info(f"Batch processing complete: {client.stats}")
-        return results

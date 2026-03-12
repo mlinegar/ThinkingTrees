@@ -73,6 +73,7 @@ class Node:
 
     # Content
     raw_text_span: Optional[str] = None
+    ops_span: Optional[str] = None
     summary: str = ""
 
     # Structure
@@ -84,6 +85,8 @@ class Node:
     audit_result: AuditResult = field(
         default_factory=lambda: AuditResult(status=AuditStatus.PENDING)
     )
+    # Per-node auxiliary payload (support spans, embeddings, sketch states, etc.).
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_leaf(self) -> bool:
@@ -180,10 +183,12 @@ class Node:
             'id': self.id,
             'level': self.level,
             'raw_text_span': self.raw_text_span,
+            'ops_span': self.ops_span,
             'summary': self.summary,
             'left_child_id': self.left_child.id if self.left_child else None,
             'right_child_id': self.right_child.id if self.right_child else None,
             'audit_result': self.audit_result.to_dict(),
+            'metadata': dict(self.metadata or {}),
         }
 
     @classmethod
@@ -199,8 +204,10 @@ class Node:
             id=data['id'],
             level=data['level'],
             raw_text_span=data.get('raw_text_span'),
+            ops_span=data.get('ops_span'),
             summary=data.get('summary', ''),
             audit_result=AuditResult.from_dict(data['audit_result']),
+            metadata=dict(data.get('metadata', {}) or {}),
         )
         # Store child IDs for later linking (not actual references yet)
         node._left_child_id = data.get('left_child_id')
@@ -504,6 +511,7 @@ def leaf(
     node_id: Optional[str] = None,
     summary: Optional[str] = None,
     require_summarization: bool = False,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Node:
     """
     Factory function to create a leaf node.
@@ -549,10 +557,13 @@ def leaf(
     node = Node(
         level=0,
         raw_text_span=text,
+        ops_span=text,
         summary=summary,
     )
     if node_id:
         node.id = node_id
+    if metadata:
+        node.metadata.update(dict(metadata))
     return node
 
 
@@ -560,7 +571,8 @@ def node(
     left: Node,
     right: Node,
     summary: str,
-    node_id: Optional[str] = None
+    node_id: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Node:
     """
     Factory function to create an internal node.
@@ -575,8 +587,14 @@ def node(
         A properly configured internal node with parent refs set
     """
     level = max(left.level, right.level) + 1
+    from src.core.protocols import format_merge_input
+
+    left_ops_span = left.ops_span or left.raw_text_span or left.summary or ""
+    right_ops_span = right.ops_span or right.raw_text_span or right.summary or ""
+
     node = Node(
         level=level,
+        ops_span=format_merge_input(left_ops_span, right_ops_span),
         summary=summary,
         left_child=left,
         right_child=right
@@ -587,5 +605,20 @@ def node(
     # Set parent references
     left.parent = node
     right.parent = node
+
+    if metadata:
+        node.metadata.update(dict(metadata))
+
+    # Propagate best-effort support span metadata (char offsets) when present.
+    try:
+        l_start = left.metadata.get("char_start")
+        l_end = left.metadata.get("char_end")
+        r_start = right.metadata.get("char_start")
+        r_end = right.metadata.get("char_end")
+        if all(isinstance(v, int) for v in [l_start, l_end, r_start, r_end]):
+            node.metadata.setdefault("char_start", min(int(l_start), int(r_start)))
+            node.metadata.setdefault("char_end", max(int(l_end), int(r_end)))
+    except Exception:
+        pass
 
     return node

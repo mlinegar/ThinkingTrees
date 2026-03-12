@@ -176,15 +176,13 @@ def zStatistic (β_hat β_null SE : ℝ) : ℝ :=
 
     For one-sided: Power ≈ Φ((β_alt - β_null)/SE - z_α) -/
 def powerApproximate
+    (std_normal_cdf : ℝ → ℝ)
     (β_alt β_null : ℝ)  -- Alternative and null values
     (SE : ℝ)            -- Standard error
     (z_alpha : ℝ)       -- Critical value
     : ℝ :=
-  -- Simplified: non-centrality parameter
   let ncp := (β_alt - β_null) / SE
-  -- Power ≈ 1 - Φ(z_alpha - ncp) for one-sided
-  -- Placeholder: actual CDF would need Mathlib probability
-  if ncp > z_alpha then 0.8 else 0.5  -- Simplified
+  1 - std_normal_cdf (z_alpha - ncp)
 
 /-- Required n for given power target.
 
@@ -192,15 +190,15 @@ def powerApproximate
 
     This is the key sample size calculation for DSL studies. -/
 def requiredSampleSize
+    (power_at_n : ℕ → ℝ)
     (β_alt β_null : ℝ)
     (σ_Y_sq σ_pred_sq : ℝ)
     (N : ℕ)
     (target_power : ℝ)
     (z_alpha : ℝ)
+    (h_exists : ∃ n, target_power ≤ power_at_n n)
     : ℕ :=
-  -- Simplified: would need actual inverse calculation
-  -- n ≥ σ²_pred / (σ²_Y/z² - ...) roughly
-  N / 10  -- Placeholder
+  Nat.find h_exists
 
 /-!
 ## Comparison with Full Labeling

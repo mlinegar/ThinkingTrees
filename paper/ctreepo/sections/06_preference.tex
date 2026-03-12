@@ -1,0 +1,49 @@
+\section{Connection to Preference Learning}\label{sec:preference}
+
+A central use case for oracle-preserving summarization is preference learning at scale. When documents are too long for direct annotation, researchers usually either truncate (and lose information) or rely on costly full-document reading. C-TreePO offers a third option: summarize hierarchically, audit the pipeline, and collect preferences from summaries with equivalence guarantees to full-document preferences under the stated assumptions.
+
+\subsection{The Factorization Assumption}
+
+The key theoretical assumption is that preferences depend on documents only through their oracle values (Assumption~\ref{ass:CF}). In the preference learning context, this means:
+
+\begin{assumption}[Oracle-indexed preferences]\label{ass:pref}
+Given documents $x_1, x_2$ with oracle values $y_1 = \fstar(x_1)$, $y_2 = \fstar(x_2)$, the probability that a human prefers response $a_1$ to $a_2$ depends only on $(y_1, y_2, a_1, a_2)$, not on the raw texts.
+\end{assumption}
+
+This assumption is satisfied when the task is well-defined (e.g., ``which summary better captures the events in the document?''), when the rubric specifies what aspects matter for comparison, and when annotators are trained to focus on task-relevant features. It may be violated when preferences depend on surface style, phrasing, or other features outside the oracle's scope. In such cases, C-TreePO still provides valid summaries, but the training equivalence theorems no longer apply.
+
+\subsection{DPO on Summaries}
+
+Direct Preference Optimization (DPO) \citep{RafailovEtAl2023DPO} optimizes a policy $\pi_\theta$ using pairwise preferences:
+\[
+\mathcal{L}_{\mathrm{DPO}}(\pi_\theta) = -\E_{(x, a_w, a_l)} \left[ \log \sigma\left( \beta \log \frac{\pi_\theta(a_w|x)}{\pi_{\mathrm{ref}}(a_w|x)} - \beta \log \frac{\pi_\theta(a_l|x)}{\pi_{\mathrm{ref}}(a_l|x)} \right) \right],
+\]
+where $(a_w, a_l)$ are the preferred and dispreferred responses and $\sigma$ is the sigmoid function.
+
+Theorem~\ref{thm:pref-equiv} covers DPO as a special case: when local preservation assumptions hold on realized calls (with context compatibility) and factorization/measurability conditions hold, minimizers on summaries and full documents coincide. \textbf{Practical implication:} collect preferences by showing annotators the summaries $Z^{(R)}$ instead of full documents $X$. Under the theorem's assumptions, summary-based and full-document training target the same population argmin set.
+
+\subsection{Extension to GRPO}
+
+Group Relative Policy Optimization (GRPO) generalizes DPO from pairwise comparisons to $k$-wise rankings using the Plackett-Luce model:
+\[
+P(\text{ranking } \sigma) = \prod_{i=1}^k \frac{\exp(s_{\sigma(i)})}{\sum_{j \ge i} \exp(s_{\sigma(j)})}.
+\]
+Theorem~\ref{thm:pref-equiv} also covers GRPO-PL under the corresponding oracle-measurability/indexing assumptions. This is particularly useful for best-of-$n$ selection, tournament evaluation, and multi-agent comparison.
+
+The same theorem covers GRPO-RL when the method-specific measurability/indexing conditions hold. When those assumptions are only approximate, Theorem~\ref{thm:unified-gap} provides quantitative drift control via $L\cdot\Delta_R$.
+
+\subsection{Practical Workflow}
+
+The recommended workflow for preference learning with C-TreePO is:
+\begin{enumerate}[nosep]
+    \item \textbf{Build hierarchies}: Use \texttt{TreeBuilder} to create summaries of your corpus.
+    \item \textbf{Audit}: Run \texttt{TreeAuditor} to estimate violation rates and verify $\Delta_R$ is acceptable.
+    \item \textbf{Collect preferences}: Have annotators compare summaries (not full documents).
+    \item \textbf{Train}: Use standard DPO/GRPO training on the (summary, preference) pairs.
+    \item \textbf{Deploy}: The trained policy applies to both summaries and full documents.
+\end{enumerate}
+This workflow can substantially reduce annotation cost while, under the stated assumptions, theoretical guarantees ensure that summary-based and full-document training target the same population objective.
+
+\subsection{Limitations}
+
+The training equivalence assumes Assumption~\ref{ass:pref} holds. Common violations include style preferences (annotators prefer certain writing styles unrelated to content), length bias (annotators systematically prefer longer or shorter responses), and formatting preferences (bullet points, headers, or other structural features). When these biases exist, consider expanding the oracle rubric to include relevant stylistic features, training annotators to focus on content, or using the gap bound (Theorem~\ref{thm:unified-gap}) to quantify potential drift.

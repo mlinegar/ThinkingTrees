@@ -1,0 +1,299 @@
+% =============================================================================
+% APPENDIX ADDITIONS TO CAPTURE CODE AND LEAN FORMALIZATION
+%
+% This file contains new sections to add to existing appendices.
+% Copy the relevant sections into the appropriate .tex files.
+% =============================================================================
+
+
+% =============================================================================
+% SECTION 1: ADDITIONS TO APPENDIX L (Lean4 Formalization)
+% File: paper/appendix/L_lean_formalization.tex
+% =============================================================================
+
+% ADD AFTER \subsection{Paper-to-Lean Correspondence}:
+
+\subsection{Complete Theorem Correspondence}
+
+Table~\ref{tab:lean-correspondence} provides the complete mapping between paper results and Lean theorem names.
+
+\begin{table}[h]
+\centering
+\caption{Paper-to-Lean theorem correspondence. All theorems are fully verified with no \texttt{sorry} statements.}
+\label{tab:lean-correspondence}
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Paper Result} & \textbf{Statement} & \textbf{Lean File} & \textbf{Lean Theorem} \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Local Laws (Section~\ref{sec:framework})}} \\
+C1 (Sufficiency) & Leaf-level preservation & LocalLaws.lean & \texttt{L1} \\
+C2 (Idempotence) & On-range stability & LocalLaws.lean & \texttt{L3} \\
+C3 (Merge Consistency) & Compositional preservation & LocalLaws.lean & \texttt{L2} \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Main Theorems (Section~\ref{sec:main-theorems})}} \\
+Theorem 1 & Multi-round preservation & ExpectationTheory.lean & \texttt{multi\_round\_proper} \\
+Corollary 1 & Schedule invariance & ExpectationTheory.lean & \texttt{schedule\_invariance} \\
+Theorem 2 & DPO equivalence & PreferenceLearning.lean & \texttt{dpo\_equivalence} \\
+Theorem 3 & GRPO-PL equivalence & PreferenceLearning.lean & \texttt{grpo\_equivalence} \\
+Theorem 4 & GRPO-RL equivalence & PreferenceLearning.lean & \texttt{grpo\_rl\_equivalence} \\
+Theorem 5 & Unified gap bound & PreferenceBounds.lean & \texttt{unified\_preference\_gap\_bounded} \\
+Theorem 6 & L3 is independent & CounterexampleExistence.lean & \texttt{thm10\_1\_L3\_not\_derivable} \\
+\midrule
+\multicolumn{4}{@{}l}{\textit{Supporting Results}} \\
+Prop. 9.1 & Canonical rep exists & CounterexampleExistence.lean & \texttt{prop9\_1\_canonical\_rep\_exists} \\
+Prop. 9.2 & Compact encoding & CounterexampleExistence.lean & \texttt{prop9\_2\_compact\_encoding\_exists} \\
+-- & DPO gap bound & PreferenceBounds.lean & \texttt{dpo\_gap\_bounded} \\
+-- & GRPO-PL gap bound & PreferenceBounds.lean & \texttt{grpo\_pl\_gap\_bounded} \\
+-- & GRPO-RL gap bound & PreferenceBounds.lean & \texttt{grpo\_rl\_gap\_bounded} \\
+-- & Two-stage composition & TrainingPipeline.lean & \texttt{training\_path\_gap\_bound} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Note on Naming Convention.}
+The Lean formalization uses L1/L2/L3 for the local laws, where:
+\begin{itemize}[nosep]
+    \item L1 corresponds to paper's C1 (Sufficiency)
+    \item L2 corresponds to paper's C3 (Merge Consistency)
+    \item L3 corresponds to paper's C2 (Idempotence)
+\end{itemize}
+This reordering in Lean reflects the proof structure: L1 and L2 are used in the base case of induction, while L3 is used in the inductive step.
+
+
+\subsection{Supporting Lean Modules}
+
+Beyond the core OPT module (27 files), the repository includes additional formalized infrastructure:
+
+\begin{itemize}[nosep]
+    \item \textbf{CLT/} (5 files): Central Limit Theorem development including Helly's selection theorem, L\'{e}vy's continuity theorem, and the full CLT for triangular arrays. These provide foundational probability theory.
+
+    \item \textbf{Econometrics/} (12 files): Potential outcomes framework, inverse probability weighting (IPW) identification, propensity scores, and related causal inference foundations. The IPW results connect to Appendix~\ref{app:sampling}.
+
+    \item \textbf{DSL/} (24 files): Debiased/double machine learning theory including cross-fitting, clustered variance estimation, and judge calibration. The \texttt{JudgeCalibration.lean} results formalize properties used in the training pipeline.
+
+    \item \textbf{ML/} (4 files): Basic supervised learning definitions including empirical risk minimization and hypothesis classes.
+
+    \item \textbf{Shared/} (2 files): Common infrastructure including \texttt{BoundedMetricSpace.lean}, which provides typeclasses for automatic bound derivation in distortion calculations.
+\end{itemize}
+
+These modules provide supporting infrastructure but are not directly invoked in the main theorems. The single axiom (\texttt{ExpectedGroupLossLipschitz}) is justified by McFadden's (1974) Random Utility Model and is used only for the preference gap bounds.
+
+
+% =============================================================================
+% SECTION 2: NEW SUBSECTION FOR APPENDIX O (Training Pipeline)
+% File: paper/appendix/O_training_pipeline.tex
+% Add after the Implementation Map subsection
+% =============================================================================
+
+\subsection{Optimization and Selection: Theory-to-Implementation Bridge}\label{sec:theory-impl-bridge}
+
+This section connects the software components to their mathematical foundations. Each implementation choice is justified by results proven earlier in the paper.
+
+\subsubsection{DSPy Optimizer Selection}
+
+The training pipeline uses DSPy optimizers to tune summarization prompts. The choice of optimizer affects how the system minimizes violations of the local consistency conditions (C1--C3).
+
+\paragraph{Connection to Consistency Bootstrap (Appendix~\ref{app:bootstrap}).}
+All optimizers target the same objective: minimizing the empirical violation rate
+\[
+\hat{p}_{\text{viol}} = \frac{1}{n} \sum_{i=1}^n \One\left[\metric(\fstar(g(x_i)), \fstar(x_i)) > \tau\right].
+\]
+The difference lies in \emph{how} they search the prompt space.
+
+\paragraph{Context Window Considerations.}
+Bootstrap-based optimizers inject few-shot demonstrations into the prompt. For a summarization task, if demonstrations include example summaries of length $\ell$, the effective context consumed is $k \cdot \ell$ for $k$ demonstrations. This can exhaust the context window before the input document is processed.
+
+\begin{table}[h]
+\centering
+\caption{Optimizer selection based on document length and available resources.}
+\label{tab:optimizer-theory}
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Optimizer} & \textbf{Optimization Target} & \textbf{Context Impact} & \textbf{Theory Connection} \\
+\midrule
+\texttt{gepa} & Instructions only & None & Reflection-based search over $\Theta$ \\
+\texttt{mipro} & Instructions + demos & Minimal & Multi-stage with selection \\
+\texttt{bootstrap} & Few-shot demos & $O(k \cdot \ell)$ per call & Teacher-student distillation \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Recommended Practice.}
+Use \texttt{gepa} as the default when a capable model (or external API) is available. The instruction-based optimization does not consume context for demonstrations, making it suitable for long documents. Reserve \texttt{bootstrap} variants for short documents where $k \cdot \ell \ll$ context window.
+
+\subsubsection{Tournament Selection with GenRM}
+
+The \texttt{TournamentStrategy} implements best-of-$k$ selection using a preference model. This is justified by the preference learning equivalence theorems.
+
+\paragraph{Connection to Preference Learning (Section~\ref{sec:preference}).}
+Theorem~\ref{thm:dpo-equiv} establishes that when local laws hold, preference learning on summaries $Z$ is equivalent to learning on originals $X$:
+\[
+\argmin_\pi \mathcal{L}_{\text{DPO}}(\pi; X) = \argmin_\pi \mathcal{L}_{\text{DPO}}(\pi; Z).
+\]
+This means preferences collected \emph{on summaries during tree construction} are valid training signal for the original task.
+
+\paragraph{Algorithm.}
+At each tree node:
+\begin{enumerate}[nosep]
+    \item Generate $k$ candidate summaries at elevated temperature
+    \item Run single-elimination tournament using GenRM pairwise comparisons
+    \item Return winner; record all $(k-1)$ preference pairs
+\end{enumerate}
+
+The preference pairs are a \textbf{free byproduct}---they require no additional oracle calls beyond what tournament selection needs.
+
+\paragraph{Connection to Gap Bounds (Appendix~\ref{sec:dpo}, \ref{sec:grpo}).}
+Theorem~\ref{thm:unified-gap} bounds the gap when local laws hold only approximately:
+\[
+|\mathcal{L}(\pi; \mu_X) - \mathcal{L}(\pi; \mu_Z)| \le L \cdot \Delta_R,
+\]
+where $L$ is the Lipschitz constant of the preference loss and $\Delta_R = \E[\metric(\fstar(Z^{(R)}(X)), \fstar(X))]$ is the expected distortion after $R$ rounds.
+
+This justifies using tournament-collected preferences even when consistency is approximate: the resulting policy is within $L \cdot \Delta_R$ of optimal.
+
+\paragraph{GenRM Integration.}
+The implementation supports two backends:
+\begin{itemize}[nosep]
+    \item \textbf{GenRMJudge}: Direct API calls to a generative reward model (e.g., Qwen3-Nemotron-GenRM). Returns ranking scores on a 1--6 scale.
+    \item \textbf{GenRMComparisonModule}: DSPy-wrapped version enabling prompt optimization for the comparison task itself.
+\end{itemize}
+
+When \texttt{--tournament-of-tournaments} is enabled, the pipeline iteratively optimizes the GenRM prompts using collected preferences, implementing a form of self-improvement.
+
+\subsubsection{Composing the Pipeline}
+
+The full training pipeline composes these components:
+
+\begin{center}
+\begin{tikzpicture}[node distance=1.8cm, auto, >=stealth']
+\node (docs) [draw, rounded corners] {Documents};
+\node (tree) [draw, rounded corners, right of=docs, xshift=1cm] {Tree Builder};
+\node (tournament) [draw, rounded corners, right of=tree, xshift=1.2cm] {Tournament};
+\node (prefs) [draw, rounded corners, right of=tournament, xshift=1cm] {Preferences};
+\node (train) [draw, rounded corners, right of=prefs, xshift=0.8cm] {DPO/GRPO};
+
+\draw[->] (docs) -- (tree);
+\draw[->] (tree) -- (tournament);
+\draw[->] (tournament) -- (prefs);
+\draw[->] (prefs) -- (train);
+
+\node (opt) [draw, dashed, rounded corners, below of=tree, yshift=0.3cm] {DSPy Optimizer};
+\draw[->, dashed] (opt) -- (tree);
+\end{tikzpicture}
+\end{center}
+
+\paragraph{End-to-End Guarantees.}
+Theorem~\ref{thm:path-gap} shows that gaps compose additively:
+\[
+|\mathcal{L}(\pi_{\text{final}}; \mu_X) - \mathcal{L}(\pi_{\text{oracle}}; \mu_X)| \le 2\epsilon_{\text{summary}} + \epsilon_{\text{train}},
+\]
+where $\epsilon_{\text{summary}} = L \cdot \Delta_R$ is the summarization gap and $\epsilon_{\text{train}}$ is the training approximation gap.
+
+\paragraph{Audit-Driven Refinement.}
+The pipeline can iterate: after training, audit the model on held-out data, identify high-violation examples, and use them to refine prompts. This corresponds to the ``hard negative'' strategy in Appendix~\ref{app:bootstrap}.
+
+% =============================================================================
+% SECTION 3: OPTIMIZER SELECTION GUIDE (standalone reference)
+% Can be placed in Appendix F or M as a quick reference
+% =============================================================================
+
+\subsection{Optimizer Selection Guide}\label{sec:optimizer-guide}
+
+ThinkingTrees provides four DSPy-based optimizers through a plugin registry. Table~\ref{tab:optimizer-selection} summarizes when to use each.
+
+\begin{table}[h]
+\centering
+\caption{DSPy optimizer selection guide. All optimizers are accessed via \texttt{get\_optimizer(name)}.}
+\label{tab:optimizer-selection}
+\small
+\begin{tabular}{@{}llllp{4cm}@{}}
+\toprule
+\textbf{Optimizer} & \textbf{Best For} & \textbf{Min Data} & \textbf{Parallel} & \textbf{Context Concern} \\
+\midrule
+\texttt{gepa} & Default choice & 20+ examples & Yes & None (instruction-based) \\
+\texttt{bootstrap} & Short docs only & 4 examples & No & \textbf{High}: few-shot bloat \\
+\texttt{bootstrap\_random\_search} & Short docs & 10+ examples & Yes & \textbf{High}: few-shot bloat \\
+\texttt{mipro} & Production & 50+ examples & Yes & None (instruction-based) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{GEPA (Gradient-free Efficient Prompt Adaptation).}
+The recommended default. Uses reflection and instruction merging to optimize prompts without injecting few-shot examples into the context window. Generates candidate instructions, reflects on failures, and merges successful prompts. Supports budget control via \texttt{auto='light'|'medium'|'heavy'} or explicit \texttt{max\_metric\_calls}. Requires access to a capable model (larger local model or external API).
+
+\paragraph{Bootstrap.}
+Generates few-shot demonstrations from training examples using a teacher model. \textbf{Critical limitation}: few-shot examples are injected into every prompt, which can exhaust the context window on longer documents. Only suitable when documents are short enough that the added demonstrations do not cause truncation.
+
+\paragraph{Bootstrap Random Search.}
+Parallel variant of bootstrap that explores more of the optimization space. Inherits the same context window limitation---only use for short documents.
+
+\paragraph{MIPRO (Multi-stage Instruction Proposal and Optimization).}
+Most thorough optimizer. Uses a multi-stage approach combining instruction optimization with demonstration selection. Best for production deployments with sufficient training data (50+ examples) and computational budget.
+
+\paragraph{Recommended Workflow.}
+Start with \texttt{gepa} (requires access to a larger model or external API). Use \texttt{bootstrap} variants only when documents are short enough that few-shot context bloat is not a concern. Move to \texttt{mipro} for production deployments with sufficient data.
+
+
+% =============================================================================
+% SECTION 3: ADDITIONS TO APPENDIX O (Training Pipeline)
+% File: paper/appendix/O_training_pipeline.tex
+% =============================================================================
+
+\subsection{Tournament Selection with GenRM}\label{sec:tournament-genrm}
+
+The \texttt{TournamentStrategy} wraps any base summarization strategy with tournament selection, using a GenRM (Generative Reward Model) to select the best candidate. Preference pairs are collected as a \emph{free byproduct}---no additional oracle calls are required beyond what the tournament needs for selection.
+
+\paragraph{Algorithm.}
+Given $k$ candidate summaries generated by the base strategy at elevated temperature:
+
+\begin{enumerate}[nosep]
+    \item \textbf{Round 1}: Pair candidates $(c_1, c_2), (c_3, c_4), \ldots$ and compare each pair using GenRM
+    \item \textbf{Subsequent rounds}: Winners advance; compare pairs until one remains
+    \item \textbf{Output}: Final winner becomes the summary; all $(k-1)$ pairwise comparisons become preference training data
+\end{enumerate}
+
+\paragraph{Pipelined Execution.}
+For $k > 4$, the implementation supports pipelined execution: round-2 matches start as soon as their round-1 prerequisites complete, rather than waiting for all round-1 matches. This reduces latency when using batched GenRM inference.
+
+\paragraph{GenRM Integration.}
+The implementation supports two GenRM backends:
+\begin{itemize}[nosep]
+    \item \textbf{GenRMJudge}: Direct API calls to NVIDIA's Qwen3-Nemotron-235B-A22B-GenRM or compatible model. Returns ranking scores (1--6 scale) and helpfulness scores (1--5 scale).
+    \item \textbf{GenRMComparisonModule}: DSPy-wrapped version enabling prompt optimization for the comparison task itself (``tournament of tournaments'').
+\end{itemize}
+
+\paragraph{Preference Collection.}
+Each tournament match produces a \texttt{PreferencePair} containing:
+\begin{itemize}[nosep]
+    \item Original text (or merged child summaries for merge operations)
+    \item Both candidate summaries
+    \item Winner label (A, B, or tie) with confidence
+    \item OPS law type (sufficiency, merge, or idempotence)
+    \item Optional score estimates from GenRM
+\end{itemize}
+
+These pairs can train reward models, fine-tune comparison modules, or provide signal for DPO/GRPO training on the summarizer itself.
+
+\paragraph{Usage.}
+\begin{lstlisting}[language=Python]
+from src.core.strategy import TournamentStrategy, BatchedStrategy
+from src.training.preference.genrm import GenRMJudge
+
+# Wrap base strategy with tournament selection
+base = BatchedStrategy(client)
+strategy = TournamentStrategy(
+    base=base,
+    judge=GenRMJudge(base_url=genrm_url),
+    config=TournamentConfig(k=4, temperature=0.9),
+)
+
+# Use like any other strategy - tournament happens transparently
+summary = await strategy.summarize(content, rubric)
+
+# Retrieve collected preferences (free byproduct)
+preferences = strategy.get_preferences()  # List[PreferencePair]
+\end{lstlisting}
+
+The tournament wrapper is transparent to \texttt{TreeBuilder}---it doesn't know tournament selection is happening internally. This allows toggling between greedy selection (base strategy alone) and tournament selection (wrapped strategy) without changing tree-building code.

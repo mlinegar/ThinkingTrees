@@ -1,0 +1,61 @@
+version: 1
+
+defaults:
+  timeout_seconds: 10800
+  workdir: "."
+
+profiles:
+  delta_ablation:
+    include_layers: ["meso"]
+
+scenarios:
+  - id: temporal_delta_{semantic_tag}_{weight_tag}
+    layer: meso
+    description: "Temporal delta-head ablation matrix (requires embedding server on :8003)."
+    matrix:
+      semantic:
+        - semantic_tag: sem_on
+          semantic_flag: --semantic-memory-features
+        - semantic_tag: sem_off
+          semantic_flag: --no-semantic-memory-features
+      weighting:
+        - weight_tag: learned
+          weight_flag: --learn-loss-weights
+        - weight_tag: fixed
+          weight_flag: --no-learn-loss-weights
+    command: >
+      source venv/bin/activate &&
+      OUT=outputs/perf_harness/generated/temporal_ablations/{scenario_id} &&
+      mkdir -p "$OUT" &&
+      python3 scripts/train_rile_embedding_sketch.py
+      --output-dir "$OUT"
+      --embedding-url http://localhost:8003/v1
+      --train-samples 180
+      --val-samples 80
+      --test-samples 80
+      --epochs 6
+      --batch-size 32
+      --delta-head
+      {semantic_flag}
+      {weight_flag}
+      --max-windows 0
+      --log-every 50
+    metrics_file: outputs/perf_harness/generated/temporal_ablations/{scenario_id}/metrics.json
+    metrics:
+      test_rile_mae: final.test.mae
+      test_delta_count: delta_vs_zero.test.count
+      test_delta_improvement: delta_vs_zero.test.relative_improvement
+      val_delta_improvement: delta_vs_zero.val.relative_improvement
+    regression:
+      - metric: test_delta_count
+        op: ">="
+        threshold: 20
+        severity: error
+      - metric: test_delta_improvement
+        op: ">="
+        threshold: 0.05
+        severity: error
+      - metric: test_rile_mae
+        op: "<="
+        threshold: 0.12
+        severity: warn

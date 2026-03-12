@@ -92,10 +92,10 @@ preferences = tournament.get_collected_preferences()
 **Code**:
 ```python
 from src.training.preference import PreferenceCollector
-from src.tasks.manifesto import create_rile_scorer
+from src.tasks.manifesto import create_rile_oracle
 
 # Create oracle scorer
-oracle = create_rile_scorer()
+oracle = create_rile_oracle()
 
 # Collect preferences from oracle
 collector = PreferenceCollector(

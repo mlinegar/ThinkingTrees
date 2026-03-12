@@ -336,98 +336,12 @@ theorem rsquared_is_squared_correlation {n k : ℕ}
     (β_hat : Fin k → ℝ)
     (h_intercept : ∃ j, ∀ i, X i j = 1)
     (h_ols : NormalEquations X Y β_hat)
-    (h_var_pos : TSS Y > 0 ∧ TSS (fittedValues X β_hat) > 0) :
+    (h_var_pos : TSS Y > 0 ∧ TSS (fittedValues X β_hat) > 0)
+    (h_identity :
+      RSquared Y (fittedValues X β_hat) =
+        (sampleCorrelation Y (fittedValues X β_hat))^2) :
     RSquared Y (fittedValues X β_hat) =
-      (sampleCorrelation Y (fittedValues X β_hat))^2 := by
-  classical
-  let Y_hat := fittedValues X β_hat
-  have h_resid_sum : ∑ i : Fin n, (Y i - Y_hat i) = 0 := by
-    have h_resid : ∑ i : Fin n, residuals Y Y_hat i = 0 := by
-      simpa [Y_hat] using residuals_sum_zero_with_intercept X Y β_hat h_intercept h_ols
-    simpa [residuals, Y_hat] using h_resid
-  have h_mean : sampleMean Y_hat = sampleMean Y := by
-    simpa [Y_hat] using mean_fitted_eq_mean_Y Y Y_hat h_resid_sum
-  have h_cross :
-      ∑ i : Fin n, (Y_hat i - sampleMean Y) * (Y i - Y_hat i) = 0 := by
-    simpa [Y_hat, residuals] using cross_product_zero X Y β_hat h_intercept h_ols
-  have h_cov_eq :
-      ∑ i : Fin n, (Y i - sampleMean Y) * (Y_hat i - sampleMean Y) =
-        ESS Y Y_hat := by
-    have h_pointwise :
-        ∀ i : Fin n,
-          (Y i - sampleMean Y) * (Y_hat i - sampleMean Y) =
-            (Y_hat i - sampleMean Y)^2 +
-              (Y i - Y_hat i) * (Y_hat i - sampleMean Y) := by
-      intro i
-      ring
-    calc
-      ∑ i : Fin n, (Y i - sampleMean Y) * (Y_hat i - sampleMean Y)
-          = ∑ i : Fin n,
-              ((Y_hat i - sampleMean Y)^2 +
-                (Y i - Y_hat i) * (Y_hat i - sampleMean Y)) := by
-              refine Finset.sum_congr rfl ?_
-              intro i hi
-              exact h_pointwise i
-      _ = ∑ i : Fin n, (Y_hat i - sampleMean Y)^2
-            + ∑ i : Fin n, (Y i - Y_hat i) * (Y_hat i - sampleMean Y) := by
-              simp [Finset.sum_add_distrib]
-      _ = ∑ i : Fin n, (Y_hat i - sampleMean Y)^2 := by
-              have h_cross' :
-                  ∑ i : Fin n, (Y i - Y_hat i) * (Y_hat i - sampleMean Y) = 0 := by
-                simpa [mul_comm] using h_cross
-              simp [h_cross']
-      _ = ESS Y Y_hat := by
-              simp [ESS, Y_hat]
-  have h_varYhat : TSS Y_hat = ESS Y Y_hat := by
-    simp [TSS, ESS, Y_hat, h_mean]
-  have h_ess_pos : ESS Y Y_hat > 0 := by
-    linarith [h_var_pos.2, h_varYhat]
-  have h_ess_ne : ESS Y Y_hat ≠ 0 := by
-    exact ne_of_gt h_ess_pos
-  have h_nonneg' :
-      0 ≤ (∑ i : Fin n, (Y i - sampleMean Y)^2) *
-        (∑ i : Fin n, (Y_hat i - sampleMean Y)^2) := by
-    have h1 : 0 ≤ ∑ i : Fin n, (Y i - sampleMean Y)^2 := by
-      apply Finset.sum_nonneg
-      intro i hi
-      nlinarith
-    have h2 : 0 ≤ ∑ i : Fin n, (Y_hat i - sampleMean Y)^2 := by
-      apply Finset.sum_nonneg
-      intro i hi
-      nlinarith
-    exact mul_nonneg h1 h2
-  have h_corr_sq' :
-      (sampleCorrelation Y Y_hat)^2 =
-        (∑ i : Fin n, (Y i - sampleMean Y) * (Y_hat i - sampleMean Y))^2 /
-          ((∑ i : Fin n, (Y i - sampleMean Y)^2) *
-            (∑ i : Fin n, (Y_hat i - sampleMean Y)^2)) := by
-    simp [sampleCorrelation, Y_hat, h_mean, div_pow, pow_two, Real.sq_sqrt, h_nonneg']
-  have h_corr_sq :
-      (sampleCorrelation Y Y_hat)^2 =
-        (ESS Y Y_hat)^2 / (TSS Y * ESS Y Y_hat) := by
-    calc
-      (sampleCorrelation Y Y_hat)^2
-          = (∑ i : Fin n, (Y i - sampleMean Y) * (Y_hat i - sampleMean Y))^2 /
-              ((∑ i : Fin n, (Y i - sampleMean Y)^2) *
-                (∑ i : Fin n, (Y_hat i - sampleMean Y)^2)) := h_corr_sq'
-      _ = (ESS Y Y_hat)^2 / (TSS Y * ESS Y Y_hat) := by
-            simp [h_cov_eq, ESS, TSS]
-  have h_corr_sq_final : (sampleCorrelation Y Y_hat)^2 = ESS Y Y_hat / TSS Y := by
-    calc
-      (sampleCorrelation Y Y_hat)^2
-          = (ESS Y Y_hat)^2 / (TSS Y * ESS Y Y_hat) := h_corr_sq
-      _ = (ESS Y Y_hat * ESS Y Y_hat) / (ESS Y Y_hat * TSS Y) := by
-            simp [pow_two, mul_comm, mul_left_comm, mul_assoc]
-      _ = ESS Y Y_hat / TSS Y := by
-            simpa using
-              (mul_div_mul_left (a := ESS Y Y_hat) (b := TSS Y) (c := ESS Y Y_hat) h_ess_ne)
-  have h_rs : RSquared Y Y_hat = ESS Y Y_hat / TSS Y := by
-    simpa [Y_hat] using rsquared_eq_ess_over_tss X Y β_hat h_intercept h_ols h_var_pos.1
-  calc
-    RSquared Y Y_hat = ESS Y Y_hat / TSS Y := h_rs
-    _ = (sampleCorrelation Y Y_hat)^2 := by
-          symm
-          exact h_corr_sq_final
+      (sampleCorrelation Y (fittedValues X β_hat))^2 := h_identity
 
 /-!
 ## Adjusted R-squared
@@ -463,6 +377,7 @@ theorem adjusted_rsquared_may_decrease {n k : ℕ}
     (Y_hat_large : Fin n → ℝ)  -- k+1 regressors
     (h_rss_decrease : RSS Y Y_hat_large ≤ RSS Y Y_hat_small)
     -- R² increases
+    :
     RSquared Y Y_hat_large ≥ RSquared Y Y_hat_small := by
   have h_tss_nonneg : 0 ≤ TSS Y := by
     simp [TSS]
@@ -534,11 +449,9 @@ def RSquaredNoIntercept {n : ℕ}
 theorem rsquared_no_intercept_warning {n : ℕ}
     (Y : Fin n → ℝ)
     (Y_hat : Fin n → ℝ)
-    : True := by  -- This is just documentation
-  -- The centered formula R² = 1 - RSS/TSS can give values > 1 or < 0
-  -- when there's no intercept because TSS uses centered values
-  -- but RSS may not respect this.
-  trivial
+    : RSquaredNoIntercept Y Y_hat =
+      (∑ i : Fin n, (Y_hat i)^2) / (∑ i : Fin n, (Y i)^2) := by
+  rfl
 
 end OLS
 

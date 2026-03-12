@@ -162,6 +162,10 @@ def resolve_vllm_runtime_flags(vllm_cfg: Mapping[str, Any], profile: str) -> VLL
     merged_cfg.pop("profile_overrides", None)
     merged_cfg.update(profile_cfg)
 
+    extra_flags_default = _coerce_str_list(runtime_cfg.get("extra_flags"))
+    extra_flags_profile = _coerce_str_list(profile_cfg.get("extra_flags"))
+    extra_flags = extra_flags_default + extra_flags_profile
+
     explicit_eager = merged_cfg.get("enforce_eager")
     if explicit_eager is not None:
         enforce_eager = _coerce_bool(explicit_eager, default=False)
@@ -203,6 +207,5 @@ def resolve_vllm_runtime_flags(vllm_cfg: Mapping[str, Any], profile: str) -> VLL
         ),
         allowed_media_domains=_coerce_str_list(merged_cfg.get("allowed_media_domains")),
         limit_mm_per_prompt=limit_mm_per_prompt,
-        extra_flags=_coerce_str_list(merged_cfg.get("extra_flags")),
+        extra_flags=extra_flags,
     )
-

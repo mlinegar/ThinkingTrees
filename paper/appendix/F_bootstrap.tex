@@ -1,0 +1,18 @@
+\section{Local Consistency Bootstrap}\label{app:bootstrap}
+
+This appendix instantiates the ``consistency bootstrap'' used throughout the main text. We view the hierarchical summarizer as a programmable policy $\mathcal{P}_\theta$ that exposes two callable modules:
+\begin{itemize}
+    \item \textbf{LeafSummarizer}$(b;\theta_\ell)$ maps a raw block $b$ to a summary $s_b$. Its loss is the indicator from Condition~\eqref{eq:leaf_sufficiency}.
+    \item \textbf{MergeSummarizer}$((s_{u_L},s_{u_R});\theta_m)$ maps stored child summaries to a parent summary $s_u$. Its loss is the indicator from Condition~\eqref{eq:leaf_compatibility}.
+\end{itemize}
+DSPy \citep{khattab2024dspy} provides a natural implementation: each module is a DSPy ``program'' whose parameters are prompt slots, few-shot exemplars, and temperature controls. The bootstrap proceeds as follows.
+
+\paragraph{1. Leaf pass.} Sample a batch of leaves $\{b_i\}$. For each leaf, run \textbf{LeafSummarizer}, evaluate $\metric(\fstar(g(b_i)),\fstar(b_i))$, and store the trace $(b_i, s_{b_i}, \text{oracle})$. When the oracle disagrees, regenerate $k$ candidates at elevated temperature or solicit a human rewrite. The first candidate that matches the oracle becomes a ``positive'' trace; if none exists, mark the edge as a hard negative for escalation. All traces are appended to DSPy's trace buffer and optionally distilled into few-shot exemplars.
+
+\paragraph{2. Merge pass.} Using the best available leaf summaries, sample adjacent pairs $(s_{u_L},s_{u_R})$. Run \textbf{MergeSummarizer}, check $\metric(\fstar(g(s_{u_L}\concat s_{u_R})),\fstar(s_{u_L}\concat s_{u_R}))$, and record the trace. Successful merges are stored as exemplars. Failures trigger regeneration or escalation. Because the oracle only sees the concatenated child summaries, this step never requires reopening raw text.
+
+\paragraph{3. Parameter update.} Run DSPy's optimizer (e.g., coordinate descent over prompt slots or gradient-free search over temperatures) on the accumulated traces. The objective is simply the empirical violation rate: minimize the fraction of traces where the oracle disagrees. Both modules can be optimized jointly or in alternating rounds. When operated online, we interleave sampling and updates so that fresh violations immediately produce corrective exemplars.
+
+\paragraph{4. Stopping rule.} Maintain running estimates of $\hat{p}_{\text{suff}}$, $\hat{p}_{\text{assoc}}$, and (if applicable) $\hat{p}_{\text{idem}}$. Continue bootstrapping until these empirical rates fall below the deployment tolerance, as measured either on a dedicated validation set or via sequential confidence bounds. Hard negatives that never satisfy the oracle become the most valuable few-shot examples and should be preserved even after the rate target is met.
+
+This loop requires no external supervision beyond the oracle assumed in the main body. Human edits or calls to a larger teacher model only appear when regeneration repeatedly fails, and those interventions are logged so that the improved spans become part of the next prompt. The resulting modules enforce the three consistency conditions by construction, aligning the entire hierarchy without ever inspecting the full document.

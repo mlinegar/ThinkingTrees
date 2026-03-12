@@ -1,0 +1,64 @@
+\section{Machine-Verified Proofs}\label{sec:verification}
+
+All theoretical results in this paper are backed by a Lean~4 formalization.
+The point of the artifact is not merely to restate theorems in code. It checks
+the full logical chain used in the paper: local laws imply preservation;
+preservation implies preference-learning equivalence; approximate local laws
+imply quantitative gap bounds; theorem-backed and measurement-error extensions
+recover the noisy-oracle setting; and stochastic adaptive tree objectives
+inherit optimizer-transfer guarantees, including high-probability certification
+versions.
+
+\subsection{Scope}
+
+The active development contains more than 50{,}000 lines across 123 Lean files.
+It is organized into five modules:
+\begin{description}[nosep]
+    \item[OPT] the core Oracle-Preserving Summarization theory;
+    \item[DSL] the TreePO / audit / IPW certificate layer;
+    \item[CLT] supporting probability theory;
+    \item[Econometrics] auxiliary identification and regression results;
+    \item[ML] general supervised-learning infrastructure.
+\end{description}
+
+For this paper, the most important fact is that the formalization now reaches
+all the way to the tree-based optimizer statements used in the preference
+learning sections. In plain language: even when the oracle is only an
+approximation to the true latent target, and even when certification is only
+available on a good event, the optimizer selected from the tree objective comes
+with a formally checked near-optimality guarantee.
+
+The same is now true for the clustered-inference side of the certificate stack.
+The Lean development does not stop at abstract concentration bounds. It also
+formalizes the deterministic bridge from clustered confidence-interval
+membership to the reported \texttt{computeDSLBound} object, together with the
+calibration and oracle-error envelopes that sit on top of that interval.
+Appendices~\ref{app:theorem-backed}, \ref{app:measurement-error}, and
+\ref{app:clustered-inference} pull the most important of those formalized
+extensions back into the paper in ordinary mathematical language.
+
+\subsection{Axiom Policy}
+
+The active proof stack uses one axiom: expected group loss is Lipschitz in
+oracle distance. This is the mathematically precise place where the paper uses
+the random-utility-model argument underlying Plackett--Luce and related
+discrete-choice objectives. Everything else in the active theorem stack is
+derived from explicit definitions and previously proved lemmas.
+
+\subsection{Why This Matters}
+
+Formal verification helps in four ways:
+\begin{itemize}[nosep]
+    \item \textbf{Trust}: theorems are checked by the proof assistant, not only by informal inspection.
+    \item \textbf{Precision}: hidden assumptions become explicit, especially around idempotence, oracle measurement error, and adaptive-tree optimization.
+    \item \textbf{Reproducibility}: anyone can rebuild the artifact from the repository.
+    \item \textbf{Extensibility}: later work can reuse the existing interfaces instead of reproving the same preservation lemmas.
+\end{itemize}
+
+\subsection{Where the Details Live}
+
+Appendix~\ref{app:lean} gives a readable summary of the formalization artifact.
+The exact paper-to-Lean map, assumption crosswalk, and adaptive-tree theorem
+inventory live in standalone repository documents under \texttt{lean3/docs/}.
+This keeps the paper readable while still exposing the full code-level
+correspondence for readers who want it.

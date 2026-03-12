@@ -17,7 +17,15 @@ from enum import Enum
 import math
 import random
 import statistics
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+from src.tree.weighting import (
+    DEFAULT_WEIGHTING_MODES,
+    WeightingMode,
+    build_weighting_views_from_replicates,
+    parse_weighting_modes,
+    validate_legacy_weighting_mode,
+)
 
 
 def _clip01(x: float) -> float:
@@ -44,6 +52,7 @@ class SelectorPolicy(str, Enum):
 
     ALL = "all"
     TOP_PROXY = "top-proxy"
+    TOP_TRUE = "top-true"
     BOTTOM_PROXY = "bottom-proxy"
     RANDOM = "random"
 
@@ -76,6 +85,19 @@ class TokenPattern(str, Enum):
     TWO_SPIKES = "two-spikes"
     MULTI_SPIKES = "multi-spikes"
     DIFFUSE = "diffuse"
+
+
+VALID_WEIGHTING_MODES: Tuple[str, ...] = tuple(m.value for m in WeightingMode)
+
+
+def _resolve_weighting(
+    *,
+    weighting_modes: Optional[Sequence[str]],
+    legacy_weighting_mode: str,
+) -> Tuple[Tuple[WeightingMode, ...], WeightingMode]:
+    modes = parse_weighting_modes(weighting_modes if weighting_modes is not None else DEFAULT_WEIGHTING_MODES)
+    legacy = validate_legacy_weighting_mode(legacy_weighting_mode, weighting_modes=modes)
+    return modes, legacy
 
 
 @dataclass(frozen=True)
@@ -203,6 +225,8 @@ class ParameterRecoverySummary:
     sample_target_bias: float
     std_estimate: float
     rmse: float
+    legacy_weighting_mode: str = "doc"
+    weighting_views: Optional[Dict[str, Dict[str, float]]] = None
 
 
 @dataclass(frozen=True)
@@ -232,6 +256,8 @@ class TwoParameterRecoverySummary:
     sample_target_bias_p_spike: float
     sample_target_bias_p_two_given_spike: float
     sample_target_bias_p_two_doc: float
+    legacy_weighting_mode: str = "doc"
+    weighting_views: Optional[Dict[str, Dict[str, Dict[str, float]]]] = None
 
 
 @dataclass(frozen=True)
@@ -274,6 +300,8 @@ class ThreeParameterRecoverySummary:
     sample_target_bias_p_boundary_given_spike: float
     sample_target_bias_p_two_doc: float
     sample_target_bias_p_boundary_doc: float
+    legacy_weighting_mode: str = "doc"
+    weighting_views: Optional[Dict[str, Dict[str, Dict[str, float]]]] = None
 
 
 @dataclass(frozen=True)
@@ -329,6 +357,8 @@ class FourParameterRecoverySummary:
     sample_target_bias_p_two_doc: float
     sample_target_bias_p_three_doc: float
     sample_target_bias_p_boundary_doc: float
+    legacy_weighting_mode: str = "doc"
+    weighting_views: Optional[Dict[str, Dict[str, Dict[str, float]]]] = None
 
 
 @dataclass(frozen=True)
@@ -430,6 +460,8 @@ class KTargetRecoverySummary:
     mean_abs_bias: float
     rmse: float
     sample_target_bias: float
+    legacy_weighting_mode: str = "doc"
+    weighting_views: Optional[Dict[str, Dict[str, float]]] = None
 
 
 @dataclass(frozen=True)
@@ -461,6 +493,8 @@ class ChunkQualitySweepSummary:
     mean_spike_token_isolation: float
     mean_chunks_total: float
     mean_chunks_kept: float
+    legacy_weighting_mode: str = "doc"
+    weighting_views: Optional[Dict[str, Dict[str, float]]] = None
 
 
 @dataclass(frozen=True)
@@ -490,6 +524,8 @@ class ChunkQualityCoverageSummary:
     mean_ci_width: float
     mean_ci_low: float
     mean_ci_high: float
+    legacy_weighting_mode: str = "doc"
+    weighting_views: Optional[Dict[str, Dict[str, float]]] = None
 
 
 def true_objective_score(
@@ -763,6 +799,8 @@ def select_chunks(
         selected = indexed[:chunk_budget]
     elif selector == SelectorPolicy.TOP_PROXY:
         selected = sorted(indexed, key=lambda t: t[1].proxy_max, reverse=True)[:chunk_budget]
+    elif selector == SelectorPolicy.TOP_TRUE:
+        selected = sorted(indexed, key=lambda t: t[1].vmax, reverse=True)[:chunk_budget]
     elif selector == SelectorPolicy.BOTTOM_PROXY:
         selected = sorted(indexed, key=lambda t: t[1].proxy_max)[:chunk_budget]
     elif selector == SelectorPolicy.RANDOM:
@@ -772,6 +810,21 @@ def select_chunks(
         raise ValueError(f"Unsupported selector: {selector!r}")
 
     return [chunk for _, chunk in sorted(selected, key=lambda t: t[0])]
+
+
+def _doc_weight(
+    *,
+    doc: ToyTokenDocument,
+    all_chunks: Sequence[Chunk],
+    mode: WeightingMode,
+) -> float:
+    if mode == WeightingMode.DOC:
+        return 1.0
+    if mode == WeightingMode.LEAF:
+        return float(max(1, len(all_chunks)))
+    if mode == WeightingMode.TOKEN:
+        return float(max(1, doc.n_tokens))
+    raise ValueError(f"unsupported weighting mode: {mode!r}")
 
 
 def _pair_groups(n: int, order: MergeOrder, rng: random.Random) -> List[List[int]]:
@@ -1432,6 +1485,8 @@ def run_spike_prevalence_recovery_study(
     docs_per_replicate: int = 200,
     seed: int = 0,
     decision_threshold: float = 0.50,
+    weighting_modes: Optional[Sequence[str]] = None,
+    legacy_weighting_mode: str = "doc",
 ) -> List[ParameterRecoverySummary]:
     """
     Estimate spike prevalence parameter under different aggregation pipelines.
@@ -1443,12 +1498,18 @@ def run_spike_prevalence_recovery_study(
         raise ValueError("n_replicates must be >= 1")
     if docs_per_replicate <= 0:
         raise ValueError("docs_per_replicate must be >= 1")
+    modes, legacy_mode = _resolve_weighting(
+        weighting_modes=weighting_modes,
+        legacy_weighting_mode=legacy_weighting_mode,
+    )
     active_methods = list(methods) if methods is not None else list(default_ablation_specs())
 
     summaries: List[ParameterRecoverySummary] = []
     for m_idx, method in enumerate(active_methods):
         estimates: List[float] = []
         sample_truths: List[float] = []
+        estimates_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        sample_truths_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
         for rep in range(n_replicates):
             rep_seed = seed + (10_000 * m_idx) + rep
             docs = sample_spike_mixture_documents(
@@ -1471,6 +1532,31 @@ def run_spike_prevalence_recovery_study(
             theta_sample = sum(ev.true_label for ev in evals) / n
             estimates.append(theta_hat)
             sample_truths.append(theta_sample)
+            for mode in modes:
+                ws = []
+                est_lab = []
+                tru_lab = []
+                for doc, ev in zip(docs, evals):
+                    if mode == WeightingMode.DOC:
+                        w = 1.0
+                    elif mode == WeightingMode.LEAF:
+                        w = float(max(1, int(ev.n_chunks_total)))
+                    elif mode == WeightingMode.TOKEN:
+                        w = float(max(1, int(doc.n_tokens)))
+                    else:  # pragma: no cover
+                        raise ValueError(f"unsupported weighting mode: {mode!r}")
+                    ws.append(w)
+                    est_lab.append(float(ev.estimated_label))
+                    tru_lab.append(float(ev.true_label))
+                wsum = float(sum(ws))
+                if wsum <= 0:
+                    est_rate = 0.0
+                    tru_rate = 0.0
+                else:
+                    est_rate = float(sum(w * y for w, y in zip(ws, est_lab)) / wsum)
+                    tru_rate = float(sum(w * y for w, y in zip(ws, tru_lab)) / wsum)
+                estimates_by_mode[mode.value].append(est_rate)
+                sample_truths_by_mode[mode.value].append(tru_rate)
 
         n_rep = float(len(estimates))
         mean_est = sum(estimates) / n_rep
@@ -1494,6 +1580,12 @@ def run_spike_prevalence_recovery_study(
                 sample_target_bias=sample_target_bias,
                 std_estimate=math.sqrt(var_est),
                 rmse=rmse,
+                legacy_weighting_mode=legacy_mode.value,
+                weighting_views=build_weighting_views_from_replicates(
+                    estimates_by_mode=estimates_by_mode,
+                    sample_targets_by_mode=sample_truths_by_mode,
+                    true_target=float(distribution.p_spike_doc),
+                ),
             )
         )
 
@@ -1561,6 +1653,8 @@ def run_two_parameter_recovery_study(
     seed: int = 0,
     spike_threshold: float = 0.90,
     decision_threshold: float = 0.50,
+    weighting_modes: Optional[Sequence[str]] = None,
+    legacy_weighting_mode: str = "doc",
 ) -> List[TwoParameterRecoverySummary]:
     """
     Joint recovery for:
@@ -1571,6 +1665,10 @@ def run_two_parameter_recovery_study(
         raise ValueError("n_replicates must be >= 1")
     if docs_per_replicate <= 0:
         raise ValueError("docs_per_replicate must be >= 1")
+    modes, legacy_mode = _resolve_weighting(
+        weighting_modes=weighting_modes,
+        legacy_weighting_mode=legacy_weighting_mode,
+    )
 
     true_p_spike = _clip01(distribution.p_spike_doc)
     true_p_two_given = _clip01(distribution.p_two_spikes_given_spike)
@@ -1592,6 +1690,13 @@ def run_two_parameter_recovery_study(
         true_two_doc_rates: List[float] = []
         true_two_given_rates: List[float] = []
 
+        est_spike_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        est_two_doc_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        est_two_given_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_spike_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_two_doc_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_two_given_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+
         for rep in range(n_replicates):
             rep_seed = seed + (20_000 * m_idx) + rep
             docs = sample_spike_mixture_documents(
@@ -1604,6 +1709,13 @@ def run_two_parameter_recovery_study(
             est_two = 0.0
             true_spike = 0.0
             true_two = 0.0
+            mode_tot_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_spike_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_two_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_two_inter_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_spike_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_two_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_two_inter_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
 
             for i, doc in enumerate(docs):
                 doc_seed = rep_seed + i
@@ -1620,20 +1732,22 @@ def run_two_parameter_recovery_study(
                     chunk_budget=method.chunk_budget,
                     rng=random.Random(doc_seed),
                 )
-                est_spike += 1.0 if aggregate_chunks(
+                est_spike_score = aggregate_chunks(
                     chunks_kept,
                     aggregator=method.aggregator,
                     merge_order=method.merge_order,
                     spike_threshold=spike_threshold,
                     seed=doc_seed,
-                ) >= decision_threshold else 0.0
-                est_two += 1.0 if aggregate_chunks(
+                )
+                est_two_score = aggregate_chunks(
                     chunks_kept,
                     aggregator=two_agg,
                     merge_order=method.merge_order,
                     spike_threshold=spike_threshold,
                     seed=doc_seed,
-                ) >= decision_threshold else 0.0
+                )
+                est_spike += 1.0 if est_spike_score >= decision_threshold else 0.0
+                est_two += 1.0 if est_two_score >= decision_threshold else 0.0
                 t_spike = true_objective_score(
                     doc.token_scores,
                     objective=ObjectiveProfile.SPIKE_EXISTS,
@@ -1642,6 +1756,20 @@ def run_two_parameter_recovery_study(
                 t_two = float(true_two_spike_event(doc.token_scores, spike_threshold=spike_threshold))
                 true_spike += t_spike
                 true_two += t_two
+
+                est_spike_event = 1.0 if est_spike_score >= decision_threshold else 0.0
+                est_two_event = 1.0 if est_two_score >= decision_threshold else 0.0
+                true_spike_event = float(t_spike >= decision_threshold)
+                true_two_event = float(t_two >= decision_threshold)
+                for mode in modes:
+                    w = _doc_weight(doc=doc, all_chunks=chunks_all, mode=mode)
+                    mode_tot_weight[mode.value] += w
+                    mode_est_spike_weight[mode.value] += w * est_spike_event
+                    mode_est_two_weight[mode.value] += w * est_two_event
+                    mode_est_two_inter_weight[mode.value] += w * (1.0 if (est_spike_event >= 0.5 and est_two_event >= 0.5) else 0.0)
+                    mode_true_spike_weight[mode.value] += w * true_spike_event
+                    mode_true_two_weight[mode.value] += w * true_two_event
+                    mode_true_two_inter_weight[mode.value] += w * (1.0 if (true_spike_event >= 0.5 and true_two_event >= 0.5) else 0.0)
 
             n = float(len(docs))
             est_spike_rate = est_spike / n
@@ -1658,6 +1786,29 @@ def run_two_parameter_recovery_study(
             true_spike_rates.append(true_spike_rate)
             true_two_doc_rates.append(true_two_doc_rate)
             true_two_given_rates.append(true_two_given)
+            for mode in modes:
+                mode_key = mode.value
+                w_tot = mode_tot_weight[mode_key]
+                est_spike_w = mode_est_spike_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                est_two_doc_w = mode_est_two_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                true_spike_w = mode_true_spike_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                true_two_doc_w = mode_true_two_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                est_two_given_w = (
+                    mode_est_two_inter_weight[mode_key] / mode_est_spike_weight[mode_key]
+                    if mode_est_spike_weight[mode_key] > 0
+                    else 0.0
+                )
+                true_two_given_w = (
+                    mode_true_two_inter_weight[mode_key] / mode_true_spike_weight[mode_key]
+                    if mode_true_spike_weight[mode_key] > 0
+                    else 0.0
+                )
+                est_spike_by_mode[mode_key].append(float(est_spike_w))
+                est_two_doc_by_mode[mode_key].append(float(est_two_doc_w))
+                est_two_given_by_mode[mode_key].append(float(est_two_given_w))
+                true_spike_by_mode[mode_key].append(float(true_spike_w))
+                true_two_doc_by_mode[mode_key].append(float(true_two_doc_w))
+                true_two_given_by_mode[mode_key].append(float(true_two_given_w))
 
         n_rep = float(n_replicates)
         mean_hat_spike = sum(est_spike_rates) / n_rep
@@ -1695,6 +1846,27 @@ def run_two_parameter_recovery_study(
                 sample_target_bias_p_spike=sum((x - y) for x, y in zip(est_spike_rates, true_spike_rates)) / n_rep,
                 sample_target_bias_p_two_given_spike=sum((x - y) for x, y in zip(est_two_given_rates, true_two_given_rates)) / n_rep,
                 sample_target_bias_p_two_doc=sum((x - y) for x, y in zip(est_two_doc_rates, true_two_doc_rates)) / n_rep,
+                legacy_weighting_mode=legacy_mode.value,
+                weighting_views={
+                    mode.value: {
+                        "p_spike": build_weighting_views_from_replicates(
+                            estimates_by_mode=est_spike_by_mode,
+                            sample_targets_by_mode=true_spike_by_mode,
+                            true_target=true_p_spike,
+                        )[mode.value],
+                        "p_two_doc": build_weighting_views_from_replicates(
+                            estimates_by_mode=est_two_doc_by_mode,
+                            sample_targets_by_mode=true_two_doc_by_mode,
+                            true_target=true_p_two_doc,
+                        )[mode.value],
+                        "p_two_given_spike": build_weighting_views_from_replicates(
+                            estimates_by_mode=est_two_given_by_mode,
+                            sample_targets_by_mode=true_two_given_by_mode,
+                            true_target=true_p_two_given,
+                        )[mode.value],
+                    }
+                    for mode in modes
+                },
             )
         )
 
@@ -1777,6 +1949,8 @@ def run_three_parameter_recovery_study(
     seed: int = 0,
     spike_threshold: float = 0.90,
     decision_threshold: float = 0.50,
+    weighting_modes: Optional[Sequence[str]] = None,
+    legacy_weighting_mode: str = "doc",
 ) -> List[ThreeParameterRecoverySummary]:
     """
     Joint recovery for:
@@ -1788,6 +1962,10 @@ def run_three_parameter_recovery_study(
         raise ValueError("n_replicates must be >= 1")
     if docs_per_replicate <= 0:
         raise ValueError("docs_per_replicate must be >= 1")
+    modes, legacy_mode = _resolve_weighting(
+        weighting_modes=weighting_modes,
+        legacy_weighting_mode=legacy_weighting_mode,
+    )
 
     true_p_spike = _clip01(distribution.p_spike_doc)
     true_p_two_given = _clip01(distribution.p_two_spikes_given_spike)
@@ -1815,6 +1993,16 @@ def run_three_parameter_recovery_study(
         true_boundary_doc_rates: List[float] = []
         true_two_given_rates: List[float] = []
         true_boundary_given_rates: List[float] = []
+        est_spike_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        est_two_doc_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        est_boundary_doc_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        est_two_given_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        est_boundary_given_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_spike_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_two_doc_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_boundary_doc_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_two_given_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_boundary_given_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
 
         for rep in range(n_replicates):
             rep_seed = seed + (30_000 * m_idx) + rep
@@ -1830,6 +2018,17 @@ def run_three_parameter_recovery_study(
             true_spike = 0.0
             true_two = 0.0
             true_boundary = 0.0
+            mode_tot_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_spike_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_two_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_boundary_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_two_inter_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_boundary_inter_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_spike_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_two_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_boundary_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_two_inter_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_boundary_inter_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
 
             for i, doc in enumerate(docs):
                 doc_seed = rep_seed + i
@@ -1846,30 +2045,36 @@ def run_three_parameter_recovery_study(
                     chunk_budget=method.chunk_budget,
                     rng=random.Random(doc_seed),
                 )
-                est_spike += 1.0 if aggregate_chunks(
+                est_spike_score = aggregate_chunks(
                     chunks_kept,
                     aggregator=method.aggregator,
                     merge_order=method.merge_order,
                     spike_threshold=spike_threshold,
                     boundary_span_tokens=method.boundary_span_tokens,
                     seed=doc_seed,
-                ) >= decision_threshold else 0.0
-                est_two += 1.0 if aggregate_chunks(
+                )
+                est_two_score = aggregate_chunks(
                     chunks_kept,
                     aggregator=two_agg,
                     merge_order=method.merge_order,
                     spike_threshold=spike_threshold,
                     boundary_span_tokens=method.boundary_span_tokens,
                     seed=doc_seed,
-                ) >= decision_threshold else 0.0
-                est_boundary += 1.0 if aggregate_chunks(
+                )
+                est_boundary_score = aggregate_chunks(
                     chunks_kept,
                     aggregator=boundary_agg,
                     merge_order=method.merge_order,
                     spike_threshold=spike_threshold,
                     boundary_span_tokens=method.boundary_span_tokens,
                     seed=doc_seed,
-                ) >= decision_threshold else 0.0
+                )
+                est_spike_event = 1.0 if est_spike_score >= decision_threshold else 0.0
+                est_two_event = 1.0 if est_two_score >= decision_threshold else 0.0
+                est_boundary_event = 1.0 if est_boundary_score >= decision_threshold else 0.0
+                est_spike += est_spike_event
+                est_two += est_two_event
+                est_boundary += est_boundary_event
 
                 t_spike = true_objective_score(
                     doc.token_scores,
@@ -1884,9 +2089,34 @@ def run_three_parameter_recovery_study(
                         boundary_span_tokens=distribution.boundary_span_tokens,
                     )
                 )
-                true_spike += t_spike
-                true_two += t_two
-                true_boundary += t_boundary
+                true_spike_event = float(t_spike >= decision_threshold)
+                true_two_event = float(t_two >= decision_threshold)
+                true_boundary_event = float(t_boundary >= decision_threshold)
+                true_spike += true_spike_event
+                true_two += true_two_event
+                true_boundary += true_boundary_event
+                for mode in modes:
+                    w = _doc_weight(doc=doc, all_chunks=chunks_all, mode=mode)
+                    mode_key = mode.value
+                    mode_tot_weight[mode_key] += w
+                    mode_est_spike_weight[mode_key] += w * est_spike_event
+                    mode_est_two_weight[mode_key] += w * est_two_event
+                    mode_est_boundary_weight[mode_key] += w * est_boundary_event
+                    mode_est_two_inter_weight[mode_key] += w * (
+                        1.0 if (est_spike_event >= 0.5 and est_two_event >= 0.5) else 0.0
+                    )
+                    mode_est_boundary_inter_weight[mode_key] += w * (
+                        1.0 if (est_spike_event >= 0.5 and est_boundary_event >= 0.5) else 0.0
+                    )
+                    mode_true_spike_weight[mode_key] += w * true_spike_event
+                    mode_true_two_weight[mode_key] += w * true_two_event
+                    mode_true_boundary_weight[mode_key] += w * true_boundary_event
+                    mode_true_two_inter_weight[mode_key] += w * (
+                        1.0 if (true_spike_event >= 0.5 and true_two_event >= 0.5) else 0.0
+                    )
+                    mode_true_boundary_inter_weight[mode_key] += w * (
+                        1.0 if (true_spike_event >= 0.5 and true_boundary_event >= 0.5) else 0.0
+                    )
 
             n = float(len(docs))
             est_spike_rate = est_spike / n
@@ -1912,6 +2142,49 @@ def run_three_parameter_recovery_study(
             true_boundary_doc_rates.append(true_boundary_doc_rate)
             true_two_given_rates.append(true_two_given)
             true_boundary_given_rates.append(true_boundary_given)
+            for mode in modes:
+                mode_key = mode.value
+                w_tot = mode_tot_weight[mode_key]
+                est_spike_w = mode_est_spike_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                est_two_doc_w = mode_est_two_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                est_boundary_doc_w = (
+                    mode_est_boundary_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                )
+                true_spike_w = mode_true_spike_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                true_two_doc_w = mode_true_two_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                true_boundary_doc_w = (
+                    mode_true_boundary_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                )
+                est_two_given_w = (
+                    mode_est_two_inter_weight[mode_key] / mode_est_spike_weight[mode_key]
+                    if mode_est_spike_weight[mode_key] > 0
+                    else 0.0
+                )
+                est_boundary_given_w = (
+                    mode_est_boundary_inter_weight[mode_key] / mode_est_spike_weight[mode_key]
+                    if mode_est_spike_weight[mode_key] > 0
+                    else 0.0
+                )
+                true_two_given_w = (
+                    mode_true_two_inter_weight[mode_key] / mode_true_spike_weight[mode_key]
+                    if mode_true_spike_weight[mode_key] > 0
+                    else 0.0
+                )
+                true_boundary_given_w = (
+                    mode_true_boundary_inter_weight[mode_key] / mode_true_spike_weight[mode_key]
+                    if mode_true_spike_weight[mode_key] > 0
+                    else 0.0
+                )
+                est_spike_by_mode[mode_key].append(float(est_spike_w))
+                est_two_doc_by_mode[mode_key].append(float(est_two_doc_w))
+                est_boundary_doc_by_mode[mode_key].append(float(est_boundary_doc_w))
+                est_two_given_by_mode[mode_key].append(float(est_two_given_w))
+                est_boundary_given_by_mode[mode_key].append(float(est_boundary_given_w))
+                true_spike_by_mode[mode_key].append(float(true_spike_w))
+                true_two_doc_by_mode[mode_key].append(float(true_two_doc_w))
+                true_boundary_doc_by_mode[mode_key].append(float(true_boundary_doc_w))
+                true_two_given_by_mode[mode_key].append(float(true_two_given_w))
+                true_boundary_given_by_mode[mode_key].append(float(true_boundary_given_w))
 
         n_rep = float(n_replicates)
         mean_hat_spike = sum(est_spike_rates) / n_rep
@@ -1922,6 +2195,31 @@ def run_three_parameter_recovery_study(
 
         supports_two = two_agg == AggregatorPolicy.MERGE_SAFE_SECOND_MAX
         supports_boundary = boundary_agg == AggregatorPolicy.MERGE_SAFE_BOUNDARY_MAX
+        spike_views = build_weighting_views_from_replicates(
+            estimates_by_mode=est_spike_by_mode,
+            sample_targets_by_mode=true_spike_by_mode,
+            true_target=true_p_spike,
+        )
+        two_doc_views = build_weighting_views_from_replicates(
+            estimates_by_mode=est_two_doc_by_mode,
+            sample_targets_by_mode=true_two_doc_by_mode,
+            true_target=true_p_two_doc,
+        )
+        boundary_doc_views = build_weighting_views_from_replicates(
+            estimates_by_mode=est_boundary_doc_by_mode,
+            sample_targets_by_mode=true_boundary_doc_by_mode,
+            true_target=true_p_boundary_doc,
+        )
+        two_given_views = build_weighting_views_from_replicates(
+            estimates_by_mode=est_two_given_by_mode,
+            sample_targets_by_mode=true_two_given_by_mode,
+            true_target=true_p_two_given,
+        )
+        boundary_given_views = build_weighting_views_from_replicates(
+            estimates_by_mode=est_boundary_given_by_mode,
+            sample_targets_by_mode=true_boundary_given_by_mode,
+            true_target=true_p_boundary_given,
+        )
 
         summaries.append(
             ThreeParameterRecoverySummary(
@@ -1969,6 +2267,17 @@ def run_three_parameter_recovery_study(
                 sample_target_bias_p_boundary_doc=sum(
                     (x - y) for x, y in zip(est_boundary_doc_rates, true_boundary_doc_rates)
                 ) / n_rep,
+                legacy_weighting_mode=legacy_mode.value,
+                weighting_views={
+                    mode.value: {
+                        "p_spike": spike_views[mode.value],
+                        "p_two_doc": two_doc_views[mode.value],
+                        "p_boundary_doc": boundary_doc_views[mode.value],
+                        "p_two_given_spike": two_given_views[mode.value],
+                        "p_boundary_given_spike": boundary_given_views[mode.value],
+                    }
+                    for mode in modes
+                },
             )
         )
 
@@ -2068,6 +2377,8 @@ def run_four_parameter_recovery_study(
     seed: int = 0,
     spike_threshold: float = 0.90,
     decision_threshold: float = 0.50,
+    weighting_modes: Optional[Sequence[str]] = None,
+    legacy_weighting_mode: str = "doc",
 ) -> List[FourParameterRecoverySummary]:
     """
     Joint recovery for:
@@ -2080,6 +2391,10 @@ def run_four_parameter_recovery_study(
         raise ValueError("n_replicates must be >= 1")
     if docs_per_replicate <= 0:
         raise ValueError("docs_per_replicate must be >= 1")
+    modes, legacy_mode = _resolve_weighting(
+        weighting_modes=weighting_modes,
+        legacy_weighting_mode=legacy_weighting_mode,
+    )
 
     true_p_spike = _clip01(distribution.p_spike_doc)
     true_p_two_given = _clip01(distribution.p_two_spikes_given_spike)
@@ -2116,6 +2431,20 @@ def run_four_parameter_recovery_study(
         true_two_given_rates: List[float] = []
         true_three_given_rates: List[float] = []
         true_boundary_given_rates: List[float] = []
+        est_spike_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        est_two_doc_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        est_three_doc_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        est_boundary_doc_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        est_two_given_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        est_three_given_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        est_boundary_given_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_spike_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_two_doc_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_three_doc_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_boundary_doc_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_two_given_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_three_given_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_boundary_given_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
 
         for rep in range(n_replicates):
             rep_seed = seed + (40_000 * m_idx) + rep
@@ -2133,6 +2462,21 @@ def run_four_parameter_recovery_study(
             true_two = 0.0
             true_three = 0.0
             true_boundary = 0.0
+            mode_tot_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_spike_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_two_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_three_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_boundary_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_two_inter_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_three_inter_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_boundary_inter_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_spike_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_two_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_three_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_boundary_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_two_inter_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_three_inter_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_boundary_inter_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
 
             for i, doc in enumerate(docs):
                 doc_seed = rep_seed + i
@@ -2149,38 +2493,46 @@ def run_four_parameter_recovery_study(
                     chunk_budget=method.chunk_budget,
                     rng=random.Random(doc_seed),
                 )
-                est_spike += 1.0 if aggregate_chunks(
+                est_spike_score = aggregate_chunks(
                     chunks_kept,
                     aggregator=method.aggregator,
                     merge_order=method.merge_order,
                     spike_threshold=spike_threshold,
                     boundary_span_tokens=method.boundary_span_tokens,
                     seed=doc_seed,
-                ) >= decision_threshold else 0.0
-                est_two += 1.0 if aggregate_chunks(
+                )
+                est_two_score = aggregate_chunks(
                     chunks_kept,
                     aggregator=two_agg,
                     merge_order=method.merge_order,
                     spike_threshold=spike_threshold,
                     boundary_span_tokens=method.boundary_span_tokens,
                     seed=doc_seed,
-                ) >= decision_threshold else 0.0
-                est_three += 1.0 if aggregate_chunks(
+                )
+                est_three_score = aggregate_chunks(
                     chunks_kept,
                     aggregator=three_agg,
                     merge_order=method.merge_order,
                     spike_threshold=spike_threshold,
                     boundary_span_tokens=method.boundary_span_tokens,
                     seed=doc_seed,
-                ) >= decision_threshold else 0.0
-                est_boundary += 1.0 if aggregate_chunks(
+                )
+                est_boundary_score = aggregate_chunks(
                     chunks_kept,
                     aggregator=boundary_agg,
                     merge_order=method.merge_order,
                     spike_threshold=spike_threshold,
                     boundary_span_tokens=method.boundary_span_tokens,
                     seed=doc_seed,
-                ) >= decision_threshold else 0.0
+                )
+                est_spike_event = 1.0 if est_spike_score >= decision_threshold else 0.0
+                est_two_event = 1.0 if est_two_score >= decision_threshold else 0.0
+                est_three_event = 1.0 if est_three_score >= decision_threshold else 0.0
+                est_boundary_event = 1.0 if est_boundary_score >= decision_threshold else 0.0
+                est_spike += est_spike_event
+                est_two += est_two_event
+                est_three += est_three_event
+                est_boundary += est_boundary_event
 
                 t_spike = true_objective_score(
                     doc.token_scores,
@@ -2196,10 +2548,44 @@ def run_four_parameter_recovery_study(
                         boundary_span_tokens=distribution.boundary_span_tokens,
                     )
                 )
-                true_spike += t_spike
-                true_two += t_two
-                true_three += t_three
-                true_boundary += t_boundary
+                true_spike_event = float(t_spike >= decision_threshold)
+                true_two_event = float(t_two >= decision_threshold)
+                true_three_event = float(t_three >= decision_threshold)
+                true_boundary_event = float(t_boundary >= decision_threshold)
+                true_spike += true_spike_event
+                true_two += true_two_event
+                true_three += true_three_event
+                true_boundary += true_boundary_event
+                for mode in modes:
+                    w = _doc_weight(doc=doc, all_chunks=chunks_all, mode=mode)
+                    mode_key = mode.value
+                    mode_tot_weight[mode_key] += w
+                    mode_est_spike_weight[mode_key] += w * est_spike_event
+                    mode_est_two_weight[mode_key] += w * est_two_event
+                    mode_est_three_weight[mode_key] += w * est_three_event
+                    mode_est_boundary_weight[mode_key] += w * est_boundary_event
+                    mode_est_two_inter_weight[mode_key] += w * (
+                        1.0 if (est_spike_event >= 0.5 and est_two_event >= 0.5) else 0.0
+                    )
+                    mode_est_three_inter_weight[mode_key] += w * (
+                        1.0 if (est_spike_event >= 0.5 and est_three_event >= 0.5) else 0.0
+                    )
+                    mode_est_boundary_inter_weight[mode_key] += w * (
+                        1.0 if (est_spike_event >= 0.5 and est_boundary_event >= 0.5) else 0.0
+                    )
+                    mode_true_spike_weight[mode_key] += w * true_spike_event
+                    mode_true_two_weight[mode_key] += w * true_two_event
+                    mode_true_three_weight[mode_key] += w * true_three_event
+                    mode_true_boundary_weight[mode_key] += w * true_boundary_event
+                    mode_true_two_inter_weight[mode_key] += w * (
+                        1.0 if (true_spike_event >= 0.5 and true_two_event >= 0.5) else 0.0
+                    )
+                    mode_true_three_inter_weight[mode_key] += w * (
+                        1.0 if (true_spike_event >= 0.5 and true_three_event >= 0.5) else 0.0
+                    )
+                    mode_true_boundary_inter_weight[mode_key] += w * (
+                        1.0 if (true_spike_event >= 0.5 and true_boundary_event >= 0.5) else 0.0
+                    )
 
             n = float(len(docs))
             est_spike_rate = est_spike / n
@@ -2233,6 +2619,65 @@ def run_four_parameter_recovery_study(
             true_two_given_rates.append(true_two_given)
             true_three_given_rates.append(true_three_given)
             true_boundary_given_rates.append(true_boundary_given)
+            for mode in modes:
+                mode_key = mode.value
+                w_tot = mode_tot_weight[mode_key]
+                est_spike_w = mode_est_spike_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                est_two_doc_w = mode_est_two_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                est_three_doc_w = mode_est_three_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                est_boundary_doc_w = (
+                    mode_est_boundary_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                )
+                true_spike_w = mode_true_spike_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                true_two_doc_w = mode_true_two_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                true_three_doc_w = mode_true_three_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                true_boundary_doc_w = (
+                    mode_true_boundary_weight[mode_key] / w_tot if w_tot > 0 else 0.0
+                )
+                est_two_given_w = (
+                    mode_est_two_inter_weight[mode_key] / mode_est_spike_weight[mode_key]
+                    if mode_est_spike_weight[mode_key] > 0
+                    else 0.0
+                )
+                est_three_given_w = (
+                    mode_est_three_inter_weight[mode_key] / mode_est_spike_weight[mode_key]
+                    if mode_est_spike_weight[mode_key] > 0
+                    else 0.0
+                )
+                est_boundary_given_w = (
+                    mode_est_boundary_inter_weight[mode_key] / mode_est_spike_weight[mode_key]
+                    if mode_est_spike_weight[mode_key] > 0
+                    else 0.0
+                )
+                true_two_given_w = (
+                    mode_true_two_inter_weight[mode_key] / mode_true_spike_weight[mode_key]
+                    if mode_true_spike_weight[mode_key] > 0
+                    else 0.0
+                )
+                true_three_given_w = (
+                    mode_true_three_inter_weight[mode_key] / mode_true_spike_weight[mode_key]
+                    if mode_true_spike_weight[mode_key] > 0
+                    else 0.0
+                )
+                true_boundary_given_w = (
+                    mode_true_boundary_inter_weight[mode_key] / mode_true_spike_weight[mode_key]
+                    if mode_true_spike_weight[mode_key] > 0
+                    else 0.0
+                )
+                est_spike_by_mode[mode_key].append(float(est_spike_w))
+                est_two_doc_by_mode[mode_key].append(float(est_two_doc_w))
+                est_three_doc_by_mode[mode_key].append(float(est_three_doc_w))
+                est_boundary_doc_by_mode[mode_key].append(float(est_boundary_doc_w))
+                est_two_given_by_mode[mode_key].append(float(est_two_given_w))
+                est_three_given_by_mode[mode_key].append(float(est_three_given_w))
+                est_boundary_given_by_mode[mode_key].append(float(est_boundary_given_w))
+                true_spike_by_mode[mode_key].append(float(true_spike_w))
+                true_two_doc_by_mode[mode_key].append(float(true_two_doc_w))
+                true_three_doc_by_mode[mode_key].append(float(true_three_doc_w))
+                true_boundary_doc_by_mode[mode_key].append(float(true_boundary_doc_w))
+                true_two_given_by_mode[mode_key].append(float(true_two_given_w))
+                true_three_given_by_mode[mode_key].append(float(true_three_given_w))
+                true_boundary_given_by_mode[mode_key].append(float(true_boundary_given_w))
 
         n_rep = float(n_replicates)
         mean_hat_spike = sum(est_spike_rates) / n_rep
@@ -2246,6 +2691,41 @@ def run_four_parameter_recovery_study(
         supports_two = two_agg == AggregatorPolicy.MERGE_SAFE_SECOND_MAX
         supports_three = three_agg == AggregatorPolicy.MERGE_SAFE_THIRD_MAX
         supports_boundary = boundary_agg == AggregatorPolicy.MERGE_SAFE_BOUNDARY_MAX
+        spike_views = build_weighting_views_from_replicates(
+            estimates_by_mode=est_spike_by_mode,
+            sample_targets_by_mode=true_spike_by_mode,
+            true_target=true_p_spike,
+        )
+        two_doc_views = build_weighting_views_from_replicates(
+            estimates_by_mode=est_two_doc_by_mode,
+            sample_targets_by_mode=true_two_doc_by_mode,
+            true_target=true_p_two_doc,
+        )
+        three_doc_views = build_weighting_views_from_replicates(
+            estimates_by_mode=est_three_doc_by_mode,
+            sample_targets_by_mode=true_three_doc_by_mode,
+            true_target=true_p_three_doc,
+        )
+        boundary_doc_views = build_weighting_views_from_replicates(
+            estimates_by_mode=est_boundary_doc_by_mode,
+            sample_targets_by_mode=true_boundary_doc_by_mode,
+            true_target=true_p_boundary_doc,
+        )
+        two_given_views = build_weighting_views_from_replicates(
+            estimates_by_mode=est_two_given_by_mode,
+            sample_targets_by_mode=true_two_given_by_mode,
+            true_target=true_p_two_given,
+        )
+        three_given_views = build_weighting_views_from_replicates(
+            estimates_by_mode=est_three_given_by_mode,
+            sample_targets_by_mode=true_three_given_by_mode,
+            true_target=true_p_three_given,
+        )
+        boundary_given_views = build_weighting_views_from_replicates(
+            estimates_by_mode=est_boundary_given_by_mode,
+            sample_targets_by_mode=true_boundary_given_by_mode,
+            true_target=true_p_boundary_given,
+        )
 
         summaries.append(
             FourParameterRecoverySummary(
@@ -2310,6 +2790,19 @@ def run_four_parameter_recovery_study(
                 sample_target_bias_p_boundary_doc=sum(
                     (x - y) for x, y in zip(est_boundary_doc_rates, true_boundary_doc_rates)
                 ) / n_rep,
+                legacy_weighting_mode=legacy_mode.value,
+                weighting_views={
+                    mode.value: {
+                        "p_spike": spike_views[mode.value],
+                        "p_two_doc": two_doc_views[mode.value],
+                        "p_three_doc": three_doc_views[mode.value],
+                        "p_boundary_doc": boundary_doc_views[mode.value],
+                        "p_two_given_spike": two_given_views[mode.value],
+                        "p_three_given_spike": three_given_views[mode.value],
+                        "p_boundary_given_spike": boundary_given_views[mode.value],
+                    }
+                    for mode in modes
+                },
             )
         )
 
@@ -2388,6 +2881,8 @@ def run_k_target_recovery_study(
     seed: int = 0,
     spike_threshold: float = 0.90,
     decision_threshold: float = 0.50,
+    weighting_modes: Optional[Sequence[str]] = None,
+    legacy_weighting_mode: str = "doc",
 ) -> List[KTargetRecoverySummary]:
     """
     Recover generic conditional targets P(count>=k | spike) for user-specified `k`.
@@ -2401,6 +2896,10 @@ def run_k_target_recovery_study(
     if any(int(k) < 2 for k in target_ks):
         raise ValueError("target_ks must be >= 2; k=1 is the conditioning event")
     _validate_spike_count_distribution(distribution)
+    modes, legacy_mode = _resolve_weighting(
+        weighting_modes=weighting_modes,
+        legacy_weighting_mode=legacy_weighting_mode,
+    )
 
     ks = tuple(sorted({int(k) for k in target_ks}))
     max_k = max(ks)
@@ -2420,6 +2919,12 @@ def run_k_target_recovery_study(
     for m_idx, method in enumerate(active_methods):
         est_cond_by_k = {k: [] for k in ks}
         true_cond_by_k = {k: [] for k in ks}
+        est_cond_by_mode_k: Dict[str, Dict[int, List[float]]] = {
+            m.value: {k: [] for k in ks} for m in modes
+        }
+        true_cond_by_mode_k: Dict[str, Dict[int, List[float]]] = {
+            m.value: {k: [] for k in ks} for m in modes
+        }
 
         for rep in range(n_replicates):
             rep_seed = seed + (50_000 * m_idx) + rep
@@ -2432,6 +2937,21 @@ def run_k_target_recovery_study(
             true_counts_by_k = {k: 0.0 for k in ks}
             est_spike = 0.0
             true_spike = 0.0
+            mode_tot_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_spike_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_spike_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_k_weight: Dict[str, Dict[int, float]] = {
+                m.value: {k: 0.0 for k in ks} for m in modes
+            }
+            mode_true_k_weight: Dict[str, Dict[int, float]] = {
+                m.value: {k: 0.0 for k in ks} for m in modes
+            }
+            mode_est_inter_weight: Dict[str, Dict[int, float]] = {
+                m.value: {k: 0.0 for k in ks} for m in modes
+            }
+            mode_true_inter_weight: Dict[str, Dict[int, float]] = {
+                m.value: {k: 0.0 for k in ks} for m in modes
+            }
 
             for i, doc in enumerate(docs):
                 doc_seed = rep_seed + i
@@ -2478,9 +2998,16 @@ def run_k_target_recovery_study(
                     raise ValueError(f"Unsupported estimator: {method.estimator!r}")
 
                 est_spike += 1.0 if est_spike_event >= decision_threshold else 0.0
+                est_spike_bin = 1.0 if est_spike_event >= decision_threshold else 0.0
 
                 count_true = true_spike_count(doc.token_scores, spike_threshold=spike_threshold)
                 true_spike += 1.0 if count_true >= 1 else 0.0
+                true_spike_bin = 1.0 if count_true >= 1 else 0.0
+                for mode in modes:
+                    w = _doc_weight(doc=doc, all_chunks=chunks_all, mode=mode)
+                    mode_tot_weight[mode.value] += w
+                    mode_est_spike_weight[mode.value] += w * est_spike_bin
+                    mode_true_spike_weight[mode.value] += w * true_spike_bin
 
                 for k in ks:
                     if method.estimator == KSketchEstimator.MERGE_SAFE_TOPK:
@@ -2512,6 +3039,18 @@ def run_k_target_recovery_study(
                         raise ValueError(f"Unsupported estimator: {method.estimator!r}")
                     est_counts_by_k[k] += 1.0 if est_event >= decision_threshold else 0.0
                     true_counts_by_k[k] += 1.0 if count_true >= k else 0.0
+                    est_event_bin = 1.0 if est_event >= decision_threshold else 0.0
+                    true_event_bin = 1.0 if count_true >= k else 0.0
+                    for mode in modes:
+                        w = _doc_weight(doc=doc, all_chunks=chunks_all, mode=mode)
+                        mode_est_k_weight[mode.value][k] += w * est_event_bin
+                        mode_true_k_weight[mode.value][k] += w * true_event_bin
+                        mode_est_inter_weight[mode.value][k] += w * (
+                            1.0 if (est_event_bin >= 0.5 and est_spike_bin >= 0.5) else 0.0
+                        )
+                        mode_true_inter_weight[mode.value][k] += w * (
+                            1.0 if (true_event_bin >= 0.5 and true_spike_bin >= 0.5) else 0.0
+                        )
 
             n = float(len(docs))
             est_spike_rate = est_spike / n
@@ -2523,6 +3062,20 @@ def run_k_target_recovery_study(
                 true_cond = true_doc_rate / true_spike_rate if true_spike_rate > 0 else 0.0
                 est_cond_by_k[k].append(est_cond)
                 true_cond_by_k[k].append(true_cond)
+                for mode in modes:
+                    mode_key = mode.value
+                    est_cond_w = (
+                        mode_est_inter_weight[mode_key][k] / mode_est_spike_weight[mode_key]
+                        if mode_est_spike_weight[mode_key] > 0
+                        else 0.0
+                    )
+                    true_cond_w = (
+                        mode_true_inter_weight[mode_key][k] / mode_true_spike_weight[mode_key]
+                        if mode_true_spike_weight[mode_key] > 0
+                        else 0.0
+                    )
+                    est_cond_by_mode_k[mode_key][k].append(float(est_cond_w))
+                    true_cond_by_mode_k[mode_key][k].append(float(true_cond_w))
 
         n_rep = float(n_replicates)
         for k in ks:
@@ -2545,6 +3098,12 @@ def run_k_target_recovery_study(
                     mean_abs_bias=sum(abs(x - true_target) for x in estimates) / n_rep,
                     rmse=math.sqrt(sum((x - true_target) ** 2 for x in estimates) / n_rep),
                     sample_target_bias=sum((x - y) for x, y in zip(estimates, true_cond_by_k[k])) / n_rep,
+                    legacy_weighting_mode=legacy_mode.value,
+                    weighting_views=build_weighting_views_from_replicates(
+                        estimates_by_mode={mode.value: est_cond_by_mode_k[mode.value][k] for mode in modes},
+                        sample_targets_by_mode={mode.value: true_cond_by_mode_k[mode.value][k] for mode in modes},
+                        true_target=true_target,
+                    ),
                 )
             )
     return out
@@ -2667,6 +3226,8 @@ def run_chunk_quality_sweep(
     spike_threshold: float = 0.90,
     decision_threshold: float = 0.50,
     include_references: bool = True,
+    weighting_modes: Optional[Sequence[str]] = None,
+    legacy_weighting_mode: str = "doc",
 ) -> List[ChunkQualitySweepSummary]:
     """
     Sweep leaf granularity / chunk budget and report both bias and chunk-quality diagnostics.
@@ -2685,6 +3246,10 @@ def run_chunk_quality_sweep(
     if docs_per_replicate <= 0:
         raise ValueError("docs_per_replicate must be >= 1")
     _validate_spike_count_distribution(distribution)
+    modes, legacy_mode = _resolve_weighting(
+        weighting_modes=weighting_modes,
+        legacy_weighting_mode=legacy_weighting_mode,
+    )
 
     k = int(target_k)
     if k < 2:
@@ -2720,6 +3285,8 @@ def run_chunk_quality_sweep(
     for m_idx, method in enumerate(methods):
         est_cond: List[float] = []
         true_cond: List[float] = []
+        est_cond_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_cond_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
         target_capture: List[float] = []
         spike_capture: List[float] = []
         spike_recall: List[float] = []
@@ -2739,6 +3306,12 @@ def run_chunk_quality_sweep(
             true_k_count = 0.0
             est_spike_count = 0.0
             true_spike_count_docs = 0.0
+            mode_est_spike_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_k_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_inter_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_spike_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_k_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_inter_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
 
             true_target_docs = 0
             captured_target_docs = 0
@@ -2785,10 +3358,26 @@ def run_chunk_quality_sweep(
                 )
                 est_spike_count += 1.0 if est_spike_event >= decision_threshold else 0.0
                 est_k_count += 1.0 if est_k_event >= decision_threshold else 0.0
+                est_spike_bin = 1.0 if est_spike_event >= decision_threshold else 0.0
+                est_k_bin = 1.0 if est_k_event >= decision_threshold else 0.0
 
                 n_spikes_true = true_spike_count(doc.token_scores, spike_threshold=spike_threshold)
                 true_spike_count_docs += 1.0 if n_spikes_true >= 1 else 0.0
                 true_k_count += 1.0 if n_spikes_true >= k else 0.0
+                true_spike_bin = 1.0 if n_spikes_true >= 1 else 0.0
+                true_k_bin = 1.0 if n_spikes_true >= k else 0.0
+                for mode in modes:
+                    w = _doc_weight(doc=doc, all_chunks=all_chunks, mode=mode)
+                    mode_est_spike_weight[mode.value] += w * est_spike_bin
+                    mode_est_k_weight[mode.value] += w * est_k_bin
+                    mode_est_inter_weight[mode.value] += w * (
+                        1.0 if (est_spike_bin >= 0.5 and est_k_bin >= 0.5) else 0.0
+                    )
+                    mode_true_spike_weight[mode.value] += w * true_spike_bin
+                    mode_true_k_weight[mode.value] += w * true_k_bin
+                    mode_true_inter_weight[mode.value] += w * (
+                        1.0 if (true_spike_bin >= 0.5 and true_k_bin >= 0.5) else 0.0
+                    )
 
                 n_spikes_kept = 0
                 n_spikes_isolated = 0
@@ -2814,6 +3403,20 @@ def run_chunk_quality_sweep(
             true_k_rate = true_k_count / n_docs
             est_cond.append(est_k_rate / est_spike_rate if est_spike_rate > 0 else 0.0)
             true_cond.append(true_k_rate / true_spike_rate if true_spike_rate > 0 else 0.0)
+            for mode in modes:
+                mode_key = mode.value
+                est_cond_mode = (
+                    mode_est_inter_weight[mode_key] / mode_est_spike_weight[mode_key]
+                    if mode_est_spike_weight[mode_key] > 0
+                    else 0.0
+                )
+                true_cond_mode = (
+                    mode_true_inter_weight[mode_key] / mode_true_spike_weight[mode_key]
+                    if mode_true_spike_weight[mode_key] > 0
+                    else 0.0
+                )
+                est_cond_by_mode[mode_key].append(float(est_cond_mode))
+                true_cond_by_mode[mode_key].append(float(true_cond_mode))
 
             target_capture.append(
                 float(captured_target_docs) / float(true_target_docs) if true_target_docs > 0 else 0.0
@@ -2859,6 +3462,12 @@ def run_chunk_quality_sweep(
                 mean_spike_token_isolation=sum(spike_isolation) / n_rep,
                 mean_chunks_total=sum(chunks_total) / n_rep,
                 mean_chunks_kept=sum(chunks_kept) / n_rep,
+                legacy_weighting_mode=legacy_mode.value,
+                weighting_views=build_weighting_views_from_replicates(
+                    estimates_by_mode=est_cond_by_mode,
+                    sample_targets_by_mode=true_cond_by_mode,
+                    true_target=true_p_k,
+                ),
             )
         )
     return out
@@ -2898,6 +3507,8 @@ def run_chunk_quality_coverage_sweep(
     decision_threshold: float = 0.50,
     include_references: bool = True,
     ci_level: float = 0.95,
+    weighting_modes: Optional[Sequence[str]] = None,
+    legacy_weighting_mode: str = "doc",
 ) -> List[ChunkQualityCoverageSummary]:
     """
     Coverage-focused variant of chunk-quality sweep.
@@ -2912,6 +3523,10 @@ def run_chunk_quality_coverage_sweep(
     if not (0.0 < ci_level < 1.0):
         raise ValueError("ci_level must be in (0, 1)")
     _validate_spike_count_distribution(distribution)
+    modes, legacy_mode = _resolve_weighting(
+        weighting_modes=weighting_modes,
+        legacy_weighting_mode=legacy_weighting_mode,
+    )
 
     k = int(target_k)
     if k < 2:
@@ -2952,6 +3567,8 @@ def run_chunk_quality_coverage_sweep(
         ci_low: List[float] = []
         ci_high: List[float] = []
         covered: List[float] = []
+        estimates_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
+        true_by_mode: Dict[str, List[float]] = {m.value: [] for m in modes}
 
         for rep in range(n_replicates):
             rep_seed = seed + (90_000 * m_idx) + rep
@@ -2963,6 +3580,10 @@ def run_chunk_quality_coverage_sweep(
 
             est_spike_docs = 0
             est_target_docs = 0
+            mode_est_spike_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_est_inter_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_spike_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
+            mode_true_inter_weight: Dict[str, float] = {m.value: 0.0 for m in modes}
             for i, doc in enumerate(docs):
                 doc_seed = rep_seed + i
                 all_chunks = chunk_document(
@@ -2999,6 +3620,15 @@ def run_chunk_quality_coverage_sweep(
                 is_target = int(est_k_event >= decision_threshold)
                 est_spike_docs += is_spike
                 est_target_docs += is_target
+                n_spikes_true = true_spike_count(doc.token_scores, spike_threshold=spike_threshold)
+                true_spike_event = 1 if n_spikes_true >= 1 else 0
+                true_target_event = 1 if n_spikes_true >= k else 0
+                for mode in modes:
+                    w = _doc_weight(doc=doc, all_chunks=all_chunks, mode=mode)
+                    mode_est_spike_weight[mode.value] += w * float(is_spike)
+                    mode_est_inter_weight[mode.value] += w * float(1 if (is_spike and is_target) else 0)
+                    mode_true_spike_weight[mode.value] += w * float(true_spike_event)
+                    mode_true_inter_weight[mode.value] += w * float(1 if (true_spike_event and true_target_event) else 0)
 
             if est_spike_docs <= 0:
                 p_hat = 0.0
@@ -3012,6 +3642,20 @@ def run_chunk_quality_coverage_sweep(
             ci_low.append(lo)
             ci_high.append(hi)
             covered.append(1.0 if (lo <= true_p_k <= hi) else 0.0)
+            for mode in modes:
+                mode_key = mode.value
+                est_mode = (
+                    mode_est_inter_weight[mode_key] / mode_est_spike_weight[mode_key]
+                    if mode_est_spike_weight[mode_key] > 0
+                    else 0.0
+                )
+                true_mode = (
+                    mode_true_inter_weight[mode_key] / mode_true_spike_weight[mode_key]
+                    if mode_true_spike_weight[mode_key] > 0
+                    else 0.0
+                )
+                estimates_by_mode[mode_key].append(float(est_mode))
+                true_by_mode[mode_key].append(float(true_mode))
 
         n_rep = float(n_replicates)
         mean_hat = sum(estimates) / n_rep
@@ -3040,6 +3684,12 @@ def run_chunk_quality_coverage_sweep(
                 mean_ci_width=sum((hi - lo) for lo, hi in zip(ci_low, ci_high)) / n_rep,
                 mean_ci_low=sum(ci_low) / n_rep,
                 mean_ci_high=sum(ci_high) / n_rep,
+                legacy_weighting_mode=legacy_mode.value,
+                weighting_views=build_weighting_views_from_replicates(
+                    estimates_by_mode=estimates_by_mode,
+                    sample_targets_by_mode=true_by_mode,
+                    true_target=true_p_k,
+                ),
             )
         )
     return out

@@ -1,0 +1,107 @@
+\section{Lean4 Formalization}
+\label{app:lean}
+
+This appendix describes the formal verification artifact at a level intended for
+paper readers. It is not a theorem-name index. The theorem-by-theorem mapping,
+assumption crosswalk, and module-level navigation notes live in the repository
+docs under \texttt{lean3/docs/}, where they can evolve without making the paper
+appendix unreadable.
+
+\subsection{Artifact Summary}
+
+The Lean sources live under \texttt{lean3/}. The active development currently
+contains more than 50{,}000 lines across 123 Lean files. The code is organized
+into five main parts:
+\begin{itemize}[nosep]
+    \item \textbf{OPT}: the core Oracle-Preserving Summarization theory, including local laws, preference-learning equivalence, gap bounds, theorem-backed reduction, measurement-error extensions, and adaptive-tree optimizer transfer.
+    \item \textbf{DSL}: the design-based statistical layer, including IPW theory, audit certificates, nonclassical expectation mismatch, and TreePO end-to-end guarantees.
+    \item \textbf{CLT}: probability infrastructure used for asymptotic arguments.
+    \item \textbf{Econometrics}: supporting results for identification, regression, panel methods, and related foundations.
+    \item \textbf{ML}: general supervised-learning primitives used by the broader theory stack.
+\end{itemize}
+
+The formalization builds on Mathlib and a companion probability library. The
+active build contains one axiom and no \texttt{sorry} placeholders in the
+imported theorem stack.
+
+\subsection{What Is Formally Verified}
+
+At a high level, the formalization verifies the full chain used in the paper:
+\begin{enumerate}[nosep]
+    \item local laws imply one-pass, schedule-invariant, and multi-round preservation;
+    \item exact preservation implies DPO, GRPO-PL, and GRPO-RL equivalence;
+    \item approximate preservation implies quantitative gap bounds for those same objectives;
+    \item theorem-backed reduction can be exact or approximate, can be direct or codec-mediated, and can be analyzed under measurement error;
+    \item stochastic adaptive tree objectives inherit optimizer-transfer guarantees, including cases where the oracle is imperfect and cases where certification holds only on a high-probability event;
+    \item clustered confidence intervals, calibration radii, and oracle-measurement envelopes feed directly into the final \texttt{computeDSLBound} object through machine-checked event-to-bound theorems;
+    \item the audit and IPW layers propagate these guarantees through the TreePO / DSL certificate stack.
+\end{enumerate}
+
+The same development also formalizes the bridge to classical mergeable
+summaries, proves that merge idempotence alone is not enough for OPS
+idempotence, and isolates the exact additional assumptions needed for
+theorem-backed learned reductions.
+
+\subsection{Single Axiom}
+
+The active theorem stack uses one formal axiom: expected group loss is
+Lipschitz in oracle distance. This is the precise point where the paper appeals
+to standard random-utility reasoning. The motivation is that preference losses
+based on rankings are often not pointwise Lipschitz because rankings can change
+discontinuously, but they \emph{are} expected-Lipschitz once one integrates over
+a continuous noise model such as Gumbel or Gaussian perturbations. That is the
+economically standard move behind Plackett--Luce and related discrete-choice
+models, and it is the only non-derived ingredient in the active formal proof
+stack.
+
+\subsection{Human-Readable Proofs vs. Repository Maps}
+
+The paper appendix follows a simple rule:
+\begin{itemize}[nosep]
+    \item if a mathematical claim appears in the appendix, it should have a full human-readable proof there;
+    \item low-level Lean identifiers, paper-to-Lean mappings, and assumption crosswalks belong in repository documentation rather than in the paper itself.
+\end{itemize}
+
+Accordingly, readers who want the exact code-level correspondence should use the
+standalone repository files:
+\begin{itemize}[nosep]
+    \item \texttt{lean3/docs/CORE\_PROOFS.md}: paper proofs reconstructed step by step alongside the Lean structure;
+    \item \texttt{lean3/docs/PAPER\_TO\_LEAN\_MAP.md}: theorem-by-theorem mapping from paper labels to Lean names and files;
+    \item \texttt{lean3/docs/ASSUMPTION\_CROSSWALK.md}: paper assumptions and their Lean counterparts;
+    \item \texttt{lean3/docs/ADAPTIVE\_TREE\_OPTIMIZER\_TRANSFER.md}: the expected-tree and high-probability optimizer-transfer results.
+\end{itemize}
+
+For code readers, \texttt{lean3/FormalProofs/OPT/MainTheorems.lean} is the
+curated Lean entry point.
+
+\subsection{Coverage Boundary}
+
+The formalization covers the mathematical guarantees of the system, not every
+engineering detail of the implementation. In particular:
+\begin{itemize}[nosep]
+    \item \textbf{Formalized}: local laws, reduction guarantees, preference-learning objectives, measurement-error variants, adaptive-tree optimization theorems, audit/sample-complexity results, and the IPW / DSL certificate layer.
+    \item \textbf{Not formalized}: low-level LLM I/O, batching, HTTP behavior, serialization, GPU orchestration, and the operational details of the Python runtime.
+\end{itemize}
+
+This boundary is deliberate. The proofs certify the mathematical contracts that
+the software is supposed to satisfy. They do not attempt to prove the correctness
+of every line of orchestration code.
+
+\subsection{Build Instructions}
+
+To verify the full formalization:
+
+\begin{lstlisting}
+cd lean3
+lake build FormalProofs
+\end{lstlisting}
+
+For the core OPS entry point only:
+
+\begin{lstlisting}
+cd lean3
+lake build FormalProofs.OPT.MainTheorems
+\end{lstlisting}
+
+The repository contains CI configuration for rebuilding these targets
+automatically on revision changes.

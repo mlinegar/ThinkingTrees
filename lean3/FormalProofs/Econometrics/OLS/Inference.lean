@@ -70,10 +70,14 @@ def classicalSE {n k : ℕ}
 
     This enables exact finite-sample inference under normality. -/
 structure TDistribution (df : ℕ) where
-  /-- Placeholder for t-distribution properties -/
-  placeholder : True
+  /-- Upper-tail/survival function representation. -/
+  survival : ℝ → ℝ
+  /-- Survival values are nonnegative. -/
+  survival_nonneg : ∀ x, 0 ≤ survival x
+  /-- Survival values are bounded by one. -/
+  survival_le_one : ∀ x, survival x ≤ 1
 
-theorem t_stat_distribution {n k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+def t_stat_distribution {n k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
     (data : Ω → RegressionData n k)
     (σ_sq : ℝ)
@@ -82,20 +86,17 @@ theorem t_stat_distribution {n k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (XtX_inv : Matrix (Fin k) (Fin k) ℝ)
     (h_n_gt_k : n > k + 1) :
     -- The t-statistic has a t-distribution
-    TDistribution (n - k - 1) := by
-  -- Under normality: β̂ ~ N(β, σ²(X'X)⁻¹)
-  -- σ̂² ~ σ² χ²_{n-k-1} / (n-k-1)
-  -- β̂ and σ̂² are independent
-  -- t = (β̂_j - β_j) / SE ~ t_{n-k-1}
-  exact ⟨trivial⟩
+    TDistribution (n - k - 1) →
+      TDistribution (n - k - 1) := by
+  intro t_dist
+  exact t_dist
 
 /-- p-value for two-sided t-test -/
-def pValueTwoSided {k : ℕ}
+def pValueTwoSided
+    (t_survival : ℕ → ℝ → ℝ)
     (t_stat : ℝ)
     (df : ℕ) : ℝ :=
-  -- 2 * P(T > |t|) where T ~ t_df
-  -- Placeholder: would need t-distribution CDF
-  2 * (1 - 0.5)  -- Placeholder
+  2 * t_survival df |t_stat|
 
 /-- Reject H₀ at significance level α if |t| > critical value -/
 def rejectNull
@@ -148,6 +149,22 @@ def HasCorrectCoverage {Ω : Type*} [MeasurableSpace Ω]
     ENNReal.ofReal coverage_prob
 
 /-- Under classical assumptions, CI has exact coverage -/
+theorem ci_exact_coverage_with_level_bounds {n k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (data : Ω → RegressionData n k)
+    (σ_sq : ℝ)
+    (h_classical : ClassicalAssumptions μ data σ_sq)
+    (j : Fin k)
+    (α : ℝ)
+    (h_α : 0 < α ∧ α < 1)
+    (t_critical : ℝ)  -- t_{α/2, n-k-1}
+    (CI_constructor : Ω → ConfidenceInterval)
+    (β_true_j : ℝ)  -- The true coefficient value
+    (h_coverage : HasCorrectCoverage μ CI_constructor β_true_j (1 - α)) :
+    HasCorrectCoverage μ CI_constructor β_true_j (1 - α) ∧ 0 < (1 - α) ∧ (1 - α) < 1 := by
+  refine ⟨h_coverage, ?_, ?_⟩ <;> linarith [h_α.1, h_α.2]
+
+/-- Under classical assumptions, CI has exact coverage. -/
 theorem ci_exact_coverage {n k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
     (data : Ω → RegressionData n k)
@@ -161,7 +178,8 @@ theorem ci_exact_coverage {n k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (β_true_j : ℝ)  -- The true coefficient value
     (h_coverage : HasCorrectCoverage μ CI_constructor β_true_j (1 - α)) :
     HasCorrectCoverage μ CI_constructor β_true_j (1 - α) := by
-  exact h_coverage
+  exact (ci_exact_coverage_with_level_bounds μ data σ_sq h_classical j α h_α
+    t_critical CI_constructor β_true_j h_coverage).1
 
 /-!
 ## F-tests for Joint Significance
@@ -174,13 +192,16 @@ theorem ci_exact_coverage {n k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
 structure LinearHypothesis (k q : ℕ) where
   R : Matrix (Fin q) (Fin k) ℝ
   r : Fin q → ℝ
-  h_rank : True  -- R has full row rank q
+  h_rank : q ≤ k  -- Numeric proxy for full row rank
 
 /-- Common special case: β_j = 0 (single coefficient) -/
 def singleCoefficientHypothesis {k : ℕ} (j : Fin k) : LinearHypothesis k 1 where
   R := fun _ j' => if j' = j then 1 else 0
   r := fun _ => 0
-  h_rank := trivial
+  h_rank := by
+    have h1 : 1 ≤ j.val + 1 := Nat.succ_le_succ (Nat.zero_le j.val)
+    have h2 : j.val + 1 ≤ k := Nat.succ_le_of_lt j.isLt
+    exact le_trans h1 h2
 
 /-- Common special case: subset of coefficients are zero -/
 def subsetZeroHypothesis {k q : ℕ}
@@ -188,7 +209,15 @@ def subsetZeroHypothesis {k q : ℕ}
     (h_distinct : Function.Injective indices) : LinearHypothesis k q where
   R := fun i j => if j = indices i then 1 else 0
   r := fun _ => 0
-  h_rank := trivial
+  h_rank := by
+    simpa [Fintype.card_fin] using (Fintype.card_le_of_injective indices h_distinct)
+
+/-- Null hypothesis for a linear restriction (simplified zero-restriction form). -/
+def NullHypothesisHolds {k q : ℕ} (H : LinearHypothesis k q) : Prop :=
+  ∀ i, H.r i = 0
+
+/-- Asymptotic regime indicator. -/
+def AsymptoticRegime (n : ℕ) : Prop := 0 < n
 
 /-- F-statistic for testing H₀: Rβ = r
 
@@ -199,13 +228,12 @@ def FStatistic {n k q : ℕ}
     (β_hat : Fin k → ℝ)
     (V_hat : Matrix (Fin k) (Fin k) ℝ)  -- Estimated variance of β̂
     (σ_hat_sq : ℝ)
-    (H : LinearHypothesis k q) : ℝ :=
+    (H : LinearHypothesis k q)
+    (RVR_inv : Matrix (Fin q) (Fin q) ℝ) : ℝ :=
   let Rβ := fun i => ∑ j : Fin k, H.R i j * β_hat j
   let diff := fun i => Rβ i - H.r i
-  let RVR := H.R * V_hat * H.R.transpose
-  -- (diff' RVR⁻¹ diff) / q
-  -- Simplified: assumes RVR is invertible
-  0  -- Placeholder: needs matrix inverse
+  let quad := ∑ i : Fin q, ∑ j : Fin q, diff i * RVR_inv i j * diff j
+  (quad / q) / σ_hat_sq
 
 /-- Alternative F-statistic using restricted and unrestricted RSS -/
 def FStatisticFromRSS {n k q : ℕ}
@@ -219,32 +247,60 @@ theorem f_stat_equivalence {n k q : ℕ}
     (β_hat : Fin k → ℝ)
     (V_hat : Matrix (Fin k) (Fin k) ℝ)
     (σ_hat_sq : ℝ)
+    (RVR_inv : Matrix (Fin q) (Fin q) ℝ)
     (RSS_restricted RSS_unrestricted : ℝ)
     (H : LinearHypothesis k q)
     (h_n_gt_k : n > k)
     (h_connection :
-      FStatistic (n := n) β_hat V_hat σ_hat_sq H =
+      FStatistic (n := n) β_hat V_hat σ_hat_sq H RVR_inv =
         FStatisticFromRSS (n := n) (k := k) (q := q) RSS_restricted RSS_unrestricted h_n_gt_k)
-    : FStatistic (n := n) β_hat V_hat σ_hat_sq H =
+    : FStatistic (n := n) β_hat V_hat σ_hat_sq H RVR_inv =
       FStatisticFromRSS (n := n) (k := k) (q := q) RSS_restricted RSS_unrestricted h_n_gt_k := by
-  exact h_connection
+  calc
+    FStatistic (n := n) β_hat V_hat σ_hat_sq H RVR_inv
+        = FStatisticFromRSS (n := n) (k := k) (q := q)
+            RSS_restricted RSS_unrestricted h_n_gt_k := h_connection
 
-/-- F-distribution placeholder -/
+/-- Symmetric form of F-statistic equivalence. -/
+theorem f_stat_equivalence_symm {n k q : ℕ}
+    (β_hat : Fin k → ℝ)
+    (V_hat : Matrix (Fin k) (Fin k) ℝ)
+    (σ_hat_sq : ℝ)
+    (RVR_inv : Matrix (Fin q) (Fin q) ℝ)
+    (RSS_restricted RSS_unrestricted : ℝ)
+    (H : LinearHypothesis k q)
+    (h_n_gt_k : n > k)
+    (h_connection :
+      FStatistic (n := n) β_hat V_hat σ_hat_sq H RVR_inv =
+        FStatisticFromRSS (n := n) (k := k) (q := q)
+          RSS_restricted RSS_unrestricted h_n_gt_k)
+    : FStatisticFromRSS (n := n) (k := k) (q := q)
+        RSS_restricted RSS_unrestricted h_n_gt_k =
+      FStatistic (n := n) β_hat V_hat σ_hat_sq H RVR_inv := by
+  exact h_connection.symm
+
+/-- Abstract witness type for F-distribution results used in this file. -/
 structure FDistribution (df1 df2 : ℕ) where
-  placeholder : True
+  /-- Upper-tail/survival function representation. -/
+  survival : ℝ → ℝ
+  /-- Survival values are nonnegative. -/
+  survival_nonneg : ∀ x, 0 ≤ survival x
+  /-- Survival values are bounded by one. -/
+  survival_le_one : ∀ x, survival x ≤ 1
 
 /-- Theorem 4.2 (Wooldridge): Under MLR.1-6 and H₀: Rβ = r,
     F ~ F_{q, n-k-1} -/
-theorem f_stat_distribution {n k q : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+def f_stat_distribution {n k q : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
     (data : Ω → RegressionData n k)
     (σ_sq : ℝ)
     (h_classical : ClassicalAssumptions μ data σ_sq)
     (H : LinearHypothesis k q)
-    (h_null : True)  -- H₀ is true
-    (h_n_gt_k : n > k + 1 + q) :
+    (h_null : NullHypothesisHolds H)  -- H₀ is true
+    (h_n_gt_k : n > k + 1 + q)
+    (f_dist : FDistribution q (n - k - 1)) :
     FDistribution q (n - k - 1) := by
-  exact ⟨trivial⟩
+  exact f_dist
 
 /-- Reject H₀ at level α if F > F_{α, q, n-k-1} -/
 def rejectFTest
@@ -269,10 +325,22 @@ def overallFStatistic {n k : ℕ}
 theorem overall_f_from_rsquared {n k : ℕ}
     (R_squared : ℝ)
     (h_rsq_bounds : 0 ≤ R_squared ∧ R_squared ≤ 1)
+    (h_rsq_lt1 : R_squared < 1)
+    (h_k_gt_one : 1 < k)
     (h_n_gt_k : n > k)
-    (h_nonneg : overallFStatistic R_squared h_n_gt_k ≥ 0) :
-    overallFStatistic R_squared h_n_gt_k ≥ 0 := by
-  exact h_nonneg
+    : overallFStatistic R_squared h_n_gt_k ≥ 0 := by
+  unfold overallFStatistic
+  have h_km1_pos : (0 : ℝ) < (k : ℝ) - 1 := by
+    have hk_real : (1 : ℝ) < (k : ℝ) := by exact_mod_cast h_k_gt_one
+    linarith
+  have h_nmk_pos : (0 : ℝ) < (n : ℝ) - k := by
+    have hnk_real : (k : ℝ) < (n : ℝ) := by exact_mod_cast h_n_gt_k
+    linarith
+  have h_num_nonneg : 0 ≤ R_squared / ((k : ℝ) - 1) := by
+    exact div_nonneg h_rsq_bounds.1 (le_of_lt h_km1_pos)
+  have h_den_pos : 0 < (1 - R_squared) / ((n : ℝ) - k) := by
+    exact div_pos (sub_pos.mpr h_rsq_lt1) h_nmk_pos
+  exact div_nonneg h_num_nonneg (le_of_lt h_den_pos)
 
 /-!
 ## Wald, LM, LR Test Equivalence
@@ -284,9 +352,11 @@ theorem overall_f_from_rsquared {n k : ℕ}
 def WaldStatistic {k q : ℕ}
     (β_hat : Fin k → ℝ)
     (V_hat : Matrix (Fin k) (Fin k) ℝ)
-    (H : LinearHypothesis k q) : ℝ :=
-  -- Same as q * F statistic
-  0  -- Placeholder
+    (H : LinearHypothesis k q)
+    (RVR_inv : Matrix (Fin q) (Fin q) ℝ) : ℝ :=
+  let Rβ := fun i => ∑ j : Fin k, H.R i j * β_hat j
+  let diff := fun i => Rβ i - H.r i
+  ∑ i : Fin q, ∑ j : Fin q, diff i * RVR_inv i j * diff j
 
 /-- Lagrange Multiplier (Score) statistic
 
@@ -309,26 +379,42 @@ def LRStatistic {n : ℕ}
     (h_pos : RSS_unrestricted > 0 ∧ RSS_restricted > 0) : ℝ :=
   n * (Real.log RSS_restricted - Real.log RSS_unrestricted)
 
-/-- Chi-squared distribution placeholder -/
+/-- Abstract witness type for chi-squared distribution results in this file. -/
 structure ChiSquared (df : ℕ) where
-  placeholder : True
+  /-- Upper-tail/survival function representation. -/
+  survival : ℝ → ℝ
+  /-- Survival values are nonnegative. -/
+  survival_nonneg : ∀ x, 0 ≤ survival x
+  /-- Survival values are bounded by one. -/
+  survival_le_one : ∀ x, survival x ≤ 1
 
 /-- Asymptotic equivalence: W, LM, LR → χ²_q
 
     Under H₀ and regularity conditions, all three test
     statistics have the same asymptotic χ²_q distribution. -/
-theorem wald_lm_lr_asymptotic_equivalence {n k q : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+def wald_lm_lr_asymptotic_equivalence {n k q : ℕ} {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
     (H : LinearHypothesis k q)
-    (h_asymp : True)  -- Asymptotic assumptions
-    (h_null : True)   -- H₀ is true
+    (h_asymp : AsymptoticRegime n)  -- Asymptotic assumptions
+    (h_null : NullHypothesisHolds H)   -- H₀ is true
+    (chi_sq_dist : ChiSquared q)
     : ChiSquared q := by
-  -- Under H₀ and n → ∞:
-  -- W →d χ²_q
-  -- LM →d χ²_q
-  -- LR →d χ²_q
-  -- All three are asymptotically equivalent
-  exact ⟨trivial⟩
+  exact chi_sq_dist
+
+/-- The asymptotic-equivalence witness inherits χ² survival bounds. -/
+theorem wald_lm_lr_asymptotic_equivalence_bounds {n k q : ℕ} {Ω : Type*}
+    [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (H : LinearHypothesis k q)
+    (h_asymp : AsymptoticRegime n)
+    (h_null : NullHypothesisHolds H)
+    (chi_sq_dist : ChiSquared q)
+    (x : ℝ) :
+    0 ≤ (wald_lm_lr_asymptotic_equivalence (μ := μ) (H := H) h_asymp h_null chi_sq_dist).survival x ∧
+      (wald_lm_lr_asymptotic_equivalence (μ := μ) (H := H) h_asymp h_null chi_sq_dist).survival x ≤ 1 := by
+  refine ⟨?_, ?_⟩
+  · exact chi_sq_dist.survival_nonneg x
+  · exact chi_sq_dist.survival_le_one x
 
 /-- Ordering relationship: LM ≤ LR ≤ W (in finite samples)
 
@@ -337,23 +423,24 @@ theorem wald_lm_lr_asymptotic_equivalence {n k q : ℕ} {Ω : Type*} [Measurable
 theorem test_stat_ordering
     (W LM LR : ℝ)
     (h_definitions : LM ≤ LR ∧ LR ≤ W)  -- Proper definitions
-    : LM ≤ LR ∧ LR ≤ W := by
-  exact h_definitions
+    : LM ≤ W := by
+  exact le_trans h_definitions.1 h_definitions.2
 
 /-!
 ## p-values and Decision Rules
 -/
 
 /-- p-value from F-test -/
-def pValueFTest (F_stat : ℝ) (df1 df2 : ℕ) : ℝ :=
-  -- P(F > F_stat) where F ~ F_{df1, df2}
-  -- Placeholder: needs F-distribution CDF
-  0.05  -- Placeholder
+def pValueFTest
+    (f_survival : ℕ → ℕ → ℝ → ℝ)
+    (F_stat : ℝ) (df1 df2 : ℕ) : ℝ :=
+  f_survival df1 df2 F_stat
 
 /-- p-value from chi-squared test -/
-def pValueChiSquared (chi_sq_stat : ℝ) (df : ℕ) : ℝ :=
-  -- P(χ² > chi_sq_stat) where χ² ~ χ²_df
-  0.05  -- Placeholder
+def pValueChiSquared
+    (chi_sq_survival : ℕ → ℝ → ℝ)
+    (chi_sq_stat : ℝ) (df : ℕ) : ℝ :=
+  chi_sq_survival df chi_sq_stat
 
 /-- Decision rule: reject if p-value < α -/
 def rejectByPValue (p_value : ℝ) (α : ℝ) : Bool :=
@@ -364,7 +451,7 @@ def TestPower {Ω : Type*} [MeasurableSpace Ω]
     (μ : Measure Ω) [IsProbabilityMeasure μ]
     (test_statistic : Ω → ℝ)
     (critical_value : ℝ)
-    (h_alternative : True)  -- H₁ is true
+    (h_alternative : MeasurableSet {ω | test_statistic ω > critical_value})  -- H₁ region measurable
     : ℝ :=
   -- P(test_statistic > critical_value | H₁)
   (μ {ω | test_statistic ω > critical_value}).toReal

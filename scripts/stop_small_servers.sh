@@ -14,11 +14,11 @@ set -e
 # Check for --all flag
 if [[ "$1" == "--all" ]]; then
     # Stop ALL vLLM servers including main server on 8000
-    PORTS_TO_STOP="8000 8001 8002 30000"
+    PORTS_TO_STOP="8000 8001 8002 8003 30000 30001"
     echo "Stopping ALL vLLM servers (including main server on 8000)..."
 else
     # Default: stop auxiliary servers only
-    PORTS_TO_STOP=${@:-"8001 8002 30000"}
+    PORTS_TO_STOP=${@:-"8001 8002 8003 30000 30001"}
 fi
 
 echo "========================================"

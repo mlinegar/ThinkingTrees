@@ -1,5 +1,5 @@
 import FormalProofs.DSL.MomentFunctions
-import FormalProofs.Probability.Core
+import FormalProofs.CLT.Core
 
 /-!
 # FormalProofs/DSL/MEstimationCore.lean

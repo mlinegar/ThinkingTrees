@@ -1,0 +1,21 @@
+\documentclass[tikz,border=5mm]{standalone}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,fit,backgrounds,decorations.pathreplacing,shapes.geometric}
+\tikzset{
+  doc/.style = {rectangle, draw, rounded corners=2pt, minimum width=1.1cm, minimum height=0.62cm, inner sep=2pt, fill=white},
+  sum/.style = {rectangle, draw, rounded corners=3pt, inner sep=4pt, fill=green!6},
+  plus/.style = {circle, draw, minimum size=0.4cm, inner sep=0pt, fill=white},
+  chip/.style = {rectangle, rounded corners=3pt, minimum width=1.95cm, minimum height=0.72cm, inner sep=3pt},
+  panel/.style = {rounded corners=4pt, line width=0.9pt},
+}
+\definecolor{regA}{HTML}{4C78A8}
+\definecolor{regB}{HTML}{F58518}
+\definecolor{regC}{HTML}{54A24B}
+\definecolor{regD}{HTML}{E45756}
+\begin{document}
+\input{markov_changepoint_dgp_slide.tikz}
+\end{document}

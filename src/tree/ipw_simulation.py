@@ -22,7 +22,9 @@ from src.tree.ipw import (
     TreePropensity,
     TreeSample,
     effective_sample_size,
+    ipw_preference_loss,
     ipw_preference_empirical_bernstein_ci,
+    ipw_violation_rate,
     ipw_violation_empirical_bernstein_ci,
 )
 
@@ -125,6 +127,14 @@ class EmpiricalBernsteinCoverageResult:
     mean_sample_count: float
     mean_effective_sample_size: float
     empty_sample_rate: float
+    ipw_violation_bias: float = float("nan")
+    ipw_preference_bias: float = float("nan")
+    naive_violation_coverage: float = float("nan")
+    naive_preference_coverage: float = float("nan")
+    naive_violation_mean_width: float = float("nan")
+    naive_preference_mean_width: float = float("nan")
+    naive_violation_bias: float = float("nan")
+    naive_preference_bias: float = float("nan")
 
 
 def compute_doc_policy_outcome(local_signals: Iterable[float]) -> float:
@@ -290,6 +300,29 @@ def _tree_sample_from_chunk(
     )
 
 
+def _as_unweighted_samples(samples: Iterable[TreeSample]) -> List[TreeSample]:
+    """
+    Return a copy of samples with unit inclusion propensities.
+
+    This is used to evaluate an intentionally naive unweighted baseline under the
+    same CI machinery.
+    """
+    out: List[TreeSample] = []
+    for sample in samples:
+        out.append(
+            TreeSample(
+                doc_id=sample.doc_id,
+                node_id=sample.node_id,
+                node_type=sample.node_type,
+                violation=sample.violation,
+                preference_loss=sample.preference_loss,
+                propensity=TreePropensity(doc=1.0, node=1.0, label=1.0),
+                metadata=sample.metadata,
+            )
+        )
+    return out
+
+
 def _draw_logged_tree_samples_bernoulli(
     population: SimulatedPopulation,
     trial_rng: random.Random,
@@ -431,6 +464,15 @@ def evaluate_empirical_bernstein_coverage(
     preference_width_sum = 0.0
     sample_count_sum = 0.0
     neff_sum = 0.0
+    ipw_violation_bias_sum = 0.0
+    ipw_preference_bias_sum = 0.0
+
+    naive_violation_hits = 0
+    naive_preference_hits = 0
+    naive_violation_width_sum = 0.0
+    naive_preference_width_sum = 0.0
+    naive_violation_bias_sum = 0.0
+    naive_preference_bias_sum = 0.0
 
     for _ in range(n_trials):
         sampled = draw_logged_tree_samples(
@@ -445,6 +487,8 @@ def evaluate_empirical_bernstein_coverage(
 
         violation_ci = ipw_violation_empirical_bernstein_ci(sampled, delta=delta)
         preference_ci = ipw_preference_empirical_bernstein_ci(sampled, delta=delta)
+        violation_hat = ipw_violation_rate(sampled)
+        preference_hat = ipw_preference_loss(sampled)
 
         if violation_ci[0] <= population.true_violation_rate <= violation_ci[1]:
             violation_hits += 1
@@ -455,6 +499,24 @@ def evaluate_empirical_bernstein_coverage(
         preference_width_sum += max(0.0, preference_ci[1] - preference_ci[0])
         sample_count_sum += float(len(sampled))
         neff_sum += effective_sample_size(sampled)
+        ipw_violation_bias_sum += float(violation_hat - population.true_violation_rate)
+        ipw_preference_bias_sum += float(preference_hat - population.true_preference_loss)
+
+        naive_samples = _as_unweighted_samples(sampled)
+        naive_violation_ci = ipw_violation_empirical_bernstein_ci(naive_samples, delta=delta)
+        naive_preference_ci = ipw_preference_empirical_bernstein_ci(naive_samples, delta=delta)
+        naive_violation_hat = ipw_violation_rate(naive_samples)
+        naive_preference_hat = ipw_preference_loss(naive_samples)
+
+        if naive_violation_ci[0] <= population.true_violation_rate <= naive_violation_ci[1]:
+            naive_violation_hits += 1
+        if naive_preference_ci[0] <= population.true_preference_loss <= naive_preference_ci[1]:
+            naive_preference_hits += 1
+
+        naive_violation_width_sum += max(0.0, naive_violation_ci[1] - naive_violation_ci[0])
+        naive_preference_width_sum += max(0.0, naive_preference_ci[1] - naive_preference_ci[0])
+        naive_violation_bias_sum += float(naive_violation_hat - population.true_violation_rate)
+        naive_preference_bias_sum += float(naive_preference_hat - population.true_preference_loss)
 
     inv_trials = 1.0 / float(n_trials)
     return EmpiricalBernsteinCoverageResult(
@@ -471,6 +533,14 @@ def evaluate_empirical_bernstein_coverage(
         mean_sample_count=sample_count_sum * inv_trials,
         mean_effective_sample_size=neff_sum * inv_trials,
         empty_sample_rate=empty_count * inv_trials,
+        ipw_violation_bias=ipw_violation_bias_sum * inv_trials,
+        ipw_preference_bias=ipw_preference_bias_sum * inv_trials,
+        naive_violation_coverage=naive_violation_hits * inv_trials,
+        naive_preference_coverage=naive_preference_hits * inv_trials,
+        naive_violation_mean_width=naive_violation_width_sum * inv_trials,
+        naive_preference_mean_width=naive_preference_width_sum * inv_trials,
+        naive_violation_bias=naive_violation_bias_sum * inv_trials,
+        naive_preference_bias=naive_preference_bias_sum * inv_trials,
     )
 
 
@@ -492,6 +562,14 @@ def summarize_coverage_runs(
             "mean_sample_count": run.mean_sample_count,
             "mean_effective_sample_size": run.mean_effective_sample_size,
             "empty_sample_rate": run.empty_sample_rate,
+            "ipw_violation_bias": run.ipw_violation_bias,
+            "ipw_preference_bias": run.ipw_preference_bias,
+            "naive_violation_coverage": run.naive_violation_coverage,
+            "naive_preference_coverage": run.naive_preference_coverage,
+            "naive_violation_mean_width": run.naive_violation_mean_width,
+            "naive_preference_mean_width": run.naive_preference_mean_width,
+            "naive_violation_bias": run.naive_violation_bias,
+            "naive_preference_bias": run.naive_preference_bias,
         }
     return summary
 

@@ -22,10 +22,15 @@ Summarization metrics:
 
 from dataclasses import dataclass
 from collections import OrderedDict
-from typing import List, Dict, Optional, Tuple, Callable, Any
+from typing import TYPE_CHECKING, List, Dict, Optional, Tuple, Callable, Any
 import math
 import threading
 import warnings
+
+if TYPE_CHECKING:
+    from src.core.conditional_memory import ConditionalMemory
+
+from src.core.conditional_memory import canonical_hash, hash_payload
 
 from src.training.core import Prediction, LawCheckResult
 
@@ -926,37 +931,131 @@ def create_oracle_metric(
 
 
 class OraclePredictionCache:
-    """Thread-safe LRU cache for oracle predictions."""
+    """Thread-safe LRU cache for oracle predictions.
 
-    def __init__(self, max_entries: int = 10000):
+    When an optional ``ConditionalMemory`` instance is provided, lookups and
+    stores are delegated to it under the ``"oracle"`` score head.  This gives
+    cross-run persistence (via L2/SQLite) and unified statistics without
+    changing any callers.  The local ``OrderedDict`` is kept as an L0 hot
+    tier for minimum-latency lookups within a single run.
+    """
+
+    def __init__(
+        self,
+        max_entries: int = 10000,
+        memory: Optional["ConditionalMemory"] = None,
+        *,
+        oracle_id: str = "oracle",
+        scale: Optional["BoundedScale"] = None,
+    ):
         self.max_entries = max_entries
         self._lock = threading.Lock()
         self._cache: "OrderedDict[str, Any]" = OrderedDict()
         self.hits = 0
         self.misses = 0
+        self._memory = memory
+        self._oracle_id = str(oracle_id or "oracle")
+        self._scale = scale
+
+    def _memory_namespace(self) -> Optional[str]:
+        if self._memory is None:
+            return None
+        return f"oracle:{self._oracle_id}:{self._memory.namespace_version}"
+
+    def _memory_key(self, text: str) -> Optional[str]:
+        if self._memory is None or self._scale is None:
+            return None
+        text_hash = canonical_hash(text)
+        payload = {
+            "text": text_hash,
+            "oracle_id": self._oracle_id,
+            "scale": {"min": float(self._scale.min_value), "max": float(self._scale.max_value)},
+        }
+        return hash_payload(payload)
+
+    @staticmethod
+    def _serialize(value: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(value, tuple):
+            val = value[0] if len(value) > 0 else 0.0
+            conf = value[1] if len(value) > 1 else 1.0
+            reasoning = value[2] if len(value) > 2 else ""
+            return {
+                "type": "tuple",
+                "value": [float(val), float(conf), str(reasoning)],
+            }
+        try:
+            return {"type": "float", "value": float(value)}
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _deserialize(payload: Any) -> Optional[Any]:
+        if isinstance(payload, dict):
+            kind = str(payload.get("type", "")).strip().lower()
+            if kind == "float":
+                try:
+                    return float(payload.get("value"))
+                except (TypeError, ValueError):
+                    return None
+            if kind == "tuple":
+                value = payload.get("value")
+                if isinstance(value, list) and value:
+                    val = float(value[0])
+                    conf = float(value[1]) if len(value) > 1 else 1.0
+                    reasoning = str(value[2]) if len(value) > 2 else ""
+                    return (val, conf, reasoning)
+        return None
 
     def get(self, key: str):
         """Return cached value or None, tracking hit/miss stats."""
+        l0_key = canonical_hash(key)
         with self._lock:
-            if key in self._cache:
-                self._cache.move_to_end(key)
+            if l0_key in self._cache:
+                self._cache.move_to_end(l0_key)
                 self.hits += 1
-                return self._cache[key]
+                return self._cache[l0_key]
+
+        # Check ConditionalMemory (cross-run persistent tier)
+        if self._memory is not None:
+            namespace = self._memory_namespace()
+            mem_key = self._memory_key(key)
+            if namespace and mem_key:
+                cached = self._memory.get_json(namespace, mem_key)
+                value = self._deserialize(cached)
+            else:
+                value = None
+            if value is not None:
+                with self._lock:
+                    self.hits += 1
+                    self._cache[l0_key] = value
+                    self._cache.move_to_end(l0_key)
+                return value
+
+        with self._lock:
             self.misses += 1
-            return None
+        return None
 
     def set(self, key: str, value) -> None:
         """Insert value with LRU eviction."""
+        l0_key = canonical_hash(key)
         with self._lock:
-            if key in self._cache:
-                self._cache[key] = value
-                self._cache.move_to_end(key)
+            if l0_key in self._cache:
+                self._cache[l0_key] = value
+                self._cache.move_to_end(l0_key)
                 return
 
             if self.max_entries and len(self._cache) >= self.max_entries:
                 self._cache.popitem(last=False)
 
-            self._cache[key] = value
+            self._cache[l0_key] = value
+
+        # Persist to ConditionalMemory for cross-run reuse
+        if self._memory is not None:
+            namespace = self._memory_namespace()
+            mem_key = self._memory_key(key)
+            payload = self._serialize(value)
+            if namespace and mem_key and payload is not None:
+                self._memory.set_json(namespace, mem_key, payload)
 
     def seed(self, values: Dict[str, Tuple[float, float, str]]) -> None:
         """Seed the cache with precomputed oracle predictions."""
@@ -972,13 +1071,16 @@ class OraclePredictionCache:
         """Return cache statistics."""
         total = self.hits + self.misses
         hit_rate = self.hits / total if total > 0 else 0.0
-        return {
+        result = {
             "cache_size": len(self._cache),
             "hits": self.hits,
             "misses": self.misses,
             "hit_rate": hit_rate,
             "max_entries": self.max_entries,
         }
+        if self._memory is not None:
+            result["memory_stats"] = self._memory.report()
+        return result
 
 
 def _resolve_oracle_fn(oracle_classifier: Callable) -> Callable:
@@ -993,15 +1095,33 @@ def create_cached_oracle_metric(
     summary_field: str = "summary",
     cache_size: int = 10000,
     with_feedback: bool = False,
+    memory: Optional["ConditionalMemory"] = None,
+    oracle_id: Optional[str] = None,
 ) -> Tuple[Callable, Optional[OraclePredictionCache]]:
     """
     Create an oracle metric with memoized oracle predictions.
+
+    Args:
+        memory: Optional ConditionalMemory for cross-run persistence.
 
     Returns:
         (metric_fn, cache_obj) where cache_obj can be passed to get_cache_stats().
     """
     oracle_fn = _resolve_oracle_fn(oracle_classifier)
-    cache = OraclePredictionCache(max_entries=cache_size) if cache_size > 0 else None
+    if oracle_id is None:
+        oracle_id = str(getattr(oracle_classifier, "name", "") or "").strip() or getattr(oracle_classifier, "__name__", None)
+        if not oracle_id:
+            oracle_id = type(oracle_classifier).__name__
+    cache = (
+        OraclePredictionCache(
+            max_entries=cache_size,
+            memory=memory,
+            oracle_id=str(oracle_id),
+            scale=scale,
+        )
+        if cache_size > 0
+        else None
+    )
 
     def cached_oracle_fn(text: str):
         if cache is None:
@@ -1398,6 +1518,7 @@ class MetricBuilder:
         self._thresholds: Dict[str, float] = {}
         self._components: List[Tuple[str, Callable, float]] = []
         self._cache: Optional[OraclePredictionCache] = None
+        self._memory: Optional["ConditionalMemory"] = None
 
     def with_oracle(self, oracle_fn: Callable) -> "MetricBuilder":
         """
@@ -1436,6 +1557,15 @@ class MetricBuilder:
             Self for chaining
         """
         self._cache_size = max_entries
+        return self
+
+    def with_memory(self, memory: "ConditionalMemory") -> "MetricBuilder":
+        """Attach a ConditionalMemory instance for cross-run persistence.
+
+        Returns:
+            Self for chaining
+        """
+        self._memory = memory
         return self
 
     def with_feedback(self) -> "MetricBuilder":
@@ -1540,6 +1670,7 @@ class MetricBuilder:
                 summary_field=self._summary_field,
                 cache_size=self._cache_size,
                 with_feedback=self._with_feedback,
+                memory=self._memory,
             )
             self._cache = cache
             return metric_fn, cache

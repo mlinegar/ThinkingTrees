@@ -76,6 +76,63 @@ def SamplingIndicator.toReal (R : SamplingIndicator) : ℝ :=
 ## Predictions and Annotations
 -/
 
+/-- Ground-truth label source.
+`human` = expert annotation.
+`dataset` = trusted pre-existing label in the source data. -/
+inductive TruthLabelSource where
+  | human
+  | dataset
+deriving DecidableEq, Repr, Inhabited
+
+/-- Approximate-label source used for high-throughput scoring.
+This captures the teacher/proxy split and embedding-based proxies. -/
+inductive ApproxLabelSource where
+  | teacher_lm
+  | proxy_lm
+  | embedding_model
+deriving DecidableEq, Repr, Inhabited
+
+/-- Label payload that can carry both truth labels and approximations.
+Truth labels may come from either humans or trusted dataset labels. -/
+structure LabelObservation (Missing : Type*) where
+  truth_label : Option Missing
+  truth_source : Option TruthLabelSource
+  approx_label : Option Missing
+  approx_source : Option ApproxLabelSource
+  h_truth_source :
+    truth_label.isSome = truth_source.isSome
+
+namespace LabelObservation
+
+/-- Whether a truth label is available. -/
+def hasTruthLabel {Missing : Type*} (l : LabelObservation Missing) : Bool :=
+  l.truth_label.isSome
+
+/-- Whether the truth label came from human annotation. -/
+def isHumanTruth {Missing : Type*} (l : LabelObservation Missing) : Bool :=
+  decide (l.truth_source = some TruthLabelSource.human)
+
+/-- Whether the truth label came from a trusted dataset label. -/
+def isDatasetTruth {Missing : Type*} (l : LabelObservation Missing) : Bool :=
+  decide (l.truth_source = some TruthLabelSource.dataset)
+
+lemma hasTruthLabel_iff_source {Missing : Type*} (l : LabelObservation Missing) :
+    l.hasTruthLabel = true ↔ l.truth_source.isSome = true := by
+  unfold hasTruthLabel
+  constructor
+  · intro h
+    have h_some : l.truth_label.isSome = true := by
+      simpa using h
+    rw [l.h_truth_source] at h_some
+    exact h_some
+  · intro h
+    have h_some : l.truth_label.isSome = true := by
+      rw [l.h_truth_source]
+      exact h
+    simpa using h_some
+
+end LabelObservation
+
 /-- A prediction for a missing variable value -/
 def Prediction (Missing : Type*) := Missing
 

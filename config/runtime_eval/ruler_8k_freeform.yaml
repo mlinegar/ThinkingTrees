@@ -1,0 +1,82 @@
+run:
+  name: ruler_8k_freeform_v0
+
+benchmark:
+  name: ruler_synthetic
+  ruler_dir: outside_data/RULER
+  benchmark_name: synthetic
+  tokenizer_type: openai
+  tokenizer_path: cl100k_base
+  model_template_type: base
+  ensure_prepared: true
+
+model:
+  # OpenAI-compatible endpoint (vLLM/SGLang/OpenAI).
+  base_url: http://localhost:8000/v1
+  model: default
+  api_key: EMPTY
+  temperature: 0.0
+  timeout: 120.0
+  enable_cache: true
+
+runtime_defaults:
+  # Per-call cap (the main claim lever).
+  cap_tokens: 8192
+  safety_tokens: 256
+  max_output_tokens: 256
+
+  # Free-form memory compression.
+  chunk_tokens: 6144
+  overlap_tokens: 256
+  leaf_memory_tokens: 256
+  merge_memory_tokens: 256
+  tree_shape: balanced
+
+  # Ablation toggles (overridden by modes like runtime_no_verifier).
+  verifier_enabled: true
+  repair_enabled: true
+  max_retries_per_step: 2
+
+phases:
+  - phase_id: S0_smoke
+    tasks: [niah_single_2, niah_multikey_2, vt, cwe, qa_2]
+    lengths: [8192, 32768, 131072]
+    seeds: [0]
+    num_samples: 50
+    split: validation
+    modes: [ground_truth, empty, runtime_full]
+
+  - phase_id: S1_length_scaling
+    tasks:
+      [
+        niah_single_1,
+        niah_single_2,
+        niah_single_3,
+        niah_multikey_1,
+        niah_multikey_2,
+        niah_multikey_3,
+        niah_multivalue,
+        niah_multiquery,
+        vt,
+        cwe,
+        fwe,
+        qa_1,
+        qa_2,
+      ]
+    lengths: [4096, 8192, 16384, 32768, 65536, 131072]
+    seeds: [0, 1, 2]
+    num_samples: 500
+    split: validation
+    modes: [flat_prompt_baseline, chunk_concat_baseline, runtime_no_verifier, runtime_full]
+
+  - phase_id: S2_budget_phase
+    tasks: [niah_multikey_3, vt, cwe, qa_2]
+    lengths: [65536, 131072]
+    seeds: [0, 1]
+    num_samples: 200
+    split: validation
+    modes: [runtime_full]
+    runtime_grid:
+      leaf_memory_tokens: [64, 128, 256, 512, 1024]
+      merge_memory_tokens: [64, 128, 256, 512, 1024]
+

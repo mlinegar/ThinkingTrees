@@ -104,7 +104,7 @@ class AuditCertificate:
     """One of: EXACT (all rates 0), UNION_BOUND (nonzero rates), EMPIRICAL (CI-based)."""
 
     violation_bound: float
-    """Upper bound on Pr[root violation]: N*p_suff + M*p_assoc + (R-1)*p_idem."""
+    """Upper bound on Pr[root violation]: N*p_suff + M*p_merge + (R-1)*p_idem."""
 
     confidence: float
     """Confidence level: 1 - delta."""
@@ -113,7 +113,7 @@ class AuditCertificate:
     """IPW-corrected leaf sufficiency violation rate."""
 
     merge_rate: float
-    """IPW-corrected merge consistency violation rate."""
+    """IPW-corrected Lean-L2 / paper-C3 merge violation rate."""
 
     idempotence_rate: float
     """IPW-corrected idempotence violation rate."""
@@ -181,6 +181,18 @@ class HarnessResult:
         with (out / "trace.jsonl").open("w") as f:
             for event in self.trace:
                 f.write(json.dumps(event) + "\n")
+
+        # Audit reports
+        (out / "audit_reports.json").write_text(
+            json.dumps(
+                [
+                    report.to_dict() if hasattr(report, "to_dict") else {}
+                    for report in self.audit_reports
+                ],
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
         # Trees
         tree_dir = out / "trees"
@@ -398,7 +410,6 @@ class TreeAudit:
             build_config = BuildConfig(
                 max_chunk_chars=self._chunk_chars,
                 chunk_strategy="axis",
-                pipelined=True,
             )
 
             t0 = time.monotonic()
@@ -457,7 +468,6 @@ class TreeAudit:
                 config=BuildConfig(
                     max_chunk_chars=self._chunk_chars,
                     chunk_strategy="axis",
-                    pipelined=True,
                     chunk_feedback_signals=doc_signals,
                 ),
             )

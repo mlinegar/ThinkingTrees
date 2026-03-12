@@ -1,0 +1,213 @@
+\section{GRPO Bounds: Plackett-Luce and Reinforcement Learning Variants}
+\label{sec:grpo}
+
+This section extends the DPO equivalence and gap bounds from Appendix~\ref{sec:dpo} to Group Relative Policy Optimization (GRPO) variants. We cover two settings: GRPO with Plackett-Luce ranking (GRPO-PL) and GRPO with reinforcement learning objectives (GRPO-RL), including the DeepSeek-R1 training objective.
+
+\subsection{Proof Strategy Overview}
+
+The GRPO proofs follow the same two-stage structure as DPO:
+\begin{enumerate}
+    \item \textbf{Exact equivalence:} Show that under oracle-measurability, all components of the loss factor through $\fstar(X)$, making the loss identical under exact preservation.
+    \item \textbf{Quantitative gap:} When preservation is approximate, bound the gap using composed Lipschitz constants.
+\end{enumerate}
+
+The main complication is that GRPO involves \emph{rankings}, which are \textbf{discontinuous pointwise}: a small change in scores can flip the ranking entirely. The key insight---formalized as the Expected Lipschitz axiom---is that while \emph{pointwise} rankings are discontinuous, the \emph{expected loss} (averaging over noise in the Random Utility Model) is continuous and Lipschitz.
+
+\subsection{GRPO-PL: Plackett-Luce Ranking}
+
+GRPO-PL generalizes DPO from pairwise comparisons ($k=2$) to $k$-wise rankings using the Plackett-Luce model.
+
+\begin{definition}[Plackett-Luce Model]
+Given $k$ candidates with scores $s_1, \ldots, s_k$, the probability of ranking $\pi$ (a permutation) is:
+\[
+P(\pi \mid s_1, \ldots, s_k) = \prod_{i=1}^{k} \frac{\exp(s_{\pi(i)})}{\sum_{j=i}^{k} \exp(s_{\pi(j)})}.
+\]
+\end{definition}
+
+The GRPO-PL loss trains a policy to maximize the log-likelihood of the observed rankings:
+\[
+\mathcal{L}_{\text{GRPO-PL}}(\pi) = -\E_{(X, \sigma)} \left[ \log P(\sigma \mid s_1(X), \ldots, s_k(X)) \right],
+\]
+where $\sigma$ is the observed ranking and $s_i(X) = \log \pi(a_i \mid X) - \log \pi_{\text{ref}}(a_i \mid X)$.
+
+\begin{definition}[Oracle-indexed group generator]
+A group generator $(a_1, \ldots, a_k) \sim \text{Gen}(X)$ is oracle-indexed if $\text{Gen}(x) = \text{Gen}(x')$ whenever $\metric(\fstar(x), \fstar(x')) = 0$.
+\end{definition}
+
+\begin{definition}[Oracle-indexed ranker]
+A ranker $\sigma \sim \text{Rank}(X, a_1, \ldots, a_k)$ is oracle-indexed if the ranking distribution depends on $X$ only through $\fstar(X)$.
+\end{definition}
+
+\begin{theorem}[Exact GRPO-PL Equivalence]\label{thm:grpo-pl-exact}
+Assume $\metric(\fstar(Z^{(R)}(X)), \fstar(X)) = 0$ almost surely. If the policy $\pi$, reference $\pi_{\text{ref}}$, group generator, and ranker are all oracle-measurable/indexed, then the sets of population minimizers of $\mathcal{L}_{\text{GRPO-PL}}$ coincide when trained on $X$ and when trained on $Z^{(R)}(X)$.
+\end{theorem}
+
+\begin{proof}
+The proof parallels Theorem~\ref{thm:dpo-exact}. Under the oracle-measurability conditions, the joint law of $(Y, a_1, \ldots, a_k, \sigma)$ is the same whether the input is $X$ or $Z^{(R)}(X)$, where $Y = \fstar(X)$. The Plackett-Luce probabilities depend on $X$ only through the scores $s_i(X)$, which by oracle-measurability depend only on $Y$. Therefore the expected loss decomposes as an expectation over $Y$ of a functional that is identical under both inputs.
+\end{proof}
+
+\begin{theorem}[Quantitative GRPO-PL Gap]\label{thm:grpo-pl-gap}
+Let $\Delta_R = \E[\metric(\fstar(Z^{(R)}(X)), \fstar(X))]$. Under a policy-Lipschitz condition with constant $L_{\text{grpo}}$:
+\[
+|\mathcal{L}_{\text{GRPO-PL}}^X(\pi) - \mathcal{L}_{\text{GRPO-PL}}^Z(\pi)| \le L_{\text{grpo}} \cdot \Delta_R.
+\]
+\end{theorem}
+
+\begin{proof}
+Write the negative log-likelihood as
+\[
+-\log P(\sigma\mid s)=\sum_{i=1}^{k-1}\left(\log\sum_{j=i}^k e^{s_{\sigma(j)}}-s_{\sigma(i)}\right).
+\]
+The log-sum-exp map is $1$-Lipschitz in $\|\cdot\|_\infty$, and the linear term contributes at most $\|s-s'\|_\infty$, so each summand is $1$-Lipschitz in $\|s\|_\infty$. Summing $k-1$ terms yields
+\[
+\big|-\log P(\sigma\mid s)+\log P(\sigma\mid s')\big|\le (k-1)\|s-s'\|_\infty.
+\]
+Under the policy-Lipschitz condition, each score difference satisfies
+$|s_i(X)-s_i(Z)|\le L_{\text{pol}}\metric(\fstar(X),\fstar(Z))$, hence
+\[
+\|s(X)-s(Z)\|_\infty \le L_{\text{pol}}\metric(\fstar(X),\fstar(Z)).
+\]
+Taking expectations over $(X,Z^{(R)}(X),\sigma)$ gives
+$|\mathcal{L}_{\text{GRPO-PL}}^X(\pi)-\mathcal{L}_{\text{GRPO-PL}}^Z(\pi)|\le (k-1)L_{\text{pol}}\Delta_R$.
+\end{proof}
+
+\subsection{GRPO-RL: DeepSeek-R1 Style Training}
+
+GRPO-RL combines group sampling with PPO-style clipped surrogate objectives and KL regularization. This is the training objective used by DeepSeek-R1.
+
+\begin{definition}[GRPO-RL Objective]
+Given $k$ candidates per prompt with rewards $r_1, \ldots, r_k$:
+\begin{enumerate}
+    \item Compute z-score normalized advantages: $A_i = (r_i - \bar{r}) / \sigma_r$
+    \item Compute importance ratios: $\rho_i = \pi_\theta(a_i \mid X) / \pi_{\text{old}}(a_i \mid X)$
+    \item Apply PPO clipping: $L_i^{\text{clip}} = \min(\rho_i A_i, \text{clip}(\rho_i, 1-\epsilon, 1+\epsilon) A_i)$
+    \item Add KL penalty: $L_{\text{KL}} = \beta \cdot D_{\text{KL}}(\pi_\theta \| \pi_{\text{ref}})$
+\end{enumerate}
+The full objective is:
+\[
+\mathcal{L}_{\text{GRPO-RL}}(\pi_\theta) = -\E \left[ \frac{1}{k} \sum_{i=1}^k L_i^{\text{clip}} \right] + L_{\text{KL}}.
+\]
+\end{definition}
+
+\begin{definition}[Oracle-measurable reward]
+A reward function $R: \Strings \times \A \to \mathbb{R}$ is oracle-measurable if $R(x, a) = R(x', a)$ whenever $\metric(\fstar(x), \fstar(x')) = 0$.
+\end{definition}
+
+\begin{theorem}[Exact GRPO-RL Equivalence]\label{thm:grpo-rl-exact}
+Assume $\metric(\fstar(Z^{(R)}(X)), \fstar(X)) = 0$ almost surely. If all policies ($\pi_\theta$, $\pi_{\text{old}}$, $\pi_{\text{ref}}$), the reward function, and the group generator are oracle-measurable/indexed, then:
+\[
+\mathcal{L}_{\text{GRPO-RL}}(\pi_\theta; X) = \mathcal{L}_{\text{GRPO-RL}}(\pi_\theta; Z^{(R)}(X)).
+\]
+\end{theorem}
+
+\begin{proof}
+Under oracle-measurability, all components of the GRPO-RL objective---rewards, advantages, importance ratios, and KL divergence---depend on the input only through $\fstar(X)$. Exact oracle preservation ensures $\fstar(Z^{(R)}(X)) = \fstar(X)$ almost surely, so the expected losses are identical.
+\end{proof}
+
+\begin{theorem}[Quantitative GRPO-RL Gap]\label{thm:grpo-rl-gap}
+Under policy-Lipschitz and reward-Lipschitz conditions, and assuming the reward standard deviation satisfies $\sigma_r \ge \sigma_{\min} > 0$ on sampled groups, there exists a combined constant $L_{\text{grpo-rl}}$ (depending on $L_{\text{pol}}$, $L_{\text{rew}}$, $\sigma_{\min}$, and clipping) such that:
+\[
+|\mathcal{L}_{\text{GRPO-RL}}^X(\pi_\theta) - \mathcal{L}_{\text{GRPO-RL}}^Z(\pi_\theta)| \le L_{\text{grpo-rl}} \cdot \Delta_R.
+\]
+\end{theorem}
+
+\begin{proof}
+Assume rewards are bounded and that the empirical reward standard deviation satisfies $\sigma_r\ge\sigma_{\min}>0$ on the sampled groups. The reward-Lipschitz condition gives
+$|r_i(X)-r_i(Z)|\le L_R\,\metric(\fstar(X),\fstar(Z))$ for each $i$, so the reward vector is Lipschitz in the oracle distance. The map $r\mapsto A=(r-\bar r)/\sigma_r$ is Lipschitz on $\{\sigma_r\ge\sigma_{\min}\}$ with constant $L_A$ depending on $(L_R,\sigma_{\min})$, hence each $A_i$ changes by at most $L_A\,\metric(\fstar(X),\fstar(Z))$. The PPO clipping map is 1-Lipschitz, and the KL term is Lipschitz in the policy log-probabilities under the policy-Lipschitz condition. Summing the clipped surrogate and KL contributions yields a combined constant $L_{\text{grpo-rl}}$, giving
+\[
+|\mathcal{L}_{\text{GRPO-RL}}^X(\pi_\theta)-\mathcal{L}_{\text{GRPO-RL}}^Z(\pi_\theta)|\le L_{\text{grpo-rl}}\,\Delta_R.
+\]
+\end{proof}
+
+\subsection{Random Utility Model Justification}
+
+The Lipschitz constants $L_{\text{grpo}}$ and $L_{\text{grpo-rl}}$ require justification because rankings are discontinuous pointwise (they jump at ties). The Random Utility Model provides the key insight.
+
+\begin{assumption}[Random Utility Model (McFadden, 1974)]
+Utilities are decomposed as $U_i = V_i + \epsilon_i$ where $V_i$ is a continuous deterministic component and $\epsilon_i$ is i.i.d. noise from a continuous distribution.
+\end{assumption}
+
+\paragraph{Why Pointwise Lipschitz Fails.}
+Consider two items with deterministic utilities $V_1 = 0$ and $V_2 = \delta$ for small $\delta > 0$. The ranking is:
+\begin{itemize}
+    \item $\sigma = (1, 2)$ if $U_1 > U_2$, i.e., $\epsilon_1 - \epsilon_2 > \delta$
+    \item $\sigma = (2, 1)$ if $U_1 < U_2$, i.e., $\epsilon_1 - \epsilon_2 < \delta$
+\end{itemize}
+As $\delta \to 0$, the ranking flips discontinuously at $\epsilon_1 = \epsilon_2$. Any ranking-dependent loss has a \emph{pointwise discontinuity} at ties.
+
+\paragraph{Why Expected Lipschitz Holds.}
+The key observation is that under continuous noise, \textbf{ties have measure zero}. Let $F$ be the CDF of $\epsilon_1 - \epsilon_2$. Then:
+\[
+P(\sigma = (2, 1)) = P(\epsilon_1 - \epsilon_2 < \delta) = F(\delta).
+\]
+As $\delta$ varies, $F(\delta)$ is \emph{continuous} (since $F$ is a CDF of a continuous distribution).
+
+More generally, for any ranking-dependent loss $\ell(\sigma)$:
+\[
+\E[\ell(\sigma) \mid V] = \sum_{\sigma} \ell(\sigma) \cdot P(\sigma \mid V),
+\]
+where $P(\sigma \mid V)$ is the probability of ranking $\sigma$ given deterministic utilities $V$. Each $P(\sigma \mid V)$ is a smooth function of $V$ (integrals over continuous densities), so the expected loss is smooth in $V$.
+
+\paragraph{Formal Argument via Dominated Convergence.}
+For a bounded loss $\ell$ and continuous noise density $p(\epsilon)$:
+\begin{align*}
+\E[\ell \mid V] &= \int \ell(\sigma(V + \epsilon)) \, p(\epsilon) \, d\epsilon.
+\end{align*}
+As $V \to V'$:
+\begin{itemize}
+    \item For almost all $\epsilon$ (all except a measure-zero set of ties), $\sigma(V + \epsilon) = \sigma(V' + \epsilon)$ for $V$ close to $V'$
+    \item By dominated convergence (with $|\ell| \le M$ as the dominating function), the integral is continuous in $V$
+\end{itemize}
+When $V$ is Lipschitz in the oracle value and $\ell$ is bounded, the composed expected loss is Lipschitz.
+
+Under the Random Utility Model:
+\begin{enumerate}
+    \item Ties have measure zero when $\epsilon$ has continuous density
+    \item Expected loss is an integral over the noise distribution
+    \item By dominated convergence, this integral is continuous in $V$
+    \item With Lipschitz components, expected loss is Lipschitz
+\end{enumerate}
+
+\begin{axiom}[Expected Group Loss Lipschitz]\label{axiom:expected-lip}
+For group generators and losses arising from the Random Utility Model with Lipschitz reward components, there exists $L > 0$ such that:
+\[
+|\E_{\text{gen}}[\ell(x)] - \E_{\text{gen}}[\ell(x')]| \le L \cdot \metric(\fstar(x), \fstar(x'))
+\]
+for all $x, x' \in \Strings$.
+\end{axiom}
+
+This is the only additional axiom used for the GRPO quantitative bounds. It replaces unprovable pointwise Lipschitz bounds with provable expected Lipschitz bounds.
+
+\subsection{Unified Framework}
+
+The gap bounds for all three methods (DPO, GRPO-PL, GRPO-RL) share a common structure.
+
+\begin{theorem}[Unified Preference Gap]\label{thm:unified}
+For any expected loss with $L$-Lipschitz inner expectation:
+\[
+|\E_X[\mathcal{L}(\pi; X)] - \E_Z[\mathcal{L}(\pi; Z)]| \le L \cdot \Delta_R.
+\]
+\end{theorem}
+
+\begin{proof}
+Let $(X,Z)$ denote the coupled pair $(X,Z^{(R)}(X))$. By the Lipschitz assumption,
+$|\mathcal{L}(\pi;X)-\mathcal{L}(\pi;Z)|\le L\,\metric(\fstar(X),\fstar(Z))$. Taking expectations and applying Jensen's inequality gives
+\[
+|\E[\mathcal{L}(\pi;X)]-\E[\mathcal{L}(\pi;Z)]|
+\le \E\big[|\mathcal{L}(\pi;X)-\mathcal{L}(\pi;Z)|\big]
+\le L\,\E\big[\metric(\fstar(X),\fstar(Z))\big]
+= L\,\Delta_R.
+\]
+\end{proof}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Method} & \textbf{Lipschitz Constant} & \textbf{Loss Structure} \\
+\midrule
+DPO & $L = 2|\beta| L_{\text{pol}}$ & Pairwise Bradley-Terry \\
+GRPO-PL & $L = L_{\text{grpo}}$ & $k$-wise Plackett-Luce \\
+GRPO-RL & $L = L_{\text{grpo-rl}}$ & Clipped surrogate + KL \\
+\bottomrule
+\end{tabular}
+\end{center}

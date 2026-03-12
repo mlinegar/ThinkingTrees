@@ -1,0 +1,199 @@
+\section{Clustered and Calibrated Inference}
+\label{app:clustered-inference}
+
+This appendix isolates the part of the theory stack where clustered standard
+errors, calibration, and the final TreePO bound object meet. The earlier
+appendices explain how to estimate local violation rates and how to obtain
+confidence radii. The purpose here is narrower: once a clustered confidence
+interval has been constructed, how does it feed into the bound we actually
+report?
+
+\subsection{A Generic Interval Lemma}
+
+\begin{lemma}[Confidence interval from error control]
+\label{lem:clustered-ci-membership}
+Let $\theta$ be a scalar target, let $\widehat{\theta}$ be an estimator, let
+$\widehat{\mathrm{SE}}\ge 0$ be a standard error estimate, and let $z\ge 0$.
+If
+\[
+|\theta-\widehat{\theta}| \le z\,\widehat{\mathrm{SE}},
+\]
+then
+\[
+\theta \in
+\left[
+\widehat{\theta}-z\,\widehat{\mathrm{SE}},
+\widehat{\theta}+z\,\widehat{\mathrm{SE}}
+\right].
+\]
+\end{lemma}
+
+\begin{proof}
+The displayed absolute-value bound is equivalent to the pair of inequalities
+\[
+-z\,\widehat{\mathrm{SE}}
+\le
+\theta-\widehat{\theta}
+\le
+z\,\widehat{\mathrm{SE}}.
+\]
+Adding $\widehat{\theta}$ throughout yields
+\[
+\widehat{\theta}-z\,\widehat{\mathrm{SE}}
+\le
+\theta
+\le
+\widehat{\theta}+z\,\widehat{\mathrm{SE}},
+\]
+which is exactly the claimed interval membership.
+\end{proof}
+
+\paragraph{Event form.}
+If an event $E$ implies
+$|\theta-\widehat{\theta}| \le z\,\widehat{\mathrm{SE}}$,
+then the same event implies coverage of the corresponding confidence interval.
+This is the only input needed to turn any external concentration theorem or
+high-probability certification event into a confidence-interval statement.
+
+\subsection{Judge-Bias Envelope}
+
+Let $b_\star$ denote the true judge bias, let $\widehat b$ be the estimated
+bias, and let $\widehat{\mathrm{SE}}_b$ be either the usual or the clustered
+standard error for that bias estimate.
+
+\begin{corollary}[Absolute-bias envelope from confidence-interval membership]
+\label{cor:abs-bias-envelope}
+If
+\[
+b_\star \in
+\left[
+\widehat b-z\,\widehat{\mathrm{SE}}_b,\,
+\widehat b+z\,\widehat{\mathrm{SE}}_b
+\right],
+\]
+then
+\[
+|b_\star|
+\le
+|\widehat b| + z\,\widehat{\mathrm{SE}}_b.
+\]
+\end{corollary}
+
+\begin{proof}
+By Lemma~\ref{lem:clustered-ci-membership},
+\[
+|b_\star-\widehat b| \le z\,\widehat{\mathrm{SE}}_b.
+\]
+Now apply the triangle inequality:
+\[
+|b_\star|
+\le
+|b_\star-\widehat b| + |\widehat b|
+\le
+z\,\widehat{\mathrm{SE}}_b + |\widehat b|.
+\]
+This is the claimed envelope.
+\end{proof}
+
+\paragraph{Why this matters.}
+The calibration layer uses exactly this quantity. The reported absolute-bias
+radius is not an additional assumption once the confidence interval has been
+constructed; it is a deterministic corollary of interval membership. The same
+argument applies with the clustered bias standard error, so document-level
+dependence simply changes which $\widehat{\mathrm{SE}}_b$ enters the formula.
+
+\subsection{\texttt{computeDSLBound} from a Joint Event}
+
+Write the judge-side TreePO estimate as $\widehat G_{\mathrm{tree}}$, its
+clustered standard error as $\widehat{\mathrm{SE}}_{\mathrm{tree}}$, and the
+calibration radius as $B_{\mathrm{cal}}$. The upper endpoint reported by the
+system is
+\[
+U
+:=
+\widehat G_{\mathrm{tree}}
+ + z\,\widehat{\mathrm{SE}}_{\mathrm{tree}}
+ + B_{\mathrm{cal}}.
+\]
+This is exactly the quantity returned by \texttt{computeDSLBound} when the
+estimate is nonnegative, as it is for the union-bound based tree estimate.
+
+\begin{theorem}[Joint interval-plus-calibration validity]
+\label{thm:joint-interval-calibration}
+Assume
+\[
+G_{\mathrm{judge}}
+\in
+\left[
+\widehat G_{\mathrm{tree}} - z\,\widehat{\mathrm{SE}}_{\mathrm{tree}},\,
+\widehat G_{\mathrm{tree}} + z\,\widehat{\mathrm{SE}}_{\mathrm{tree}}
+\right]
+\]
+and
+\[
+|G_{\mathrm{oracle}} - G_{\mathrm{judge}}| \le B_{\mathrm{cal}}.
+\]
+If $\widehat G_{\mathrm{tree}} \ge 0$, then
+\[
+|G_{\mathrm{oracle}}| \le U.
+\]
+\end{theorem}
+
+\begin{proof}
+The interval membership assumption gives
+\[
+G_{\mathrm{judge}}
+\le
+\widehat G_{\mathrm{tree}} + z\,\widehat{\mathrm{SE}}_{\mathrm{tree}}.
+\]
+Because the interval is centered at a nonnegative quantity, the same upper
+endpoint also bounds the absolute value:
+\[
+|G_{\mathrm{judge}}|
+\le
+\widehat G_{\mathrm{tree}} + z\,\widehat{\mathrm{SE}}_{\mathrm{tree}}.
+\]
+Now apply the triangle inequality:
+\[
+|G_{\mathrm{oracle}}|
+\le
+|G_{\mathrm{oracle}}-G_{\mathrm{judge}}| + |G_{\mathrm{judge}}|
+\le
+B_{\mathrm{cal}}
+ + \widehat G_{\mathrm{tree}}
+ + z\,\widehat{\mathrm{SE}}_{\mathrm{tree}}
+= U.
+\]
+\end{proof}
+
+\begin{theorem}[Joint interval-plus-calibration validity with oracle error]
+\label{thm:joint-interval-calibration-oracle}
+Assume the hypotheses of
+Theorem~\ref{thm:joint-interval-calibration}, and in addition suppose
+\[
+|G_{\mathrm{true}} - G_{\mathrm{oracle}}| \le B_{\mathrm{oracle}}.
+\]
+Then
+\[
+|G_{\mathrm{true}}| \le U + B_{\mathrm{oracle}}.
+\]
+\end{theorem}
+
+\begin{proof}
+By Theorem~\ref{thm:joint-interval-calibration},
+$|G_{\mathrm{oracle}}| \le U$. One more triangle inequality gives
+\[
+|G_{\mathrm{true}}|
+\le
+|G_{\mathrm{true}}-G_{\mathrm{oracle}}| + |G_{\mathrm{oracle}}|
+\le
+B_{\mathrm{oracle}} + U.
+\]
+\end{proof}
+
+\paragraph{Interpretation.}
+The theorem has a useful modular form. A clustered confidence interval controls
+the judge-side tree estimate. Calibration controls judge-vs-oracle error.
+Optional oracle measurement control handles oracle-vs-truth error. The final
+reported upper bound is obtained by adding exactly those radii, with no further
+statistical trick.

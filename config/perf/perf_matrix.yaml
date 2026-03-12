@@ -1,0 +1,84 @@
+version: 1
+
+defaults:
+  timeout_seconds: 1800
+  workdir: "."
+
+profiles:
+  ci:
+    include_layers: ["micro", "meso"]
+  nightly:
+    include_layers: ["micro", "meso", "macro"]
+
+scenarios:
+  - id: micro_ruler_mock
+    layer: micro
+    description: "Runtime-eval smoke via MockLLM (no live server required)."
+    command: >
+      source venv/bin/activate &&
+      python3 scripts/run_runtime_eval.py init
+      --config config/runtime_eval/ruler_8k_freeform.yaml
+      --output-dir outputs/perf_harness/generated
+      --run-id perf_micro_ruler_mock &&
+      python3 scripts/run_runtime_eval.py run
+      --run-dir outputs/perf_harness/generated/perf_micro_ruler_mock
+      --phase-id S0_smoke
+      --mode runtime_full
+      --max-units 1
+      --max-problems 5
+      --mock-llm &&
+      python3 scripts/run_runtime_eval.py aggregate
+      --run-dir outputs/perf_harness/generated/perf_micro_ruler_mock
+    metrics_file: outputs/perf_harness/generated/perf_micro_ruler_mock/metrics.json
+    metrics:
+      primary_mean: primary_mean
+      n_predictions: n_predictions
+    regression:
+      - metric: primary_mean
+        op: ">="
+        threshold: 70
+        severity: error
+
+  - id: meso_manifesto_dry
+    layer: meso
+    description: "Manifesto chunking + orchestration dry-run."
+    command: >
+      source venv/bin/activate &&
+      python3 scripts/run_manifesto_batched_example.py
+      --ids 51320_198306 51620_198306
+      --chunk-size 8000
+      --dry-run
+      --output outputs/perf_harness/generated/manifesto_dry.json
+    metrics_file: outputs/perf_harness/generated/manifesto_dry.json
+    metrics:
+      first_chunk_count: chunk_analysis.0.chunk_count
+      second_chunk_count: chunk_analysis.1.chunk_count
+    regression:
+      - metric: first_chunk_count
+        op: ">="
+        threshold: 1
+        severity: error
+      - metric: second_chunk_count
+        op: ">="
+        threshold: 1
+        severity: error
+
+  - id: macro_perf_baseline_live
+    layer: macro
+    description: "End-to-end cold/warm perf baseline (requires live task server on :8000)."
+    command: >
+      source venv/bin/activate &&
+      python3 scripts/run_perf_baseline.py
+      --samples 6
+      --iterations 1
+      --port 8000
+      --output outputs/perf_harness/generated/perf_baseline_live.json
+    metrics_file: outputs/perf_harness/generated/perf_baseline_live.json
+    metrics:
+      cold_docs_per_second: runs.0.aggregate.docs_per_second
+      warm_docs_per_second: runs.1.aggregate.docs_per_second
+    regression:
+      - metric: warm_docs_per_second
+        op: ">="
+        threshold: 0.001
+        severity: warn

@@ -13,7 +13,7 @@ The builder is async-first with a sync wrapper for compatibility.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Callable, Any, Dict, TYPE_CHECKING
+from typing import List, Optional, Callable, Any, Dict, Tuple, TYPE_CHECKING
 from pathlib import Path
 import logging
 import asyncio
@@ -160,13 +160,15 @@ class BuildConfig:
     # Tournament settings (used by TournamentStrategy)
     k: int = 4  # Number of candidates for tournament selection
 
-    # Execution mode
-    pipelined: bool = True  # Use pipelined execution (submit merges as dependencies complete)
-
     # Concurrency and cleanup
     max_concurrent_requests: int = 200
     task_cancel_timeout: float = 30.0
     document_retry_delay: float = 1.0
+
+    # Degenerate-summary safeguards (manual validation / fail-fast mode)
+    fail_on_degenerate_summary: bool = False
+    max_degenerate_leaf_fallbacks: int = 0
+    max_degenerate_merge_fallbacks: int = 0
 
     # Debug settings
     verbose: bool = False
@@ -296,11 +298,8 @@ class TreeBuilder:
         if not leaves:
             raise ValueError("No leaf nodes created")
 
-        # Build tree bottom-up (pipelined or level-wise based on config)
-        if self.config.pipelined:
-            tree = await self._build_tree_pipelined(leaves, rubric, errors)
-        else:
-            tree = await self._build_tree_from_leaves(leaves, rubric, errors)
+        # Build tree bottom-up with pipelined execution
+        tree = await self._build_tree_pipelined(leaves, rubric, errors)
 
         # Preserve explicit chunk-to-leaf lineage for downstream audit/training.
         tree.metadata.setdefault(
@@ -327,6 +326,13 @@ class TreeBuilder:
                 ),
             },
         )
+        # Attach support spans to nodes for unified downstream artifacts.
+        try:
+            from src.tree.unified_artifacts import attach_chunk_support
+
+            attach_chunk_support(tree, overwrite=False)
+        except Exception:
+            logger.debug("Failed to attach chunk support spans to tree nodes", exc_info=True)
 
         # Collect preferences if strategy supports it (e.g., TournamentStrategy)
         preferences = []
@@ -419,73 +425,6 @@ class TreeBuilder:
         valid_results.sort(key=lambda x: x[0])
         return [n for _, n in valid_results]
 
-    async def _build_tree_from_leaves(
-        self,
-        leaves: List[Node],
-        rubric: str,
-        errors: List[str],
-    ) -> Tree:
-        """Build tree by recursively merging leaves asynchronously."""
-        if len(leaves) == 1:
-            return Tree(root=leaves[0], rubric=rubric)
-
-        current_level = list(leaves)
-        level_num = 0
-
-        if self.config.verbose:
-            logger.info(f"Starting build with {len(leaves)} leaves")
-
-        while len(current_level) > 1:
-            level_num += 1
-
-            if self.config.verbose:
-                logger.info(f"Building level {level_num} from {len(current_level)} nodes")
-
-            # Collect pairs for this level
-            pairs = []
-            odd_node = None
-            for i in range(0, len(current_level), 2):
-                if i + 1 < len(current_level):
-                    pairs.append((i // 2, current_level[i], current_level[i + 1]))
-                else:
-                    odd_node = current_level[i]
-
-            # Create merge tasks for all pairs
-            async def merge_pair(idx: int, left: Node, right: Node, level: int) -> tuple[int, Node]:
-                try:
-                    return idx, await self._merge_nodes(left, right, rubric, level)
-                except Exception as e:
-                    # Re-raise instead of silent fallback to truncated concatenation
-                    # Truncated text as summary corrupts data quality silently
-                    error_msg = f"Merge failed at level {level} pair {idx}: {e}"
-                    logger.error(error_msg)
-                    errors.append(error_msg)
-                    raise
-
-            merge_tasks = [
-                merge_pair(idx, left, right, level_num)
-                for idx, left, right in pairs
-            ]
-
-            # Await all merges in parallel (with cleanup on cancellation)
-            results = await gather_with_cleanup(merge_tasks, return_exceptions=False)
-
-            # Sort by index and build next level
-            results = sorted(results, key=lambda x: x[0])
-            next_level = [n for _, n in results]
-
-            if odd_node is not None:
-                next_level.append(odd_node)
-
-            current_level = next_level
-
-        root = current_level[0]
-
-        if not root.is_leaf and root.level == 0:
-            root.level = level_num
-
-        return Tree(root=root, rubric=rubric)
-
     async def _merge_nodes(
         self,
         left: Node,
@@ -518,9 +457,8 @@ class TreeBuilder:
         """
         Build tree with pipelined execution - submit merges as soon as children ready.
 
-        Unlike _build_tree_from_leaves which waits for each level to complete,
-        this method submits merges as soon as their dependencies are satisfied.
-        This reduces latency by allowing work to overlap.
+        Submits merges as soon as their dependencies are satisfied, reducing
+        latency by allowing work to overlap across tree levels.
 
         Pattern: Uses asyncio.wait(FIRST_COMPLETED) to process completions
         and submit newly-ready work immediately.
@@ -674,6 +612,89 @@ class TreeBuilder:
         # Reset tournament preferences if strategy supports it
         if hasattr(self.strategy, 'reset_preferences'):
             self.strategy.reset_preferences()
+
+    # -----------------------------------------------------------------
+    # Unified tree integration: LLM summarisation on shared topology
+    # -----------------------------------------------------------------
+
+    async def summarize_unified_nodes(
+        self,
+        nodes: List[Any],
+        rubric: str = "",
+    ) -> None:
+        """Run LLM summarisation on a pre-built unified tree (in-place).
+
+        This takes a list of ``EmbeddingTreeNode`` objects (from
+        ``build_unified_tree()``) that already have shared topology and
+        embeddings, and fills in the ``summary`` field using the builder's
+        ``SummarizationStrategy``.
+
+        - **Leaves**: summarised via ``strategy.summarize(text_span, rubric)``
+        - **Internal nodes**: merged via ``strategy.merge(left.summary,
+          right.summary, rubric)`` following the existing binary merge order.
+
+        The tree topology (``children`` tuples, ``level``, ``char_start/end``)
+        is **not modified** — only ``summary`` fields are written.
+
+        Args:
+            nodes: Flat list of EmbeddingTreeNode (bottom-up order, as returned
+                by ``build_unified_tree()``).
+            rubric: Information-preservation rubric for the LLM.
+        """
+        from src.core.async_utils import gather_with_cleanup
+
+        # --- Phase 1: Summarise all leaves in parallel ---
+        leaf_indices = [i for i, n in enumerate(nodes) if n.is_leaf]
+
+        async def _summarize_leaf(idx: int) -> Tuple[int, str]:
+            node = nodes[idx]
+            text = node.text_span if node.text_span else ""
+            try:
+                summary = await self.strategy.summarize(text, rubric)
+                self._build_stats['summarizer_calls'] += 1
+                return idx, summary
+            except Exception as e:
+                logger.warning("Leaf summarization failed for node %d: %s", idx, e)
+                return idx, text  # fall back to raw text
+
+        leaf_tasks = [_summarize_leaf(i) for i in leaf_indices]
+        leaf_results = await gather_with_cleanup(leaf_tasks, return_exceptions=True)
+
+        for item in leaf_results:
+            if isinstance(item, Exception):
+                logger.warning("Leaf summarization task failed: %s", item)
+                continue
+            idx, summary = item
+            nodes[idx].summary = summary
+
+        # --- Phase 2: Merge internal nodes level-by-level ---
+        # Nodes are bottom-up, so processing in order guarantees children
+        # are summarised before parents.
+        for i, node in enumerate(nodes):
+            if node.is_leaf:
+                continue
+            if node.children is None:
+                continue
+
+            left_idx, right_idx = node.children
+            left_summary = nodes[left_idx].summary or nodes[left_idx].text_span
+            right_summary = nodes[right_idx].summary or nodes[right_idx].text_span
+
+            if left_idx == right_idx:
+                # Promoted odd node — just copy child summary
+                node.summary = left_summary
+                continue
+
+            try:
+                merged_summary = await self.strategy.merge(
+                    left_summary, right_summary, rubric
+                )
+                self._build_stats['summarizer_calls'] += 1
+                node.summary = merged_summary
+            except Exception as e:
+                logger.warning("Merge failed for node %d: %s", i, e)
+                # Fallback: concatenate truncated children
+                node.summary = left_summary[:500] + "\n---\n" + right_summary[:500]
 
 
 # =============================================================================

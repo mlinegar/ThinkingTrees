@@ -1,0 +1,28 @@
+\section{Controlled Mechanism Checks}\label{sec:empirical}
+
+This section is intentionally narrow. The simulations are meant to test the paper's mechanism claims, not to serve as a broad benchmark. Each subsection asks whether a specific failure or recovery pattern predicted by the theory appears in controlled settings where ground truth is known exactly.
+
+\subsection{Phase Behavior}
+
+\textbf{What this tests:} whether the toy sketch exhibits the predicted sharp sufficiency boundary. Sweeps across $(k,m)$ configurations show a sharp transition at $m = k$: the supported regime ($m \ge k$) delivers low mean absolute bias, while the unsupported regime ($m < k$) yields persistent bias that does not close with additional samples. The same experiments show that leaf granularity and selection budget are separate control axes: fine-grained leaves with insufficient budget still fail (selection bottleneck), while coarser leaves with adequate budget can succeed (sufficient retention).
+
+\subsection{Failure Attribution}
+
+\textbf{What this tests:} whether failures can be attributed to the local laws rather than to undifferentiated model error. Targeted ablations on a complexity ladder are consistent with interpretable failure modes. The ``missing-stat'' variant (analogous to $m < k$) and ``wrong-chunker'' variant (misaligned partitioning) fail in the regimes predicted by the theory, corresponding to C3 violations (insufficient merge-state capacity) and C1 violations (leaf partitions that split interaction-bearing information). Positive controls remain stable throughout. Additional plots for the complexity ladder are deferred to the companion paper.
+
+\subsection{Learning the Sketch from Oracle Feedback}\label{sec:learned-sketch}
+
+\textbf{What this tests:} whether the same local oracle signal used for auditing can also train a merge rule. The preceding simulations use hand-designed merge rules (the top-$m$ algebraic sketch). We therefore replace that rule with a small neural network (two-layer MLP, ${\sim}\!3$K parameters) that encodes leaf indicators into an $m$-dimensional state, merges two child states into a parent state, and reads out predicted per-type counts from any node state. Training uses only local oracle queries at randomly sampled tree nodes---the same probabilistic audit signal from Section~\ref{sec:estimation}, now used with gradients.
+
+To create a task where the sufficiency boundary is information-theoretic rather than just algebraic, we assign each indicator position a \emph{type} (round-robin: position $i$ has type $i \bmod k$) and ask the oracle to report the $k$-vector of per-type spike counts. This makes the sufficient statistic genuinely $k$-dimensional: to predict all $k$ type counts independently, the state must carry at least $k$ dimensions of information. The linear readout from $m$ state dimensions to $k$ outputs has rank $\min(m, k)$, so when $m < k$ it cannot independently recover all $k$ counts regardless of what the encoder and merge function learn.
+
+Figure~\ref{fig:learned-sketch-curves} shows learning curves for different state budgets $m$ with $k=4$ types. When $m \ge k$, the learned sketch converges to near-zero MSE and approaches the hand-designed type-aware sketch. When $m < k$, the MSE plateaus at a nonzero floor that training cannot overcome---the bottleneck is structural. The hand-designed sketch exhibits the same boundary: with $m < k$ tracked types, some dimensions are lost at every merge.
+
+These checks support two points. First, in this controlled setup, the oracle-query signal used for auditing is sufficient to learn the merge law without direct knowledge of the underlying data-generating process. Second, the $m < k$ sufficiency boundary remains in place for learned sketches when the oracle's sufficient statistic is genuinely $k$-dimensional.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{learned_sketch_curves.png}
+    \caption{Learning the merge rule from oracle feedback. Left: root MSE (per-type count prediction) during training, indexed by state budget $m$ with $k=4$ types. When $m \ge k$, the learned sketch converges to near-zero error; when $m < k$, the error plateaus at a nonzero floor. Right: final threshold accuracy (``all types present'') of the learned sketch versus the hand-designed type-aware sketch. The $m < k$ boundary binds both.}
+    \label{fig:learned-sketch-curves}
+\end{figure}

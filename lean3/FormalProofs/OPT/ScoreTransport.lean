@@ -151,6 +151,103 @@ lemma sigma_subset_of_fstar_eq_pointwise
     _ ≤ MeasurableSpace.comap Z _ := MeasurableSpace.comap_mono hfstar.comap_le
 
 /-!
+## Oracle Factorization (Doob-Dynkin Packaging)
+
+This section packages the "sufficient statistic" statement used in the paper:
+`f*(X)` factors through `Z` iff `σ(f*(X)) ⊆ σ(Z)`.
+-/
+
+/-- Oracle factorization through the summary variable `Z`.
+
+There exists a measurable decoder `h` such that `f*(X) = h(Z)` pointwise. -/
+def OracleFactorization' (fstar : Strings' → Y') (X Z : Ω → Strings') : Prop :=
+  ∃ h : Strings' → Y', Measurable h ∧ fstar ∘ X = h ∘ Z
+
+/-- A measurable factorization implies oracle sigma-algebra containment. -/
+lemma sigma_subset_of_oracle_factorization
+    (fstar : Strings' → Y') (X Z : Ω → Strings')
+    (hfac : OracleFactorization' fstar X Z) :
+    OracleSigmaSubset' fstar X Z := by
+  rcases hfac with ⟨h, hh_meas, hh_eq⟩
+  unfold OracleSigmaSubset'
+  rw [hh_eq]
+  calc MeasurableSpace.comap (h ∘ Z) _
+      = MeasurableSpace.comap Z (MeasurableSpace.comap h _) := MeasurableSpace.comap_comp.symm
+    _ ≤ MeasurableSpace.comap Z _ := MeasurableSpace.comap_mono hh_meas.comap_le
+
+/-- Oracle sigma-algebra containment implies a measurable factorization.
+
+This is the constructive Doob-Dynkin direction. The `StandardBorelSpace` assumption
+is used by `Measurable.exists_eq_measurable_comp`. -/
+lemma oracle_factorization_of_sigma_subset
+    [Nonempty Y'] [StandardBorelSpace Y']
+    (fstar : Strings' → Y') (X Z : Ω → Strings')
+    (hσ : OracleSigmaSubset' fstar X Z) :
+    OracleFactorization' fstar X Z := by
+  have h_meas_comap : Measurable[MeasurableSpace.comap Z ‹_›] (fstar ∘ X) := by
+    exact MeasurableSpace.comap_le_iff_le_map.mp hσ
+  rcases (Measurable.exists_eq_measurable_comp
+    (f := Z) (g := fstar ∘ X) h_meas_comap) with ⟨h, hh_meas, hh_eq⟩
+  exact ⟨h, hh_meas, hh_eq⟩
+
+/-- Doob-Dynkin equivalence in oracle form:
+`f*(X)` factors through `Z` iff `σ(f*(X)) ⊆ σ(Z)`. -/
+theorem oracle_factorization_iff_sigma_subset
+    [Nonempty Y'] [StandardBorelSpace Y']
+    (fstar : Strings' → Y') (X Z : Ω → Strings') :
+    OracleFactorization' fstar X Z ↔ OracleSigmaSubset' fstar X Z := by
+  constructor
+  · exact sigma_subset_of_oracle_factorization fstar X Z
+  · exact oracle_factorization_of_sigma_subset fstar X Z
+
+/-- A.e. oracle factorization through the summary variable `Z`.
+
+There exists a measurable decoder `h` such that `f*(X) = h(Z)` almost surely. -/
+def OracleFactorizationAE' (fstar : Strings' → Y') (X Z : Ω → Strings')
+    (μ : @Measure Ω m₀) : Prop :=
+  ∃ h : Strings' → Y', Measurable h ∧ (fstar ∘ X) =ᵐ[μ] h ∘ Z
+
+/-- A.e. factorization implies `AEStronglyMeasurable` with respect to `σ(Z)`. -/
+lemma aestronglyMeasurable_of_oracle_factorization_ae
+    [SecondCountableTopology Y']
+    (fstar : Strings' → Y') (X Z : Ω → Strings')
+    (hfac : OracleFactorizationAE' fstar X Z μ) :
+    AEStronglyMeasurable[MeasurableSpace.comap Z ‹_›] (fstar ∘ X) μ := by
+  rcases hfac with ⟨h, hh_meas, h_eq⟩
+  have hZ_meas : Measurable[MeasurableSpace.comap Z ‹_›] Z := by
+    simpa using (comap_measurable (f := Z))
+  have h_comp_meas : Measurable[MeasurableSpace.comap Z ‹_›] (h ∘ Z) := hh_meas.comp hZ_meas
+  exact h_comp_meas.aestronglyMeasurable.congr h_eq.symm
+
+/-- `AEStronglyMeasurable` with respect to `σ(Z)` implies a.e. oracle factorization.
+
+This is the a.e. Doob-Dynkin direction. As in the pointwise version, the
+`StandardBorelSpace` assumption enables measurable decoder construction. -/
+lemma oracle_factorization_ae_of_aestronglyMeasurable
+    [Nonempty Y'] [StandardBorelSpace Y']
+    (fstar : Strings' → Y') (X Z : Ω → Strings')
+    (h_ae : AEStronglyMeasurable[MeasurableSpace.comap Z ‹_›] (fstar ∘ X) μ) :
+    OracleFactorizationAE' fstar X Z μ := by
+  classical
+  have h_meas : Measurable[MeasurableSpace.comap Z ‹_›] (h_ae.mk (fstar ∘ X)) :=
+    h_ae.stronglyMeasurable_mk.measurable
+  rcases (Measurable.exists_eq_measurable_comp
+    (f := Z) (g := h_ae.mk (fstar ∘ X)) h_meas) with ⟨h, hh_meas, hh_eq⟩
+  refine ⟨h, hh_meas, ?_⟩
+  exact h_ae.ae_eq_mk.trans (Filter.EventuallyEq.of_eq hh_eq)
+
+/-- A.e. Doob-Dynkin equivalence in oracle form:
+factorization up to `=ᵐ[μ]` is equivalent to `AEStronglyMeasurable` over `σ(Z)`. -/
+theorem oracle_factorization_ae_iff_aestronglyMeasurable
+    [Nonempty Y'] [StandardBorelSpace Y'] [SecondCountableTopology Y']
+    (fstar : Strings' → Y') (X Z : Ω → Strings') :
+    OracleFactorizationAE' fstar X Z μ ↔
+      AEStronglyMeasurable[MeasurableSpace.comap Z ‹_›] (fstar ∘ X) μ := by
+  constructor
+  · exact aestronglyMeasurable_of_oracle_factorization_ae fstar X Z
+  · exact oracle_factorization_ae_of_aestronglyMeasurable fstar X Z
+
+/-!
 ## Blackwell/Doob-Dynkin Score Transport
 -/
 
@@ -293,6 +390,59 @@ theorem prop5_score_transport
     ∫ ω, Sstar (X ω) a ∂μ = ∫ ω, hCF.choose (fstar (X ω)) a ∂μ :=
   blackwell_transport' Sstar fstar X Z hX hZ hfstar hCF hσ a hint
 
+/-- If score transport fails for an action `a`, then at least one structural
+assumption must fail: either CF fails, or oracle factorization through `Z` fails.
+
+This links the score-transport statement to the Doob-Dynkin IFF. -/
+theorem not_score_transport_implies_cf_or_oracle_factorization_failure
+    [Nonempty Y'] [StandardBorelSpace Y']
+    (Sstar : Strings' → A → ℝ) (fstar : Strings' → Y') (X Z : Ω → Strings')
+    (hX : @Measurable Ω Strings' m₀ _ X) (hZ : @Measurable Ω Strings' m₀ _ Z)
+    (hfstar : Measurable fstar)
+    [hμZ : SigmaFinite (μ.trim hZ.comap_le)]
+    [hμX : SigmaFinite (μ.trim hX.comap_le)]
+    (a : A) (hint : Integrable (fun ω => Sstar (X ω) a) μ)
+    (h_fail : ¬ (∫ ω, Sstar (X ω) a ∂μ = ∫ ω, SummaryScore' Sstar X Z μ a ω ∂μ)) :
+    ¬ ConditionalFactorization' Sstar fstar X μ hX ∨ ¬ OracleFactorization' fstar X Z := by
+  classical
+  by_cases hCF : ConditionalFactorization' Sstar fstar X μ hX
+  · right
+    intro hFac
+    have hσ : OracleSigmaSubset' fstar X Z :=
+      (oracle_factorization_iff_sigma_subset fstar X Z).1 hFac
+    have h_transport : ∫ ω, Sstar (X ω) a ∂μ = ∫ ω, SummaryScore' Sstar X Z μ a ω ∂μ :=
+      (prop5_score_transport Sstar fstar X Z hX hZ hfstar hCF hσ a hint).1
+    exact h_fail h_transport
+  · exact Or.inl hCF
+
+/-- Tree-level contrapositive template:
+if score transport fails, then not all local laws can hold, provided you have a bridge
+from local laws (`L1`,`L2`,`L3`) to oracle sigma containment for the chosen `X`,`Z`. -/
+theorem not_score_transport_implies_one_local_law_failed_of_bridge
+    (g : Summarizer Strings') (T : BinTree Strings')
+    (Sstar : Strings' → A → ℝ) (fstar : Strings' → Y') (X Z : Ω → Strings')
+    (hX : @Measurable Ω Strings' m₀ _ X) (hZ : @Measurable Ω Strings' m₀ _ Z)
+    (hfstar : Measurable fstar)
+    [hμZ : SigmaFinite (μ.trim hZ.comap_le)]
+    [hμX : SigmaFinite (μ.trim hX.comap_le)]
+    (hBridge : L1 g T fstar → L2 g T fstar → L3 g fstar → OracleSigmaSubset' fstar X Z)
+    (hCF : ConditionalFactorization' Sstar fstar X μ hX)
+    (a : A) (hint : Integrable (fun ω => Sstar (X ω) a) μ)
+    (h_fail : ¬ (∫ ω, Sstar (X ω) a ∂μ = ∫ ω, SummaryScore' Sstar X Z μ a ω ∂μ)) :
+    ¬ L1 g T fstar ∨ ¬ L2 g T fstar ∨ ¬ L3 g fstar := by
+  classical
+  by_cases h1 : L1 g T fstar
+  · by_cases h2 : L2 g T fstar
+    · by_cases h3 : L3 g fstar
+      · exfalso
+        have hσ : OracleSigmaSubset' fstar X Z := hBridge h1 h2 h3
+        have h_transport : ∫ ω, Sstar (X ω) a ∂μ = ∫ ω, SummaryScore' Sstar X Z μ a ω ∂μ :=
+          (prop5_score_transport Sstar fstar X Z hX hZ hfstar hCF hσ a hint).1
+        exact h_fail h_transport
+      · exact Or.inr (Or.inr h3)
+    · exact Or.inr (Or.inl h2)
+  · exact Or.inl h1
+
 /-- **Proposition 5 (Corollary): Score Factorization Under Nesting**
 
 **Paper Reference:** Section 8, Proposition 5 (Corollary)
@@ -317,6 +467,55 @@ theorem prop5_score_factorization_corollary
     (a : A) (hint : Integrable (fun ω => Sstar (X ω) a) μ) :
     SummaryScore' Sstar X Z μ a =ᵐ[μ] fun ω => hCF.choose (fstar (X ω)) a :=
   condexp_oracle_factored' Sstar fstar X Z hX hZ hfstar hσ hσ_ZX hCF a hint
+
+/-- If local laws bridge to oracle sigma containment, then score factorization follows.
+
+This is the non-vacuous tree-to-score bridge:
+`L1,L2,L3` + `CF` + nesting (`σ(Z) ⊆ σ(X)`) implies
+`E[S*(X,a)|Z] =ᵐ Q̄(f*(X),a)`. -/
+theorem local_laws_imply_score_factorization_of_bridge
+    (g : Summarizer Strings') (T : BinTree Strings')
+    (Sstar : Strings' → A → ℝ) (fstar : Strings' → Y') (X Z : Ω → Strings')
+    (hX : @Measurable Ω Strings' m₀ _ X) (hZ : @Measurable Ω Strings' m₀ _ Z)
+    (hfstar : Measurable fstar)
+    [hμZ : SigmaFinite (μ.trim hZ.comap_le)]
+    [hμX : SigmaFinite (μ.trim hX.comap_le)]
+    (hBridge : L1 g T fstar → L2 g T fstar → L3 g fstar → OracleSigmaSubset' fstar X Z)
+    (hσ_ZX : MeasurableSpace.comap Z ‹_› ≤ MeasurableSpace.comap X ‹_›)
+    (hCF : ConditionalFactorization' Sstar fstar X μ hX)
+    (h1 : L1 g T fstar) (h2 : L2 g T fstar) (h3 : L3 g fstar)
+    (a : A) (hint : Integrable (fun ω => Sstar (X ω) a) μ) :
+    SummaryScore' Sstar X Z μ a =ᵐ[μ] fun ω => hCF.choose (fstar (X ω)) a := by
+  exact prop5_score_factorization_corollary Sstar fstar X Z hX hZ hfstar
+    (hBridge h1 h2 h3) hσ_ZX hCF a hint
+
+/-- Contrapositive bridge:
+if score factorization fails for `a`, at least one local law must fail (assuming CF and bridge). -/
+theorem not_score_factorization_implies_one_local_law_failed_of_bridge
+    (g : Summarizer Strings') (T : BinTree Strings')
+    (Sstar : Strings' → A → ℝ) (fstar : Strings' → Y') (X Z : Ω → Strings')
+    (hX : @Measurable Ω Strings' m₀ _ X) (hZ : @Measurable Ω Strings' m₀ _ Z)
+    (hfstar : Measurable fstar)
+    [hμZ : SigmaFinite (μ.trim hZ.comap_le)]
+    [hμX : SigmaFinite (μ.trim hX.comap_le)]
+    (hBridge : L1 g T fstar → L2 g T fstar → L3 g fstar → OracleSigmaSubset' fstar X Z)
+    (hσ_ZX : MeasurableSpace.comap Z ‹_› ≤ MeasurableSpace.comap X ‹_›)
+    (hCF : ConditionalFactorization' Sstar fstar X μ hX)
+    (a : A) (hint : Integrable (fun ω => Sstar (X ω) a) μ)
+    (h_fail : ¬ SummaryScore' Sstar X Z μ a =ᵐ[μ] fun ω => hCF.choose (fstar (X ω)) a) :
+    ¬ L1 g T fstar ∨ ¬ L2 g T fstar ∨ ¬ L3 g fstar := by
+  classical
+  by_cases h1 : L1 g T fstar
+  · by_cases h2 : L2 g T fstar
+    · by_cases h3 : L3 g fstar
+      · exfalso
+        have h_eq : SummaryScore' Sstar X Z μ a =ᵐ[μ] fun ω => hCF.choose (fstar (X ω)) a :=
+          local_laws_imply_score_factorization_of_bridge g T Sstar fstar X Z hX hZ hfstar
+            hBridge hσ_ZX hCF h1 h2 h3 a hint
+        exact h_fail h_eq
+      · exact Or.inr (Or.inr h3)
+    · exact Or.inr (Or.inl h2)
+  · exact Or.inl h1
 
 end ScoreTransport
 

@@ -1,0 +1,27 @@
+\begin{tikzpicture}[x=1.0cm, y=1.2cm]
+  \tikzset{selected/.style={fill=yellow!30, draw=orange!80!black, very thick}}
+  \foreach \i [evaluate=\i as \xx using 2*(\i-1)] in {1,...,8}{
+    \node[doc] (x\i) at (\xx,0) {$x_{\i}$};
+    \node[sum] (g\i) at (\xx,1.4) {$s_{\i}=g(x_{\i})$};
+    \draw[->] (x\i) -- (g\i);
+  }
+  \foreach \a/\b in {1/2,3/4,5/6,7/8}{
+    \node[plus] (p\a\b) at ($ (g\a)!0.5!(g\b) + (0,1.2) $) {$\concat$};
+    \node[sum]  (s\a\b) at ($ (p\a\b) + (0,1.2) $) {$s_{\a\b}=g\!\big(s_{\a} \concat s_{\b}\big)$};
+    \draw[->] (g\a) -- (p\a\b);
+    \draw[->] (g\b) -- (p\a\b);
+    \draw[->] (p\a\b) -- (s\a\b);
+  }
+  \foreach \L/\R in {12/34,56/78}{
+    \node[plus] (p\L\R) at ($ (s\L)!0.5!(s\R) + (0,1.2) $) {$\concat$};
+    \node[sum]  (s\L\R) at ($ (p\L\R) + (0,1.2) $) {$s_{\L\R}=g\big(s_{\L} \concat s_{\R}\big)$};
+    \draw[->] (s\L) -- (p\L\R);
+    \draw[->] (s\R) -- (p\L\R);
+    \draw[->] (p\L\R) -- (s\L\R);
+  }
+  \node[plus] (pall) at ($ (s1234)!0.5!(s5678) + (0,1.2) $) {$\concat$};
+  \node[sum]  (sall) at ($ (pall) + (0,1.2) $) {$s_{\mathrm{root}}=g\big(s_{1234} \concat s_{5678}\big)$};
+  \draw[->] (s1234) -- (pall);
+  \draw[->] (s5678) -- (pall);
+  \draw[->] (pall) -- (sall);
+\end{tikzpicture}

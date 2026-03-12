@@ -1,0 +1,15 @@
+\section{Assumption Check for Gap Bounds}\label{sec:verification}
+
+Table~\ref{tab:assumption-bundles} already separates the structural bundles from the downstream bundles. This short section records the extra ingredients used only for quantitative transport and finite-sample certification.
+
+The first point is conceptual: the Preservation Stack and Recompression Stack are structural. They ask whether local validity composes to the root and whether extra clean-up passes are safe. The gap theorems add a different kind of ingredient: they need a way to turn oracle distortion into objective drift, and they need empirical envelopes that connect a sampled audit to the unobserved target quantity.
+
+The quantitative preference-gap bounds (Theorem~\ref{thm:unified-gap} and Theorem~\ref{thm:e2e}) therefore require two extra classes of assumptions:
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Transport assumptions.} A method-level Lipschitz/integrability condition linking expected loss drift to oracle distance. For DPO this reduces to a policy-Lipschitz condition; for GRPO-PL and GRPO-RL, one natural sufficient route is a random-utility model \citep{Schervish1995}.
+    \item \textbf{Calibration and sampling assumptions.} The accessible judge must be well enough calibrated to the target oracle on a representative held-out set, and the sampling design must satisfy the logged-propensity and positivity conditions used by Horvitz--Thompson estimation.
+\end{enumerate}
+
+These are not hidden premises. Each has a direct falsification route: surface-form perturbation tests for factorization/measurability, context-swap checks for context compatibility, calibration-set audits for judge mismatch, and logged-propensity diagnostics for the sampling layer.
+
+Readers who prefer not to rely on these extra ingredients can still use the structural theorems directly, or treat the transport and calibration constants as explicit sensitivity parameters rather than as fixed truths.

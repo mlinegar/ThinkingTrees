@@ -1,0 +1,155 @@
+\section{Main Theorems}\label{sec:theorems}
+
+The utility of the three consistency conditions is that they allow us to transport trust from the leaves to the root. We do not need to verify the final summary against the whole book; we only need to verify that each station of the assembly line is functioning correctly. All theorems in this section are \emph{machine-verified} in Lean~4; Section~\ref{sec:verification} describes the formalization and Appendix~\ref{app:lean} provides the full details.
+
+\subsection{Processing Invariance}
+
+\begin{theorem}[Inductive Preservation]\label{thm:one-pass}
+Fix a document partition $x = b_1 \concat \dots \concat b_k$ and any full binary merge tree $T$. If \ref{eq:leaf_sufficiency} holds on every realized leaf and \ref{eq:leaf_compatibility} holds at every realized internal node, then the final summary preserves the oracle in expectation:
+\[
+\E\left[\metric\big(\fstar(Z^{(1)}), \fstar(x)\big)\right] = 0.
+\]
+Furthermore, if \ref{eq:leaf_idempotence} holds, this preservation is maintained through any number of additional re-summarization rounds $Z^{(R)}$.
+\end{theorem}
+
+\noindent\textit{Proof intuition:} The proof is by structural induction on the tree. \emph{Base case:} (C1) directly asserts $\fstar(g(b)) = \fstar(b)$ at leaves. \emph{Inductive step:} If children preserve the oracle, (C3) ensures the parent merge also preserves it. The tree structure propagates preservation from leaves to root. Multi-round stability follows from (C2): once at the root, re-summarizing an on-range string is inert.
+
+\noindent\textit{Proof:} See Appendix~\ref{app:proofs-core}, Proof~\ref{proof:thm-one-pass}.
+
+\begin{corollary}[Schedule invariance]\label{cor:schedule}
+For any fixed partition $(b_1, \ldots, b_k)$, every full binary tree on these leaves yields the same expected oracle whenever Conditions~\eqref{eq:leaf_sufficiency} and \eqref{eq:leaf_compatibility} hold on its realized edges. Balanced reductions and daisy chains are therefore interchangeable.
+\end{corollary}
+
+\noindent\textit{Proof:} See Appendix~\ref{app:proofs-core}, Proof~\ref{proof:cor-schedule}.
+
+\begin{corollary}[Fold-of-folds invariance]\label{cor:folds}
+Consider any two-level plan that first reduces contiguous ``folds'' and then reduces the fold summaries. If Conditions~\eqref{eq:leaf_sufficiency} and \eqref{eq:leaf_compatibility} hold on every realized edge and Condition~\eqref{eq:leaf_idempotence} holds on the intermediate summaries, the composite schedule preserves $\fstar$ in expectation regardless of the within-fold or over-fold parenthesizations.
+\end{corollary}
+
+\noindent\textit{Proof:} See Appendix~\ref{app:proofs-core}, Proof~\ref{proof:cor-folds}.
+
+Together these results ensure that practitioners can pick whatever reduction schedule matches their infrastructure (balanced trees, daisy chains, fold-of-folds pipelines) without changing the expected oracle, provided the three conditions hold in the realized hierarchy.
+
+\begin{theorem}[Multi-round preservation]\label{thm:multi-round}
+Assume Conditions~\eqref{eq:leaf_sufficiency} and \eqref{eq:leaf_compatibility} hold along the realized tree so that Theorem~\ref{thm:one-pass} yields $\E[\metric(\fstar(Z^{(1)}(x)), \fstar(x))] = 0$. If, in addition, on-range stability \eqref{eq:leaf_idempotence} holds, then $\E[\metric(\fstar(Z^{(R)}(x)), \fstar(x))] = 0$ for every $R \geq 1$ with $Z^{(R+1)}(x) := g(Z^{(R)}(x))$.
+\end{theorem}
+
+\noindent\textit{Proof:} See Appendix~\ref{app:proofs-core}, Proof~\ref{proof:thm-multi-round}.
+
+\subsection{Preference Learning Equivalence}
+
+When downstream supervision depends on documents only through $\fstar(X)$ (Assumption~\ref{ass:CF}), training on oracle-preserving summaries is information-equivalent to training on full documents. Section~\ref{sec:preference} develops this connection in detail; here we state the main results.
+
+\begin{theorem}[DPO Equivalence]\label{thm:dpo-equiv}
+Assume Conditions~\eqref{eq:leaf_sufficiency}, \eqref{eq:leaf_idempotence}, and \eqref{eq:leaf_compatibility} hold so that $\E[\metric(\fstar(Z^{(R)}), \fstar(x))] = 0$. Let the policy $\pi$ and reference $\pi_{\mathrm{ref}}$ be oracle-measurable, and let the pair generator be oracle-indexed. Then:
+\[
+\arg\min_\pi \mathcal{L}_{\mathrm{DPO}}(\pi; X) = \arg\min_\pi \mathcal{L}_{\mathrm{DPO}}(\pi; Z^{(R)}).
+\]
+\end{theorem}
+
+\noindent\textit{Proof intuition:} Under oracle-measurability, the DPO loss factors through the oracle: $\mathcal{L}(X) = \tilde{\mathcal{L}}(\fstar(X))$. When $\fstar(Z) = \fstar(X)$ almost surely, replacing $X$ with $Z$ does not change the oracle value, hence the loss is identical.
+
+\noindent\textit{Proof:} See Appendix~\ref{sec:dpo} (Theorem~\ref{thm:dpo-exact}).
+
+\begin{theorem}[GRPO-PL Equivalence]\label{thm:grpo-pl}
+Under the same conditions as Theorem~\ref{thm:dpo-equiv}, with oracle-indexed group generator and oracle-indexed ranker, GRPO with Plackett-Luce ranking loss (generalizing DPO from $k=2$ to arbitrary $k$) satisfies:
+\[
+\arg\min_\pi \mathcal{L}_{\mathrm{GRPO}}(\pi; X) = \arg\min_\pi \mathcal{L}_{\mathrm{GRPO}}(\pi; Z^{(R)}).
+\]
+\end{theorem}
+
+\noindent\textit{Proof:} See Appendix~\ref{sec:grpo} (Theorem~\ref{thm:grpo-pl-exact}).
+
+\begin{theorem}[GRPO-RL Equivalence (DeepSeek-R1 Style)]\label{thm:grpo-rl}
+Under the same conditions, with oracle-measurable reward and all policies, the GRPO-RL objective (clipped surrogate + KL penalty) satisfies training equivalence:
+\[
+\mathcal{L}_{\mathrm{GRPO-RL}}(\pi; X) = \mathcal{L}_{\mathrm{GRPO-RL}}(\pi; Z^{(R)}).
+\]
+\end{theorem}
+
+\noindent\textit{Proof:} See Appendix~\ref{sec:grpo} (Theorem~\ref{thm:grpo-rl-exact}).
+
+\subsection{Quantitative Gap Bounds}
+
+When the local conditions hold only approximately (nonzero expected distortion $\Delta_R := \E[\metric(\fstar(Z^{(R)}), \fstar(x))]$), we obtain quantitative bounds on the training gap.
+
+\begin{theorem}[Unified Preference Gap]\label{thm:unified-gap}
+For any expected loss with $L$-Lipschitz inner expectation:
+\[
+\left| \E_X[\mathcal{L}(\pi; X)] - \E_Z[\mathcal{L}(\pi; Z)] \right| \le L \cdot \Delta_R.
+\]
+\end{theorem}
+
+\noindent\textit{Proof intuition:} The Lipschitz condition $|\mathcal{L}(x) - \mathcal{L}(x')| \le L \cdot \metric(\fstar(x), \fstar(x'))$ integrates over the joint distribution. Taking expectations: $|\E[\mathcal{L}(X)] - \E[\mathcal{L}(Z)]| \le \E[L \cdot \metric(\fstar(X), \fstar(Z))] = L \cdot \Delta_R$.
+
+\noindent\textit{Proof:} See Appendix~\ref{sec:grpo} (Theorem~\ref{thm:unified}).
+
+\paragraph{Instantiations.}
+\begin{itemize}[nosep]
+    \item \textbf{DPO:} $L = 2|\beta| L_{\mathrm{pol}}$ where $L_{\mathrm{pol}}$ is the policy Lipschitz constant.
+    \item \textbf{GRPO-PL:} $L = L_{\mathrm{grpo}}$ from the Plackett-Luce structure.
+    \item \textbf{GRPO-RL:} $L = L_{\mathrm{grpo-rl}}$ combining clipping and KL constants.
+\end{itemize}
+
+In the stochastic or adaptive setting, however, one typically optimizes an
+\emph{expected tree objective} rather than the loss associated with a single
+deterministic reduction tree. The next theorem states the most useful version
+for practice: even if the oracle is itself only an approximation to the true
+latent target, optimizing the expected tree objective is still safe provided the
+average oracle gap and the average summarization gap are both small.
+
+\begin{theorem}[Expected-Tree Optimization under Oracle Uncertainty]
+\label{thm:expected-tree-opt}
+Let $\widehat{\mathcal{L}}_{\tau}(\pi)
+  := \E_{T \sim \tau(x)}[\mathcal{L}_{\mathrm{tree}}(\pi; T)]$
+be the objective induced by a stochastic tree policy $\tau$. Assume that for
+every admissible policy $\pi$,
+\[
+\E_{T \sim \tau(x)}
+  \left[
+    \left|
+      \mathcal{L}_{\mathrm{true}}(\pi) -
+      \mathcal{L}_{\mathrm{tree}}(\pi; T)
+    \right|
+  \right]
+  \le \varepsilon_{\tau}(\pi).
+\]
+Then every exact minimizer $\widehat{\pi}$ of
+$\widehat{\mathcal{L}}_{\tau}$ satisfies
+\[
+\mathcal{L}_{\mathrm{true}}(\widehat{\pi})
+\le
+\mathcal{L}_{\mathrm{true}}(\pi)
+  + \varepsilon_{\tau}(\widehat{\pi})
+  + \varepsilon_{\tau}(\pi)
+\quad
+\text{for every admissible } \pi.
+\]
+In particular, if
+$\varepsilon_{\tau}(\pi)=
+\E_{T}[\varepsilon_{\mathrm{oracle}}(\pi,T)] +
+\E_{T}[\varepsilon_{\mathrm{transport}}(T)]$,
+then the optimization slack decomposes additively into an
+\emph{oracle-uncertainty term} and a \emph{tree-transport term}.
+\end{theorem}
+
+\noindent\textit{Plain-language reading:} the policy found by minimizing the
+tree objective is good for the real objective whenever two averages are small:
+how much the summaries change the loss, and how much the oracle misses the true
+latent state. Exact oracle access is just the special case where the first term
+is zero.
+
+\subsection{Necessity: L3 is Independent}
+
+The three conditions are not redundant. Appendix~\ref{app:counterexample} gives a constructive counterexample showing that Condition~(C2) (Idempotence) cannot be derived from Conditions~(C1) and (C3).
+
+\begin{theorem}[L3 is substantive]\label{thm:l3-necessary}
+There exists a summarizer $g_{\mathrm{bad}}$ satisfying (C1) and (C3) on fresh inputs but violating (C2) on range elements. Specifically, for the constructed $g_{\mathrm{bad}}$:
+\[
+\metric(\fstar(g_{\mathrm{bad}}(\text{POS})), \fstar(\text{POS})) > 0 \quad \text{for } \text{POS} \in \operatorname{range}(g_{\mathrm{bad}}).
+\]
+\end{theorem}
+
+\noindent\textit{Proof intuition:} The counterexample exploits that (C1) only constrains $g$ on fresh inputs, not on its own outputs. We construct $g_{\mathrm{bad}}$ that acts as a ``polarity flip'' on its range: $\text{POS} \mapsto \text{NEG} \mapsto \text{POS}$. This 2-cycle preserves the oracle on first application (satisfying C1) but corrupts it on re-application (violating C2).
+
+\noindent\textit{Proof:} See Appendix~\ref{app:counterexample}.

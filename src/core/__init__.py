@@ -65,6 +65,25 @@ from src.core.summarization import (
     SummarizationResult,
     create_summarizers,
 )
+from src.core.conditional_memory import (
+    ConditionalMemoryEntry,
+    ConditionalMemoryConfig,
+    ConditionalMemory,
+    canonical_hash,
+    hash_payload,
+    get_default_memory,
+)
+from src.core.semantic_memory import (
+    SemanticMemoryConfig,
+    SemanticMemoryEntry,
+    SemanticMemoryIndex,
+    SemanticNeighbor,
+    normalize_rile_delta,
+    temporal_delta_targets,
+)
+
+# Backward-compat alias used by older imports.
+MemoryRecord = ConditionalMemoryEntry
 
 __all__ = [
     # Data models
@@ -117,4 +136,19 @@ __all__ = [
     "GenericMerger",
     "SummarizationResult",
     "create_summarizers",
+    # Conditional memory
+    "ConditionalMemoryEntry",
+    "ConditionalMemoryConfig",
+    "MemoryRecord",
+    "ConditionalMemory",
+    "canonical_hash",
+    "hash_payload",
+    "get_default_memory",
+    # Semantic memory
+    "SemanticMemoryConfig",
+    "SemanticMemoryEntry",
+    "SemanticMemoryIndex",
+    "SemanticNeighbor",
+    "normalize_rile_delta",
+    "temporal_delta_targets",
 ]

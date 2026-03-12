@@ -1,0 +1,46 @@
+\documentclass[11pt]{article}
+
+% Preamble
+\input{preamble}
+
+\title{C-TreePO: Compression Tree Preference Optimization}
+\author{Mitchell Linegar}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Preference optimization on long documents is hard because hierarchical summarization can destroy the task signal before the optimizer ever sees the document.
+We introduce \emph{Compression Tree Preference Optimization} (C-TreePO), which treats recursive summarization as a learned mergeable sketch: split a document into contiguous blocks, summarize locally, and audit whether each merge preserves the task oracle.
+The framework is organized around three local laws in plain language: each leaf summary must preserve the evidence the task depends on, re-summarizing a stored summary must not change that evidence, and split-then-merge must preserve the same cross-span interactions as summarize-together.
+Our main results form a ladder: local validity yields root-level oracle preservation and schedule invariance, adding downstream factorization yields the same population target as full-document DPO/GRPO training, and adding calibration and sampling assumptions turns sampled audits into an empirical preference-gap certificate.
+Controlled toy examples, a running manifesto RILE example, and current mechanism checks are consistent with the predicted phase boundary between sufficient and insufficient merge state, including learned-sketch recovery only in supported regimes.
+\end{abstract}
+
+% ---- Main Text ----
+
+\input{sections/01_introduction}
+\input{sections/02_framework}
+\input{sections/03_example}
+\input{sections/04_theory}
+\input{sections/05_estimation}
+\input{sections/07_empirical}
+\input{sections/08_verification}
+\input{sections/09_related}
+\input{sections/10_conclusion}
+
+% ---- Appendix ----
+
+\appendix
+
+\input{appendix/A_notation}
+\input{appendix/B_proofs}
+\input{appendix/C_fixed_partition}
+\input{appendix/D_counterexample}
+\input{appendix/E_proof_artifacts}
+
+\bibliographystyle{plainnat}
+\bibliography{../refs}
+
+\end{document}

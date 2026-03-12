@@ -22,6 +22,56 @@ vllm:
       tensor_parallel: 4
       max_model_len: 32768
 
+    # Qwen3.5-35B-A3B NVFP4: compact MoE instruction model.
+    # Architecture: Qwen3_5MoeForConditionalGeneration | good quality/speed tradeoff
+    qwen3.5-35b-a3b:
+      path: "/mnt/data/models/AxionML/Qwen3.5-35B-A3B-NVFP4"
+      tensor_parallel: 2
+      max_model_len: 32768
+
+    # Qwen3.5-397B-A17B NVFP4: very large teacher model for synthetic generation.
+    qwen3.5-397b-a17b-nvfp4:
+      path: "/mnt/data/models/nvidia/Qwen3.5-397B-A17B-NVFP4"
+      tensor_parallel: 4
+      max_model_len: 131072
+
+    # Qwen3.5-0.8B: small instruction model for fast iteration/prototyping.
+    qwen3.5-0.8b:
+      path: "/mnt/data/models/AxionML/Qwen3.5-0.8B-NVFP4"
+      tensor_parallel: 1
+      max_model_len: 32768
+
+    # Qwen3.5-0.8B-Base: base checkpoint for SFT/DPO/LoRA training experiments.
+    qwen3.5-0.8b-base:
+      path: "/mnt/data/models/AxionML/Qwen3.5-0.8B-Base-NVFP4"
+      tensor_parallel: 1
+      max_model_len: 32768
+
+    # Qwen3.5-2B: small/mid instruction model for stronger quality at low cost.
+    qwen3.5-2b:
+      path: "/mnt/data/models/AxionML/Qwen3.5-2B-NVFP4"
+      tensor_parallel: 1
+      max_model_len: 32768
+
+    # Qwen3.5-2B-Base: base checkpoint for training-focused ablations.
+    qwen3.5-2b-base:
+      path: "/mnt/data/models/AxionML/Qwen3.5-2B-Base-NVFP4"
+      tensor_parallel: 1
+      max_model_len: 32768
+
+    # Qwen3.5-4B: largest "small" instruction model in this local bundle.
+    qwen3.5-4b:
+      path: "/mnt/data/models/AxionML/Qwen3.5-4B-NVFP4"
+      tensor_parallel: 1
+      max_model_len: 32768
+
+    # Qwen3.5-4B-Base: base checkpoint for higher-capacity finetuning.
+    # NOTE: AxionML NVFP4 variant not currently published; retaining existing path.
+    qwen3.5-4b-base:
+      path: "/mnt/data/models/Qwen/Qwen3.5-4B-Base"
+      tensor_parallel: 1
+      max_model_len: 32768
+
     # Qwen3-235B: Large instruction model with compressed-tensors NVFP4
     # Architecture: Qwen3MoeForCausalLM | Load time: ~20s | Memory: ~34 GiB (4 GPUs)
     qwen-235b:
@@ -51,8 +101,14 @@ vllm:
       tensor_parallel: 1
       max_model_len: 32768
 
-    # NVIDIA Nemotron-3-Nano-30B: MoE model with FP8 quantization
-    # Architecture: NemotronForCausalLM | Similar to Qwen3-30B in size
+    # NVIDIA Nemotron-3-Nano-30B: MoE model with NVFP4 quantization
+    # Architecture: NemotronForCausalLM | default small model profile
+    nemotron-30b-nvfp4:
+      path: "/mnt/data/models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4"
+      tensor_parallel: 2
+      max_model_len: 32768
+
+    # NVIDIA Nemotron-3-Nano-30B: FP8 profile retained for backwards compatibility
     nemotron-30b-fp8:
       path: "/mnt/data/models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8"
       tensor_parallel: 2
@@ -84,6 +140,14 @@ vllm:
       tensor_parallel: 4
       max_model_len: 32768
 
+    # Qwen3 Embedding 8B: tiny/cheap embedding model for chunking proxies.
+    # Stored locally (download with scripts/download_hf_model.sh).
+    qwen3-embedding-8b:
+      path: "/mnt/data/models/Qwen/Qwen3-Embedding-8B"
+      served_model_name: "Qwen/Qwen3-Embedding-8B"
+      tensor_parallel: 1
+      max_model_len: 32768
+
   # Server settings
   host: "0.0.0.0"
   port: 8000
@@ -96,13 +160,131 @@ vllm:
   enable_prefix_caching: true
 
   # Default model to use
-  default: "nemotron-30b-fp8"
+  default: "nemotron-30b-nvfp4"
+
+  # Runtime tuning for vLLM OpenAI API server.
+  # These defaults are profile-aware and used by:
+  # - scripts/start_vllm.sh
+  # - scripts/start_oracle_server.sh
+  # - src/core/gpu_orchestrator.py
+  runtime:
+    # Prefer CUDA graph/async path by default (faster steady-state throughput).
+    # Keep eager only for profiles that still benefit from eager startup.
+    enforce_eager_default: false
+    # Nemotron NVFP4 has shown better stability with eager startup (avoids
+    # CUDA graph capture / torch.compile paths which can segfault under load,
+    # especially when combined with sleep mode transitions).
+    enforce_eager_profiles: ["glm-4.6", "nemotron-30b-nvfp4", "nemotron-30b-fp8", "genrm-nvfp4"]
+
+    # Extra CLI flags applied to all vLLM servers (per-profile extra_flags are appended).
+    # Keep these stable to maximize prefix cache reuse across requests.
+    extra_flags: ["--enable-chunked-prefill", "--block-size", "32"]
+
+    # Frontend scaling and V1 process model.
+    api_server_count: 1
+    disable_frontend_multiprocessing: false
+
+    # Multimodal-ready serving knobs (safe for text-only mode too).
+    mm_processor_cache_gb: 4.0
+    mm_processor_cache_type: "lru"
+    interleave_mm_strings: false
+    allowed_media_domains: []
+    limit_mm_per_prompt: {}
+
+    # Per-profile runtime overrides for multimodal models.
+    profile_overrides:
+      # Avoid large warmup allocations that can OOM TP=2 startup.
+      nemotron-30b-nvfp4:
+        extra_flags: [
+          "--max-num-seqs", "128",
+          "--max-num-batched-tokens", "16384",
+        ]
+      # GenRM 235B is more memory-sensitive; keep warmup smaller.
+      genrm-nvfp4:
+        extra_flags: [
+          "--max-num-seqs", "32",
+          "--max-num-batched-tokens", "8192"
+        ]
+      qwen-vl-235b:
+        limit_mm_per_prompt:
+          image: 8
+          video: 2
+
+# SGLang Server Configuration
+# SGLang reuses model profiles from vllm.models above (same paths and tensor_parallel).
+# Only server-specific settings differ.
+sglang:
+  # Default port (SGLang convention is 30000)
+  port: 30000
+  host: "0.0.0.0"
+
+  # Memory fraction for static KV cache allocation (like gpu_memory_utilization)
+  mem_fraction_static: 0.88
+
+  # Runtime tuning
+  runtime:
+    # Enable torch.compile for faster kernels (adds startup time)
+    enable_torch_compile: false
+    # Chunked prefill size (0 = auto)
+    chunked_prefill_size: 0
+    # Disable RadixAttention (disables automatic prefix caching)
+    disable_radix_cache: false
+    # Optional explicit backend (leave empty for model default).
+    attention_backend: ""
+    # Global CUDA graph toggle (profile overrides can change this).
+    disable_cuda_graph: false
+    # Optional cap if CUDA graph is re-enabled.
+    cuda_graph_max_bs: 32
+    # Per-profile runtime overrides.
+    profile_overrides:
+      qwen-80b:
+        # Required for Blackwell hybrid GDN models.
+        attention_backend: "triton"
+        # Improves startup stability for this profile on current stack.
+        disable_cuda_graph: true
+      qwen3.5-35b-a3b:
+        # Required for Blackwell hybrid GDN models.
+        attention_backend: "triton"
+        # Avoid CUDA-graph startup fragility during pipeline debugging.
+        disable_cuda_graph: true
+
+# Conditional Memory (Engram-inspired unified cache)
+# Provides persistent, context-gated memory across pipeline runs.
+memory:
+  enabled: false                            # Set true to enable ConditionalMemory
+  l1_capacity: 4096                         # In-memory LRU cache entries
+  l2_path: "memory/conditional_memory.db"   # SQLite persistent tier (cross-run)
+  gate_threshold: 0.0                       # 0.0 = disabled, 0.85 = strict context gating
+  promotion_threshold: 3                    # L2→L1 promotion after N accesses
 
 # Server URLs
-# Can be overridden via environment variables: TASK_MODEL_URL, GENRM_URL
+# Can be overridden via environment variables: TASK_MODEL_URL, GENRM_URL, EMBEDDING_URL
 servers:
   task_model_url: "http://localhost:8000/v1"
   genrm_url: "http://localhost:8001/v1"
+  embedding_url: "http://localhost:8003/v1"
+  # Default multilingual embedding model/id served by the embedding endpoint.
+  embedding_model: "Qwen/Qwen3-Embedding-8B"
+  # vLLM profile used by helper scripts (e.g., scripts/start_embedding_server.sh).
+  embedding_profile: "qwen3-embedding-8b"
+
+# Inference backend selection and routing policy.
+inference:
+  backend:
+    # Backend names: vllm | sglang
+    task_backend: "vllm"
+    genrm_backend: "vllm"
+    # Fallback backend used when the selected backend is unavailable.
+    fallback_backend: "vllm"
+    # Multi-server request routing policy.
+    # Options: round_robin | document_affinity | affinity_load_aware
+    routing_policy: "affinity_load_aware"
+    # Poll interval for backend-neutral inference telemetry collectors.
+    metrics_poll_seconds: 2.0
+    # Keep SGLang in a dedicated environment separate from vLLM.
+    sglang_venv_path: "/home/mlinegar/sglang-env"
+    # Reuse vLLM env CUDA toolkit for SGLang NVFP4 kernel builds.
+    vllm_venv_path: "/home/mlinegar/vllm-env"
 
 # Task Configuration
 # Tasks define what we do with documents (e.g., scoring, summarization, extraction)
@@ -122,6 +304,63 @@ datasets:
     require_text: true
   jsonl:
     path: null
+  pdf:
+    path: null
+    recursive: true
+    require_text: true
+
+# Parser feedback routing (OCR/VLM/vision embedding dispatch).
+# This stage executes parser-emitted action hints before chunking/training.
+parsers:
+  router:
+    enabled: false
+    fail_open: true
+    strict_contracts: true
+    contract_version: 1
+    max_hints_per_sample: 128
+    store_max_results_per_sample: 200
+    max_concurrency: 4
+    max_retries: 2
+    retry_backoff_seconds: 0.5
+    enabled_processors: ["ocr", "vlm_parse", "vision_embedding"]
+    timeout_seconds: 20.0
+    # Optional JSON endpoints. When omitted, actions are recorded as
+    # "skipped_unconfigured" but the routing stage still runs.
+    ocr_endpoint: null
+    vlm_endpoint: null
+    vision_embedding_endpoint: null
+    vlm_segment_endpoint: null
+
+# VLM Visual Segmentation
+# Uses a Vision Language Model to segment PDF pages into visual regions,
+# score information density, and feed scores into adaptive chunking and
+# content-weighted audit sampling.
+vlm_segmentation:
+  enabled: false
+  backend: "smoldocling"
+  endpoint: "http://localhost:8010/v1/segment"
+  dpi: 150
+  timeout_seconds: 30.0
+  scoring:
+    type_weights:
+      table: 0.92
+      figure: 0.88
+      equation: 0.85
+      code: 0.82
+      list: 0.65
+      body_text: 0.50
+      caption: 0.45
+      header: 0.25
+      footer: 0.10
+  audit:
+    sampling_strategy: "content_weighted"
+    # α exponent: weight_i = info_score_i^α. Higher α concentrates
+    # audit budget on high-info segments. α=2 gives tables ~85x
+    # higher draw probability than page numbers.
+    concentration: 2.0
+    # Minimum inclusion probability. Low-info segments still have
+    # nonzero draw probability, keeping IPW weights bounded (≤100).
+    propensity_floor: 0.01
 
 # LLM Configuration
 llm:
@@ -141,14 +380,34 @@ generation:
     candidate_temperatures: [0.3, 0.5, 0.7, 0.9]
   oracle:
     temperature: 0.1
-    max_tokens: 4096
+    max_tokens: 1024
   genrm_judge:
     temperature: 0.6
     top_p: 0.95
-    max_tokens: 4096
+    # Keep judge outputs concise to avoid long-tail timeouts under heavy queues.
+    max_tokens: 1024
+    # Qwen GenRM can emit long <think> traces unless explicitly disabled.
+    disable_thinking: true
+    # Ask for JSON-only output to reduce verbose completions and parse failures.
+    force_json_response: true
+    # Keep GenRM request pressure moderate on the 235B model.
+    # Lower concurrency + longer timeout improves interleaved stability.
+    max_concurrent: 8
+    request_timeout_seconds: 600
+    tree_concurrency: 8
+    recovery_cooldown_seconds: 120
   comparison_judge:
     temperature: 0.3
     max_tokens: 16384
+  optimization:
+    # Reflection/proposal LM settings for GEPA/MIPRO prompt optimization.
+    # Keep this larger than oracle scoring so optimization instructions do not
+    # get truncated mid-proposal.
+    temperature: 0.3
+    max_tokens: 4096
+    # Bound in-flight generation time for long reflection prompts. Queueing is
+    # handled client-side so this timeout applies after the request is sent.
+    timeout_seconds: 600
   synthetic_data:
     temperature: 0.6
     top_p: 0.95
@@ -157,10 +416,36 @@ generation:
     temperature: 0.3
     max_tokens: 16384
 
+# Score parsing robustness controls.
+# `parse_numeric_score` now handles noisy outputs heuristically by default.
+# Optional LLM fallback is only used when all local parsing methods fail.
+scoring_parser:
+  llm_fallback:
+    enabled: true
+    # Optional dedicated extractor endpoint/model (defaults to servers.task_model_url).
+    base_url: null
+    model: "default"
+    api_key: "EMPTY"
+    timeout_seconds: 20.0
+    max_tokens: 12
+    max_retries: 1
+    max_input_chars: 4000
+    disable_thinking: true
+
 # DSPy runtime settings
 dspy:
   max_errors: 50
   provide_traceback: true
+  lm_num_retries: 6
+  lm_timeout_seconds: 120
+  # Prefer fast-fail for local vLLM to avoid long exponential backoff.
+  lm_num_retries_local: 0
+  # NOTE: 30s is often too aggressive for long-context summarization/merge
+  # during optimization + tournament candidate generation; 120s is a safer
+  # default while still disabling provider retries locally.
+  lm_timeout_seconds_local: 120
+  # Periodic health probe for local load-balanced vLLM ports (0 disables).
+  lm_health_probe_interval_seconds: 600
 
 # Document Chunking
 chunking:
@@ -168,6 +453,103 @@ chunking:
   max_tokens: 2000
   # Model for token counting
   model: "gpt-4"
+  # Adaptive chunking policy (used by GenRM tree-building path)
+  adaptive:
+    enabled: false
+    min_chars: 400
+    max_chars: 8000
+    low_info_expansion_weight: 0.8
+    noise_expansion_weight: 0.3
+    high_info_compression_weight: 0.5
+    min_target_scale: 0.6
+    max_target_scale: 2.0
+    proxy_blend: 0.5
+    crossfit_folds: 1
+    proxy_model: null
+    proxy_score_key: null
+    proxy_fallback_to_baseline: true
+    window_adapter: "text_char"
+    # Merge adjacent windows when embedding movement is low.
+    # This keeps low-information regions coarse.
+    window_merge_enabled: true
+    window_merge_max_cosine_distance: 0.03
+    window_merge_max_extent: null
+    embedding_proxy:
+      enabled: false
+      # Keep this off until you have enough trusted labels (human/dataset/oracle).
+      # The embedding proxy is trained in Phase 1.25 of `src/training/run_pipeline.py`.
+      # Until a trained proxy artifact exists, span-level feedback is skipped.
+      api_base: "http://localhost:8003/v1"
+      model: "Qwen/Qwen3-Embedding-8B"
+      # Optional adapter-specific embedding models.
+      # Keys: text_char | text_page | sequence_item | time_segment
+      models_by_adapter:
+        text_char: "Qwen/Qwen3-Embedding-8B"
+        text_page: "Qwen/Qwen3-Embedding-8B"
+        sequence_item: "Qwen/Qwen3-Embedding-8B"
+      batch_size: 32
+      timeout_seconds: 60.0
+      min_samples: 12
+      # Supervision source for proxy training.
+      # - reference_score: dataset/human labels (when available)
+      # - estimated_score: scorer/oracle output on the summary
+      # - baseline_score: scorer/oracle output on the full text (when enabled)
+      target_field: "reference_score"
+      # Optional post-normalization transform (after mapping to [0,1]).
+      # - identity: y
+      # - magnitude: |y - 0.5| * 2 (useful for signed scales like RILE)
+      target_transform: "identity"
+      ridge_lambda: 1.0
+      head_method: "ridge"  # ridge | linear_sgd | mil_sgd
+      head_epochs: 25
+      head_learning_rate: 0.005
+      head_weight_decay: 0.0001
+      # MIL head (head_method=mil_sgd) options.
+      # These are char-window settings for text_char adapters.
+      mil_window_size_chars: null
+      mil_window_overlap_chars: null
+      mil_smoothness_lambda: 0.0
+      mil_sparsity_lambda: 0.0
+      mil_drift_temperature: 0.15
+      mil_max_windows_per_doc: 128
+      full_finetune_enabled: false
+      finetune_command: null
+      fail_on_error: false
+      rerun_on_resume: false
+      max_text_chars: 6000
+      retrain_rounds: 1
+      include_val: false
+      allowed_truth_sources: ["human", "dataset"]
+      score_key: "embedding_proxy_score"
+  # Honest split policy for adaptive-feedback usage.
+  # Boundary split updates chunking; evaluation split is held out.
+  honest:
+    enabled: false
+    boundary_fraction: 0.5
+    split_seed: 17
+    boundary_role: "boundary"
+    evaluation_role: "evaluation"
+
+# Three-layer honesty for Thinking-Trees training:
+# - chunk: adaptive boundary policy updates
+# - summarizer: summary generation/training artifacts
+# - oracle: scorer/objective fitting
+honesty:
+  three_layer:
+    enabled: false
+    split_seed: 23
+    chunk_train_fraction: 0.5
+    summarizer_train_fraction: 0.5
+    oracle_train_fraction: 0.5
+    train_role: "train"
+    eval_role: "eval"
+  # Single-oracle two-view naming used in runtime metadata and reporting.
+  oracle_views:
+    online_view: "online"
+    eval_view: "eval"
+  # Truth-label provenance fallback when metadata does not specify source.
+  truth_labels:
+    default_source: "dataset"
 
 # Context Window Allocation
 # Ensures input + output never exceeds model's context window.
@@ -216,8 +598,8 @@ optimization:
   enable_progress_check: true
   progress_check_samples: null  # null = use all training samples, or specify a number
 
-  # Joint optimization settings (oracle + GenRM)
-  optimization_mode: "joint"  # "oracle_only", "genrm_only", "sequential", "joint"
+  # Optimization settings (default large-model-only path)
+  optimization_mode: "oracle_only"  # "oracle_only", "genrm_only", "sequential", "joint"
   oracle_weight: 0.7  # Weight for oracle accuracy (only for joint mode)
   genrm_weight: 0.3   # Weight for GenRM consistency (only for joint mode)
 
@@ -260,21 +642,21 @@ speculative:
     # Training: Large target model + small draft for faster DSPy optimization
     training:
       target: "qwen-80b"            # Large model for optimization quality
-      draft: "qwen-30b-thinking"    # Fast draft model
+      draft: "nemotron-30b-nvfp4"   # Fast draft model
       enabled: true
       num_speculative_tokens: 5
 
     # Inference: Just the small model with DSPy-optimized prompts
     # The optimized prompts/demos from training help the small model perform well
     inference:
-      target: "qwen-30b-thinking"   # Small model with optimized prompts
+      target: "nemotron-30b-nvfp4"  # Small model with optimized prompts
       draft: null                   # No speculative decoding needed
       enabled: false
 
     # Heavy training: 235B target for maximum quality (requires 4+ GPUs)
     training-heavy:
       target: "qwen-235b"
-      draft: "qwen-30b-thinking"
+      draft: "nemotron-30b-nvfp4"
       enabled: true
       num_speculative_tokens: 5
 
@@ -283,10 +665,22 @@ speculative:
 # Enabled by default - disable with --no-dynamic-gpu flag
 orchestration:
   enabled: true
+  # Auto-select task topology in dynamic mode.
+  # Preserves default large-model behavior while increasing task TP for
+  # small models so DP=2 uses all four GPUs more effectively.
+  auto_task_topology: true
+  # Models at or below this size (in "B" units parsed from profile/path)
+  # are considered "small" for throughput-oriented TP promotion.
+  small_model_saturation_max_b: 8.0
+  # Target TP for each task server in DP=2 when small-model saturation applies.
+  # With default GPU pairs (0,1) and (2,3), TP=2 engages all 4 GPUs.
+  small_model_target_tensor_parallel: 2
 
   # Model profiles (from vllm.models section)
-  task_model_profile: "nemotron-30b-fp8"
+  task_model_profile: "nemotron-30b-nvfp4"
   genrm_profile: "genrm-nvfp4"
+  # Large-model-only default: do not manage GenRM lifecycle in orchestrator.
+  enable_genrm: false
 
   # Server ports
   task_primary_port: 8000   # Task model (always awake)
@@ -297,6 +691,17 @@ orchestration:
   task_primary_gpus: "0,1"
   task_replica_gpus: "2,3"
   genrm_gpus: "2,3"
+  # Embedding lifecycle management (dynamic mode only).
+  # If enabled, orchestrator starts/stops embedding model on demand so embeddings
+  # do not reserve GPUs during long task/genrm-only phases.
+  auto_manage_embedding_server: true
+  quiesce_embedding_when_idle: true
+  embedding_profile: "qwen3-embedding-8b"
+  embedding_port: 8003
+  embedding_gpus: "2"
+  embedding_tensor_parallel: 1
+  # Legacy fallback when embedding server is externally managed.
+  auto_reserve_embedding_gpu: true
 
   # vLLM environment
   venv_path: "/home/mlinegar/vllm-env"
@@ -304,9 +709,121 @@ orchestration:
   # Sleep mode settings
   sleep_timeout: 30.0       # Max seconds for sleep operation
   wake_timeout: 60.0        # Max seconds for wake operation
+  post_stop_settle_seconds: 6.0  # Wait after forced stop so CUDA memory fully releases
+  shared_gpu_hard_quiesce: false  # Prefer sleep-mode swapping (speed > stability); set true if wake/start becomes flaky
+
+  # KV-cache persistence via LMCache (Phase 6.1)
+  # Enables SSD-backed KV cache that survives server restarts.
+  # Requires: pip install lmcache  (in the vLLM venv)
+  kv_persistence:
+    enabled: false
+    # Backend: "lmcache" (GPU→CPU→SSD) or "native" (GPU→CPU only)
+    backend: "lmcache"
+    # CPU RAM budget for KV cache offloading (GB)
+    cpu_cache_gb: 5.0
+    # Local SSD path for persistent KV cache (LMCache only)
+    disk_cache_path: "/tmp/thinkingtrees_kv_cache"
+    # Max SSD usage (GB). Set to 0 to disable disk tier.
+    disk_cache_gb: 50.0
+    # LMCache chunk size (tokens per cache block)
+    chunk_size: 256
 
   # GenRM-specific settings (235B model needs more memory)
-  genrm_gpu_memory_utilization: 0.95
+  # Note: vLLM warmup can OOM at very high utilizations (esp. with large
+  # max_num_seqs). Keep headroom for sampler warmup + CUDA graphs.
+  # Keep task replica slightly lower than task primary because GPUs 2,3 are
+  # also used by GenRM and tend to fragment more across mode transitions.
+  task_primary_gpu_memory_utilization: 0.90
+  task_replica_gpu_memory_utilization: 0.88
+  genrm_gpu_memory_utilization: 0.90
+
+# CTreePO: learned mergeable sketches over multilingual embeddings.
+# Used for fast position scoring and cross-language retrieval.
+ctreepo:
+  enabled: false
+  model_path: null                # Path to trained .pt checkpoint
+  sketch_dim: 32
+  hidden_dim: 256
+  merge_type: "gated"             # gated | mlp | avg
+  head_names: ["rile"]
+  window_size: 1200
+  window_overlap: 150
+  # Unified tree architecture: shared topology for both sketch and text paths.
+  unified_tree: false             # Enable unified tree mode
+  adaptive_windows: false         # Coarse-to-fine adaptive windowing
+  coarse_window_size: 4000        # Characters per coarse window (adaptive mode)
+  merge_drift_threshold: 0.03    # Cosine distance threshold for drift merging
+  oracle_feedback_to_chunks: false  # Feed oracle scores back to window adaptation
+  mil_proxy_model_path: null      # Path to MIL proxy model for window importance
+
+# Mergeable embedding sketch: strictly mergeable DeepSets over embedding windows.
+# Trained via scripts/train_rile_embedding_sketch.py; usable for fast scoring and
+# as a mergeable embedding-side analogue to LLM summaries.
+mergeable_sketch:
+  enabled: false
+  model_path: null                # Path to checkpoint (.pt) from train_rile_embedding_sketch.py
+
+# Unified score-routing across text/embedding/operator representations.
+# Backends: llm | embedding | ctreepo | mergeable_sketch | ensemble | auto
+representation_pipeline:
+  backends: ["llm"]               # Ordered preference list ("auto" expands to available backends)
+  primary_backend: "auto"         # auto = first available backend from backends order
+  weights: {}                     # Optional ensemble weights, e.g. {llm: 0.5, ctreepo: 0.5}
+  fallback_to_available_backend: true
+  hybrid_oracle_seeded_ensemble: false   # If true, treat llm as seed and boost embedding/operator corrections
+  hybrid_seed_llm_min_weight: 0.20       # Lower bound for llm seed weight in hybrid mode
+  hybrid_seed_llm_max_weight: 0.55       # Upper bound for llm seed weight in hybrid mode
+  hybrid_operator_boost: 1.40            # Multiplier for embedding/operator backends in hybrid mode
+  llm_text_path_enabled: true     # Disable to keep tree-building local/deterministic (no LLM summarize/merge calls)
+
+training:
+  neural_operators:
+    enabled: false
+    which: "both"
+    auto_wire_representation: true
+    fail_fast: false
+    fail_on_error: false
+    rerun_on_resume: false
+    ctreepo_local_law:
+      root_weight: 1.0
+      leaf_audit_weight: 0.0
+      merge_audit_weight: 0.5
+      violation_threshold: 10.0
+      require_supervision: false
+      oracle_module: null         # Use 'task' for the task/teacher-provided span oracle, or module.path:function_name for an explicit callback.
+      teacher_port: null          # Optional model-backed teacher labeler endpoint (fallback only).
+      teacher_model: null
+      teacher_max_tokens: 64
+      teacher_temperature: 0.0
+      allow_model_based_labeling: false
+  generator:
+    enabled: false
+    method: "grpo"
+    model: null
+    use_lora: true
+    learning_rate: 1.0e-5
+    epochs: 3
+    batch_size: 2
+    min_preferences: 50
+    fail_on_error: false
+    rerun_on_resume: false
+
+# Semantic multilingual memory (additive to Engram exact memory).
+semantic_memory:
+  enabled: false
+  index_dir: "outputs/semantic_memory"
+  top_k: 5
+  lambda_year: 0.08
+  scope_bonus_party_country: 0.05
+  scope_bonus_family_country: 0.02
+  index_granularity: "doc_chunk"  # doc | chunk | doc_chunk
+  max_windows: 0                  # 0 = unlimited windows
+  update_policy: "post_score"
+  inject_prompts: true
+  model_features: true
+  temporal_mode: true
+  max_chunk_snippets_per_neighbor: 2
+  max_snippet_chars: 240
 
 # Logging
 logging:

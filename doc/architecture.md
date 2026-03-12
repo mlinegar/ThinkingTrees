@@ -360,7 +360,7 @@ class NormalizedOutputAccessor:
     def get(self, name: str, default: Any = None) -> Any:
         """
         Case-insensitive field access.
-        Handles: rile_score, RILE_score, riLE_score, etc.
+        Handles: score, Score, SCORE, etc.
         """
 ```
 

@@ -13,16 +13,27 @@ Signatures:
 See src.core.signatures.MetricScore for the generic scoring pattern.
 """
 
+import json
 import logging
+import os
 import re
 import dspy
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from src.core.output_parser import NormalizedOutputAccessor
 from src.core.prompting import parse_numeric_score
+from src.core.engram_prompting import format_prompt_metadata_block
 from .constants import RILE_MIN, RILE_MAX
 
 logger = logging.getLogger(__name__)
+
+_SCORER_DIAG_BUDGET_DEFAULT = 24
+_SCORER_DIAG_BUDGET = _SCORER_DIAG_BUDGET_DEFAULT
+
+
+def _scorer_diag_enabled() -> bool:
+    raw = str(os.getenv("RILE_SCORER_DIAG", "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 class RILEScore(dspy.Signature):
@@ -68,7 +79,8 @@ class SimpleScore(dspy.Signature):
     score: float = dspy.OutputField(
         desc=(
             "Numeric score on the exact scale defined in task_context. "
-            "Output a single number only (format examples, do not copy: -12, 0, 37.5; "
+            "Estimate as precisely as possible on the continuous scale; "
+            "Output a single number only "
             "no markdown/backticks/code fences, no extra text); "
             "do not invent an alternate scale; "
             "do not output multiple numbers, ranges, or lists."
@@ -148,27 +160,101 @@ class RILEComparison(dspy.Signature):
     )
 
 
-def _coerce_rile_score(raw_value: Any, raw_result: Any) -> Optional[float]:
-    if raw_value is not None:
-        parsed = parse_numeric_score(
-            str(raw_value),
+_STRICT_NUMERIC_RE = re.compile(r"^[-+]?\d+(?:\.\d+)?$")
+_LABELED_SCORE_RE = re.compile(
+    r"(?i)^\s*(?:rile(?:\s+score)?|score|value|prediction)\s*[:=]\s*([-+]?\d+(?:\.\d+)?)\s*$"
+)
+
+
+def _coerce_rile_range(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed < RILE_MIN or parsed > RILE_MAX:
+        return None
+    return float(parsed)
+
+
+def _strip_score_wrappers(text: str) -> str:
+    rendered = str(text or "")
+    cleaned = re.sub(r"<think>.*?</think>", "", rendered, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = re.sub(r"<think>.*$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    cleaned = cleaned.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    return cleaned.strip()
+
+
+def _strict_parse_rile_score(value: Any) -> Optional[float]:
+    cleaned = _strip_score_wrappers(str(value or ""))
+    if not cleaned:
+        return None
+
+    # JSON outputs: prefer score-like keys and recurse.
+    try:
+        payload = json.loads(cleaned)
+    except Exception:
+        payload = None
+    if payload is not None:
+        if isinstance(payload, (int, float)):
+            return _coerce_rile_range(payload)
+        if isinstance(payload, str):
+            return _strict_parse_rile_score(payload)
+        if isinstance(payload, dict):
+            for key in ("score", "rile", "rile_score", "value", "prediction"):
+                if key in payload:
+                    parsed = _strict_parse_rile_score(payload[key])
+                    if parsed is not None:
+                        return parsed
+            return None
+        if isinstance(payload, list) and len(payload) == 1:
+            return _strict_parse_rile_score(payload[0])
+        return None
+
+    token = cleaned.strip("`\"'")
+    if _STRICT_NUMERIC_RE.fullmatch(token):
+        return _coerce_rile_range(token)
+
+    candidates: list[float] = []
+    for line in cleaned.splitlines():
+        candidate_line = line.strip()
+        if not candidate_line:
+            continue
+        if _STRICT_NUMERIC_RE.fullmatch(candidate_line):
+            parsed = _coerce_rile_range(candidate_line)
+            if parsed is not None:
+                candidates.append(parsed)
+            continue
+        match = _LABELED_SCORE_RE.match(candidate_line)
+        if match:
+            parsed = _coerce_rile_range(match.group(1))
+            if parsed is not None:
+                candidates.append(parsed)
+
+    if not candidates:
+        return None
+    return float(candidates[-1])
+
+
+def _coerce_rile_score(raw_value: Any, raw_result: Any, *, strict_parse: bool = True) -> Optional[float]:
+    parser = _strict_parse_rile_score if strict_parse else (
+        lambda value: parse_numeric_score(
+            str(value),
             min_value=RILE_MIN,
             max_value=RILE_MAX,
             allow_llm_fallback=False,
         )
+    )
+
+    if raw_value is not None:
+        parsed = parser(raw_value)
         if parsed is not None:
             return parsed
 
-    # Fallback: parse the last in-range number from the full (possibly messy)
-    # result representation. This recovers from format drift where the adapter
-    # returns a partial field or different casing/structure.
     if raw_result is not None:
-        parsed = parse_numeric_score(
-            str(raw_result),
-            min_value=RILE_MIN,
-            max_value=RILE_MAX,
-            allow_llm_fallback=False,
-        )
+        parsed = parser(raw_result)
         if parsed is not None:
             return parsed
 
@@ -180,27 +266,59 @@ def _coerce_rile_score(raw_value: Any, raw_result: Any) -> Optional[float]:
 class RILEScorer(dspy.Module):
     """DSPy module for RILE scoring."""
 
-    def __init__(self, use_cot: bool = False):
+    def __init__(
+        self,
+        use_cot: bool = False,
+        max_tokens: int = 64,
+        temperature: float = 0.0,
+        strict_parse: bool = True,
+    ):
         super().__init__()
         # Default to the compact signature to keep scorer outputs short and
         # stable during GEPA optimization/evaluation loops.
-        # Also cap completion tokens so the scorer cannot ramble; we only need
-        # a single numeric value.
-        scorer_max_tokens = 32
-        scorer_temperature = 0.0
+        # Also cap completion tokens so the scorer cannot ramble.
+        scorer_max_tokens = max(1, int(max_tokens))
+        scorer_temperature = float(temperature)
+        self._strict_parse = bool(strict_parse)
+        self._use_cot = bool(use_cot)
+        self._scorer_max_tokens = scorer_max_tokens
+        self._scorer_temperature = scorer_temperature
+        self._score_predictor = self._build_score_predictor()
+
+    @property
+    def score(self) -> Any:
+        """Backwards-compatible accessor used by older optimization artifacts."""
+        return self._score_predictor
+
+    @score.setter
+    def score(self, value: Any) -> None:
+        self._score_predictor = value
+
+    def _build_score_predictor(self) -> Any:
         score_signature = SimpleScore
-        if use_cot:
-            self.score = dspy.ChainOfThought(
+        if self._use_cot:
+            return dspy.ChainOfThought(
                 score_signature,
-                max_tokens=scorer_max_tokens,
-                temperature=scorer_temperature,
+                max_tokens=self._scorer_max_tokens,
+                temperature=self._scorer_temperature,
             )
-        else:
-            self.score = dspy.Predict(
-                score_signature,
-                max_tokens=scorer_max_tokens,
-                temperature=scorer_temperature,
-            )
+        return dspy.Predict(
+            score_signature,
+            max_tokens=self._scorer_max_tokens,
+            temperature=self._scorer_temperature,
+        )
+
+    def _resolve_score_predictor(self) -> Any:
+        predictor = getattr(self, "_score_predictor", None)
+        if callable(predictor):
+            return predictor
+        logger.warning(
+            "RILEScorer predictor is non-callable (%s); rebuilding default predictor",
+            type(predictor).__name__ if predictor is not None else "None",
+        )
+        predictor = self._build_score_predictor()
+        self._score_predictor = predictor
+        return predictor
 
     def forward(
         self,
@@ -210,6 +328,7 @@ class RILEScorer(dspy.Module):
         summary: str = None,
         rubric: str = None,
         original_content: str = None,  # Accepted but not used for pure scoring
+        metadata: Optional[Dict[str, Any]] = None,
         dspy_config: Optional[dict[str, Any]] = None,
     ) -> dict:
         """
@@ -225,10 +344,23 @@ class RILEScorer(dspy.Module):
             summary: Alternative name for text (from training examples)
             rubric: Alternative name for task_context (from training examples)
             original_content: Ignored, accepted for compatibility
+            metadata: Optional structured document metadata (year/country/party)
 
         Returns:
             Dictionary with score and analysis
         """
+        global _SCORER_DIAG_BUDGET
+        diag_enabled = _scorer_diag_enabled()
+
+        def _diag_log(message: str, *args: Any) -> None:
+            global _SCORER_DIAG_BUDGET
+            if not diag_enabled:
+                return
+            if _SCORER_DIAG_BUDGET <= 0:
+                return
+            _SCORER_DIAG_BUDGET -= 1
+            logger.info("RILEScorer diag: " + message, *args)
+
         # Support both calling conventions
         actual_text = text if text is not None else summary
         actual_context = task_context if task_context is not None else rubric
@@ -237,6 +369,13 @@ class RILEScorer(dspy.Module):
             raise ValueError("Either 'text' or 'summary' must be provided")
         if actual_context is None:
             raise ValueError("Either 'task_context' or 'rubric' must be provided")
+
+        metadata_block = format_prompt_metadata_block(metadata if isinstance(metadata, dict) else None)
+        if metadata_block:
+            if str(actual_context).strip():
+                actual_context = f"{actual_context}\n\n{metadata_block}"
+            else:
+                actual_context = metadata_block
 
         request_config: Optional[dict[str, Any]] = None
         if isinstance(dspy_config, dict) and dspy_config:
@@ -257,31 +396,89 @@ class RILEScorer(dspy.Module):
             return candidate or None
 
         def _score_once(task_ctx: str) -> Optional[float]:
+            predictor = self._resolve_score_predictor()
             try:
                 if request_config is None:
-                    result = self.score(task_context=task_ctx, text=actual_text)
+                    result = predictor(task_context=task_ctx, text=actual_text)
                 else:
-                    result = self.score(
+                    result = predictor(
                         task_context=task_ctx,
                         text=actual_text,
                         config=request_config,
                     )
             except Exception as exc:
+                # Defensive recovery for rare optimizer artifacts that overwrite
+                # predictor state with a scalar.
+                if "not callable" in str(exc).lower():
+                    predictor = self._build_score_predictor()
+                    self._score_predictor = predictor
+                    try:
+                        if request_config is None:
+                            result = predictor(task_context=task_ctx, text=actual_text)
+                        else:
+                            result = predictor(
+                                task_context=task_ctx,
+                                text=actual_text,
+                                config=request_config,
+                            )
+                    except Exception as retry_exc:
+                        exc = retry_exc
+                    else:
+                        accessor = NormalizedOutputAccessor(result)
+                        parsed = _coerce_rile_score(
+                            accessor.get("score", None),
+                            result,
+                            strict_parse=self._strict_parse,
+                        )
+                        _diag_log(
+                            "result parsed=%s score_field=%r result_snippet=%s",
+                            parsed,
+                            accessor.get("score", None),
+                            str(result)[:240].replace("\n", " "),
+                        )
+                        return parsed
                 lm_response = _extract_lm_response_from_exception(exc)
                 if lm_response:
-                    parsed = parse_numeric_score(
-                        lm_response,
-                        min_value=RILE_MIN,
-                        max_value=RILE_MAX,
-                        allow_llm_fallback=False,
+                    parsed = (
+                        _strict_parse_rile_score(lm_response)
+                        if self._strict_parse
+                        else parse_numeric_score(
+                            lm_response,
+                            min_value=RILE_MIN,
+                            max_value=RILE_MAX,
+                            allow_llm_fallback=False,
+                        )
                     )
                     if parsed is not None:
+                        _diag_log(
+                            "parsed score from exception payload parsed=%s snippet=%s",
+                            parsed,
+                            str(lm_response)[:240].replace("\n", " "),
+                        )
                         return parsed
                 logger.warning("RILEScorer prediction failed; defaulting to neutral. Error: %s", exc)
+                _diag_log("exception fallback to neutral candidate error=%s", exc)
                 return None
 
             accessor = NormalizedOutputAccessor(result)
-            return _coerce_rile_score(accessor.get("score", None), result)
+            parsed = _coerce_rile_score(
+                accessor.get("score", None),
+                result,
+                strict_parse=self._strict_parse,
+            )
+            _diag_log(
+                "result parsed=%s score_field=%r result_snippet=%s",
+                parsed,
+                accessor.get("score", None),
+                str(result)[:240].replace("\n", " "),
+            )
+            if parsed is None:
+                logger.debug(
+                    "RILEScorer parse miss (strict=%s) for output snippet: %s",
+                    self._strict_parse,
+                    str(result)[:240],
+                )
+            return parsed
 
         raw_score = _score_once(actual_context)
 
@@ -296,8 +493,11 @@ class RILEScorer(dspy.Module):
         if raw_score is None:
             logger.warning("RILEScorer could not parse score after retry; defaulting to neutral score 0.0")
             raw_score = 0.0
+            _diag_log("final fallback raw_score=0.0 after retry")
         normalized = (raw_score - RILE_MIN) / (RILE_MAX - RILE_MIN)
         normalized = max(0.0, min(1.0, normalized))
+
+        _diag_log("normalized score=%s from raw_score=%s", normalized, raw_score)
 
         return {'score': normalized}
 

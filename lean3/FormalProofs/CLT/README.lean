@@ -19,6 +19,10 @@ It provides the measure-theoretic foundations for asymptotic analysis.
 ```
 CLT/
 ├── Core.lean           # Basic probability definitions
+├── ProbabilityLaws.lean # Laws, transfer theorem, total probability
+├── Distributions.lean  # Binomial/Geometric/Poisson/Uniform/Exponential/Gaussian
+├── GeneratingFunctions.lean # PGF and sums of independent RVs
+├── WeakLaw.lean        # Weak law of large numbers
 ├── Normal.lean         # Normal distribution properties
 ├── HellySelection.lean # Helly's selection theorem (tightness)
 ├── LevyContinuity.lean # Lévy's continuity theorem

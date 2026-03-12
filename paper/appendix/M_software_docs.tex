@@ -1,0 +1,348 @@
+\section{Software Documentation}\label{app:software}
+
+This appendix provides installation instructions and API reference for the \textsc{ThinkingTrees} package. Full documentation is available at \url{https://github.com/thinking-trees/thinking-trees}.
+
+\subsection{Repository Layout and Entry Points}
+
+\paragraph{Package metadata.}
+The Python package name is \texttt{thinking-trees} (see \texttt{pyproject.toml}).
+Repository: \url{https://github.com/thinking-trees/thinking-trees}.
+The import path used throughout the codebase is the repository-local \texttt{src/} package.
+
+\paragraph{Primary entry points.}
+\begin{itemize}[nosep]
+    \item \texttt{main.py}: CLI for building a single OPS tree from a document.
+    \item \texttt{src/training/run\_pipeline.py}: end-to-end training pipeline invoked by \texttt{scripts/run\_training\_pipeline.sh}.
+    \item \texttt{scripts/start\_dual\_servers.sh} and \texttt{scripts/start\_vllm.sh}: vLLM server launchers driven by \texttt{config/settings.yaml}.
+\end{itemize}
+
+\paragraph{Core modules.}
+\begin{itemize}[nosep]
+    \item \texttt{src/core/}: LLM clients, batching, scoring/oracles, protocols, and request orchestration.
+    \item \texttt{src/tree/}: tree construction, auditing, verification, and labeled datasets.
+    \item \texttt{src/training/}: DSPy optimization, preference collection, judges, metrics, and training loops.
+    \item \texttt{src/tasks/} and \texttt{src/datasets/}: pluggable task and dataset registries.
+    \item \texttt{src/pipelines/}: batched multi-document pipeline for high-throughput inference.
+\end{itemize}
+
+\subsection{Installation}
+
+\paragraph{Requirements.}
+\begin{itemize}[nosep]
+    \item Python 3.10+
+    \item \texttt{dspy>=3.0.0}
+    \item \texttt{openai>=1.0.0} (for OpenAI-compatible endpoints)
+    \item Optional: \texttt{vllm>=0.12.0} for local inference
+\end{itemize}
+
+\paragraph{Basic Installation.}
+\begin{lstlisting}
+pip install thinking-trees
+\end{lstlisting}
+
+\paragraph{Development Installation.}
+\begin{lstlisting}
+git clone https://github.com/thinking-trees/thinking-trees.git
+cd ThinkingTrees
+pip install -e ".[dev]"
+\end{lstlisting}
+
+\paragraph{Optional Dependencies.}
+\begin{lstlisting}
+pip install thinking-trees[vllm]      # vLLM backend
+pip install thinking-trees[manifesto] # Manifesto dataset utilities
+pip install thinking-trees[trl]       # TRL training
+pip install thinking-trees[all]       # All optional deps
+\end{lstlisting}
+
+\subsection{Quick Start}
+
+\paragraph{Building a Tree.}
+\begin{lstlisting}
+import asyncio
+from src.core.batch_processor import AsyncBatchLLMClient
+from src.core.strategy import BatchedStrategy
+from src.tree.builder import TreeBuilder, BuildConfig
+
+async def build_tree(text: str, rubric: str) -> None:
+    async with AsyncBatchLLMClient(base_url="http://localhost:8000/v1") as client:
+        strategy = BatchedStrategy(client, max_tokens=500, unified_mode=True)
+        builder = TreeBuilder(strategy, config=BuildConfig(max_chunk_chars=2000))
+        result = await builder.build(text, rubric)
+        print(f"Root summary: {result.tree.final_summary[:200]}...")
+
+asyncio.run(build_tree(document, rubric="Preserve key information and entities."))
+\end{lstlisting}
+
+\paragraph{Auditing a Tree.}
+\begin{lstlisting}
+from src.tree.auditor import Auditor, AuditConfig, SimpleScorer
+
+scorer = SimpleScorer()
+auditor = Auditor(oracle=scorer, config=AuditConfig(sample_budget=25))
+report = auditor.audit_tree(tree)
+
+print(f"Nodes audited: {report.nodes_audited}")
+print(f"Sufficiency rate: {report.sufficiency_rate:.4f}")
+print(f"Merge rate: {report.merge_rate:.4f}")
+\end{lstlisting}
+
+\paragraph{Collecting Preferences.}
+\begin{lstlisting}
+from src.training.preference.types import PreferenceDataset
+from src.training.preference.collector import PreferenceCollector
+
+collector = PreferenceCollector(summarizer=my_dspy_summarizer, k=4)
+pairs = collector.collect_pairs_for_example(
+    example_id="doc1",
+    original_text=document,
+    rubric="Preserve key information",
+    law_type="sufficiency",
+)
+
+# Export for DPO training
+dataset = PreferenceDataset(pairs)
+dataset.save("preferences.json")
+\end{lstlisting}
+
+\subsection{API Reference}
+
+\subsubsection{Core Data Models}
+
+\paragraph{\texttt{Node}.}
+\begin{lstlisting}
+@dataclass
+class Node:
+    id: str
+    level: int
+    raw_text_span: Optional[str]
+    summary: str
+    left_child: Optional[Node]
+    right_child: Optional[Node]
+    parent: Optional[Node]
+    audit_result: AuditResult
+
+    @property
+    def is_leaf(self) -> bool: ...
+\end{lstlisting}
+
+\paragraph{\texttt{Tree}.}
+\begin{lstlisting}
+@dataclass
+class Tree:
+    root: Node
+    rubric: str = ""
+    metadata: dict = {}
+
+    def traverse_preorder(self) -> Iterator[Node]: ...
+    def save(self, path: Path) -> None: ...
+    @classmethod
+    def load(cls, path: Path) -> "Tree": ...
+\end{lstlisting}
+
+\paragraph{\texttt{DocumentSample} and \texttt{DocumentResult}.}
+\begin{lstlisting}
+@dataclass
+class DocumentSample:
+    doc_id: str
+    text: str
+    reference_score: Optional[float] = None
+    metadata: Dict[str, Any] = {}
+
+@dataclass
+class DocumentResult:
+    doc_id: str
+    final_summary: str
+    reference_score: Optional[float]
+    estimated_score: Optional[float]
+    tree_height: Optional[int]
+    tree_nodes: Optional[int]
+    error: Optional[str]
+\end{lstlisting}
+
+\subsubsection{TreeBuilder}
+
+\begin{lstlisting}
+@dataclass
+class BuildConfig:
+    max_chunk_chars: int = 2000
+    min_chunk_chars: int = 100
+    chunk_strategy: str = "sentence"
+    merge_strategy: str = "binary"
+    pipelined: bool = True
+
+class TreeBuilder:
+    def __init__(self, strategy: SummarizationStrategy, config: BuildConfig = None): ...
+    async def build(self, text: str, rubric: str = "") -> BuildResult: ...
+    async def build_from_file(self, filepath: Path, rubric: str = "") -> BuildResult: ...
+    def build_sync(self, text: str, rubric: str = "") -> BuildResult: ...
+
+@dataclass
+class BuildResult:
+    tree: Tree
+    chunks_created: int
+    nodes_created: int
+    levels_created: int
+    errors: List[str]
+    preferences: List[PreferencePair]
+\end{lstlisting}
+
+\subsubsection{Auditing and Checks}
+
+\begin{lstlisting}
+@dataclass
+class AuditConfig:
+    sample_budget: int = 10
+    discrepancy_threshold: float = 0.1
+    audit_leaves: bool = True
+    audit_internal: bool = True
+    audit_idempotence: bool = True
+    audit_substitution: bool = True
+
+class Auditor:
+    def __init__(self, oracle: ScoringOracle, config: AuditConfig = None): ...
+    def audit_tree(self, tree: Tree) -> AuditReport: ...
+\end{lstlisting}
+
+\subsubsection{Summarization Strategies}
+
+\paragraph{\texttt{BatchedStrategy}.}
+High-throughput batched inference:
+\begin{lstlisting}
+strategy = BatchedStrategy(client, max_tokens=500, unified_mode=True)
+\end{lstlisting}
+
+\paragraph{\texttt{DSPyStrategy}.}
+Optimizable with DSPy:
+\begin{lstlisting}
+strategy = DSPyStrategy(
+    leaf_module=GenericSummarizer(),
+    merge_module=GenericMerger(),
+)
+\end{lstlisting}
+
+\subsubsection{Task Plugin Interface}
+
+\begin{lstlisting}
+class AbstractTask(ABC):
+    @property
+    def name(self) -> str: ...
+    @property
+    def scale(self) -> Optional[ScaleDefinition]: ...
+    def create_rubric(self) -> str: ...
+    def create_predictor(self, retriever=None, config=None) -> dspy.Module: ...
+    def create_prompt_builders(self) -> PromptBuilders: ...
+    def create_metric(self, with_feedback: bool = True) -> Callable: ...
+
+task = ScoringTask(
+    name="my_task",
+    scale=ScaleDefinition(name="score", min_value=-100, max_value=100),
+    rubric="Preserve key information for the task...",
+)
+\end{lstlisting}
+
+\subsection{LLM Clients and Batching}
+
+\paragraph{Single-request client.}
+\texttt{src/core/llm\_client.py} provides \texttt{LLMConfig} and \texttt{LLMClient}
+for OpenAI-compatible endpoints (vLLM, SGLang, OpenAI API). It supports:
+retry limits, request timeouts, and optional LRU response caching.
+
+\paragraph{Batched client.}
+\texttt{AsyncBatchLLMClient} pools requests, sends batched HTTP calls to vLLM,
+tracks throughput statistics, and returns structured \texttt{BatchResponse} objects.
+Global scheduling across documents is implemented in \texttt{BatchTreeOrchestrator}.
+Concurrency defaults are centralized in \texttt{src/config/concurrency.py}.
+
+\subsection{Configuration Reference}
+
+Configuration is YAML-based with defaults in \texttt{config/settings.yaml}.
+Additional runtime configs include \texttt{config/inference.yaml},
+\texttt{config/training.yaml}, and \texttt{config/audit.yaml}.
+
+\paragraph{Key settings.}
+\begin{itemize}[nosep]
+    \item \texttt{servers.task\_model\_url}, \texttt{servers.genrm\_url} (override with \texttt{TASK\_MODEL\_URL}, \texttt{GENRM\_URL})
+    \item \texttt{tasks.default}, \texttt{datasets.default} (override with \texttt{TASK}, \texttt{DATASET})
+    \item \texttt{generation.*} for summarizer/oracle/judge sampling parameters
+    \item \texttt{chunking.max\_tokens} (settings) or \texttt{chunking.max\_chars} (inference) plus \texttt{context\_window.*} for input/output allocation
+    \item \texttt{audit.*} for sample budgets and thresholds
+    \item \texttt{optimization.*} for DSPy optimization control
+\end{itemize}
+
+\paragraph{Environment overrides for LLM client.}
+LLM client defaults can be overridden via \texttt{LLM\_BASE\_URL},
+\texttt{LLM\_MODEL}, and \texttt{LLM\_API\_KEY}.
+
+\subsection{Dataset and Artifact Formats}
+
+\paragraph{JSONL dataset.}
+Each line is a JSON object with required \texttt{text} (or \texttt{content})
+and optional \texttt{doc\_id}/\texttt{id}. Optional numeric score fields:
+\texttt{reference\_score} or \texttt{score} (\texttt{src/datasets/jsonl.py}).
+
+\paragraph{Manifesto dataset.}
+\texttt{src/datasets/manifesto.py} wraps the Manifesto Project loader and
+maps fields like \texttt{party\_name}, \texttt{country\_code}, and \texttt{year}
+into \texttt{DocumentSample.metadata}.
+
+\paragraph{Tree serialization.}
+\texttt{Tree.save()} writes a JSON blob with \texttt{root\_id}, \texttt{rubric},
+\texttt{metadata}, and a flat \texttt{nodes} list (see \texttt{Tree.to\_dict}).
+
+\paragraph{Preference datasets.}
+Preference pairs are stored as JSON with fields from \texttt{PreferencePair}
+(see \texttt{src/training/preference/types.py}). The training pipeline writes:
+\texttt{preferences/preferences\_ops\_tree\_*.json},
+\texttt{preferences/dpo\_ops\_tree\_*.json}, and
+\texttt{preferences/tree\_stats\_*.json}.
+
+\subsection{Scripted Workflows}
+
+\paragraph{Single-document CLI.}
+\begin{lstlisting}
+python main.py --input data/raw/example.txt --port 8000 --output outputs/tree.json
+\end{lstlisting}
+
+\paragraph{Server control.}
+\begin{lstlisting}
+./scripts/start_dual_servers.sh
+./scripts/start_dual_servers.sh --small-only
+./scripts/start_dual_servers.sh --large-only
+./scripts/start_vllm.sh nemotron-30b-fp8
+./scripts/stop_small_servers.sh --all
+\end{lstlisting}
+
+\paragraph{Training pipeline.}
+\begin{lstlisting}
+./scripts/run_training_pipeline.sh \
+  --output-dir outputs/train_$(date +%Y%m%d_%H%M) \
+  --train-samples 100 --val-samples 30 --test-samples 30 \
+  --optimizer bootstrap_random_search --optimizer-budget heavy \
+  --n-iterations 2 --enable-genrm --genrm-port 8001
+\end{lstlisting}
+
+\subsection{Troubleshooting}
+
+\paragraph{Rate limiting.}
+Use \texttt{AsyncBatchLLMClient} to control concurrency and batching:
+\begin{lstlisting}
+client = AsyncBatchLLMClient(
+    base_url="http://localhost:8000/v1",
+    max_concurrent=50,
+    batch_size=20,
+    batch_timeout=0.05,
+)
+\end{lstlisting}
+
+\paragraph{Memory issues.}
+For large documents, reduce request sizes or chunk sizes:
+\begin{lstlisting}
+config = BuildConfig(max_chunk_chars=1500)
+\end{lstlisting}
+
+\paragraph{Timeout errors.}
+Increase request timeouts for slow models:
+\begin{lstlisting}
+client = AsyncBatchLLMClient(request_timeout=600.0)
+\end{lstlisting}

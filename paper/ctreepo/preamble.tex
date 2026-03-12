@@ -1,0 +1,84 @@
+% C-TreePO Preamble
+% Adapted from parent paper preamble for NeurIPS-style submission
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usepackage{tikz-cd}
+\usepackage{microtype}
+\usepackage{natbib}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!50!black,
+    citecolor=blue!50!black,
+    urlcolor=blue!50!black
+}
+
+\graphicspath{
+    {../../outputs/}
+    {../../doc/old/figures/cld/}
+    {../figures/}
+    {figures/}
+}
+
+% Listings configuration
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{gray!5},
+    keywordstyle=\color{blue!70!black},
+    commentstyle=\color{green!50!black},
+    stringstyle=\color{red!50!black},
+    literate={→}{$\to$}1 {∈}{$\in$}1 {∀}{$\forall$}1 {∃}{$\exists$}1
+}
+
+% Theorem environments
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+\newtheorem{lemma}{Lemma}
+\newtheorem{remark}{Remark}
+\newtheorem{assumption}{Assumption}
+\newtheorem{example}{Example}
+\newtheorem{axiom}{Axiom}
+\newtheorem{convention}{Convention}
+
+% Custom commands
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Prob}{\mathbb{P}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\X}{\mathcal{X}}
+\newcommand{\Y}{\mathcal{Y}}
+\newcommand{\A}{\mathcal{A}}
+\newcommand{\Strings}{\mathcal{X}}
+\newcommand{\metric}{d_{\Y}}
+\newcommand{\fstar}{f^\ast}
+\newcommand{\sstar}{s^\ast}
+\newcommand{\concat}{\oplus}
+\newcommand{\emptystr}{\emptyset}
+\newcommand{\One}{\mathbb{I}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+% TikZ setup
+\usetikzlibrary{arrows.meta, positioning, calc, fit, backgrounds, shapes.geometric}
+
+\tikzset{
+    doc/.style={rectangle, draw, rounded corners=2pt, minimum width=1.2cm, minimum height=0.6cm, fill=blue!10},
+    sum/.style={rectangle, draw, rounded corners=2pt, minimum width=1.2cm, minimum height=0.6cm, fill=green!10},
+    op/.style={circle, draw, minimum size=0.5cm, fill=yellow!20},
+    plus/.style={circle, draw, minimum size=0.4cm, inner sep=0pt, fill=white},
+}

@@ -1,0 +1,34 @@
+\documentclass[12pt]{article}
+\usepackage[paperwidth=13.333in,paperheight=7.5in,margin=0in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\usetikzlibrary{positioning,calc,fit,backgrounds}
+\definecolor{markovadd}{HTML}{4C78A8}
+\definecolor{markovneural}{HTML}{E45756}
+\definecolor{ctreegreen}{HTML}{54A24B}
+\definecolor{guideorange}{HTML}{F58518}
+\definecolor{softgray}{HTML}{F4F6F8}
+\definecolor{midgray}{HTML}{D9DEE3}
+\newcommand{\slidebox}[4]{
+  \node[anchor=north west, rounded corners=7pt, draw=#1!70!black, fill=#1!8, line width=0.9pt, inner sep=10pt,
+        align=left] at #3 {\parbox{#2}{\raggedright #4}};
+}
+\begin{document}
+\begin{tikzpicture}[x=1in,y=1in]
+\useasboundingbox (0,0) rectangle (13.333,7.5);
+
+\node[anchor=north west, font=\bfseries\fontsize{26}{28}\selectfont] at (0.45,7.08) {Bridge Slide: C-TreePO as the Approximate Analogue};
+\node[anchor=north west, text=black!65, font=\fontsize{13}{15}\selectfont, text width=12.2in] at (0.47,6.66) {The Markov slides separate exact control, learned operator quality, and test-time help. This slide shows the same logic in the broader C-TreePO family.};
+\node[anchor=north west] at (0.52,5.95) {\includegraphics[width=5.9in]{ctree_budget_4096_plot.pdf}};
+\node[anchor=north west] at (6.55,5.95) {\includegraphics[width=5.95in]{ctree_bridge_norm_plot.pdf}};
+\slidebox{ctreegreen}{12.0in}{(0.63,1.75)}{\bfseries Bridge to C-TreePO\\[0.45em]Left panel: the existing topic-phi-docs $=4096$ operator budget curve.\\[0.25em]Right panel: the paper-safe normalized read from publication Figure B. Compare \emph{B5/B6}-style normalized progress, not raw \emph{B1/B2} units.\\[0.55em]\textcolor{black!70}{Message: with a few labels, C-TreePO can close its own gap quickly, but the comparison has to stay within-family or use normalized progress.}}
+\end{tikzpicture}
+\end{document}

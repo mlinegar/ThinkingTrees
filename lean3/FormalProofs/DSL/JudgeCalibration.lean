@@ -1,4 +1,5 @@
 import FormalProofs.DSL.ClusteredVariance
+import Mathlib.Probability.ProbabilityMassFunction.Basic
 
 /-!
 # FormalProofs/JudgeCalibration.lean
@@ -29,7 +30,7 @@ The calibration framework applies regardless of which level is treated as oracle
 
 set_option linter.mathlibStandardSet false
 
-open scoped BigOperators Real Nat Classical Pointwise
+open scoped BigOperators Real Nat Classical Pointwise NNReal
 
 set_option maxHeartbeats 400000
 set_option maxRecDepth 4000
@@ -189,15 +190,12 @@ Then:
 **Bias-Variance Decomposition:** RMSE² = bias² + variance, so:
   RMSE ≤ |bias| + std (by √(a² + b²) ≤ |a| + |b|)
 
-**Axiomatization:** Full proof requires measure-theoretic integration and
-Lipschitz assumption on the gap functional. We provide the bound structure.
+This theorem proves the structural non-negativity piece directly.
+Quantitative gap guarantees are formalized below in the PMF/Lipschitz section.
 
 This is the key result enabling judge-based training with oracle guarantees. -/
 theorem surrogate_bound (cal : CalibrationSet)
-    (gap_judge : ℝ)
-    -- DSL hypotheses
-    (h_propensities_correct : True)  -- Semantic: propensities match inclusion probs
-    (h_calibration_representative : True)  -- Semantic: calibration samples from same distribution
+    (_gap_judge : ℝ)
     :
     -- The bound holds: error bounded by RMSE ≤ |bias| + std
     -- We prove the algebraic fact: |bias| + std ≥ 0 (trivial but establishes structure)
@@ -218,6 +216,55 @@ lemma judgeRMSE_eq_sqrt_mse (cal : CalibrationSet) :
     judgeRMSE cal = Real.sqrt ((judgeBias cal)^2 + judgeVariance cal) := by
   unfold judgeRMSE judgeMSE
   rfl
+
+/-! Basic inequalities connecting RMSE, bias, and variance. -/
+
+lemma judgeRMSE_le_absbias_add_std (cal : CalibrationSet) :
+    judgeRMSE cal ≤ absJudgeBias cal + judgeStd cal := by
+  -- Use sqrt_le_iff and expand squares.
+  have hvar_nonneg : 0 ≤ judgeVariance cal := by
+    unfold judgeVariance
+    apply div_nonneg
+    · apply List.sum_nonneg
+      intro x hx
+      simp only [List.mem_map] at hx
+      obtain ⟨s, _, rfl⟩ := hx
+      apply mul_nonneg
+      · exact le_of_lt s.weight_pos
+      · exact sq_nonneg _
+    · exact le_of_lt cal.sumWeights_pos
+  have hstd_nonneg : 0 ≤ judgeStd cal := by
+    unfold judgeStd
+    exact Real.sqrt_nonneg _
+  have h_nonneg : 0 ≤ absJudgeBias cal + judgeStd cal := by
+    exact add_nonneg (abs_nonneg _) hstd_nonneg
+  have h1 : (judgeBias cal)^2 = (absJudgeBias cal)^2 := by
+    unfold absJudgeBias
+    simp [sq_abs]
+  have h2 : judgeVariance cal = (judgeStd cal)^2 := by
+    unfold judgeStd
+    simpa using (Real.sq_sqrt hvar_nonneg).symm
+  have h_sq :
+      (judgeBias cal)^2 + judgeVariance cal ≤ (absJudgeBias cal + judgeStd cal)^2 := by
+    have hb : 0 ≤ judgeStd cal := hstd_nonneg
+    calc
+      (judgeBias cal)^2 + judgeVariance cal
+          = (absJudgeBias cal)^2 + (judgeStd cal)^2 := by
+              simp [h1, h2]
+      _ ≤ (absJudgeBias cal)^2 + (judgeStd cal)^2 +
+            2 * absJudgeBias cal * judgeStd cal := by
+              have hnonneg : 0 ≤ 2 * absJudgeBias cal * judgeStd cal := by
+                have h2 : 0 ≤ (2 : ℝ) := by norm_num
+                have h3 : 0 ≤ absJudgeBias cal := abs_nonneg _
+                exact mul_nonneg (mul_nonneg h2 h3) hb
+              exact le_add_of_nonneg_right hnonneg
+      _ = (absJudgeBias cal + judgeStd cal)^2 := by
+              ring
+  -- Apply sqrt_le_iff
+  have h :=
+    (Real.sqrt_le_iff).2 ⟨h_nonneg, h_sq⟩
+  simpa [judgeRMSE, judgeMSE] using h
+
 
 /-!
 ## Section 5: Calibration Standard Error
@@ -243,6 +290,11 @@ def biasSE (cal : CalibrationSet) : ℝ :=
 def calibrationNeff (cal : CalibrationSet) : ℝ :=
   effectiveSampleSize (calToWeightedSamples cal)
 
+lemma biasSE_nonneg (cal : CalibrationSet) :
+    0 ≤ biasSE cal := by
+  unfold biasSE
+  exact Real.sqrt_nonneg _
+
 /-!
 ## Section 6: Confidence Intervals for Judge Error
 -/
@@ -264,6 +316,251 @@ def biasConfidenceInterval (cal : CalibrationSet) (z : ℝ := 1.96) : ℝ × ℝ
 This provides a conservative bound for use in surrogate_bound. -/
 def absbiasUpperBound (cal : CalibrationSet) (z : ℝ := 1.96) : ℝ :=
   absJudgeBias cal + z * biasSE cal
+
+/-- Conservative two-sided calibration error bound for judge-vs-oracle gaps. -/
+def judgeCalibrationErrorBound (cal : CalibrationSet) (z : ℝ := 1.96) : ℝ :=
+  2 * (absbiasUpperBound cal z + judgeStd cal)
+
+/-!
+## Calibration Axioms (Core DSL Assumption)
+-/
+
+/-- Calibration representativeness: population RMSE is bounded by calibration estimates. -/
+def CalibrationRMSEBound {Ω : Type*} [Fintype Ω]
+    (p : PMF Ω) (oracle judge : Ω → ℝ) (cal : CalibrationSet) (z : ℝ) : Prop :=
+  Real.sqrt (∑' ω, (p ω).toReal * (oracle ω - judge ω)^2) ≤
+    absbiasUpperBound cal z + judgeStd cal
+
+/-- Backward-compatible name for calibration RMSE representativeness. -/
+abbrev CalibrationAxioms {Ω : Type*} [Fintype Ω]
+    (p : PMF Ω) (oracle judge : Ω → ℝ) (cal : CalibrationSet) (z : ℝ) : Prop :=
+  CalibrationRMSEBound p oracle judge cal z
+
+lemma absbiasUpperBound_ge_absbias (cal : CalibrationSet) (z : ℝ)
+    (h_z : 0 ≤ z) : absJudgeBias cal ≤ absbiasUpperBound cal z := by
+  unfold absbiasUpperBound
+  have hbiasSE : 0 ≤ biasSE cal := by
+    unfold biasSE
+    exact Real.sqrt_nonneg _
+  nlinarith [h_z, hbiasSE]
+
+/-! Surrogate gap bound from an RMSE-style assumption. -/
+
+theorem surrogate_bound_from_rmse
+    (cal : CalibrationSet) (gap_oracle gap_judge : ℝ) (z : ℝ := 1.96)
+    (h_rmse : |gap_oracle - gap_judge| ≤ 2 * judgeRMSE cal)
+    (h_z : 0 ≤ z) :
+    |gap_oracle - gap_judge| ≤ 2 * (absbiasUpperBound cal z + judgeStd cal) := by
+  have h_rmse' :
+      judgeRMSE cal ≤ absbiasUpperBound cal z + judgeStd cal := by
+    have h1 := judgeRMSE_le_absbias_add_std cal
+    have h2 := absbiasUpperBound_ge_absbias cal z h_z
+    nlinarith [h1, h2]
+  calc
+    |gap_oracle - gap_judge| ≤ 2 * judgeRMSE cal := h_rmse
+    _ ≤ 2 * (absbiasUpperBound cal z + judgeStd cal) := by
+          nlinarith [h_rmse']
+
+/-!
+## Section 6.5: Lipschitz Gap Models (PMF Form)
+
+We model a gap as an expectation of a 1-Lipschitz functional of oracle/judge
+scores under a finite PMF. This lets us derive the RMSE-style bound directly
+from Cauchy-Schwarz, instead of assuming it.
+-/
+
+/-- A Lipschitz condition for a scalar gap functional. -/
+def GapLipschitz (G : ℝ → ℝ) (L : ℝ≥0) : Prop :=
+  ∀ (a b : ℝ), |G a - G b| ≤ (L : ℝ) * |a - b|
+
+/-- Oracle gap under a PMF. -/
+def gapOracle {Ω : Type*} (p : PMF Ω) (G : ℝ → ℝ) (oracle : Ω → ℝ) : ℝ :=
+  ∑' ω, (p ω).toReal * G (oracle ω)
+
+/-- Judge gap under a PMF. -/
+def gapJudge {Ω : Type*} (p : PMF Ω) (G : ℝ → ℝ) (judge : Ω → ℝ) : ℝ :=
+  ∑' ω, (p ω).toReal * G (judge ω)
+
+section PMFGap
+
+variable {Ω : Type*} [Fintype Ω]
+
+lemma gap_diff_le_expected_abs
+    (p : PMF Ω) (oracle judge : Ω → ℝ) (G : ℝ → ℝ) (L : ℝ≥0)
+    (hL : GapLipschitz G L) :
+    |gapOracle p G oracle - gapJudge p G judge| ≤
+      (L : ℝ) * ∑' ω, (p ω).toReal * |oracle ω - judge ω| := by
+  classical
+  -- Reduce to finite sums.
+  simp [gapOracle, gapJudge, tsum_fintype]
+  -- Rewrite the difference as a single sum.
+  have hdiff :
+      (∑ ω, (p ω).toReal * G (oracle ω)) -
+        ∑ ω, (p ω).toReal * G (judge ω) =
+      ∑ ω, (p ω).toReal * (G (oracle ω) - G (judge ω)) := by
+    simp [Finset.sum_sub_distrib, mul_sub]
+  -- Bound by Lipschitz.
+  calc
+    |∑ ω, (p ω).toReal * G (oracle ω) -
+        ∑ ω, (p ω).toReal * G (judge ω)| =
+        |∑ ω, (p ω).toReal * (G (oracle ω) - G (judge ω))| := by
+          simp [hdiff]
+    _ ≤ ∑ ω, |(p ω).toReal * (G (oracle ω) - G (judge ω))| := by
+          simpa using (Finset.abs_sum_le_sum_abs (s := Finset.univ)
+            (f := fun ω =>
+              (p ω).toReal * (G (oracle ω) - G (judge ω))))
+    _ ≤ ∑ ω, (p ω).toReal * ((L : ℝ) * |oracle ω - judge ω|) := by
+          refine Finset.sum_le_sum ?_
+          intro ω hω
+          have h_nonneg : 0 ≤ (p ω).toReal := ENNReal.toReal_nonneg
+          have h_lip : |G (oracle ω) - G (judge ω)| ≤ (L : ℝ) * |oracle ω - judge ω| :=
+            hL (oracle ω) (judge ω)
+          calc
+            |(p ω).toReal * (G (oracle ω) - G (judge ω))| =
+                (p ω).toReal * |G (oracle ω) - G (judge ω)| := by
+                simp [abs_mul, h_nonneg]
+            _ ≤ (p ω).toReal * ((L : ℝ) * |oracle ω - judge ω|) := by
+                exact mul_le_mul_of_nonneg_left h_lip h_nonneg
+    _ = (L : ℝ) * ∑ ω, (p ω).toReal * |oracle ω - judge ω| := by
+          -- factor out L
+          calc
+            ∑ ω, (p ω).toReal * ((L : ℝ) * |oracle ω - judge ω|)
+                = ∑ ω, (L : ℝ) * ((p ω).toReal * |oracle ω - judge ω|) := by
+                    refine Finset.sum_congr rfl ?_
+                    intro ω hω
+                    ring
+            _ = (L : ℝ) * ∑ ω, (p ω).toReal * |oracle ω - judge ω| := by
+                    simpa using
+                      (Finset.mul_sum (s := Finset.univ)
+                        (f := fun ω => (p ω).toReal * |oracle ω - judge ω|)
+                        (a := (L : ℝ))).symm
+
+lemma expected_abs_le_sqrt_expected_sq
+    (p : PMF Ω) (e : Ω → ℝ) :
+    ∑' ω, (p ω).toReal * |e ω| ≤
+      Real.sqrt (∑' ω, (p ω).toReal * (e ω)^2) := by
+  classical
+  -- Move to finite sums.
+  simp [tsum_fintype]
+  have hsum_p : ∑ ω, (p ω).toReal = 1 := by
+    simpa [tsum_fintype] using (PMF.toReal_tsum_coe p)
+  -- Cauchy-Schwarz with f = √p, g = √p * |e|.
+  have hcs :=
+    Real.sum_mul_le_sqrt_mul_sqrt (s := Finset.univ)
+      (f := fun ω => Real.sqrt (p ω).toReal)
+      (g := fun ω => Real.sqrt (p ω).toReal * |e ω|)
+  have hleft :
+      ∑ ω, Real.sqrt (p ω).toReal * (Real.sqrt (p ω).toReal * |e ω|) =
+        ∑ ω, (p ω).toReal * |e ω| := by
+    refine Finset.sum_congr rfl ?_
+    intro ω hω
+    have hp : 0 ≤ (p ω).toReal := ENNReal.toReal_nonneg
+    calc
+      Real.sqrt (p ω).toReal * (Real.sqrt (p ω).toReal * |e ω|)
+          = (Real.sqrt (p ω).toReal * Real.sqrt (p ω).toReal) * |e ω| := by
+              ring
+      _ = (p ω).toReal * |e ω| := by
+              simp [Real.mul_self_sqrt hp]
+  have hright1 :
+      ∑ ω, (Real.sqrt (p ω).toReal) ^ 2 = ∑ ω, (p ω).toReal := by
+    refine Finset.sum_congr rfl ?_
+    intro ω hω
+    have hp : 0 ≤ (p ω).toReal := ENNReal.toReal_nonneg
+    simp [pow_two, Real.sq_sqrt hp]
+  have hright2 :
+      ∑ ω, (Real.sqrt (p ω).toReal * |e ω|) ^ 2 =
+        ∑ ω, (p ω).toReal * (e ω)^2 := by
+    refine Finset.sum_congr rfl ?_
+    intro ω hω
+    have hp : 0 ≤ (p ω).toReal := ENNReal.toReal_nonneg
+    calc
+      (Real.sqrt (p ω).toReal * |e ω|) ^ 2
+          = (Real.sqrt (p ω).toReal) ^ 2 * (|e ω|) ^ 2 := by
+              simp [mul_pow]
+      _ = (p ω).toReal * (e ω)^2 := by
+              simp [Real.sq_sqrt hp, sq_abs]
+  have hcs' :
+      ∑ ω, (p ω).toReal * |e ω| ≤
+        Real.sqrt (∑ ω, (p ω).toReal) *
+          Real.sqrt (∑ ω, (p ω).toReal * (e ω)^2) := by
+    simpa [hleft, hright1, hright2] using hcs
+  calc
+    ∑ ω, (p ω).toReal * |e ω| ≤
+        Real.sqrt (∑ ω, (p ω).toReal) *
+          Real.sqrt (∑ ω, (p ω).toReal * (e ω)^2) := hcs'
+    _ = Real.sqrt (∑ ω, (p ω).toReal * (e ω)^2) := by
+          simp [hsum_p]
+
+lemma gap_diff_le_rmse
+    (p : PMF Ω) (oracle judge : Ω → ℝ) (G : ℝ → ℝ) (L : ℝ≥0)
+    (hL : GapLipschitz G L) :
+    |gapOracle p G oracle - gapJudge p G judge| ≤
+      (L : ℝ) * Real.sqrt (∑' ω, (p ω).toReal * (oracle ω - judge ω)^2) := by
+  have h1 :=
+    gap_diff_le_expected_abs (p := p) (oracle := oracle) (judge := judge)
+      (G := G) (L := L) hL
+  have h2 :=
+    expected_abs_le_sqrt_expected_sq (p := p) (e := fun ω => oracle ω - judge ω)
+  have hL_nonneg : 0 ≤ (L : ℝ) := by exact_mod_cast L.property
+  have h2' :
+      (L : ℝ) * ∑' ω, (p ω).toReal * |oracle ω - judge ω| ≤
+        (L : ℝ) * Real.sqrt (∑' ω, (p ω).toReal * (oracle ω - judge ω)^2) :=
+    mul_le_mul_of_nonneg_left h2 hL_nonneg
+  exact le_trans h1 h2'
+
+theorem surrogate_bound_pmf_calibration
+    (p : PMF Ω) (oracle judge : Ω → ℝ) (G : ℝ → ℝ) (L : ℝ≥0)
+    (cal : CalibrationSet) (z : ℝ := 1.96)
+    (hL : GapLipschitz G L)
+    (h_rmse_upper :
+      Real.sqrt (∑' ω, (p ω).toReal * (oracle ω - judge ω)^2) ≤
+        absbiasUpperBound cal z + judgeStd cal) :
+    |gapOracle p G oracle - gapJudge p G judge| ≤
+      (L : ℝ) * (absbiasUpperBound cal z + judgeStd cal) := by
+  have h1 :=
+    gap_diff_le_rmse (p := p) (oracle := oracle) (judge := judge) (G := G) (L := L) hL
+  have hL_nonneg : 0 ≤ (L : ℝ) := by exact_mod_cast L.property
+  have h2 :
+      (L : ℝ) * Real.sqrt (∑' ω, (p ω).toReal * (oracle ω - judge ω)^2) ≤
+        (L : ℝ) * (absbiasUpperBound cal z + judgeStd cal) :=
+    mul_le_mul_of_nonneg_left h_rmse_upper hL_nonneg
+  exact le_trans h1 h2
+
+theorem surrogate_bound_pmf_calibration_axioms
+    (p : PMF Ω) (oracle judge : Ω → ℝ) (G : ℝ → ℝ) (L : ℝ≥0)
+    (cal : CalibrationSet) (z : ℝ := 1.96)
+    (hL : GapLipschitz G L)
+    (cal_axioms : CalibrationRMSEBound p oracle judge cal z) :
+    |gapOracle p G oracle - gapJudge p G judge| ≤
+      (L : ℝ) * (absbiasUpperBound cal z + judgeStd cal) := by
+  exact surrogate_bound_pmf_calibration (p := p) (oracle := oracle) (judge := judge)
+    (G := G) (L := L) (cal := cal) (z := z) hL cal_axioms
+
+theorem surrogate_bound_pmf_calibration2
+    (p : PMF Ω) (oracle judge : Ω → ℝ) (G : ℝ → ℝ)
+    (cal : CalibrationSet) (z : ℝ := 1.96)
+    (hL : GapLipschitz G (2 : ℝ≥0))
+    (h_rmse_upper :
+      Real.sqrt (∑' ω, (p ω).toReal * (oracle ω - judge ω)^2) ≤
+        absbiasUpperBound cal z + judgeStd cal) :
+    |gapOracle p G oracle - gapJudge p G judge| ≤
+      judgeCalibrationErrorBound cal z := by
+  have h :=
+    surrogate_bound_pmf_calibration (p := p) (oracle := oracle) (judge := judge) (G := G)
+      (L := (2 : ℝ≥0)) (cal := cal) (z := z) hL h_rmse_upper
+  simpa [judgeCalibrationErrorBound] using h
+
+theorem surrogate_bound_pmf_calibration2_axioms
+    (p : PMF Ω) (oracle judge : Ω → ℝ) (G : ℝ → ℝ)
+    (cal : CalibrationSet) (z : ℝ := 1.96)
+    (hL : GapLipschitz G (2 : ℝ≥0))
+    (cal_axioms : CalibrationRMSEBound p oracle judge cal z) :
+    |gapOracle p G oracle - gapJudge p G judge| ≤
+      judgeCalibrationErrorBound cal z := by
+  exact surrogate_bound_pmf_calibration2 (p := p) (oracle := oracle) (judge := judge)
+    (G := G) (cal := cal) (z := z) hL cal_axioms
+
+end PMFGap
 
 /-!
 ## Section 7: Calibration Drift Detection
@@ -320,6 +617,135 @@ def clusteredBiasSE (cal : CalibrationSet)
   let weighted_clusters := clusters.map (fun cc => calClusterToCluster cc bias)
   clusteredSE weighted_clusters bias
 
+/-- Clustered confidence interval for judge bias. -/
+def clusteredBiasConfidenceInterval (cal : CalibrationSet)
+    (get_doc_id : LabeledSample → String) (z : ℝ := 1.96) : ℝ × ℝ :=
+  let bias := judgeBias cal
+  let se := clusteredBiasSE cal get_doc_id
+  (bias - z * se, bias + z * se)
+
+/-- Cluster-aware upper bound on absolute bias. -/
+def clusteredAbsbiasUpperBound (cal : CalibrationSet)
+    (get_doc_id : LabeledSample → String) (z : ℝ := 1.96) : ℝ :=
+  absJudgeBias cal + z * clusteredBiasSE cal get_doc_id
+
+lemma clusteredBiasSE_nonneg (cal : CalibrationSet)
+    (get_doc_id : LabeledSample → String) :
+    0 ≤ clusteredBiasSE cal get_doc_id := by
+  unfold clusteredBiasSE
+  exact clusteredSE_nonneg _ _
+
+theorem abs_trueBias_le_absbiasUpperBound_of_abs_sub_le
+    (cal : CalibrationSet) (true_bias z : ℝ)
+    (h_err : |true_bias - judgeBias cal| ≤ z * biasSE cal) :
+    |true_bias| ≤ absbiasUpperBound cal z := by
+  have htri : |true_bias| ≤ |true_bias - judgeBias cal| + |judgeBias cal| := by
+    have hdecomp : true_bias = (true_bias - judgeBias cal) + judgeBias cal := by ring
+    rw [hdecomp]
+    simpa using (abs_add_le (true_bias - judgeBias cal) (judgeBias cal))
+  calc
+    |true_bias| ≤ |true_bias - judgeBias cal| + |judgeBias cal| := htri
+    _ ≤ z * biasSE cal + |judgeBias cal| := by
+          exact add_le_add h_err (le_refl _)
+    _ = absbiasUpperBound cal z := by
+          simp [absbiasUpperBound, absJudgeBias, add_comm, add_left_comm, add_assoc]
+
+theorem abs_trueBias_le_absbiasUpperBound_of_mem_biasConfidenceInterval
+    (cal : CalibrationSet) (true_bias z : ℝ)
+    (h_z : 0 ≤ z)
+    (h_mem : true_bias ∈ Set.Icc
+      (biasConfidenceInterval cal z).1
+      (biasConfidenceInterval cal z).2) :
+    |true_bias| ≤ absbiasUpperBound cal z := by
+  have h_radius : 0 ≤ z * biasSE cal := mul_nonneg h_z (biasSE_nonneg cal)
+  have h_err :
+      |true_bias - judgeBias cal| ≤ z * biasSE cal := by
+    simpa [biasConfidenceInterval] using
+      (mem_confidenceInterval_iff_abs_sub_le
+        (theta := true_bias) (mu_hat := judgeBias cal) (se := biasSE cal) (z := z)
+        h_radius).mp h_mem
+  exact abs_trueBias_le_absbiasUpperBound_of_abs_sub_le cal true_bias z h_err
+
+theorem judgeBiasConfidenceInterval_coverage_of_error_event
+    {Ω : Type*} [MeasurableSpace Ω]
+    (μ : MeasureTheory.Measure Ω)
+    (cal_seq : Ω → CalibrationSet)
+    (true_bias z : ℝ)
+    (q : ENNReal)
+    (h_event : q ≤ μ {ω |
+      |true_bias - judgeBias (cal_seq ω)| ≤ z * biasSE (cal_seq ω)}) :
+    q ≤ μ {ω | true_bias ∈ Set.Icc
+      (biasConfidenceInterval (cal_seq ω) z).1
+      (biasConfidenceInterval (cal_seq ω) z).2} := by
+  simpa [biasConfidenceInterval, confidenceInterval] using
+    (confidenceInterval_coverage_of_error_event
+      (μ := μ)
+      (theta := true_bias)
+      (z := z)
+      (mu_hat := fun ω => judgeBias (cal_seq ω))
+      (se := fun ω => biasSE (cal_seq ω))
+      (q := q)
+      h_event)
+
+theorem abs_trueBias_le_clusteredAbsbiasUpperBound_of_abs_sub_le
+    (cal : CalibrationSet) (get_doc_id : LabeledSample → String)
+    (true_bias z : ℝ)
+    (h_err : |true_bias - judgeBias cal| ≤ z * clusteredBiasSE cal get_doc_id) :
+    |true_bias| ≤ clusteredAbsbiasUpperBound cal get_doc_id z := by
+  have htri : |true_bias| ≤ |true_bias - judgeBias cal| + |judgeBias cal| := by
+    have hdecomp : true_bias = (true_bias - judgeBias cal) + judgeBias cal := by ring
+    rw [hdecomp]
+    simpa using (abs_add_le (true_bias - judgeBias cal) (judgeBias cal))
+  calc
+    |true_bias| ≤ |true_bias - judgeBias cal| + |judgeBias cal| := htri
+    _ ≤ z * clusteredBiasSE cal get_doc_id + |judgeBias cal| := by
+          exact add_le_add h_err (le_refl _)
+    _ = clusteredAbsbiasUpperBound cal get_doc_id z := by
+          simp [clusteredAbsbiasUpperBound, absJudgeBias, add_comm, add_left_comm, add_assoc]
+
+theorem abs_trueBias_le_clusteredAbsbiasUpperBound_of_mem_clusteredBiasConfidenceInterval
+    (cal : CalibrationSet) (get_doc_id : LabeledSample → String)
+    (true_bias z : ℝ)
+    (h_z : 0 ≤ z)
+    (h_mem : true_bias ∈ Set.Icc
+      (clusteredBiasConfidenceInterval cal get_doc_id z).1
+      (clusteredBiasConfidenceInterval cal get_doc_id z).2) :
+    |true_bias| ≤ clusteredAbsbiasUpperBound cal get_doc_id z := by
+  have h_radius : 0 ≤ z * clusteredBiasSE cal get_doc_id :=
+    mul_nonneg h_z (clusteredBiasSE_nonneg cal get_doc_id)
+  have h_err :
+      |true_bias - judgeBias cal| ≤ z * clusteredBiasSE cal get_doc_id := by
+    simpa [clusteredBiasConfidenceInterval] using
+      (mem_confidenceInterval_iff_abs_sub_le
+        (theta := true_bias) (mu_hat := judgeBias cal)
+        (se := clusteredBiasSE cal get_doc_id) (z := z)
+        h_radius).mp h_mem
+  exact abs_trueBias_le_clusteredAbsbiasUpperBound_of_abs_sub_le
+    cal get_doc_id true_bias z h_err
+
+theorem judgeClusteredBiasConfidenceInterval_coverage_of_error_event
+    {Ω : Type*} [MeasurableSpace Ω]
+    (μ : MeasureTheory.Measure Ω)
+    (cal_seq : Ω → CalibrationSet)
+    (get_doc_id : CalibrationSet → LabeledSample → String)
+    (true_bias z : ℝ)
+    (q : ENNReal)
+    (h_event : q ≤ μ {ω |
+      |true_bias - judgeBias (cal_seq ω)| ≤
+        z * clusteredBiasSE (cal_seq ω) (get_doc_id (cal_seq ω))}) :
+    q ≤ μ {ω | true_bias ∈ Set.Icc
+      (clusteredBiasConfidenceInterval (cal_seq ω) (get_doc_id (cal_seq ω)) z).1
+      (clusteredBiasConfidenceInterval (cal_seq ω) (get_doc_id (cal_seq ω)) z).2} := by
+  simpa [clusteredBiasConfidenceInterval, confidenceInterval] using
+    (confidenceInterval_coverage_of_error_event
+      (μ := μ)
+      (theta := true_bias)
+      (z := z)
+      (mu_hat := fun ω => judgeBias (cal_seq ω))
+      (se := fun ω => clusteredBiasSE (cal_seq ω) (get_doc_id (cal_seq ω)))
+      (q := q)
+      h_event)
+
 /-!
 ## Section 9: Validity Theorems
 -/
@@ -346,16 +772,12 @@ Under correct propensities (w_i = 1/π_i where π_i = inclusion probability):
 
 **Requirement:** Propensities must be positive and correctly specified.
 
-**Axiomatization:** Full proof requires measure theory. We prove a structural
-property: the bias estimate is well-defined (finite). -/
+This theorem currently formalizes the structural well-definedness check.
+A full asymptotic consistency proof is left to a dedicated probability module. -/
 theorem bias_consistent (cal : CalibrationSet)
-    -- DSL Requirement: Propensities match true inclusion probabilities
-    (h_propensities_correct : True)  -- Semantic hypothesis
-    -- Regularity: bounded errors
-    (h_errors_bounded : ∃ M : ℝ, ∀ s ∈ cal.samples, |s.error| ≤ M)
     :
     -- The bias estimate is finite (well-defined)
-    -- This is provable; consistency is axiomatized
+    -- (structural sanity check)
     ∃ b : ℝ, judgeBias cal = b := by
   exact ⟨judgeBias cal, rfl⟩
 
@@ -375,14 +797,12 @@ The weighted variance estimator is:
 **Note:** This is a plug-in estimator that uses b̂ instead of true bias.
 The bias in variance estimation is O(1/n), negligible for large samples.
 
-**Axiomatization:** Full proof requires measure theory. We prove the
-structural property that variance is non-negative. -/
+This theorem captures the structural non-negativity property directly.
+Asymptotic consistency is left for future extension. -/
 theorem variance_consistent (cal : CalibrationSet)
-    -- DSL Requirement
-    (h_propensities_correct : True)  -- Semantic hypothesis
     :
     -- Variance estimate is non-negative (provable)
-    -- Consistency is axiomatized
+    -- (structural sanity check)
     0 ≤ judgeVariance cal := by
   -- Prove inline: variance is sum of non-negative weighted squared deviations / positive weight
   unfold judgeVariance
@@ -422,19 +842,15 @@ Then with probability ≥ 1 - α:
 If you measure gap_j = 0.1 and compute the error bound = 0.05, then:
   gap_o ∈ [0.05, 0.15] with 95% confidence
 
-**Axiomatization:** Full proof requires:
-- Measure theory for probabilistic statement
-- Asymptotic normality of bias estimator
-We prove the structural property that the bound is non-negative. -/
+This theorem proves the deterministic non-negativity of the calibration error radius.
+High-probability calibration guarantees are handled by explicit RMSE assumptions
+in the PMF theorems above. -/
 theorem surrogate_guarantee (cal : CalibrationSet)
-    (gap_judge : ℝ) (z : ℝ := 1.96)
-    -- DSL requirements
-    (h_enough_samples : hasAdequateCalibration cal)
-    (h_propensities_correct : True)  -- Semantic: correct propensities
+    (_gap_judge : ℝ) (z : ℝ := 1.96)
     (h_z_pos : 0 ≤ z)  -- z-score must be non-negative
     :
     -- The error bound is non-negative (provable)
-    -- The probabilistic guarantee is axiomatized
+    -- (structural sanity check)
     0 ≤ 2 * absbiasUpperBound cal z + 2 * judgeStd cal := by
   apply add_nonneg
   · apply mul_nonneg (by norm_num : (0 : ℝ) ≤ 2)

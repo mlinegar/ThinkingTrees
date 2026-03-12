@@ -1,0 +1,113 @@
+
+\section{Notation Recap and Local Foundations}
+\label{app:notation}
+
+This appendix collects the primitives needed before the first theorem in Section~\ref{sec:theorems}. It spells out every object once, keeping the notation flexible enough that we can later drop explicit ``$g$" symbols and simply write $g$ for the hierarchical evaluation.
+
+\subsection{Strings, oracle, and metric}
+We work on the free monoid $(\Strings,\concat,\emptystr)$: $\Strings$ is the set of all finite token sequences, $\concat$ is the usual concatenation of strings, and $\emptystr$ is the empty sequence acting as the identity. Documents are random variables $X\in\Strings$ drawn from a population law $\rho$. When we fix a specific document, we denote its base, unsummarized form by $x_0$ so that the realized leaf blocks are literally contiguous substrings of $x_0$. A fixed oracle $\fstar:\Strings\to Y$ maps strings to their task value (labels, tuples, rewards, etc.). A measurable (pseudo)metric $\metric:Y\times Y\to[0,\infty)$ scores task disagreement, and we use it directly as $\metric(\fstar(z),\fstar(x))$.
+
+\subsection{Summarizers and expectations}
+A summarizer is a (possibly stochastic) Markov kernel $g:\Strings\rightsquigarrow\Strings$ that turns any input string into a string-valued random output. Whenever randomness is present we average over the seeds or call counts used by $g$; when $g$ is deterministic the equalities below hold pointwise. To avoid notational clutter we simply write $\E[\cdot]$ for all expectations and suppress the implicit conditioning on the realized substrings.
+
+\subsection{Partitions, trees, and hierarchical evaluation}
+Fix a document $x=b_1\concat\cdots\concat b_k$; equivalently $x_0=x$ and $b_1,\ldots,b_k$ are contiguous substrings drawn from $x_0$. A \/emph{realized partition and tree} consists of those blocks together with a full binary tree $T$ whose leaves, read left to right, are $(b_1,\ldots,b_k)$. Leaves therefore contain no summaries—only raw text—and internal nodes contain summaries with two ordered children denoted $u_L,u_R$. Each node $u\in T$ carries two associated strings. The latent raw span is
+\[
+S(u)=
+\begin{cases}
+b_i,& u\text{ is the $i$th leaf},\\
+S(u_L)\concat S(u_R),& u\text{ internal with children }u_L,u_R,
+\end{cases}
+\]
+and the stored summary that flows upward is
+\[
+g(u):=
+\begin{cases}
+g\big(S(u)\big),& u\text{ leaf},\\
+g\big(g(u_L)\concat g(u_R)\big),& u\text{ internal}.
+\end{cases}
+\]
+
+\paragraph{Summary of symbols and expectations.}
+The following table collects the core notation used throughout the appendix and main text.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+Symbol & Meaning \\
+\midrule
+$x_0$ & Base (unsummarized) document; each leaf block $b_i$ is a contiguous substring \\
+$b$ & A realized leaf block input to $g$ \\
+$u$ & Internal node with children $u_L,u_R$; raw text $S(u)=S(u_L)\concat S(u_R)$ \\
+$r$ & Root of tree $T$ \\
+$g(T')$ & Summary at root of subtree $T'$; equivalently $g(T')=g(r')$ for root $r'$ of $T'$ \\
+$Z^{(R)}(x)$ & $R$th-round summary: $Z^{(1)}(x)=g(r)$, $Z^{(R+1)}(x)=g(Z^{(R)}(x))$ \\
+$\E$ & Expectation over randomness in $g$ (pointwise if $g$ deterministic) \\
+\bottomrule
+\end{tabular}
+\caption{Core notation for hierarchical summarization.}
+\label{tab:notation}
+\end{table}
+
+\subsection{Consistency conditions}
+The guarantees in the main text follow from three statements checked \emph{only} on the leaves and internal nodes that the realized tree touches. All three definitions coincide with their counterparts in Section~\ref{sec:framework}; we restate them here to make the appendix self-contained.
+
+\begin{definition}[Sufficiency condition (C1)]
+For each realized leaf $b$, the single-block summary preserves the oracle in expectation:
+\[
+\E\big[\metric\big(\fstar(g(b)),\fstar(b)\big)\big]=0.
+\]
+This is Eq.~\eqref{eq:leaf_sufficiency} in the main text.
+\end{definition}
+
+\begin{definition}[Merge-consistency condition (C3)]
+For every pair of strings $u,v\in\Strings$,
+\[
+\E\Big[\metric\Big(\fstar(u\concat v),\,\fstar\big(g(g(u)\concat g(v))\big)\Big)\Big]=0.
+\]
+The triangle inequality together with Condition~(C1) immediately implies $\E[\metric(\fstar(g(u)\concat g(v)),\,\fstar(g(g(u)\concat g(v))))]=0$, which is the specific check enforced at realized internal nodes in the hierarchy (Eq.~\eqref{eq:leaf_compatibility}).
+\end{definition}
+
+\begin{definition}[Idempotence condition (C2)]
+For any random variable $Z$ supported on the range of $g$,
+\[
+\E\big[\metric\big(\fstar(g(Z)),\fstar(Z)\big)\,\big|\,Z\big]=0,
+\]
+ensuring that re-summarizing a summary leaves the oracle unchanged (Eq.~\eqref{eq:leaf_idempotence}).
+\end{definition}
+
+The edge-wise two-route comparison
+\[
+\metric\Big(\fstar(v\concat w),\fstar\big(g(v\concat w)\big)\Big)=0
+\]
+for realized child summaries $(v,w)$ is an optional audit probe (Remark~\ref{rem:edgewise_compatibility}).
+
+\begin{remark}[Task-level congruence]
+Whenever the distortion is zero, we may declare $x\sim x'$ if $\metric(\fstar(x),\fstar(x'))=0$. This equivalence relation is a congruence on the free monoid (Appendix~\ref{sec:global}) and motivates the view that $g$ should output canonical representatives of task-equivalent strings.
+\end{remark}
+
+\paragraph{Notation snapshot.}
+\subsection{Nodewise preservation and the first theorem}
+
+\begin{lemma}[Nodewise preservation under the consistency conditions]\label{lem:nodewise}
+If Conditions~\eqref{eq:leaf_sufficiency} and \eqref{eq:leaf_compatibility} hold on all realized leaves and internal nodes of $T$, then for every node $u$,
+\[
+\E\Big[\metric\big(\fstar(g(u)),\fstar(S(u))\big)\Big]=0.
+\]
+\end{lemma}
+
+\begin{proof}
+If $u$ is a leaf, $g(u)=g(S(u))$ and Condition~(C1) yields the claim. If $u$ is internal with children $u_L,u_R$, the induction hypothesis gives $g(u_L)\sim S(u_L)$ and $g(u_R)\sim S(u_R)$. Condition~(C3) applied to the raw inputs $S(u_L),S(u_R)$ implies
+\[
+S(u_L)\concat S(u_R)\ \sim\ g\big(g(S(u_L))\concat g(S(u_R))\big).
+\]
+Because $g(S(u_L))=g(u_L)$ and $g(S(u_R))=g(u_R)$ by definition, the right-hand side equals $g(g(u_L)\concat g(u_R))=g(u)$. Thus $g(u)\sim S(u_L)\concat S(u_R)=S(u)$, completing the induction.
+\end{proof}
+
+\begin{proof}[Proof of Theorem~\ref{thm:one-pass}]
+\phantomsection\label{proof:thm-one-pass}
+Apply Lemma~\ref{lem:nodewise} to the root $r$ of $T$. The conditional expectation $\E_r$ coincides with $\E$ because every coin flip used anywhere in the reduction of $T$ sits below $r$. Moreover $S(r)=x$, establishing the claim.
+\end{proof}
+
+This lemma–theorem pair captures everything needed before invoking more elaborate schedules (Corollary~\ref{cor:schedule}) or additional rounds. From this point forward we simply write $g(u)$ for the summary stored at node $u$.

@@ -1,0 +1,36 @@
+\section{Connections to Related Work}\label{sec:related}
+
+Our focus on local merge compatibility draws on, and extends, several established theoretical traditions. We view our framework as a semantic generalization of randomized sketching, justified by decision-theoretic sufficiency, and extended to modern preference learning.
+
+\paragraph{Mergeable Summaries and Sketches.}
+The closest formal analogue to our work is the theory of \emph{mergeable summaries} for data streams \citep{Agarwal2013MergeableTODS}. In that setting, a summary (or sketch) $S$ supports a binary merge operator $\oplus$ such that $S(A \cup B) \approx S(A) \oplus S(B)$, with error guarantees that hold under arbitrary merge trees.
+Our framework can be understood as generalizing this logic to the semantic, non-commutative domain of natural language.
+Specifically, when the task oracle $\fstar$ is symmetric (e.g., word counts or bag-of-words statistics) and the metric is Euclidean, our \emph{Merge Consistency} condition (C3) is mathematically isomorphic to the definition of a mergeable summary. In this specific case, checking Condition~\eqref{eq:leaf_compatibility} is equivalent to verifying that the LLM acts as a valid adder for a Count-Min sketch \citep{CormodeMuthukrishnan2005}.
+However, text data is rarely commutative---the order of paragraphs changes the meaning of a narrative. Our contribution is to impose the rigorous discipline of mergeable summaries on these non-commutative operations, replacing the explicit algebra of sketches with ``learned'' local consistency checks that force a stochastic summarizer to behave \emph{as if} it were a mergeable data structure.
+Appendix~\ref{app:mergeable} formalizes this bridge, mapping our notation $(\Strings,\concat,\fstar,g)$ onto the streaming literature and proving that Condition~\eqref{eq:leaf_compatibility} coincides with mergeability when the oracle is symmetric.
+
+\paragraph{Decision Theory and Blackwell Sufficiency.}
+A second foundation is decision theory. Under proper scoring rules, the optimal Bayesian action depends only on the posterior of the target; reporting the truth is optimal \citep{GneitingRaftery2007,Dawid2007}. Our Assumption~\ref{ass:CF} instantiates this principle: if supervision factorizes through $\fstar(X)$, then $\fstar$ is a \emph{sufficient statistic} for the population decision problem. Replacing $X$ with a summary that preserves $\fstar$ leaves the Bayes risk unchanged. This is a task-specific version of Blackwell sufficiency \citep{Blackwell1953,Torgersen1991}, where $\fstar$ acts as the sufficient reduction. While Blackwell's theorem is often invoked abstractly, our framework provides an operational audit to verify that a specific summarization pipeline actually retains this sufficiency in practice.
+
+\paragraph{Design-based Supervised Learning.}
+Our work connects closely to recent advances in using LLM predictions as data in social science research. \citet{EgamiEtAl2024} develop Design-based Supervised Learning (DSL), showing that naively substituting LLM labels for ground-truth annotations can bias downstream regressions even when prediction errors are small. Their doubly-robust procedure combines surrogate labels with gold-standard annotations to guarantee valid inference. OPS complements DSL by providing a way to generate reliable summaries for annotation: when the audit certifies small violation rates, summaries can serve as faithful proxies for full documents, potentially reducing the burden of gold-standard annotation.
+
+\paragraph{LLMs for Political Measurement.}
+\citet{BenoitEtAl2025} demonstrate that LLM ensembles can estimate party positions from manifestos with high correlation to expert surveys. Their work validates LLMs as measurement tools but does not provide formal guarantees about information preservation through summarization. OPS extends this line of research by providing auditable pipelines with provable bounds on information loss, enabling reliable scaling to arbitrary document lengths.
+
+\paragraph{Information-theoretic parallels.}
+Our framework is grounded in sufficiency and mergeable summaries, but it also admits an information-theoretic interpretation: the summary acts as the sufficient component while the discarded text serves as an ancillary ``remainder.'' For readers interested in that lens, Appendix~\ref{sec:info-sieve} sketches how the decomposition ideas behind the \emph{Information Sieve} of \citet{steeg2016informationsieve} can be adapted to oracle-preserving compression, though this viewpoint is entirely optional for the main results.
+
+\paragraph{Preference Learning and RLHF.}
+Modern alignment techniques, such as Direct Preference Optimization (DPO), model preferences using Bradley--Terry--Luce likelihoods driven by a reward function \citep{BradleyTerry1952,RafailovEtAl2023DPO}. A standard assumption in this literature is that human preferences depend on the input only through its task-relevant semantics (the oracle value), not incidental phrasing. Under this factorization, our preservation results imply that training DPO on oracle-preserving summaries attains the same population optimum as training on full documents. Section~\ref{sec:preference} extends these results to GRPO and GRPO-RL objectives, including DeepSeek-R1 style training. When readability or fluency preferences fall outside $\fstar$, they must be modeled by a richer oracle or handled by separate alignment channels.
+
+\paragraph{Formal Verification in ML.}
+Machine-verified proofs are increasingly common in mathematics but remain rare in machine learning research. Notable exceptions include formalization of backpropagation \citep{huet2021backprop}, optimization algorithms, and basic learning theory results. Our Lean~4 formalization (Section~\ref{sec:verification}) contributes to this literature by providing the first machine-verified treatment of preference learning gap bounds, including GRPO-RL objectives. We hope this raises the bar for theoretical claims in the alignment literature.
+
+\paragraph{Global Structure vs. Local Checks.}
+Finally, we contrast our approach with corpus-level abstractions like Latent Dirichlet Allocation (LDA) or Structural Topic Models (STM) \citep{BleiNgJordan2003,RobertsStewartTingley2014}. While those methods discover latent global structures unsupervised, we assume a pre-defined outcome label $\fstar$ determined by the researcher.
+Furthermore, while our results induce a monoid congruence on strings when assumptions hold globally (discussed in Appendix~\ref{sec:global}), we deliberately avoid assuming a global algebra. Instead, we rely on ``local'' consistency: checks enforced only on the specific leaves and merges realized by the scheduler. This allows us to estimate the fidelity of a pipeline without requiring the oracle space $\Y$ to possess a strict algebraic structure that the task semantics may not justify. The tradeoff is scope: we restrict attention to decomposable coding, extraction, counting, or guided-summarization tasks where $\fstar$ is defined on bounded spans.
+
+\bigskip
+\noindent
+In short, we borrow the algebraic intuition of mergeable sketches, adopt the sufficiency criteria of decision theory, and insist on edge-wise, testable equalities where practitioners actually operate.

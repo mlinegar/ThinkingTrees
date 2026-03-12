@@ -1,0 +1,18 @@
+# LMCache Configuration for ThinkingTrees KV-Cache Persistence (Phase 6.1)
+#
+# This file is auto-generated from settings.yaml orchestration.kv_persistence.
+# Set LMCACHE_CONFIG_FILE=/path/to/this/file before starting vLLM.
+#
+# Tiered hierarchy: GPU → CPU RAM → local SSD
+# See: https://docs.lmcache.ai/kv_cache/local_storage.html
+
+# Tokens per cache block. Must match vLLM --block-size or be a multiple.
+chunk_size: 256
+
+# CPU RAM tier (fast, volatile)
+local_cpu: true
+max_local_cpu_size: 5.0       # GB
+
+# Local SSD tier (persistent across restarts)
+local_disk: "file:///tmp/thinkingtrees_kv_cache/"
+max_local_disk_size: 50.0     # GB

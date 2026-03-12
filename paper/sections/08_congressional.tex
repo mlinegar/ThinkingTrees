@@ -1,0 +1,130 @@
+\section{Application II: Congressional Record Policy Positions}\label{sec:congressional}
+
+Our second application demonstrates OPS on long-form political speeches from the Congressional Record, extracting policy positions on specific issues. This task showcases OPS on multi-dimensional coding with explicit rubrics for each policy dimension.
+
+\subsection{Task Definition}
+
+The Congressional Record contains floor speeches, statements, and proceedings from the U.S. Congress. Speeches can span many pages and cover multiple topics. We focus on extracting positions on three policy dimensions:
+
+\begin{description}[nosep]
+    \item[Immigration]: Support for restrictive vs. permissive immigration policies
+    \item[Climate]: Support for climate action vs. skepticism/opposition
+    \item[Healthcare]: Support for government healthcare expansion vs. market-based approaches
+\end{description}
+
+For each dimension, the oracle assigns a score from $-100$ (strongly opposing) to $+100$ (strongly supporting), with $0$ indicating neutral or no position.
+
+\paragraph{Oracle Definition.}
+We define separate oracles $\fstar_{\text{immigration}}, \fstar_{\text{climate}}, \fstar_{\text{healthcare}}$ for each policy dimension. These are approximated using:
+\begin{enumerate}[nosep]
+    \item Existing vote-based measures (DW-NOMINATE) as external validation
+    \item Expert coding of a sample
+    \item Deliberation model with dimension-specific rubrics
+\end{enumerate}
+
+\paragraph{Rubric Design.}
+Each dimension has a task-specific rubric specifying:
+\begin{itemize}[nosep]
+    \item Key phrases and terminology indicating position
+    \item Examples of statements at different score levels
+    \item Handling of implicit vs. explicit positions
+    \item Treatment of procedural vs. substantive statements
+\end{itemize}
+
+\subsection{Experimental Setup}
+
+\paragraph{Dataset.}
+We use Congressional Record data from:
+\begin{itemize}[nosep]
+    \item Congresses: [TBD: specify range, e.g., 115th--118th]
+    \item Chambers: House and Senate
+    \item Speech types: Floor speeches and extended remarks
+    \item Total documents: [TBD]
+    \item Average length: [TBD tokens]
+\end{itemize}
+
+\paragraph{Baselines.}
+\begin{enumerate}[nosep]
+    \item \textbf{Direct extraction}: Apply oracle to full speeches
+    \item \textbf{Truncation}: First $N$ tokens only
+    \item \textbf{OPS}: Hierarchical summarization with issue-specific rubrics
+\end{enumerate}
+
+\paragraph{External Validation.}
+We validate extracted positions against:
+\begin{itemize}[nosep]
+    \item DW-NOMINATE ideal points (for overall ideology)
+    \item Interest group scores (LCV for climate, NumbersUSA for immigration, etc.)
+    \item Roll call votes on relevant legislation
+\end{itemize}
+
+\subsection{Results}
+
+[TBD: Present results including:]
+
+\paragraph{Audit Statistics by Dimension.}
+Table showing violation rates for each policy dimension.
+
+\paragraph{Correlation with External Measures.}
+Comparison with DW-NOMINATE and interest group scores.
+
+\paragraph{Cross-Dimensional Analysis.}
+How well do OPS summaries preserve positions across multiple dimensions simultaneously?
+
+\paragraph{Long Document Analysis.}
+Focus on speeches exceeding 10,000 tokens where hierarchical summarization is essential.
+
+\subsection{Comparison with Existing Methods}
+
+Political science has developed various approaches to extracting positions from text:
+
+\begin{description}[nosep]
+    \item[Wordshoal/Wordfish]: Scaling methods based on word frequencies \citep{slapin2008scaling}
+    \item[Supervised learning]: Classification/regression on labeled examples
+    \item[Dictionary methods]: Counting policy-specific keywords
+\end{description}
+
+OPS differs by:
+\begin{itemize}[nosep]
+    \item Preserving full semantic content, not just word frequencies
+    \item Providing auditable guarantees on information preservation
+    \item Enabling flexible rubric-based extraction
+    \item Scaling to arbitrary document lengths
+\end{itemize}
+
+[TBD: Empirical comparison with one or more existing methods]
+
+\subsection{Discussion}
+
+\paragraph{Multi-Dimensional Challenges.}
+Extracting multiple policy dimensions simultaneously introduces additional complexity:
+\begin{itemize}[nosep]
+    \item Rubrics must be jointly designed to avoid conflicts
+    \item Summaries must preserve information for all dimensions
+    \item Audit must verify preservation across dimensions
+\end{itemize}
+
+\paragraph{Implicit Positions.}
+Congressional speeches often convey positions implicitly through:
+\begin{itemize}[nosep]
+    \item Legislative cosponsorship mentions
+    \item References to party leaders or interest groups
+    \item Framing choices (``illegal aliens'' vs. ``undocumented immigrants'')
+\end{itemize}
+
+[TBD: Analysis of how well OPS handles implicit positioning]
+
+\paragraph{Procedural vs. Substantive Content.}
+Many Congressional Record entries contain procedural language. [TBD: How does OPS handle this?]
+
+\subsection{Implications for Political Science}
+
+This application demonstrates that OPS can:
+\begin{enumerate}[nosep]
+    \item Scale text-as-data methods to long documents
+    \item Provide quality guarantees through auditing
+    \item Support multi-dimensional analysis with explicit rubrics
+    \item Enable preference learning for political text
+\end{enumerate}
+
+The framework opens possibilities for replicating and extending existing political science studies that rely on text-as-data methods.

@@ -70,4 +70,40 @@ def observationPMF {Strings A : Type*}
     (model.pairGen x).bind (fun p =>
       (model.noise.labelPMF x p.1 p.2).map (fun b => (x, p.1, p.2, b))))
 
+/-!
+## Tree Preference Sampling Model (TreePO)
+
+This extends the pairwise sampling model to the tree setting by inserting
+an explicit **node sampler** between document sampling and action sampling.
+
+This mirrors the TreePO objective:
+  E_{x~μ} E_{u~q(·|x)} E_{g~gen(node)} [loss(span(u), g)]
+-/
+
+/-- Node sampler: draws a node conditioned on document x. -/
+def NodeSampler (Strings Node : Type*) := Strings → PMF Node
+
+/-- Group generator at a node (k-wise preference candidates). -/
+def NodeGroupGenerator (Node A : Type*) (k : ℕ) := Node → PMF (Fin k → A)
+
+/-- Oracle-indexed node sampler: depends on x only through f*(x). -/
+def OracleIndexedNodeSampler {Strings Y Node : Type*} [PseudoMetricSpace Y]
+    (fstar : Strings → Y) (q : NodeSampler Strings Node) : Prop :=
+  ∀ x x', dist (fstar x) (fstar x') = 0 → q x = q x'
+
+/-- Tree-based preference sampling model (document → node → group). -/
+structure TreePreferenceSamplingModel (Strings Node A : Type*) (k : ℕ) where
+  docDist : PMF Strings
+  nodeSampler : NodeSampler Strings Node
+  nodeSpan : Node → Strings
+  groupGen : NodeGroupGenerator Node A k
+
+/-- Expected preference loss under a tree sampling model. -/
+noncomputable def ExpectedTreePreferenceLoss {Strings Node A : Type*} {k : ℕ}
+    (model : TreePreferenceSamplingModel Strings Node A k)
+    (loss : Strings → (Fin k → A) → ℝ) : ℝ :=
+  ∑' x, (model.docDist x).toReal *
+    ∑' u, (model.nodeSampler x u).toReal *
+      ∑' g, (model.groupGen u g).toReal * loss (model.nodeSpan u) g
+
 end OPT

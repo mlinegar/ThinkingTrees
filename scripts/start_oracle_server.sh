@@ -21,12 +21,26 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONFIG_FILE="$PROJECT_ROOT/config/settings.yaml"
 
 # Defaults
-PORT=${PORT:-8001}
+PORT="${PORT:-}"
+PORT_SET=false
+if [[ -n "$PORT" ]]; then
+    PORT_SET=true
+fi
 MODEL=${MODEL:-genrm-nvfp4}
-TENSOR_PARALLEL=${TENSOR_PARALLEL:-2}
-MAX_MODEL_LEN=${MAX_MODEL_LEN:-16384}
+BACKEND=${BACKEND:-vllm}
+TENSOR_PARALLEL=${TENSOR_PARALLEL:-}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-}
 GPU_MEM=${GPU_MEM:-0.95}
 CUDA_DEVICES=${CUDA_DEVICES:-2,3}  # Default to GPUs 2,3 (main model uses 0,1)
+SGLANG_VENV_PATH=${SGLANG_VENV_PATH:-}
+TP_OVERRIDE=false
+MAX_LEN_OVERRIDE=false
+if [[ -n "$TENSOR_PARALLEL" ]]; then
+    TP_OVERRIDE=true
+fi
+if [[ -n "$MAX_MODEL_LEN" ]]; then
+    MAX_LEN_OVERRIDE=true
+fi
 
 # Help
 show_help() {
@@ -38,13 +52,15 @@ Starts a large model for synthetic data generation and preference learning.
 Usage: ./scripts/start_oracle_server.sh [OPTIONS]
 
 OPTIONS:
-  --port PORT           Server port (default: 8001)
+  --backend BACKEND     Inference backend: vllm or sglang (default: vllm)
+  --port PORT           Server port (default: backend-specific; vllm=8001, sglang=30001)
   --model MODEL         Model to use (default: genrm-nvfp4)
                         Available: genrm-nvfp4, qwen3-nemotron-genrm, qwen-235b
   --tensor-parallel N   Number of GPUs (default: 2, reads from config)
   --max-model-len N     Max context length (default: from config)
   --gpu-mem RATIO       GPU memory utilization (default: 0.95)
   --cuda-devices IDS    CUDA devices to use (default: 2,3)
+  --sglang-venv-path P  SGLang virtualenv path override (SGLang backend only)
   -h, --help            Show this help
 
 EXAMPLES:
@@ -73,6 +89,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --port)
             PORT="$2"
+            PORT_SET=true
+            shift 2
+            ;;
+        --backend)
+            BACKEND="$2"
             shift 2
             ;;
         --model)
@@ -81,18 +102,24 @@ while [[ $# -gt 0 ]]; do
             ;;
         --tensor-parallel)
             TENSOR_PARALLEL="$2"
+            TP_OVERRIDE=true
             shift 2
             ;;
-        --max-model-len)
+        --max-model-len|--context-length)
             MAX_MODEL_LEN="$2"
+            MAX_LEN_OVERRIDE=true
             shift 2
             ;;
-        --gpu-mem)
+        --gpu-mem|--mem-fraction-static)
             GPU_MEM="$2"
             shift 2
             ;;
         --cuda-devices)
             CUDA_DEVICES="$2"
+            shift 2
+            ;;
+        --sglang-venv-path)
+            SGLANG_VENV_PATH="$2"
             shift 2
             ;;
         *)
@@ -102,28 +129,150 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+BACKEND="$(printf '%s' "$BACKEND" | tr '[:upper:]' '[:lower:]')"
+if [[ "$BACKEND" != "vllm" && "$BACKEND" != "sglang" ]]; then
+    echo "ERROR: --backend must be 'vllm' or 'sglang' (got '$BACKEND')"
+    exit 1
+fi
+
+if [[ "$PORT_SET" != "true" ]]; then
+    read -r VLLM_PORT SGLANG_PORT SGLANG_GENRM_PORT < <(python3 - <<PY
+import yaml
+cfg = {}
+with open("${CONFIG_FILE}") as f:
+    cfg = yaml.safe_load(f) or {}
+v = cfg.get("vllm", {}) if isinstance(cfg, dict) else {}
+s = cfg.get("sglang", {}) if isinstance(cfg, dict) else {}
+v_port = int(v.get("port", 8000) or 8000)
+s_port = int(s.get("port", 30000) or 30000)
+s_genrm_port = int(s.get("genrm_port", s_port + 1) or (s_port + 1))
+print(v_port, s_port, s_genrm_port)
+PY
+)
+    VLLM_PORT=${VLLM_PORT:-8000}
+    SGLANG_PORT=${SGLANG_PORT:-30000}
+    SGLANG_GENRM_PORT=${SGLANG_GENRM_PORT:-$((SGLANG_PORT + 1))}
+    VLLM_GENRM_PORT=$((VLLM_PORT + 1))
+
+    if [[ "$BACKEND" == "sglang" ]]; then
+        PORT="${SGLANG_GENRM_PORT}"
+    else
+        PORT="${VLLM_GENRM_PORT}"
+    fi
+fi
+
+if [[ "$BACKEND" == "sglang" ]]; then
+    echo ""
+    echo "========================================"
+    echo "Starting Oracle Model Server"
+    echo "========================================"
+    echo "Backend:        sglang"
+    echo "Model:          $MODEL"
+    echo "Port:           $PORT"
+    echo "CUDA Devices:   $CUDA_DEVICES"
+    if [[ -n "$TENSOR_PARALLEL" ]]; then
+        echo "Tensor Parallel:$TENSOR_PARALLEL"
+    fi
+    if [[ -n "$MAX_MODEL_LEN" ]]; then
+        echo "Max Model Len:  $MAX_MODEL_LEN"
+    fi
+    if [[ -n "$GPU_MEM" ]]; then
+        echo "Mem Fraction:   $GPU_MEM"
+    fi
+    if [[ -n "$SGLANG_VENV_PATH" ]]; then
+        echo "SGLang Venv:    $SGLANG_VENV_PATH"
+    fi
+    echo "========================================"
+    echo ""
+
+    SGLANG_CMD=(
+        "${PROJECT_ROOT}/scripts/start_sglang.sh"
+        "$MODEL"
+        --port "$PORT"
+        --cuda-devices "$CUDA_DEVICES"
+    )
+    if [[ -n "$TENSOR_PARALLEL" ]]; then
+        SGLANG_CMD+=(--tensor-parallel "$TENSOR_PARALLEL")
+    fi
+    if [[ -n "$MAX_MODEL_LEN" ]]; then
+        SGLANG_CMD+=(--max-model-len "$MAX_MODEL_LEN")
+    fi
+    if [[ -n "$GPU_MEM" ]]; then
+        SGLANG_CMD+=(--mem-fraction-static "$GPU_MEM")
+    fi
+    if [[ -n "$SGLANG_VENV_PATH" ]]; then
+        SGLANG_CMD+=(--sglang-venv-path "$SGLANG_VENV_PATH")
+    fi
+
+    exec "${SGLANG_CMD[@]}"
+fi
+
 # Activate vLLM environment
 source /home/mlinegar/vllm-env/bin/activate
 cd "$PROJECT_ROOT"
 
-# Get model path and tensor_parallel from config
-read MODEL_PATH MODEL_TP MODEL_MAX_LEN PREFIX_CACHE < <(python3 -c "
-import yaml
-with open('$CONFIG_FILE') as f:
-    cfg = yaml.safe_load(f)
-vllm = cfg.get('vllm', {})
-model_cfg = vllm.get('models', {}).get('$MODEL', {})
-prefix_cache = vllm.get('enable_prefix_caching', False)
-print(model_cfg.get('path', ''), model_cfg.get('tensor_parallel', 2), model_cfg.get('max_model_len', 16384), str(prefix_cache).lower())
-" 2>/dev/null)
+read_config() {
+    TT_CONFIG_FILE="$CONFIG_FILE" \
+    TT_MODEL="$MODEL" \
+    TT_PROJECT_ROOT="$PROJECT_ROOT" \
+    python3 - <<'PY'
+import os
+import shlex
+import sys
+import importlib.util
 
-# Use config values if not overridden by command line
-if [[ "$TENSOR_PARALLEL" == "4" ]]; then
-    # Only use config value if user didn't explicitly set TP
+import yaml
+
+runtime_module_path = os.path.join(
+    os.environ["TT_PROJECT_ROOT"],
+    "src",
+    "core",
+    "vllm_runtime.py",
+)
+runtime_spec = importlib.util.spec_from_file_location("tt_vllm_runtime", runtime_module_path)
+if runtime_spec is None or runtime_spec.loader is None:
+    raise RuntimeError(f"Could not load runtime helper module: {runtime_module_path}")
+runtime_module = importlib.util.module_from_spec(runtime_spec)
+sys.modules[runtime_spec.name] = runtime_module
+runtime_spec.loader.exec_module(runtime_module)
+resolve_vllm_runtime_flags = runtime_module.resolve_vllm_runtime_flags
+
+
+def emit(key, value):
+    if isinstance(value, bool):
+        text = "true" if value else "false"
+    elif value is None:
+        text = ""
+    else:
+        text = str(value)
+    print(f"{key}={shlex.quote(text)}")
+
+
+with open(os.environ["TT_CONFIG_FILE"]) as f:
+    cfg = yaml.safe_load(f)
+
+model_name = os.environ["TT_MODEL"]
+vllm = cfg.get("vllm", {})
+model_cfg = vllm.get("models", {}).get(model_name, {})
+runtime = resolve_vllm_runtime_flags(vllm_cfg=vllm, profile=model_name)
+
+emit("MODEL_PATH", model_cfg.get("path", ""))
+emit("MODEL_TP", model_cfg.get("tensor_parallel", 2))
+emit("MODEL_MAX_LEN", model_cfg.get("max_model_len", 16384))
+emit("PREFIX_CACHE", bool(vllm.get("enable_prefix_caching", False)))
+emit("RUNTIME_ARGS_JOINED", "\x1f".join(runtime.to_cli_args()))
+PY
+}
+
+# Get model path, tensor_parallel, and runtime flags from config.
+CONFIG_VARS="$(read_config)" || exit 1
+eval "$CONFIG_VARS"
+
+# Use config values unless explicitly overridden by env/CLI.
+if [[ "$TP_OVERRIDE" == "false" ]]; then
     TENSOR_PARALLEL=${MODEL_TP:-2}
 fi
-if [[ "$MAX_MODEL_LEN" == "32768" ]]; then
-    # Only use config value if user didn't explicitly set max_model_len
+if [[ "$MAX_LEN_OVERRIDE" == "false" ]]; then
     MAX_MODEL_LEN=${MODEL_MAX_LEN:-16384}
 fi
 
@@ -149,6 +298,11 @@ else
     PREFIX_CACHE_FLAG=""
 fi
 
+ORACLE_RUNTIME_ARGS=()
+if [[ -n "$RUNTIME_ARGS_JOINED" ]]; then
+    IFS=$'\x1f' read -r -a ORACLE_RUNTIME_ARGS <<< "$RUNTIME_ARGS_JOINED"
+fi
+
 # Check if model exists (can be a directory or a single GGUF file)
 if [[ ! -d "$MODEL_PATH" && ! -f "$MODEL_PATH" ]]; then
     echo "ERROR: Model not found at $MODEL_PATH"
@@ -172,6 +326,9 @@ echo "Tensor Parallel:$TENSOR_PARALLEL"
 echo "Max Model Len:  $MAX_MODEL_LEN"
 echo "GPU Memory:     $GPU_MEM"
 echo "Prefix Cache:   $PREFIX_CACHE"
+if [[ ${#ORACLE_RUNTIME_ARGS[@]} -gt 0 ]]; then
+    echo "Runtime Flags:  ${ORACLE_RUNTIME_ARGS[*]}"
+fi
 echo "========================================"
 echo ""
 
@@ -184,6 +341,6 @@ CUDA_VISIBLE_DEVICES=$CUDA_DEVICES python -m vllm.entrypoints.openai.api_server 
     --max-model-len "$MAX_MODEL_LEN" \
     --gpu-memory-utilization "$GPU_MEM" \
     --trust-remote-code \
-    --enforce-eager \
     $PREFIX_CACHE_FLAG \
+    "${ORACLE_RUNTIME_ARGS[@]}" \
     --disable-log-requests

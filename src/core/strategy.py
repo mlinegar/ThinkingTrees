@@ -24,7 +24,7 @@ Usage:
     # With tournament selection (for learning with preference collection)
     strategy = TournamentStrategy(
         base=BatchedStrategy(client),
-        judge=GenRMJudge(genrm_url),
+        judge=LargeJudgeComparisonModule(),
     )
 
     # Same tree-building code works with all:
@@ -40,18 +40,18 @@ import logging
 import random
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, Protocol, TYPE_CHECKING, Literal, Union, Callable
+from typing import Optional, List, Dict, Any, Protocol, TYPE_CHECKING, Literal, Callable
 
 if TYPE_CHECKING:
     import dspy
     from src.core.batch_processor import AsyncBatchLLMClient, BatchRequest
-    from src.training.preference.genrm import GenRMJudge
-    from src.training.preference.genrm_dspy import GenRMComparisonModule
+    from src.training.judges.base import BaseJudge
     from src.training.preference import PreferencePair
 
 from src.core.prompting import default_merge_prompt, default_summarize_prompt, default_unified_prompt
 from src.core.prompting import clean_summary_text
 from src.core.protocols import format_merge_input
+from src.core.conditional_memory import canonical_hash
 from src.config.concurrency import get_concurrency_config
 
 logger = logging.getLogger(__name__)
@@ -200,11 +200,18 @@ class BatchedStrategy:
         summarize_prompt_fn=None,
         merge_prompt_fn=None,
         unified_mode: bool = False,
+        await_response_timeout: Optional[float] = None,
+        disable_thinking: bool = True,
     ):
         self.client = client
         self.max_tokens = max_tokens
         self._counter = 0
         self.unified_mode = unified_mode
+        self.disable_thinking = bool(disable_thinking)
+        if await_response_timeout is None:
+            self.await_response_timeout = None
+        else:
+            self.await_response_timeout = max(1.0, float(await_response_timeout))
 
         # Use default prompt builders if not provided
         if unified_mode:
@@ -216,6 +223,14 @@ class BatchedStrategy:
             self.summarize_prompt_fn = summarize_prompt_fn or default_summarize_prompt
             self.merge_prompt_fn = merge_prompt_fn or default_merge_prompt
 
+    async def _await_response(self, request_id: str):
+        if self.await_response_timeout is None:
+            return await self.client.await_response(request_id)
+        return await self.client.await_response(
+            request_id,
+            timeout=self.await_response_timeout,
+        )
+
     async def summarize(
         self, content: str, rubric: str, temperature: float = 0.7
     ) -> str:
@@ -223,15 +238,19 @@ class BatchedStrategy:
         from src.core.batch_processor import BatchRequest
 
         self._counter += 1
+        doc_id = tournament_doc_id.get()
+        chat_template_kwargs = {"enable_thinking": False} if self.disable_thinking else None
         request = BatchRequest(
             request_id=f"strategy_summarize_{self._counter}",
             messages=self.summarize_prompt_fn(content, rubric),
             max_tokens=self.max_tokens,
             request_type="summarize",
             temperature=temperature,
+            document_id=str(doc_id) if doc_id is not None else None,
+            chat_template_kwargs=chat_template_kwargs,
         )
         await self.client.submit(request)
-        response = await self.client.await_response(request.request_id)
+        response = await self._await_response(request.request_id)
         return clean_summary_text(response.content) if not response.error else ""
 
     async def merge(
@@ -241,6 +260,8 @@ class BatchedStrategy:
         from src.core.batch_processor import BatchRequest
 
         self._counter += 1
+        doc_id = tournament_doc_id.get()
+        chat_template_kwargs = {"enable_thinking": False} if self.disable_thinking else None
 
         if self.unified_mode:
             # Use same prompt as leaf, just format input differently
@@ -257,9 +278,11 @@ class BatchedStrategy:
             max_tokens=self.max_tokens,
             request_type="merge",
             temperature=temperature,
+            document_id=str(doc_id) if doc_id is not None else None,
+            chat_template_kwargs=chat_template_kwargs,
         )
         await self.client.submit(request)
-        response = await self.client.await_response(request.request_id)
+        response = await self._await_response(request.request_id)
         return clean_summary_text(response.content) if not response.error else ""
 
     async def _generate_candidates_impl(
@@ -284,6 +307,8 @@ class BatchedStrategy:
 
         # Submit k requests in parallel
         requests = []
+        doc_id = tournament_doc_id.get()
+        chat_template_kwargs = {"enable_thinking": False} if self.disable_thinking else None
         for _ in range(k):
             self._counter += 1
             request = BatchRequest(
@@ -292,6 +317,8 @@ class BatchedStrategy:
                 max_tokens=self.max_tokens,
                 request_type=request_type,
                 temperature=temperature,
+                document_id=str(doc_id) if doc_id is not None else None,
+                chat_template_kwargs=chat_template_kwargs,
             )
             requests.append(request)
             await self.client.submit(request)
@@ -299,7 +326,7 @@ class BatchedStrategy:
         # Await all responses
         candidates = []
         for request in requests:
-            response = await self.client.await_response(request.request_id)
+            response = await self._await_response(request.request_id)
             if response.content and not response.error:
                 candidate = clean_summary_text(response.content)
                 if candidate:
@@ -710,7 +737,8 @@ class TournamentConfig:
     """Configuration for tournament-based candidate selection."""
     k: int = 4  # Number of candidates to generate
     temperature: float = 0.9  # Temperature for candidate generation
-    pipelined: bool = True  # Use pipelined execution (submits matches as ready)
+    judge_retry_attempts: int = 1  # Additional judge retries per match on errors
+    judge_retry_delay_seconds: float = 1.0  # Base delay before retrying failed matches
 
 
 class TournamentStrategy:
@@ -718,13 +746,13 @@ class TournamentStrategy:
     Wraps any SummarizationStrategy with tournament selection.
 
     This strategy generates multiple candidate summaries using the base strategy's
-    generate_candidates() method and uses a GenRM judge to select the best one
+    generate_candidates() method and uses a pairwise judge to select the best one
     via pairwise tournament. Preference pairs are collected as a FREE byproduct.
 
     Usage:
         # Wrap any base strategy
         base = BatchedStrategy(client)
-        strategy = TournamentStrategy(base, judge=GenRMJudge(...))
+        strategy = TournamentStrategy(base, judge=...)
 
         # Use like any other strategy - tournament happens transparently
         summary = await strategy.summarize(content, rubric)
@@ -739,7 +767,7 @@ class TournamentStrategy:
     def __init__(
         self,
         base: SummarizationStrategy,
-        judge: Union["GenRMJudge", "GenRMComparisonModule"],
+        judge: Any,
         config: Optional[TournamentConfig] = None,
         feedback_collector: Optional[Any] = None,
     ):
@@ -748,9 +776,8 @@ class TournamentStrategy:
 
         Args:
             base: Base summarization strategy to wrap
-            judge: GenRMJudge or GenRMComparisonModule for pairwise comparison.
-                   GenRMComparisonModule can use optimizable DSPy prompts when
-                   initialized with use_dspy_predictor=True (for tournament of tournaments).
+            judge: Pairwise comparison judge with either `.compare(...)` or
+                DSPy-style `.forward(...)` interface.
             config: Tournament configuration (k candidates, temperature)
             feedback_collector: Optional FeedbackCollector for enriched feedback.
                 When set, tournament matches also produce FeedbackResponse objects
@@ -819,6 +846,22 @@ class TournamentStrategy:
 
         return preferred, reasoning, confidence, score_a, score_b
 
+    def _augment_context_with_doc_metadata(self, context: str) -> str:
+        """Append safe document metadata to judge context when available."""
+        rendered = str(context or "").strip()
+        try:
+            from src.core.engram_prompting import format_prompt_metadata_block
+
+            metadata_block = format_prompt_metadata_block()
+        except Exception:
+            metadata_block = ""
+
+        if not metadata_block:
+            return rendered
+        if rendered:
+            return f"{rendered}\n\n{metadata_block}"
+        return metadata_block
+
     async def summarize(
         self, content: str, rubric: str, temperature: float = 0.7
     ) -> str:
@@ -842,14 +885,9 @@ class TournamentStrategy:
             return candidates[0] if candidates else ""
 
         # Run tournament and collect preferences
-        if self.config.pipelined:
-            winner, prefs = await self._run_tournament_pipelined(
-                candidates, content, rubric, segment_id, law_type="sufficiency"
-            )
-        else:
-            winner, prefs = await self._run_tournament(
-                candidates, content, rubric, segment_id, law_type="sufficiency"
-            )
+        winner, prefs = await self._run_tournament_pipelined(
+            candidates, content, rubric, segment_id, law_type="sufficiency"
+        )
         self._preferences.extend(prefs)
 
         return winner
@@ -878,14 +916,9 @@ class TournamentStrategy:
         original_text = format_merge_input(left, right)
 
         # Run tournament and collect preferences
-        if self.config.pipelined:
-            winner, prefs = await self._run_tournament_pipelined(
-                candidates, original_text, rubric, segment_id, law_type="merge"
-            )
-        else:
-            winner, prefs = await self._run_tournament(
-                candidates, original_text, rubric, segment_id, law_type="merge"
-            )
+        winner, prefs = await self._run_tournament_pipelined(
+            candidates, original_text, rubric, segment_id, law_type="merge"
+        )
         self._preferences.extend(prefs)
 
         return winner
@@ -902,195 +935,6 @@ class TournamentStrategy:
         """Delegate to base strategy."""
         return await self.base.generate_merge_candidates(left, right, rubric, k, temperature)
 
-    async def _run_tournament(
-        self,
-        candidates: List[str],
-        original_text: str,
-        rubric: str,
-        segment_id: str,
-        law_type: str = "sufficiency",
-    ) -> tuple[str, List["PreferencePair"]]:
-        """
-        Run elimination tournament and collect preferences.
-
-        Supports both GenRMJudge (uses .compare()) and GenRMComparisonModule
-        (uses .forward() for DSPy compatibility).
-
-        Returns (winner, list of PreferencePair).
-        """
-        from src.training.preference import PreferencePair
-
-        if len(candidates) == 0:
-            raise ValueError("No candidates provided")
-        if len(candidates) == 1:
-            return candidates[0], []
-
-        remaining = candidates.copy()
-        preferences: List["PreferencePair"] = []
-        round_num = 0
-
-        doc_id = tournament_doc_id.get()
-        segment_tag = f"{doc_id}:{segment_id}" if doc_id is not None else segment_id
-
-        # Determine judge type and model name
-        is_dspy_module = hasattr(self.judge, 'forward') and hasattr(self.judge, 'use_dspy_predictor')
-        if is_dspy_module:
-            if getattr(self.judge, 'use_dspy_prompt', False):
-                judge_model = "genrm-prompt-tuned"
-            elif self.judge.use_dspy_predictor:
-                judge_model = "dspy-optimizable"
-            else:
-                judge_model = "genrm-via-dspy"
-        else:
-            judge_model = "qwen3-nemotron-genrm"
-
-        while len(remaining) > 1:
-            # Collect all matches for this round
-            matches = []  # List of (idx_a, idx_b, summary_a, summary_b)
-            for i in range(0, len(remaining), 2):
-                if i + 1 < len(remaining):
-                    matches.append((i, i + 1, remaining[i], remaining[i + 1]))
-
-            if not matches:
-                break
-
-            # Batch execute all comparisons for this round
-            if is_dspy_module:
-                # DSPy modules: use asyncio.gather with to_thread
-                tasks = [
-                    asyncio.to_thread(
-                        self.judge.forward,
-                        context=rubric,
-                        original_text=original_text,
-                        summary_a=summary_a,
-                        summary_b=summary_b,
-                        law_type=law_type,
-                    )
-                    for _, _, summary_a, summary_b in matches
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-            elif hasattr(self.judge, 'compare_batch_async'):
-                # GenRMJudge with batch support: use compare_batch_async
-                comparisons = [
-                    (rubric, original_text, summary_a, summary_b, law_type, None)
-                    for _, _, summary_a, summary_b in matches
-                ]
-                results = await self.judge.compare_batch_async(comparisons)
-            elif hasattr(self.judge, 'compare_async'):
-                # GenRMJudge without batch: use asyncio.gather on compare_async
-                tasks = [
-                    self.judge.compare_async(
-                        context=rubric,
-                        original_text=original_text,
-                        summary_a=summary_a,
-                        summary_b=summary_b,
-                        law_type=law_type,
-                    )
-                    for _, _, summary_a, summary_b in matches
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-            else:
-                # Fallback: sync compare in threads
-                tasks = [
-                    asyncio.to_thread(
-                        self.judge.compare,
-                        context=rubric,
-                        original_text=original_text,
-                        summary_a=summary_a,
-                        summary_b=summary_b,
-                        law_type=law_type,
-                    )
-                    for _, _, summary_a, summary_b in matches
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # Process all results for this round
-            next_round = []
-            for match_num, ((idx_a, idx_b, summary_a, summary_b), result) in enumerate(zip(matches, results)):
-                # Handle exceptions from gather
-                if isinstance(result, Exception):
-                    logger.warning(f"Tournament match failed: {result}, treating as tie")
-                    preferred, reasoning, confidence, score_a, score_b = "tie", str(result), 0.0, None, None
-                    result = None  # No result object available
-                else:
-                    preferred, reasoning, confidence, score_a, score_b = self._extract_preference_fields(
-                        result,
-                        is_dspy_module,
-                        match_label=f"{segment_tag}_r{round_num}_m{match_num}",
-                    )
-
-                # Capture preference pair (FREE - no extra cost!)
-                pair = PreferencePair(
-                    pair_id=f"tournament_{segment_tag}_r{round_num}_m{match_num}",
-                    source_example_id=segment_tag,
-                    original_text=original_text,  # Store full text - truncation corrupts training data
-                    rubric=rubric,
-                    reference_score=None,
-                    summary_a=summary_a,
-                    summary_b=summary_b,
-                    preferred=preferred,
-                    reasoning=reasoning,
-                    confidence=confidence,
-                    law_type=law_type,
-                    score_estimate_a=score_a,
-                    score_estimate_b=score_b,
-                    judge_model=judge_model,
-                )
-                preferences.append(pair)
-
-                # Collect enriched feedback if collector is configured
-                if self._feedback_collector is not None:
-                    try:
-                        from src.feedback.types import FeedbackRequest, FeedbackDimension
-                        judge_reasoning = clean_summary_text(reasoning)
-                        if len(judge_reasoning) > 2400:
-                            judge_reasoning = judge_reasoning[:2400].rstrip() + " ... (truncated)"
-                        fb_request = FeedbackRequest(
-                            request_id=pair.pair_id,
-                            text_a=summary_a,
-                            text_b=summary_b,
-                            original_text=original_text,
-                            rubric=rubric,
-                            law_type=law_type,
-                            node_id=segment_tag,
-                            dimensions=[
-                                FeedbackDimension(kind="pairwise"),
-                                FeedbackDimension(kind="critique"),
-                            ],
-                            context={
-                                "match_label": f"{segment_tag}_r{round_num}_m{match_num}",
-                                "candidate_indices": [idx_a, idx_b],
-                                "judge_preferred": preferred,
-                                "judge_confidence": confidence,
-                                "judge_reasoning": judge_reasoning,
-                                "judge_score_estimate_a": score_a,
-                                "judge_score_estimate_b": score_b,
-                                "judge_model": judge_model,
-                            },
-                        )
-                        fb_response = self._feedback_collector.collect(fb_request)
-                        self._feedback_responses.append((fb_request, fb_response))
-                    except Exception as e:
-                        logger.debug("Feedback collector failed in tournament: %s", e)
-
-                # Handle tie with random selection to avoid position bias
-                if preferred == "A":
-                    winner = summary_a
-                elif preferred == "B":
-                    winner = summary_b
-                else:  # tie
-                    winner = summary_a if random.random() < 0.5 else summary_b
-                next_round.append(winner)
-
-            # Handle odd candidate (advances without playing)
-            if len(remaining) % 2 == 1:
-                next_round.append(remaining[-1])
-
-            remaining = next_round
-            round_num += 1
-
-        return remaining[0], preferences
-
     async def _run_tournament_pipelined(
         self,
         candidates: List[str],
@@ -1102,9 +946,9 @@ class TournamentStrategy:
         """
         Run elimination tournament with pipelined execution.
 
-        Unlike _run_tournament which waits for all round-N matches to complete
-        before starting round-N+1, this version submits new matches as soon as
-        their prerequisites (parent matches) complete.
+        Submits new matches as soon as their prerequisites (parent matches)
+        complete, rather than waiting for all round-N matches before starting
+        round-N+1.
 
         For k=4 candidates:
         - Round 1: Match0 (A vs B), Match1 (C vs D)
@@ -1200,13 +1044,15 @@ class TournamentStrategy:
         is_dspy_module = hasattr(self.judge, 'forward') and hasattr(self.judge, 'use_dspy_predictor')
         if is_dspy_module:
             if getattr(self.judge, 'use_dspy_prompt', False):
-                judge_model = "genrm-prompt-tuned"
+                judge_model = "dspy-prompt-tuned"
             elif self.judge.use_dspy_predictor:
                 judge_model = "dspy-optimizable"
             else:
-                judge_model = "genrm-via-dspy"
+                judge_model = "dspy-via-wrapper"
+        elif getattr(self.judge, "judge_backend", None):
+            judge_model = str(getattr(self.judge, "judge_backend"))
         else:
-            judge_model = "qwen3-nemotron-genrm"
+            judge_model = type(self.judge).__name__
 
         async def execute_match(m: Match) -> tuple[int, str, Any]:
             """Execute a single match and return (match_id, winner, result)."""
@@ -1220,40 +1066,100 @@ class TournamentStrategy:
                 summary_b = completed[m.right_idx]
             else:
                 summary_b = candidates[m.right_idx]
+            judge_context = self._augment_context_with_doc_metadata(rubric)
 
-            # Execute comparison
-            if is_dspy_module:
-                result = await asyncio.to_thread(
-                    self.judge.forward,
-                    context=rubric,
-                    original_text=original_text,
-                    summary_a=summary_a,
-                    summary_b=summary_b,
-                    law_type=law_type,
-                )
-            elif hasattr(self.judge, 'compare_async'):
-                result = await self.judge.compare_async(
-                    context=rubric,
-                    original_text=original_text,
-                    summary_a=summary_a,
-                    summary_b=summary_b,
-                    law_type=law_type,
-                )
-            else:
-                result = await asyncio.to_thread(
+            def _is_error_result(result: Any) -> bool:
+                if result is None:
+                    return True
+                error_msg = getattr(result, "error_message", None)
+                if error_msg:
+                    return True
+                # Some judge wrappers expose error_type without a valid preference.
+                if getattr(result, "error_type", None) and getattr(result, "preferred", None) is None:
+                    return True
+                if is_dspy_module:
+                    preferred = getattr(result, "preference", getattr(result, "preferred", None))
+                    return preferred is None
+                preferred = getattr(result, "preferred", None)
+                return preferred is None
+
+            async def _call_judge_once() -> Any:
+                if is_dspy_module:
+                    return await asyncio.to_thread(
+                        self.judge.forward,
+                        context=judge_context,
+                        original_text=original_text,
+                        summary_a=summary_a,
+                        summary_b=summary_b,
+                        law_type=law_type,
+                    )
+                if hasattr(self.judge, 'compare_async'):
+                    return await self.judge.compare_async(
+                        context=judge_context,
+                        original_text=original_text,
+                        summary_a=summary_a,
+                        summary_b=summary_b,
+                        law_type=law_type,
+                    )
+                return await asyncio.to_thread(
                     self.judge.compare,
-                    context=rubric,
+                    context=judge_context,
                     original_text=original_text,
                     summary_a=summary_a,
                     summary_b=summary_b,
                     law_type=law_type,
                 )
+
+            max_attempts = 1 + max(0, int(getattr(self.config, "judge_retry_attempts", 0)))
+            retry_delay = max(0.0, float(getattr(self.config, "judge_retry_delay_seconds", 0.0)))
+            result: Any = None
+            match_label = f"{segment_tag}_m{m.id}"
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    result = await _call_judge_once()
+                    if not _is_error_result(result):
+                        break
+                    error_message = (
+                        getattr(result, "error_message", None)
+                        or f"missing/invalid preference in result type {type(result).__name__}"
+                    )
+                    if attempt < max_attempts:
+                        logger.warning(
+                            "Tournament match %s judge error on attempt %d/%d: %s. Retrying...",
+                            match_label,
+                            int(attempt),
+                            int(max_attempts),
+                            error_message,
+                        )
+                        if retry_delay > 0:
+                            await asyncio.sleep(retry_delay * float(attempt))
+                        continue
+                    logger.error(
+                        "Tournament match %s judge error on final attempt %d/%d: %s. Falling back to tie handling.",
+                        match_label,
+                        int(attempt),
+                        int(max_attempts),
+                        error_message,
+                    )
+                except Exception as exc:
+                    if attempt < max_attempts:
+                        logger.warning(
+                            "Tournament match %s judge exception on attempt %d/%d: %s. Retrying...",
+                            match_label,
+                            int(attempt),
+                            int(max_attempts),
+                            exc,
+                        )
+                        if retry_delay > 0:
+                            await asyncio.sleep(retry_delay * float(attempt))
+                        continue
+                    raise
 
             # Determine winner
             preferred, reasoning, confidence, score_a, score_b = self._extract_preference_fields(
                 result,
                 is_dspy_module,
-                match_label=f"{segment_tag}_m{m.id}",
+                match_label=match_label,
             )
 
             if preferred == "A":
@@ -1293,14 +1199,22 @@ class TournamentStrategy:
                         # Find which match failed
                         for mid, t in list(pending.items()):
                             if t is task:
-                                logger.warning(f"Tournament match {mid} failed: {e}")
-                                # Treat as tie, pick randomly
+                                logger.error(
+                                    "Tournament match %s failed after retries: %s. Falling back to tie/random.",
+                                    f"{segment_tag}_m{mid}",
+                                    e,
+                                )
+                                # Treat as tie, pick randomly to avoid position bias.
                                 m = matches[mid]
                                 if m.left_is_match:
                                     summary_a = completed[m.left_idx]
                                 else:
                                     summary_a = candidates[m.left_idx]
-                                winner = summary_a
+                                if m.right_is_match:
+                                    summary_b = completed[m.right_idx]
+                                else:
+                                    summary_b = candidates[m.right_idx]
+                                winner = summary_a if random.random() < 0.5 else summary_b
                                 completed[mid] = winner
                                 del pending[mid]
                                 break
@@ -1484,11 +1398,147 @@ def list_strategies() -> List[str]:
     return list(_STRATEGY_REGISTRY.keys())
 
 
+# =============================================================================
+# Gated Strategy (Engram WS3 — Context-aware gating)
+# =============================================================================
+
+class GatedStrategy:
+    """Wraps any SummarizationStrategy with ConditionalMemory gating.
+
+    Before each summarize/merge call, checks ConditionalMemory for a
+    cached result. For "easy" chunks (high boilerplate ratio, low entity
+    density), uses the cached summary or a deterministic fallback instead
+    of calling the LLM.
+
+    This is Engram's core insight: don't waste compute on trivial pattern
+    reconstruction.  Expected impact: 25-40% reduction in LLM calls for
+    repetitive corpora.
+
+    Parameters
+    ----------
+    base : SummarizationStrategy
+        The underlying strategy for actual LLM calls.
+    memory : ConditionalMemory
+        Shared memory instance for cache lookups.
+    gate_threshold : float
+        Minimum complexity score (0-1) below which cached results are used.
+        0.0 = never gate (always call LLM), 1.0 = always gate if cached.
+    """
+
+    def __init__(
+        self,
+        base: SummarizationStrategy,
+        memory: Any,  # ConditionalMemory (avoid import for TYPE_CHECKING)
+        gate_threshold: float = 0.3,
+    ):
+        self.base = base
+        self.memory = memory
+        self.gate_threshold = gate_threshold
+        self._gate_hits = 0
+        self._gate_misses = 0
+
+    @staticmethod
+    def _complexity_score(text: str) -> float:
+        """Estimate text complexity as a 0-1 score.
+
+        Uses cheap heuristics:
+        - Entity density (capitalized words / total words)
+        - Vocabulary diversity (unique words / total words)
+        - Boilerplate ratio (repeated bigrams)
+
+        Returns a score where higher = more complex = should call LLM.
+        """
+        words = text.split()
+        if len(words) < 5:
+            return 1.0  # Short texts always go to LLM
+
+        total = len(words)
+        unique = len(set(w.lower() for w in words))
+        capitalized = sum(1 for w in words if w and w[0].isupper())
+
+        vocab_diversity = unique / total  # 0-1, higher = more diverse
+        entity_density = capitalized / total  # 0-1, higher = more entities
+
+        # Bigram repetition (boilerplate indicator)
+        bigrams = [f"{words[i]} {words[i+1]}" for i in range(len(words) - 1)]
+        unique_bigrams = len(set(bigrams))
+        bigram_diversity = unique_bigrams / max(1, len(bigrams))
+
+        # Weighted combination: high diversity + high entities = complex
+        score = 0.4 * vocab_diversity + 0.3 * entity_density + 0.3 * bigram_diversity
+        return min(1.0, score)
+
+    async def summarize(
+        self, content: str, rubric: str, temperature: float = 0.7
+    ) -> str:
+        """Summarize with gating: skip LLM for cached easy chunks."""
+        namespace = f"gated_summarize:{self.memory.namespace_version}"
+        key = canonical_hash(content)
+        cached = self.memory.get_text(namespace, key)
+        if cached:
+            complexity = self._complexity_score(content)
+            if complexity < self.gate_threshold:
+                self._gate_hits += 1
+                return cached
+
+        self._gate_misses += 1
+        result = await self.base.summarize(content, rubric, temperature)
+
+        # Store result for future gating
+        self.memory.set_text(namespace, key, result)
+        return result
+
+    async def merge(
+        self, left: str, right: str, rubric: str, temperature: float = 0.7
+    ) -> str:
+        """Merge with gating: skip LLM for cached merge results."""
+        merge_key = f"{left}\n---MERGE---\n{right}"
+        namespace = f"gated_merge:{self.memory.namespace_version}"
+        key = canonical_hash(merge_key)
+        cached = self.memory.get_text(namespace, key)
+        if cached:
+            complexity = max(
+                self._complexity_score(left),
+                self._complexity_score(right),
+            )
+            if complexity < self.gate_threshold:
+                self._gate_hits += 1
+                return cached
+
+        self._gate_misses += 1
+        result = await self.base.merge(left, right, rubric, temperature)
+
+        self.memory.set_text(namespace, key, result)
+        return result
+
+    async def generate_candidates(
+        self, content: str, rubric: str, k: int = 4, temperature: float = 0.9
+    ) -> List[str]:
+        """Delegate to base — candidate generation always calls LLM."""
+        return await self.base.generate_candidates(content, rubric, k, temperature)
+
+    async def generate_merge_candidates(
+        self, left: str, right: str, rubric: str, k: int = 4, temperature: float = 0.9
+    ) -> List[str]:
+        """Delegate to base — candidate generation always calls LLM."""
+        return await self.base.generate_merge_candidates(left, right, rubric, k, temperature)
+
+    def gate_stats(self) -> Dict[str, Any]:
+        """Return gating statistics."""
+        total = self._gate_hits + self._gate_misses
+        return {
+            "gate_hits": self._gate_hits,
+            "gate_misses": self._gate_misses,
+            "gate_rate": self._gate_hits / total if total > 0 else 0.0,
+        }
+
+
 # Register built-in strategies
 register_strategy("batched")(BatchedStrategy)
 register_strategy("dspy")(DSPyStrategy)
 register_strategy("callable")(CallableStrategy)
 register_strategy("tournament")(TournamentStrategy)
+register_strategy("gated")(GatedStrategy)
 
 
 # =============================================================================
@@ -1508,6 +1558,7 @@ __all__ = [
     "CallableStrategy",
     "TournamentStrategy",
     "TournamentConfig",
+    "GatedStrategy",
     # Context
     "tournament_doc_id",
 ]

@@ -1,14 +1,14 @@
 """
-OPS Law Verification at Tree Nodes.
+Lean-aligned local-law verification at tree nodes.
 
-This module implements verification of OPS (Oracle-Preserving Summarization) laws
-at each node in the summarization tree. The verifier uses a score predictor to
-check that summaries preserve oracle-relevant information according to the laws:
+Theorem-facing mapping from ``LocalLaws.lean``:
+- paper C1 = Lean L1 = leaf preservation
+- paper C2 = Lean L3 = on-range idempotence
+- paper C3 = Lean L2 = merge preservation against the node span
 
-- C1 (Sufficiency): oracle(summary) ~ oracle(original)
-- C2 (Idempotence): oracle(summarize(S)) ~ oracle(S)
-- C3A (Substitution): Equivalent summaries -> same oracle
-- C3B (Merge Consistency): oracle(merge) ~ aggregate(oracle(children))
+This module keeps a small set of non-theorem diagnostics for backwards
+analysis, but the default merge check now uses the recursive theorem-domain
+span (``ops_span``) rather than aggregated child readouts.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -26,7 +26,8 @@ from src.training.core import (
     UnifiedTrainingExample,
     TrainingExampleLabel,
 )
-from src.core.ops_checks import CheckType
+from src.core.ops_checks import AuditCheckKind
+from src.core.protocols import format_merge_input
 
 
 @runtime_checkable
@@ -113,6 +114,7 @@ class OracleNodeVerifier:
         predictor: Any,  # ScorePredictor or any callable with compatible signature
         tolerance: float = 0.0,
         summarizer: Optional[Callable[[str], str]] = None,
+        theorem_operator: Optional[Any] = None,
     ):
         """
         Initialize the verifier.
@@ -121,10 +123,12 @@ class OracleNodeVerifier:
             predictor: The score predictor to use for predictions
             tolerance: Allowed discrepancy before marking as violation
             summarizer: Optional function to re-summarize for idempotence checks
+            theorem_operator: Optional theorem-facing operator with resummarize or encode/decode
         """
         self.predictor = predictor
         self.tolerance = tolerance
         self.summarizer = summarizer
+        self.theorem_operator = theorem_operator
 
     def _scores_equivalent(self, score_a: float, score_b: float) -> bool:
         """Check if two scores are equivalent within tolerance."""
@@ -214,7 +218,15 @@ class OracleNodeVerifier:
         """
         # Get re-summary if not provided
         if re_summary is None:
-            if self.summarizer is None:
+            operator = self.theorem_operator
+            if operator is not None:
+                if hasattr(operator, "resummarize"):
+                    re_summary = operator.resummarize(summary, rubric=rubric)
+                elif hasattr(operator, "encode") and hasattr(operator, "decode"):
+                    re_summary = operator.decode(operator.encode(summary, rubric=rubric), rubric=rubric)
+                else:
+                    operator = None
+            if re_summary is None and self.summarizer is None and operator is None:
                 # Can't check idempotence without a summarizer
                 return LawCheckResult(
                     law="idempotence",
@@ -225,7 +237,8 @@ class OracleNodeVerifier:
                     skipped=True,
                     skip_reason="no_summarizer",
                 )
-            re_summary = self.summarizer(summary)
+            if re_summary is None:
+                re_summary = self.summarizer(summary)
 
         # Get predictions
         summ_pred = self.predictor(
@@ -265,6 +278,96 @@ class OracleNodeVerifier:
 
     def check_merge_consistency(
         self,
+        original_content: str,
+        merged_summary: str,
+        rubric: str,
+        node_id: Optional[str] = None,
+    ) -> LawCheckResult:
+        """
+        Check Lean L2 / paper C3 against the theorem-domain node span.
+
+        Args:
+            original_content: The recursive node span S(node), typically ``ops_span``
+            merged_summary: The summary produced by merging children
+            rubric: Description of what to preserve
+            node_id: Optional identifier for the node
+
+        Returns:
+            LawCheckResult with pass/fail and discrepancy
+        """
+        span_pred = self.predictor(
+            original_content=original_content,
+            summary=original_content,
+            rubric=rubric,
+        )
+        merged_pred = self.predictor(
+            original_content=original_content,
+            summary=merged_summary,
+            rubric=rubric,
+        )
+
+        # Compare
+        expected_score = _parse_score(span_pred.label)
+        merged_score = _parse_score(merged_pred.label)
+        discrepancy = _score_distance(merged_score, expected_score)
+        passed = discrepancy <= self.tolerance
+
+        reasoning = None
+        if not passed:
+            reasoning = (
+                f"Merge preservation violation: Node span predicted '{span_pred.label}' "
+                f"but merged summary predicted '{merged_pred.label}' "
+                f"(discrepancy={discrepancy:.2f})."
+            )
+
+        return LawCheckResult(
+            law="merge_consistency",
+            passed=passed,
+            discrepancy=discrepancy,
+            original_prediction=span_pred,
+            summary_prediction=merged_pred,
+            expected_label=str(expected_score),
+            node_id=node_id,
+            reasoning=reasoning,
+        )
+
+    def check_joint_to_disjoint_drift(
+        self,
+        merged_summary: str,
+        child_summaries: List[str],
+        rubric: str,
+        node_id: Optional[str] = None,
+    ) -> LawCheckResult:
+        """
+        Non-theorem diagnostic: compare parent summary against child-summary concat.
+        """
+        merge_input = format_merge_input(*child_summaries[:2]) if len(child_summaries) >= 2 else ""
+        joint_pred = self.predictor(
+            original_content=merge_input,
+            summary=merge_input,
+            rubric=rubric,
+        )
+        disjoint_pred = self.predictor(
+            original_content=merge_input,
+            summary=merged_summary,
+            rubric=rubric,
+        )
+        expected_score = _parse_score(joint_pred.label)
+        actual_score = _parse_score(disjoint_pred.label)
+        discrepancy = _score_distance(expected_score, actual_score)
+        return LawCheckResult(
+            law=AuditCheckKind.MERGE_JOINT_TO_DISJOINT.value,
+            passed=discrepancy <= self.tolerance,
+            discrepancy=discrepancy,
+            original_prediction=joint_pred,
+            summary_prediction=disjoint_pred,
+            expected_label=str(expected_score),
+            node_id=node_id,
+            reasoning=None,
+        )
+
+    def check_readout_aggregation_drift(
+        self,
         merged_summary: str,
         child_summaries: List[str],
         rubric: str,
@@ -272,31 +375,15 @@ class OracleNodeVerifier:
         node_id: Optional[str] = None,
     ) -> LawCheckResult:
         """
-        Check C3B (Merge Consistency): Is merged result consistent with children?
-
-        When child summaries are merged, the resulting summary should produce
-        an oracle prediction consistent with the aggregated predictions of
-        the children.
-
-        Args:
-            merged_summary: The summary produced by merging children
-            child_summaries: List of child summaries that were merged
-            rubric: Description of what to preserve
-            child_weights: Optional weights for children (e.g., by text length)
-            node_id: Optional identifier for the node
-
-        Returns:
-            LawCheckResult with pass/fail and discrepancy
+        Non-theorem diagnostic: compare merged readout to aggregated child readouts.
         """
-        # Get prediction for merged summary
         merged_pred = self.predictor(
             original_content=merged_summary,
             summary=merged_summary,
             rubric=rubric,
         )
 
-        # Get predictions for each child (concurrent for better GPU utilization)
-        def predict_child(child):
+        def predict_child(child: str) -> Prediction:
             return self.predictor(
                 original_content=child,
                 summary=child,
@@ -306,31 +393,22 @@ class OracleNodeVerifier:
         with ThreadPoolExecutor(max_workers=len(child_summaries)) as executor:
             child_preds = list(executor.map(predict_child, child_summaries))
 
-        # Aggregate child predictions (weighted average of scores)
-        expected_score = self._aggregate_scores(
-            child_preds,
-            weights=child_weights,
-        )
-
-        # Compare
+        expected_score = self._aggregate_scores(child_preds, weights=child_weights)
         merged_score = _parse_score(merged_pred.label)
         discrepancy = _score_distance(merged_score, expected_score)
-        passed = discrepancy <= self.tolerance
-
         reasoning = None
-        if not passed:
+        if discrepancy > self.tolerance:
             child_labels = [p.label for p in child_preds]
             reasoning = (
-                f"Merge consistency violation: Children predicted {child_labels} "
+                f"Readout aggregation drift: children predicted {child_labels} "
                 f"(aggregated to '{expected_score:.2f}') but merged summary predicted "
                 f"'{merged_pred.label}' (discrepancy={discrepancy:.2f})."
             )
-
         return LawCheckResult(
-            law="merge_consistency",
-            passed=passed,
+            law=AuditCheckKind.READOUT_AGGREGATION_DRIFT.value,
+            passed=discrepancy <= self.tolerance,
             discrepancy=discrepancy,
-            original_prediction=None,  # Not applicable for merge
+            original_prediction=None,
             summary_prediction=merged_pred,
             expected_label=str(expected_score),
             node_id=node_id,
@@ -474,6 +552,16 @@ class OracleNodeVerifier:
 
         if "merge_consistency" in checks and child_summaries:
             results["merge_consistency"] = self.check_merge_consistency(
+                original_content, summary, rubric, node_id=node_id
+            )
+
+        if "joint_to_disjoint_drift" in checks and child_summaries:
+            results["joint_to_disjoint_drift"] = self.check_joint_to_disjoint_drift(
+                summary, child_summaries, rubric, node_id=node_id
+            )
+
+        if "readout_aggregation_drift" in checks and child_summaries:
+            results["readout_aggregation_drift"] = self.check_readout_aggregation_drift(
                 summary, child_summaries, rubric, node_id=node_id
             )
 
@@ -493,8 +581,14 @@ class TreeVerifier:
         predictor: Any,  # ScorePredictor or any callable with compatible signature
         tolerance: float = 0.0,
         summarizer: Optional[Callable[[str], str]] = None,
+        theorem_operator: Optional[Any] = None,
     ):
-        self.node_verifier = OracleNodeVerifier(predictor, tolerance, summarizer)
+        self.node_verifier = OracleNodeVerifier(
+            predictor,
+            tolerance,
+            summarizer,
+            theorem_operator=theorem_operator,
+        )
         self.results: List[NodeVerificationResult] = []
 
     def verify_tree(
@@ -530,13 +624,16 @@ class TreeVerifier:
             node_id = node.get('id', f"node_{uuid.uuid4().hex}")
             summary = node.get('summary', '')
             children = node.get('children', [])
-            original = node.get('original', node.get('raw_text_span', summary))
+            original = node.get(
+                'ops_span',
+                node.get('original', node.get('raw_text_span', summary)),
+            )
         else:
             # Node object
             node_id = node.id
             summary = node.summary or ''
             children = node.children
-            original = node.raw_text_span or summary
+            original = node.ops_span or node.raw_text_span or summary
 
         # Recursively verify children first
         child_summaries = []
@@ -546,6 +643,10 @@ class TreeVerifier:
                 child_summaries.append(child.get('summary', ''))
             else:
                 child_summaries.append(child.summary or '')
+
+        if children and (original == summary or not original):
+            if len(child_summaries) >= 2:
+                original = format_merge_input(child_summaries[0], child_summaries[1])
 
         # Verify this node (original already set based on node type)
         result = self.node_verifier.verify_node(

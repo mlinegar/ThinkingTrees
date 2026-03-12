@@ -11,13 +11,14 @@ Primary use case: speed up repeated runs over the same documents/prompts
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from src.core.conditional_memory import canonical_hash
 
 
 def _stable_json_dumps(payload: Any) -> str:
@@ -50,7 +51,7 @@ def make_chat_cache_key(
             except TypeError:
                 safe_extra[str(key)] = str(value)
         cache_data["extra"] = safe_extra
-    digest = hashlib.sha256(_stable_json_dumps(cache_data).encode("utf-8")).hexdigest()
+    digest = canonical_hash(_stable_json_dumps(cache_data), normalize=False)
     return digest
 
 
@@ -120,4 +121,3 @@ class FileResponseCache:
     @staticmethod
     def now_iso() -> str:
         return datetime.now().isoformat()
-

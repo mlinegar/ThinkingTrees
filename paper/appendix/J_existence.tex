@@ -1,0 +1,32 @@
+\section{Existence of Oracle-Preserving Summaries}
+\label{app:existence}
+
+Two existence notions matter: set-theoretic (\emph{some} $g$ exists) and operational (a \emph{short} $g$ exists that fits a budget). We state both in terms of the task metric.
+
+\begin{proposition}[Canonical representative map in metric form]
+\label{prop:canonical}
+Because $\Strings$ is countable, define $x\sim x'$ iff $\metric(\fstar(x),\fstar(x'))=0$. Fix a total order on $\Strings$ and let $c:\Y\to\Strings$ send $y$ to the least $x$ with $\metric(\fstar(x),y)=0$. Then
+\[
+g_{\mathrm{can}}(x):=c\big(\fstar(x)\big)
+\quad\text{satisfies}\quad
+\metric\!\big(\fstar(g_{\mathrm{can}}(x)),\,\fstar(x)\big)=0\ \ \text{for all }x,
+\]
+and $g_{\mathrm{can}}$ is idempotent on its range. Hence $g_{\mathrm{can}}\in\Gstar$ in the sense of Definition~\ref{def:exact-suff-stable}.
+\end{proposition}
+
+\begin{proposition}[Compact encodings]
+\label{prop:encoding}
+If there exists an injective encoder $\mathrm{enc}:\Y\to\Strings$ of uniformly bounded length such that
+$\metric(\fstar(\mathrm{enc}(y)),y)=0$ for all $y\in\Y$, then
+\[
+g_{\mathrm{enc}}(x):=\mathrm{enc}(\fstar(x))
+\quad\text{obeys}\quad
+\metric\!\big(\fstar(g_{\mathrm{enc}}(x)),\,\fstar(x)\big)=0
+\]
+and is idempotent on its range. Thus $g_{\mathrm{enc}}\in\Gstar$ and returns short strings.
+\end{proposition}
+
+Proposition~\ref{prop:canonical} certifies internal consistency: exact, idempotent, oracle-preserving normal forms always exist; Proposition~\ref{prop:encoding} records the operational version used in practice (the summary \emph{is} a compact encoding of the oracle).
+
+
+

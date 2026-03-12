@@ -43,6 +43,10 @@ _TRUTH_SOURCE_ALIASES: Dict[str, TruthLabelSource] = {
     "gold": DATASET_SOURCE,
     # Trusted model-based labels.
     "oracle": ORACLE_SOURCE,
+    "task_oracle": ORACLE_SOURCE,
+    "oracle_callback": ORACLE_SOURCE,
+    "model_backed_teacher": ORACLE_SOURCE,
+    "task": ORACLE_SOURCE,
     "judge": ORACLE_SOURCE,
     "llm_judge": ORACLE_SOURCE,
     "reward_model": ORACLE_SOURCE,
@@ -61,4 +65,3 @@ def normalize_truth_label_source(value: Any, *, default: TruthLabelSource = UNKN
     if not key:
         return default
     return _TRUTH_SOURCE_ALIASES.get(key, default)
-

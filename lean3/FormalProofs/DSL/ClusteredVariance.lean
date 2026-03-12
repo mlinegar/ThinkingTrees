@@ -205,7 +205,7 @@ theorem variance_inflation_icc (icc : ℝ) (avg_cluster_size : ℝ)
 ## Section 6: Validity Theorems
 -/
 
-/-- Clustered SE is valid under cluster independence.
+/-- Clustered variance estimate is always non-negative.
 
 If clusters are independent, the clustered variance estimator
 is a consistent estimator of the true variance.
@@ -227,22 +227,14 @@ where G_d = Σ_{i∈d} w_i(y_i - μ̂) is the cluster-level residual sum.
 - The variance is computed across cluster sums, which are independent
 - This is the "generalized estimating equations" (GEE) approach
 
-**Axiomatization:**
-Full proof requires measure theory over the joint sampling distribution of
-(X_1,...,X_n) where X_i are clustered. We axiomatize the result here.
+This file proves the structural non-negativity property of the estimator.
+Asymptotic consistency under cluster independence is currently documented but
+not yet fully formalized in this theorem.
 
 **Reference:** Liang, K.-Y., & Zeger, S. L. (1986). Longitudinal data analysis
 using generalized linear models. Biometrika, 73(1), 13-22. -/
-theorem clustered_se_valid (clusters : List (Cluster ℝ)) (mu_hat : ℝ)
-    -- DSL Requirement: Clusters are mutually independent
-    -- (samples within clusters may be arbitrarily correlated)
-    (h_independent : True)  -- Semantic: clusters drawn independently
-    (h_enough_clusters : 2 ≤ clusters.length)
-    -- Regularity conditions
-    (h_weights_bounded : ∀ c ∈ clusters, ∀ s ∈ c.samples, s.weight ≤ 1000)  -- Bounded weights
-    :
-    -- The clustered variance estimator is non-negative (we can prove this)
-    -- and consistent for the true variance (axiomatized)
+theorem clustered_se_valid (clusters : List (Cluster ℝ)) (mu_hat : ℝ) :
+    -- This theorem formalizes the always-valid structural property.
     0 ≤ clusteredVariance clusters mu_hat := by
   exact clusteredVariance_nonneg clusters mu_hat
 
@@ -276,6 +268,105 @@ def clusteredConfidenceInterval (clusters : List (Cluster ℝ)) (z : ℝ := 1.96
   let mu_hat := hajekEstimator all
   let se := clusteredSE clusters mu_hat
   confidenceInterval mu_hat se z
+
+lemma confidenceHalfWidth_nonneg {se z : ℝ}
+    (hse : 0 ≤ se) (hz : 0 ≤ z) :
+    0 ≤ confidenceHalfWidth se z := by
+  unfold confidenceHalfWidth
+  exact mul_nonneg hz hse
+
+lemma confidenceInterval_left_le_right
+    (mu_hat se z : ℝ) (hse : 0 ≤ se) (hz : 0 ≤ z) :
+    (confidenceInterval mu_hat se z).1 ≤ (confidenceInterval mu_hat se z).2 := by
+  have hhw : 0 ≤ confidenceHalfWidth se z :=
+    confidenceHalfWidth_nonneg hse hz
+  unfold confidenceInterval
+  linarith
+
+lemma mem_confidenceInterval_center
+    (mu_hat se z : ℝ) (hse : 0 ≤ se) (hz : 0 ≤ z) :
+    mu_hat ∈ Set.Icc (confidenceInterval mu_hat se z).1
+      (confidenceInterval mu_hat se z).2 := by
+  have hhw : 0 ≤ confidenceHalfWidth se z :=
+    confidenceHalfWidth_nonneg hse hz
+  unfold confidenceInterval
+  constructor <;> linarith
+
+lemma mem_confidenceInterval_of_abs_sub_le
+    (theta mu_hat se z : ℝ)
+    (h : |theta - mu_hat| ≤ z * se) :
+    theta ∈ Set.Icc (confidenceInterval mu_hat se z).1
+      (confidenceInterval mu_hat se z).2 := by
+  have h' : -(z * se) ≤ theta - mu_hat ∧ theta - mu_hat ≤ z * se := by
+    exact abs_le.mp h
+  unfold confidenceInterval confidenceHalfWidth
+  constructor <;> linarith
+
+lemma mem_confidenceInterval_iff_abs_sub_le
+    (theta mu_hat se z : ℝ)
+    (hradius : 0 ≤ z * se) :
+    theta ∈ Set.Icc (confidenceInterval mu_hat se z).1
+      (confidenceInterval mu_hat se z).2 ↔
+      |theta - mu_hat| ≤ z * se := by
+  constructor
+  · intro hmem
+    rcases hmem with ⟨hlo, hhi⟩
+    unfold confidenceInterval confidenceHalfWidth at hlo hhi
+    refine abs_le.mpr ?_
+    constructor <;> linarith
+  · intro habs
+    exact mem_confidenceInterval_of_abs_sub_le theta mu_hat se z habs
+
+theorem confidenceInterval_coverage_of_error_event
+    {Ω : Type*} [MeasurableSpace Ω]
+    (μ : MeasureTheory.Measure Ω)
+    (theta z : ℝ)
+    (mu_hat se : Ω → ℝ)
+    (q : ENNReal)
+    (h_event : q ≤ μ {ω | |theta - mu_hat ω| ≤ z * se ω}) :
+    q ≤ μ {ω | theta ∈ Set.Icc
+      (confidenceInterval (mu_hat ω) (se ω) z).1
+      (confidenceInterval (mu_hat ω) (se ω) z).2} := by
+  have h_subset :
+      {ω | |theta - mu_hat ω| ≤ z * se ω} ⊆
+        {ω | theta ∈ Set.Icc
+          (confidenceInterval (mu_hat ω) (se ω) z).1
+          (confidenceInterval (mu_hat ω) (se ω) z).2} := by
+    intro ω hω
+    exact mem_confidenceInterval_of_abs_sub_le theta (mu_hat ω) (se ω) z hω
+  exact le_trans h_event (MeasureTheory.measure_mono h_subset)
+
+lemma mem_clusteredConfidenceInterval_of_abs_sub_le
+    (clusters : List (Cluster ℝ)) (theta z : ℝ)
+    (h : |theta - hajekEstimator (allSamples clusters)| ≤
+      z * clusteredSE clusters (hajekEstimator (allSamples clusters))) :
+    theta ∈ Set.Icc (clusteredConfidenceInterval clusters z).1
+      (clusteredConfidenceInterval clusters z).2 := by
+  exact mem_confidenceInterval_of_abs_sub_le theta
+    (hajekEstimator (allSamples clusters))
+    (clusteredSE clusters (hajekEstimator (allSamples clusters))) z h
+
+theorem clusteredConfidenceInterval_coverage_of_error_event
+    {Ω : Type*} [MeasurableSpace Ω]
+    (μ : MeasureTheory.Measure Ω)
+    (clusters : Ω → List (Cluster ℝ))
+    (theta z : ℝ)
+    (q : ENNReal)
+    (h_event : q ≤ μ {ω |
+      |theta - hajekEstimator (allSamples (clusters ω))| ≤
+        z * clusteredSE (clusters ω) (hajekEstimator (allSamples (clusters ω)))}) :
+    q ≤ μ {ω | theta ∈ Set.Icc
+      (clusteredConfidenceInterval (clusters ω) z).1
+      (clusteredConfidenceInterval (clusters ω) z).2} := by
+  simpa [clusteredConfidenceInterval] using
+    (confidenceInterval_coverage_of_error_event
+      (μ := μ)
+      (theta := theta)
+      (z := z)
+      (mu_hat := fun ω => hajekEstimator (allSamples (clusters ω)))
+      (se := fun ω => clusteredSE (clusters ω) (hajekEstimator (allSamples (clusters ω))))
+      (q := q)
+      h_event)
 
 /-!
 ## Section 8: Diagnostics

@@ -1,0 +1,19 @@
+\section{Information-Theoretic View of OPS}\label{sec:info-sieve}
+
+This appendix makes explicit the connection between Oracle-Preserving Summarization (OPS) and the \emph{Information Sieve} of \citet{steeg2016informationsieve}. The sieve decomposes an input $X$ into a latent factor $Y$ and \emph{remainder information} $\bar X$ such that $(Y,\bar X)$ reconstructs $X$ exactly while $Y$ captures as much multivariate dependence (Total Correlation) as possible and $\bar X$ is independent of $Y$. OPS instantiates the same architecture, but the objective is supervised: rather than maximizing dependence within $X$, we require that the retained summary $Z=g(X)$ be a sufficient statistic for the oracle $f^*(X)$.
+
+\begin{theorem}[Oracle information decomposition]\label{thm:info-decomp}
+Let $X$ be a block or node in the hierarchy, let $Z=g(X)$ be its summary, and let $\nu$ denote any (possibly stochastic) remainder such that $X$ is measurable with respect to $(Z,\nu)$. Then
+\[
+I(X; f^*) \;=\; I(Z; f^*) \;+\; I(\nu; f^* \mid Z).
+\]
+In particular, $Z$ preserves all oracle information if and only if $I(\nu; f^* \mid Z)=0$.
+\end{theorem}
+
+\begin{proof}
+Apply the chain rule for mutual information with $X = (Z,\nu)$.
+\end{proof}
+
+Condition~(C1) (Sufficiency) enforces $I(\nu; f^* \mid Z)=0$ at every realized leaf by checking that the oracle agrees on $b$ and $g(b)$. Condition~(C2) (Merge Consistency) ensures that when $Z$ is formed by hierarchically merging child summaries $(Z_{u_L},Z_{u_R})$, the remainder created at that merge is also orthogonal to $f^*$. Combining Theorem~\ref{thm:info-decomp} with the incremental construction of the Information Sieve (Theorem~2.1 of \citet{steeg2016informationsieve}) yields an additive view of the hierarchy: each merge acts as a sieve layer whose discarded bits are independent of the oracle. Consequently, if the local audits certify that $I(\nu; f^* \mid Z)=0$ on every edge, the root summary preserves the full mutual information $I(X_{\text{root}}; f^*)$ present in the original document.
+
+Finally, Section~5 of \citet{steeg2016informationsieve} observes that discarding the remainder induces a lossy compression of the raw input. OPS inherits this interpretation: summaries $g(x)$ need not suffice to reconstruct the surface text, but they are \emph{lossless with respect to $f^*$}. The ``loss'' lives entirely in the nuisance remainder, which by design is independent of the oracle and therefore irrelevant for downstream coding tasks.

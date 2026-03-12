@@ -19,12 +19,16 @@ Usage:
     optimizer.compile(student, trainset, metric=metric)
 """
 
-import hashlib
 import threading
 import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional, Protocol, Tuple, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Protocol, Tuple, runtime_checkable
+
+from src.core.conditional_memory import canonical_hash
+
+if TYPE_CHECKING:
+    from src.core.conditional_memory import ConditionalMemory
 
 
 # =============================================================================
@@ -338,6 +342,7 @@ class SimilarityScorer:
         scale: BoundedScale,
         name: str = "value",
         cache_size: int = 1024,
+        memory: Optional["ConditionalMemory"] = None,
     ):
         """
         Initialize the similarity scorer.
@@ -348,6 +353,9 @@ class SimilarityScorer:
             name: Name for the extracted value (used in reasoning)
             cache_size: Max entries to cache (0 = no caching). Caching avoids
                         redundant LLM calls when scoring same texts repeatedly.
+            memory: Optional ConditionalMemory instance. When provided, extracted
+                    values are cached persistently (L1+SQLite L2) under a
+                    namespaced key, enabling cross-run reuse.
         """
         self._value_extractor_raw = value_extractor
         self.scale = scale
@@ -357,22 +365,36 @@ class SimilarityScorer:
         self._cache_hits = 0
         self._cache_misses = 0
         self._cache_lock = threading.Lock()  # Thread safety for cache operations
+        self._memory = memory
 
     def _text_hash(self, text: str) -> str:
-        """Compute hash key for text caching."""
-        return hashlib.sha256(text.encode()).hexdigest()
+        """Compute deterministic cache key via shared canonical hash utility."""
+        return canonical_hash(text)
 
     def value_extractor(self, text: str) -> float:
         """Cached value extraction. Avoids redundant LLM calls for same text.
 
         Thread-safe implementation using a lock to protect cache operations.
+        When a ConditionalMemory instance is available, it is checked first
+        (providing cross-run persistence and unified stats).
         """
-        if self.cache_size == 0:
+        if self.cache_size == 0 and self._memory is None:
             return self._value_extractor_raw(text)
+
+        # Check ConditionalMemory first (cross-run persistent tier).
+        if self._memory is not None:
+            namespace = f"similarity:{self.name}:{self._memory.namespace_version}"
+            mem_key = canonical_hash(text)
+            cached = self._memory.get_json(namespace, mem_key)
+            if cached is not None:
+                try:
+                    return float(cached)
+                except (TypeError, ValueError):
+                    pass
 
         key = self._text_hash(text)
 
-        # Check cache with lock
+        # Check local cache with lock
         with self._cache_lock:
             if key in self._cache:
                 self._cache_hits += 1
@@ -382,18 +404,25 @@ class SimilarityScorer:
         # Call extractor outside lock to avoid holding lock during LLM call
         value = self._value_extractor_raw(text)
 
-        # Add to cache with lock
+        # Add to local cache with lock
         with self._cache_lock:
             # Double-check in case another thread added it
             if key in self._cache:
                 return self._cache[key]
 
             # Add to cache (with simple LRU eviction if full)
-            if len(self._cache) >= self.cache_size:
+            if self.cache_size > 0 and len(self._cache) >= self.cache_size:
                 # Remove oldest entry (first key in dict - Python 3.7+ preserves order)
                 oldest_key = next(iter(self._cache))
                 del self._cache[oldest_key]
-            self._cache[key] = value
+            if self.cache_size > 0:
+                self._cache[key] = value
+
+        # Store in ConditionalMemory for cross-run persistence.
+        if self._memory is not None:
+            namespace = f"similarity:{self.name}:{self._memory.namespace_version}"
+            mem_key = canonical_hash(text)
+            self._memory.set_json(namespace, mem_key, float(value))
 
         return value
 

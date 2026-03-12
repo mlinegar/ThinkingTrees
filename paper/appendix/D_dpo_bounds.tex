@@ -1,0 +1,100 @@
+\section{Direct Preference Optimization (DPO): Equivalence and Gap Bounds}
+\label{sec:dpo}
+
+Direct preference optimization trains policies by comparing preferred (``win'') vs.\ dispreferred (``loss'') responses. This section shows when training on hierarchically summarized documents $Z^{(R)}(X)$ yields the same optimal policies as training on full documents $X$. Under exact oracle preservation—when Conditions~\eqref{eq:leaf_sufficiency}--\eqref{eq:leaf_idempotence} hold exactly along the realized tree—the DPO objective depends on the input only through $\fstar(\cdot)$, so the sets of population minimizers coincide. When preservation is approximate, we control the population gap by the oracle distortion $\Delta_R$ and provide explicit bounds under Lipschitz or bounded-reward assumptions. The key requirement is that annotator preferences factor through the oracle; if preferences depend on presentational features not encoded by $\fstar$, training on summaries can deviate even when oracle preservation holds.
+
+\subsection{Proof Strategy Overview}
+
+The DPO equivalence and gap bounds follow a two-stage argument:
+
+\paragraph{Stage 1: Factorization through the Oracle.}
+The key insight is that when all components of the DPO objective are \emph{oracle-measurable}---meaning they depend on the input $X$ only through $\fstar(X)$---the entire loss can be written as an expectation over the oracle value $Y = \fstar(X)$:
+\[
+\mathcal{L}_{\mathrm{DPO}}(\pi) = \E_Y[\ell(\pi; Y)]
+\]
+for some per-oracle loss function $\ell$. When $\fstar(Z^{(R)}(X)) = \fstar(X)$ (exact preservation), both training on $X$ and training on $Z^{(R)}(X)$ yield the same distribution over $Y$, hence the same expected loss.
+
+\paragraph{Stage 2: Lipschitz Stability for Approximate Preservation.}
+When preservation is only approximate ($\Delta_R > 0$), we bound the loss gap using Lipschitz continuity. The chain is:
+\begin{enumerate}
+    \item The DPO loss applies $-\log \sigma(\cdot)$ to a logit, and $-\log \sigma$ is $1$-Lipschitz
+    \item The logit involves log-ratios of policies, which are Lipschitz in the oracle value
+    \item Composing Lipschitz functions preserves Lipschitz continuity
+    \item The gap is bounded by $L \cdot \Delta_R$ where $L$ is the composed Lipschitz constant
+\end{enumerate}
+
+Let preferences follow Bradley–Terry–Luce with per‑oracle rewards $\{R_y:\A\to\R\}_{y\in\Y}$ and scale $\beta>0$:
+\[
+\Pr\{a^w\succ a^\ell\mid X=x\}=\sigma\!\Big(\beta\,[R_{\fstar(x)}(a^w)-R_{\fstar(x)}(a^\ell)]\Big),
+\qquad \sigma(t)=\frac{1}{1+e^{-t}}.
+\]
+DPO reparameterizes the reward through the policy $\pi$ relative to a reference policy $\pi_{\mathrm{ref}}$ and minimizes
+\[
+\mathcal L_{\mathrm{DPO}}(\pi;\pi_{\mathrm{ref}})=
+-\,\E_{(X,a^w,a^\ell)}\!\left[\log \sigma\!\Big(\beta\Big\{\log\frac{\pi(a^w\mid X)}{\pi_{\mathrm{ref}}(a^w\mid X)}-\log\frac{\pi(a^\ell\mid X)}{\pi_{\mathrm{ref}}(a^\ell\mid X)}\Big\}\Big)\right].
+\]
+The log-ratio difference $\log\frac{\pi(a^w\mid X)}{\pi_{\mathrm{ref}}(a^w\mid X)}-\log\frac{\pi(a^\ell\mid X)}{\pi_{\mathrm{ref}}(a^\ell\mid X)}$ measures how much more the policy $\pi$ favors the winner over the loser, relative to the reference. DPO trains $\pi$ to maximize this gap for preferred pairs.
+
+\begin{definition}[Oracle‑measurable policies]
+A policy $\pi$ (and $\pi_{\mathrm{ref}}$) is oracle‑measurable if $\pi(\cdot\mid x)=\pi(\cdot\mid x')$ whenever $\metric\!\big(\fstar(x),\fstar(x')\big)=0$.
+\end{definition}
+
+\begin{theorem}[Exact DPO equivalence under oracle preservation and oracle–indexed pairs]\label{thm:dpo-exact}
+% \emph{(Restates Theorem~\ref{thm:dpo-exact}.)}
+Assume $\metric\!\big(\fstar(Z^{(R)}(X)),\fstar(X)\big)=0$ almost surely for some $R\ge1$. Assume also that the pair generator depends on $X$ only through $\fstar(X)$ and that $\pi_{\mathrm{ref}}$ is oracle‑measurable with full support. Then the sets of population minimizers of $\mathcal L_{\mathrm{DPO}}$ coincide when trained on $X$ and when trained on $Z^{(R)}(X)$. Moreover, there exists a population minimizer that is oracle‑measurable; equivalently, we may without loss of generality restrict attention to oracle‑measurable policies.
+\end{theorem}
+
+\begin{proof}
+Let $Y=\fstar(X)$. Exact preservation gives $\fstar(Z^{(R)}(X))=Y$ a.s. The pair generator is oracle-indexed and $\pi_{\mathrm{ref}}$ is oracle-measurable, so the conditional law of $(a^w,a^\ell)$ given $Y$ is the same under input $X$ or $Z^{(R)}(X)$, and the log-ratio terms in the DPO logit depend only on $Y$. By the Doob--Dynkin lemma, there exists a measurable $\ell$ such that
+\[
+\mathcal{L}_{\mathrm{DPO}}(\pi; X)=\E_Y[\ell(\pi;Y)]
+\quad\text{and}\quad
+\mathcal{L}_{\mathrm{DPO}}(\pi; Z^{(R)}(X))=\E_Y[\ell(\pi;Y)].
+\]
+Thus the population losses coincide for all $\pi$, so the argmin sets are identical. Moreover, because the loss decomposes over oracle values, one can choose a minimizer that optimizes each $Y$-section independently, yielding an oracle-measurable minimizer.
+\end{proof}
+
+\begin{theorem}[Quantitative DPO gap under metric distortion]\label{thm:dpo-gap}
+% \emph{(Restates Theorem~\ref{thm:dpo-gap}.)}
+Let $\Delta_R=\E\big[\,\metric\!\big(\fstar(Z^{(R)}(X)),\fstar(X)\big)\,\big]$ be the expected oracle distortion. To bound the population gap quantitatively, we impose regularity conditions ensuring that policies do not react radically to small changes in the oracle value. One option is a \emph{policy-Lipschitz log-ratio} condition: there exists $L_\pi<\infty$ such that
+\[
+\Bigg|\log\frac{\pi(a\mid y)}{\pi_{\mathrm{ref}}(a\mid y)}-\log\frac{\pi(a\mid y')}{\pi_{\mathrm{ref}}(a\mid y')}\Bigg|\,\le\,L_\pi\,\metric(y,y')\quad\forall\,a,y,y',
+\]
+so the policy's preference for action $a$ changes smoothly with the oracle value. Alternatively, we may assume a \emph{reward-Lipschitz exponential family}: $\pi(a\mid y)\propto \pi_{\mathrm{ref}}(a\mid y)\exp\{\beta^{-1}R_y(a)\}$ with $\sup_a|R_y(a)-R_{y'}(a)|\le L_R\,\metric(y,y')$ for all $y,y'$, which says the induced rewards vary smoothly in the oracle space.
+Then, writing $\mathcal L^{X}$ and $\mathcal L^{Z}$ for the DPO loss with inputs $X$ and $Z^{(R)}(X)$, respectively,
+\[
+\big|\mathcal L^{X}(\pi)-\mathcal L^{Z}(\pi)\big|
+\ \le\
+\begin{cases}
+2\,\beta\,L_\pi\,\Delta_R,&\text{case (1)},\\[2pt]
+2\,L_R\,\Delta_R,&\text{case (2)},
+\end{cases}
+\qquad
+\text{and}\qquad
+\inf_\pi \mathcal L^{X}(\pi)-\inf_\pi \mathcal L^{Z}(\pi)\ \le\ \text{same bound}.
+\]
+\end{theorem}
+
+\begin{proof}
+Let $\varphi(t)=-\log\sigma(t)$, which is $1$–Lipschitz. Denote the DPO logit by
+\[
+\Lambda(X;a^w,a^\ell)\ :=\ \beta\!\left[\log\frac{\pi(a^w\mid X)}{\pi_{\mathrm{ref}}(a^w\mid X)}-\log\frac{\pi(a^\ell\mid X)}{\pi_{\mathrm{ref}}(a^\ell\mid X)}\right].
+\]
+Then, for any fixed $(a^w,a^\ell)$,
+\[
+\big|\mathcal L^{X}(\pi)-\mathcal L^{Z}(\pi)\big|
+\ \le\ \E\big|\varphi(\Lambda(X;a^w,a^\ell))-\varphi(\Lambda(Z^{(R)}(X);a^w,a^\ell))\big|
+\ \le\ \E\big|\Lambda(X;a^w,a^\ell)-\Lambda(Z^{(R)}(X);a^w,a^\ell)\big|.
+\]
+In case (1), oracle‑measurability lets us replace $X$ by $y=\fstar(X)$ and $Z^{(R)}(X)$ by $y'=\fstar(Z^{(R)}(X))$, and the Lipschitz condition yields
+\[
+\big|\Lambda(X;a^w,a^\ell)-\Lambda(Z^{(R)}(X);a^w,a^\ell)\big|\ \le\ \beta\,L_\pi\big(\metric(y,y')+\metric(y,y')\big)\ =\ 2\,\beta\,L_\pi\,\metric(y,y').
+\]
+Taking expectations gives the stated $2\,\beta\,L_\pi\,\Delta_R$ bound. In case (2), the exponential-family form implies
+\[
+\Lambda(X;a^w,a^\ell)=\beta^{-1}\!\big(R_y(a^w)-R_y(a^\ell)\big),
+\]
+so the logit difference equals $\beta^{-1}\!\big[(R_y(a^w)-R_{y'}(a^w))-(R_y(a^\ell)-R_{y'}(a^\ell))\big]$. Apply the reward-Lipschitz bound twice to obtain $2\,L_R\,\metric(y,y')$, then take expectations. Because the bound holds for every $\pi$, it also bounds $\inf_\pi \mathcal L^{X}(\pi)-\inf_\pi \mathcal L^{Z}(\pi)$.
+\end{proof}
+
+\paragraph{Remarks.} (i) Because $\metric\ge0$, any display of the form $\E[\metric(\cdot,\cdot)]=0$ immediately implies $\metric(\cdot,\cdot)=0$ almost surely with respect to the summarizer’s randomness, conditional on the realized subtree. We use the stronger almost‑sure formulation in the exact‐equivalence statements for clarity. (ii) If $\pi_{\mathrm{ref}}$ is \emph{not} oracle‑measurable, exact preservation of $\fstar$ alone does not guarantee equivalence of minimizers; the KL term can transmit presentational artifacts of $X$ into the optimizer. This is why the oracle‑indexed pair generator and oracle‑measurable $\pi_{\mathrm{ref}}$ hypothesis appears in Theorem~\ref{thm:dpo-exact}.

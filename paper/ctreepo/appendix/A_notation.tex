@@ -1,0 +1,55 @@
+\section{Notation Recap}\label{app:notation}
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{ll}
+\toprule
+Symbol & Meaning \\
+\midrule
+\multicolumn{2}{l}{\textit{Spaces and Structures}} \\
+$\Strings$ & Set of all finite token sequences (free monoid) \\
+$\concat$ & Concatenation operator on $\Strings$ \\
+$\emptystr$ & Empty string (the string with no tokens; $\emptystr \concat u = u \concat \emptystr = u$) \\
+$\Y$ & Oracle output space (equipped with metric $\metric$) \\
+$\A$ & Action or label space \\
+$T$ & Full binary merge tree over leaf blocks \\
+\midrule
+\multicolumn{2}{l}{\textit{Functions}} \\
+$\fstar: \Strings \to \Y$ & Oracle: maps any string to its task value \\
+$g: \Strings \rightsquigarrow \Strings$ & Summarizer (possibly stochastic) \\
+$\metric: \Y \times \Y \to [0,\infty)$ & Metric on oracle space \\
+$\sstar: \Strings \times \A \to \R$ & Supervision signal \\
+\midrule
+\multicolumn{2}{l}{\textit{Tree Objects}} \\
+$b_i$ & Realized leaf block (contiguous substring of $x_0$) \\
+$S(u)$ & Latent span under node $u$ (raw concatenation of descendant blocks) \\
+$s_u$ & Stored summary at node $u$ \\
+$u_L, u_R$ & Left and right children of node $u$ \\
+$r$ & Root node \\
+\midrule
+\multicolumn{2}{l}{\textit{Pipeline Outputs}} \\
+$Z^{(1)}(x) = s_r$ & Root summary after one pass \\
+$Z^{(R)}(x)$ & Summary after $R$ rounds ($Z^{(R+1)} = g(Z^{(R)})$) \\
+$\Delta_R$ & Expected distortion: $\E[\metric(\fstar(Z^{(R)}), \fstar(x))]$ \\
+\midrule
+\multicolumn{2}{l}{\textit{Audit Statistics}} \\
+$\hat{p}_{\text{suff}}$ & Empirical sufficiency violation rate \\
+$\hat{p}_{\text{assoc,raw}}$ & Empirical C3 raw-link violation rate (disjoint-vs-raw) \\
+$\hat{p}_{\text{assoc,joint}}$ & Empirical C3 joint-link violation rate (disjoint-vs-joint) \\
+$\hat{p}_{\text{idem}}$ & Empirical idempotence violation rate \\
+$\tau$ & Tolerance threshold for audit checks \\
+$\mu_{\mathrm{dist}}^{\star}$ & Ideal (target-oracle) finite-population mean distortion \\
+$\mu_{\mathrm{dist}}^{J}$ & Accessible-judge finite-population mean distortion \\
+$\hat{\mu}_{\mathrm{HT}}^{J}$ & Unclipped Horvitz--Thompson estimator for $\mu_{\mathrm{dist}}^{J}$ \\
+$\hat{\mu}_{\mathrm{dist}}$ & Deployed distortion estimator (possibly clipped/truncated) \\
+$C_{\mathrm{meth}}$ & Method-transport constant from distortion to objective units \\
+$G_{\mathrm{meth}}$ & Method-specific population preference-objective gap \\
+$B_{\mathrm{cal}}, B_{\mathrm{est}}, B_{\mathrm{clip}}$ & Calibration, estimation, and clipping envelopes (objective units) \\
+$D_{\max}$ & Uniform upper bound on per-unit distortion in the audited population \\
+\midrule
+\multicolumn{2}{l}{\textit{Relations}} \\
+$u \sim v$ & Oracle equivalence: $\metric(\fstar(u), \fstar(v)) = 0$ \\
+\bottomrule
+\end{tabular}
+\caption{Complete notation dictionary.}
+\end{table}

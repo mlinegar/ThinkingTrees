@@ -668,6 +668,14 @@ def run_toy_coverage_suite(
                                             "empty_sample_rate": coverage.empty_sample_rate,
                                             "true_violation_rate": coverage.true_violation_rate,
                                             "true_preference_loss": coverage.true_preference_loss,
+                                            "ipw_violation_bias": coverage.ipw_violation_bias,
+                                            "ipw_preference_bias": coverage.ipw_preference_bias,
+                                            "naive_violation_coverage": coverage.naive_violation_coverage,
+                                            "naive_preference_coverage": coverage.naive_preference_coverage,
+                                            "naive_violation_mean_width": coverage.naive_violation_mean_width,
+                                            "naive_preference_mean_width": coverage.naive_preference_mean_width,
+                                            "naive_violation_bias": coverage.naive_violation_bias,
+                                            "naive_preference_bias": coverage.naive_preference_bias,
                                         },
                                     )
                                 )
@@ -819,6 +827,14 @@ def run_mergeable_sketch_examples(
                         "empty_sample_rate": coverage.empty_sample_rate,
                         "true_violation_rate": coverage.true_violation_rate,
                         "true_preference_loss": coverage.true_preference_loss,
+                        "ipw_violation_bias": coverage.ipw_violation_bias,
+                        "ipw_preference_bias": coverage.ipw_preference_bias,
+                        "naive_violation_coverage": coverage.naive_violation_coverage,
+                        "naive_preference_coverage": coverage.naive_preference_coverage,
+                        "naive_violation_mean_width": coverage.naive_violation_mean_width,
+                        "naive_preference_mean_width": coverage.naive_preference_mean_width,
+                        "naive_violation_bias": coverage.naive_violation_bias,
+                        "naive_preference_bias": coverage.naive_preference_bias,
                     },
                 )
             )

@@ -17,5 +17,15 @@ name = "mathlib"
 scope = "leanprover-community"
 rev = "v4.27.0-rc1"
 
+[[require]]
+name = "FormalProbability"
+# NOTE (release hygiene): this project depends on the companion `FormalProbability` library.
+# In this monorepo, it is expected to be checked out as a sibling of `ThinkingTrees/`:
+#   ../../FormalProbability
+# If you publish a standalone repo, prefer either:
+# - vendoring `FormalProbability/` into the repo and switching this to a relative in-repo path, or
+# - pointing `git = ...` at a revision that includes the required modules.
+path = "../../FormalProbability"
+
 [[lean_lib]]
 name = "FormalProofs"

@@ -1,0 +1,268 @@
+\section{Preference Learning: Detailed Proofs}
+\label{app:preference-proofs}
+
+This appendix provides complete proofs for the preference learning equivalence and gap theorems.
+
+\subsection{Proof Strategy Overview}
+
+The preference learning proofs follow a unified architecture across DPO, GRPO-PL, and GRPO-RL:
+
+\paragraph{The Lipschitz Chain.}
+Every gap bound is established by composing Lipschitz constants through a three-stage chain:
+\[
+\text{Loss} \xrightarrow{L_1\text{-Lip}} \text{Logit/Score} \xrightarrow{L_2\text{-Lip}} \text{Policy ratios} \xrightarrow{L_3\text{-Lip}} \text{Oracle value}
+\]
+
+The final Lipschitz constant is the product: $L = L_1 \cdot L_2 \cdot L_3$.
+
+\paragraph{Oracle-Measurability as Factorization.}
+Oracle-measurable policies satisfy $\pi(\cdot \mid x) = \pi(\cdot \mid \fstar(x))$. This allows rewriting any oracle-measurable quantity as a function of $\fstar(x)$ rather than $x$ directly. When $\fstar(Z) = \fstar(X)$, all such quantities are identical.
+
+\paragraph{From Pointwise to Expected.}
+Pointwise Lipschitz bounds integrate to expected bounds:
+\[
+|f(x) - f(x')| \le L \cdot d(x, x') \implies |\E_X[f(X)] - \E_{X'}[f(X')]| \le L \cdot \E[d(X, X')].
+\]
+This is the key step connecting sample-level analysis to population gap bounds.
+
+\subsection{Oracle-Measurability Foundations}
+
+\begin{definition}[Oracle-Measurable Policy]
+A policy $\pi: \Strings \to \Delta(\A)$ is \emph{oracle-measurable} if:
+\[
+\metric(\fstar(x), \fstar(x')) = 0 \implies \pi(\cdot \mid x) = \pi(\cdot \mid x')
+\]
+\end{definition}
+
+\begin{definition}[Oracle-Indexed Preference]
+A preference function $\text{pref}: \Strings \times \A \times \A \to [0, 1]$ is \emph{oracle-indexed} if:
+\[
+\metric(\fstar(x), \fstar(x')) = 0 \implies \text{pref}(x, a, a') = \text{pref}(x', a, a')
+\]
+for all actions $a, a'$.
+\end{definition}
+
+\subsection{DPO Loss Structure}
+
+\begin{definition}[Bradley-Terry Preference Model]
+\[
+P(a \succ a' \mid x) = \sigma(\beta \cdot (s(x, a) - s(x, a')))
+\]
+where $s(x, a) = \log \frac{\pi_\theta(a \mid x)}{\pi_{\text{ref}}(a \mid x)}$ and $\sigma(z) = \frac{1}{1 + e^{-z}}$.
+\end{definition}
+
+\begin{definition}[DPO Loss]
+\[
+\mathcal{L}_{\text{DPO}}(\theta; x, a_w, a_l) = -\log \sigma\left(\beta \cdot \left(\log \frac{\pi_\theta(a_w \mid x)}{\pi_{\text{ref}}(a_w \mid x)} - \log \frac{\pi_\theta(a_l \mid x)}{\pi_{\text{ref}}(a_l \mid x)}\right)\right)
+\]
+\end{definition}
+
+\subsection{Lipschitz Properties}
+
+\begin{lemma}[Sigmoid Lipschitz]\label{lem:sigmoid-lip}
+The sigmoid function $\sigma(z) = \frac{1}{1+e^{-z}}$ is $\frac{1}{4}$-Lipschitz:
+\[
+|\sigma(z) - \sigma(z')| \le \frac{1}{4}|z - z'|
+\]
+\end{lemma}
+
+\begin{proof}
+$\sigma'(z) = \sigma(z)(1 - \sigma(z))$. Since $\sigma(z) \in (0, 1)$, we have $\sigma'(z) \le \frac{1}{4}$ with maximum at $z = 0$.
+\end{proof}
+
+\begin{lemma}[Negative Log-Sigmoid Lipschitz]\label{lem:neglog-lip}
+The function $\ell(z) = -\log \sigma(z)$ is $1$-Lipschitz for $z \in \mathbb{R}$:
+\[
+|\ell(z) - \ell(z')| \le |z - z'|
+\]
+\end{lemma}
+
+\begin{proof}
+$\ell'(z) = \sigma(-z) \in (0, 1)$, so $|\ell'(z)| < 1$.
+\end{proof}
+
+\begin{assumption}[Policy-Lipschitz]\label{assum:policy-lip}
+The log-ratio difference is Lipschitz in the oracle value:
+\[
+\left|\log \frac{\pi_\theta(a \mid x)}{\pi_{\text{ref}}(a \mid x)} - \log \frac{\pi_\theta(a \mid x')}{\pi_{\text{ref}}(a \mid x')}\right| \le L_{\text{pol}} \cdot \metric(\fstar(x), \fstar(x'))
+\]
+for oracle-measurable policies.
+\end{assumption}
+
+\begin{theorem}[DPO Pointwise Lipschitz]\label{thm:dpo-lip}
+Under Assumption~\ref{assum:policy-lip}:
+\[
+|\mathcal{L}_{\text{DPO}}(\theta; x, a_w, a_l) - \mathcal{L}_{\text{DPO}}(\theta; x', a_w, a_l)| \le 2|\beta| L_{\text{pol}} \cdot \metric(\fstar(x), \fstar(x'))
+\]
+\end{theorem}
+
+\begin{proof}
+Let $s(x,a)=\log\frac{\pi_\theta(a\mid x)}{\pi_{\text{ref}}(a\mid x)}$ and
+$\Lambda(x)=s(x,a_w)-s(x,a_l)$. The loss is
+$\mathcal{L}_{\text{DPO}}(\theta;x,a_w,a_l)=-\log\sigma(\beta\,\Lambda(x))$.
+By Lemma~\ref{lem:neglog-lip}, $-\log\sigma$ is $1$-Lipschitz, so
+\[
+|\mathcal{L}(x)-\mathcal{L}(x')|\le |\beta|\,|\Lambda(x)-\Lambda(x')|.
+\]
+By the triangle inequality,
+$
+|\Lambda(x)-\Lambda(x')|
+\le |s(x,a_w)-s(x',a_w)|+|s(x,a_l)-s(x',a_l)|.
+$
+Assumption~\ref{assum:policy-lip} bounds each term by
+$L_{\text{pol}}\metric(\fstar(x),\fstar(x'))$. Combining yields
+\[
+|\mathcal{L}(x)-\mathcal{L}(x')|
+\le 2|\beta|L_{\text{pol}}\metric(\fstar(x),\fstar(x')),
+\]
+as claimed.
+\end{proof}
+
+\subsection{Training Equivalence}
+
+\begin{theorem}[DPO Training Equivalence]\label{app:thm:dpo-equiv}
+Assume:
+\begin{enumerate}
+    \item $\metric(\fstar(Z^{(R)}(X)), \fstar(X)) = 0$ almost surely
+    \item The policy $\pi_\theta$, reference $\pi_{\text{ref}}$, and preference oracle are all oracle-measurable/indexed
+\end{enumerate}
+Then the sets of population minimizers coincide:
+\[
+\argmin_\theta \E_X[\mathcal{L}_{\text{DPO}}(\theta; X)] = \argmin_\theta \E_Z[\mathcal{L}_{\text{DPO}}(\theta; Z^{(R)}(X))]
+\]
+\end{theorem}
+
+\begin{proof}
+Let $Y=\fstar(X)$. Oracle-measurability of the policies and oracle-indexing of the pair sampler imply that, conditional on $Y$, the joint law of $(a_w,a_l)$ and the log-ratio terms is identical whether the input is $X$ or $Z^{(R)}(X)$. By the Doob--Dynkin lemma there exists $\tilde{\mathcal{L}}_{\text{DPO}}$ with
+\[
+\mathcal{L}_{\text{DPO}}(\theta; x, a_w, a_l) = \tilde{\mathcal{L}}_{\text{DPO}}(\theta; \fstar(x), a_w, a_l).
+\]
+Exact preservation gives $\fstar(Z^{(R)}(X))=Y$ a.s., hence
+\[
+\E_X[\mathcal{L}_{\text{DPO}}(\theta; X)]
+= \E_Y\!\left[\E[\tilde{\mathcal{L}}_{\text{DPO}}(\theta; Y, a_w, a_l)\mid Y]\right]
+= \E_Z[\mathcal{L}_{\text{DPO}}(\theta; Z^{(R)}(X))].
+\]
+Since $\mathcal{L}^X_{\text{DPO}}(\theta) = \mathcal{L}^Z_{\text{DPO}}(\theta)$ for all $\theta$, the argmin sets coincide.
+\end{proof}
+
+\subsection{Quantitative Gap Bounds}
+
+\begin{theorem}[DPO Gap Bound]\label{app:thm:dpo-gap}
+Let $\Delta_R = \E[\metric(\fstar(Z^{(R)}(X)), \fstar(X))]$. Then:
+\[
+|\mathcal{L}^X_{\text{DPO}}(\theta) - \mathcal{L}^Z_{\text{DPO}}(\theta)| \le 2|\beta| L_{\text{pol}} \cdot \Delta_R
+\]
+\end{theorem}
+
+\begin{proof}
+\begin{align*}
+|\mathcal{L}^X_{\text{DPO}}(\theta) - \mathcal{L}^Z_{\text{DPO}}(\theta)|
+&= |\E_{X,a,a'}[\mathcal{L}_{\text{DPO}}(\theta; X, a_w, a_l) - \mathcal{L}_{\text{DPO}}(\theta; Z^{(R)}(X), a_w, a_l)]| \\
+&\le \E_{X,a,a'}[|\mathcal{L}_{\text{DPO}}(\theta; X, a_w, a_l) - \mathcal{L}_{\text{DPO}}(\theta; Z^{(R)}(X), a_w, a_l)|] \\
+&\le 2|\beta| L_{\text{pol}} \cdot \E_X[\metric(\fstar(Z^{(R)}(X)), \fstar(X))] \\
+&= 2|\beta| L_{\text{pol}} \cdot \Delta_R
+\end{align*}
+\end{proof}
+
+\subsection{GRPO-PL Bounds}
+
+\begin{definition}[Plackett-Luce Model]
+For $k$ candidates with scores $s_1, \ldots, s_k$:
+\[
+P(\sigma \mid s_1, \ldots, s_k) = \prod_{i=1}^{k} \frac{\exp(s_{\sigma(i)})}{\sum_{j=i}^{k} \exp(s_{\sigma(j)})}
+\]
+\end{definition}
+
+\begin{lemma}[Plackett-Luce Lipschitz]
+The negative log Plackett-Luce probability is Lipschitz in the scores:
+\[
+\left|-\log P(\sigma \mid s) + \log P(\sigma \mid s')\right| \le (k-1) \|s - s'\|_\infty
+\]
+\end{lemma}
+
+\begin{proof}
+Expand the log-likelihood:
+\[
+-\log P(\sigma \mid s)=\sum_{i=1}^{k-1}\left(\log\sum_{j=i}^k e^{s_{\sigma(j)}}-s_{\sigma(i)}\right).
+\]
+The log-sum-exp map is $1$-Lipschitz in $\|\cdot\|_\infty$ because its gradient is a probability simplex vector. The linear term is also $1$-Lipschitz in $\|\cdot\|_\infty$. Therefore each summand is $1$-Lipschitz, and summing $k-1$ terms yields
+\[
+\big|-\log P(\sigma \mid s)+\log P(\sigma \mid s')\big|\le (k-1)\|s-s'\|_\infty.
+\]
+\end{proof}
+
+\begin{theorem}[GRPO-PL Gap Bound]
+Under oracle-measurable policies and group generators:
+\[
+|\mathcal{L}^X_{\text{GRPO-PL}}(\theta) - \mathcal{L}^Z_{\text{GRPO-PL}}(\theta)| \le L_{\text{grpo}} \cdot \Delta_R
+\]
+where $L_{\text{grpo}} = (k-1) \cdot L_{\text{pol}}$.
+\end{theorem}
+
+\begin{proof}
+Let $s(X)$ denote the score vector with entries $s_i(X)=\log\pi(a_i\mid X)-\log\pi_{\text{ref}}(a_i\mid X)$. By Lemma~(Plackett-Luce Lipschitz),
+\[
+\big|-\log P(\sigma\mid s(X))+\log P(\sigma\mid s(Z))\big|
+\le (k-1)\|s(X)-s(Z)\|_\infty.
+\]
+Oracle-measurability and the policy-Lipschitz assumption give
+$\|s(X)-s(Z)\|_\infty \le L_{\text{pol}}\metric(\fstar(X),\fstar(Z))$.
+Taking expectations over $(X,Z^{(R)}(X),\sigma)$ yields
+$|\mathcal{L}^X_{\text{GRPO-PL}}(\theta)-\mathcal{L}^Z_{\text{GRPO-PL}}(\theta)| \le (k-1)L_{\text{pol}}\Delta_R$.
+\end{proof}
+
+\subsection{GRPO-RL Bounds}
+
+\begin{definition}[GRPO-RL Objective]
+\[
+\mathcal{L}_{\text{GRPO-RL}}(\theta) = -\E\left[\frac{1}{k}\sum_{i=1}^k \min(\rho_i A_i, \text{clip}(\rho_i) A_i)\right] + \beta \cdot D_{\text{KL}}(\pi_\theta \| \pi_{\text{ref}})
+\]
+where $\rho_i = \pi_\theta(a_i \mid x) / \pi_{\text{old}}(a_i \mid x)$ and $A_i = (r_i - \bar{r})/\sigma_r$.
+\end{definition}
+
+\begin{assumption}[Reward-Lipschitz]
+The reward function is Lipschitz in the oracle value:
+\[
+|r(x, a) - r(x', a)| \le L_{\text{rew}} \cdot \metric(\fstar(x), \fstar(x'))
+\]
+\end{assumption}
+
+\begin{theorem}[GRPO-RL Gap Bound]
+Under oracle-measurable policies and rewards, and assuming $\sigma_r \ge \sigma_{\min} > 0$ on sampled groups:
+\[
+|\mathcal{L}^X_{\text{GRPO-RL}}(\theta) - \mathcal{L}^Z_{\text{GRPO-RL}}(\theta)| \le L_{\text{grpo-rl}} \cdot \Delta_R
+\]
+where $L_{\text{grpo-rl}}$ depends on $L_{\text{pol}}$, $L_{\text{rew}}$, $\sigma_{\min}$, and the clipping parameter.
+\end{theorem}
+
+\begin{proof}
+Assume rewards are bounded and the empirical standard deviation satisfies $\sigma_r\ge\sigma_{\min}>0$. The reward-Lipschitz condition implies the reward vector is Lipschitz in $\metric(\fstar(X),\fstar(Z))$, and the z-score map $r\mapsto(r-\bar r)/\sigma_r$ is Lipschitz on $\{\sigma_r\ge\sigma_{\min}\}$ with constant $L_A$ depending on $(L_{\text{rew}},\sigma_{\min})$. The clipping operator is 1-Lipschitz and the KL term is Lipschitz under the policy-Lipschitz assumption. Combining these bounds yields a constant $L_{\text{grpo-rl}}$ such that
+$|\mathcal{L}^X_{\text{GRPO-RL}}(\theta)-\mathcal{L}^Z_{\text{GRPO-RL}}(\theta)|\le L_{\text{grpo-rl}}\Delta_R$.
+\end{proof}
+
+\subsection{Unified Framework}
+
+\begin{theorem}[Unified Preference Gap]\label{app:thm:unified-gap}
+For any expected preference learning loss with $L$-Lipschitz inner expectation:
+\[
+|\E_X[\mathcal{L}(\theta; X)] - \E_Z[\mathcal{L}(\theta; Z^{(R)}(X))]| \le L \cdot \Delta_R
+\]
+\end{theorem}
+
+\begin{proof}
+Let $(X,Z)$ denote the coupled pair $(X,Z^{(R)}(X))$. By assumption,
+$|\mathcal{L}(\theta;X)-\mathcal{L}(\theta;Z)|\le L\,\metric(\fstar(X),\fstar(Z))$.
+Taking expectations and applying Jensen's inequality gives
+\[
+|\E[\mathcal{L}(\theta;X)]-\E[\mathcal{L}(\theta;Z)]|
+\le \E\big[|\mathcal{L}(\theta;X)-\mathcal{L}(\theta;Z)|\big]
+\le L\,\E\big[\metric(\fstar(X),\fstar(Z))\big]
+= L\,\Delta_R.
+\]
+\end{proof}
+
+The adaptive-tree optimizer-transfer results are collected separately in
+Appendix~\ref{app:adaptive-tree-proofs}, where we give full human-readable
+proofs for both the expected-tree perturbation theorem and its
+high-probability version.

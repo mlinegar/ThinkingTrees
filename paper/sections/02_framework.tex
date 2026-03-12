@@ -1,0 +1,102 @@
+\section{Framework Overview}\label{sec:framework}
+
+\subsection{Preservation Objective}
+
+Consider a researcher who hands us a sprawling report, novel, or code base and wants a short artifact that still supports the questions they care about. They already know how to grade answers when the full text is available---they can run a painstaking rubric, consult a subject-matter expert, or query a deliberation-grade LLM. This grading procedure is the \emph{oracle} we want the hierarchy to preserve. The only reason summarization enters the story is that calling the oracle on every long document is too expensive, so we compress the document into smaller spans that can be checked locally while still behaving like the original text when fed back to the oracle.
+
+Section~\ref{sec:introduction} argued informally that hierarchical summarization is the only scalable route to this goal. We now slow down and make the objects explicit. The researcher specifies the oracle $\fstar: \Strings \to \Y$ and asks the summarizer to act as a faithful, local proxy for $\fstar$ on every span the hierarchy touches. Because $\fstar$ can be prohibitively expensive to evaluate, we typically instantiate it with a high-quality but limited resource $f$ (expert annotations, a trusted LLM, or a human-in-the-loop workflow).\footnote{Whenever we write $\fstar$ in the guarantees below, read it as ``the oracle we would like to preserve.'' In deployments we approximate $\fstar$ with an accessible $f$ that we trust enough to act as the auditing oracle. Any gap between $f$ and $\fstar$ simply becomes measurement error in the audit.}
+
+\begin{definition}[Oracle]\label{def:oracle}
+Let $\Strings$ denote the set of all finite token sequences with concatenation $\concat$ and identity $\emptystr$. An \emph{oracle} is a function $\fstar: \Strings \to \Y$ mapping any document to the task value $\fstar(x)$ that the researcher ultimately cares about.
+\end{definition}
+
+A summarizer $g: \Strings \rightsquigarrow \Strings$ is the compression primitive we audit. Every call to $g$ is \emph{local}: it sees at most a single leaf block or the concatenation of two child summaries. Composing these local calls yields the global hierarchical pipeline that shortens a book into a paragraph, yet the pipeline is entirely determined by how $g$ behaves on small neighborhoods. If the local behavior aligns with what the oracle expects, the entire pipeline can safely swap summaries for raw text. This locality is also what makes the verification procedure introduced below tractable.
+
+\begin{definition}[Summarizer]\label{def:summarizer}
+A \emph{summarizer} is a (possibly stochastic) map $g: \Strings \rightsquigarrow \Strings$. When $g$ uses randomness (temperature, seeds), statements about $g(x)$ are interpreted in expectation over this randomness.
+\end{definition}
+
+Two desiderata drive the theory. First, the oracle should return the same answer on the raw text and on the stored summary, i.e., $\fstar(x) = \fstar(g(x))$ for every realized span. This is the ``left panel'' intuition from Figure~\ref{fig:hierarchical_summarization}: the oracle should not be able to tell whether it was handed the book or the book's summary. Second, extra ``clean-up'' passes should be inert, meaning $\fstar(g(s)) = \fstar(s)$ whenever $s$ is itself a summary. When both desiderata hold, we can freely substitute summaries for text and freely re-edit summaries without corrupting $\fstar$.
+
+\subsection{Hierarchical Pipeline Construction}
+
+Operationally we partition the document into contiguous chunks $(b_1,\dots,b_k)$ that fit inside the model's context window and assign them to the leaves of a full binary tree $T$ (Figure~\ref{fig:hierarchical_summarization}). Each leaf is summarized once to produce $s_i = g(b_i)$, and every internal node $u$ receives the strings from its children, concatenates them, and calls the same summarizer again: $s_u := g(s_{u_L} \concat s_{u_R})$. Traversing the tree bottom-up shrinks an entire book into a single paragraph-width string at the root.
+
+During execution we only store the summaries $s_u$. The raw substrings $S(u)$ underneath a node exist conceptually so that we can compare the pipeline back to the document during a verification pass. Because $g$ always sees at most two child summaries, every operation fits inside a bounded context window, making the ``local'' $g$ literally the function invoked at each node and enabling the sampling-based checks formalized by the probabilistic audit (Definition~\ref{def:prob-audit}).
+
+Table~\ref{tab:notation-main} serves as a concise reference for the objects that appear throughout the paper. It names the realized blocks $(b_i)$, the latent spans $S(u)$, the stored summaries $s_u$, and the multi-round outputs $Z^{(R)}(x)$. With this dictionary in place, the informal description matches Figure~\ref{fig:hierarchical_summarization}: the left panel shows the oracle-equivalent replacements we hope for.
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{ll}
+\toprule
+Symbol & Meaning \\
+\midrule
+$\Strings$ & Set of finite token sequences (free monoid with concatenation $\concat$ and identity $\emptystr$) \\
+$\fstar: \Strings \to \Y$ & Oracle mapping strings to task values; $\metric: \Y \times \Y \to [0,\infty)$ scores discrepancies \\
+$g: \Strings \rightsquigarrow \Strings$ & Local summarizer (possibly stochastic) applied at every node of the hierarchy \\
+$x_0$ & Base document; realized leaves $b_i$ are contiguous substrings of $x_0$ \\
+$u$ & Node of merge tree $T$ with ordered children $u_L,u_R$ and latent span $S(u)$ \\
+$s_u$ & Stored summary at node $u$ ($s_u=g(b)$ at leaves; $s_u=g(s_{u_L}\concat s_{u_R})$ internally) \\
+$r$ & Root node with latent span $S(r)=x$ and stored summary $s_r = Z^{(1)}(x)$ \\
+$Z^{(R)}(x)$ & $R$th-round summary ($Z^{(1)}(x)=s_r$, $Z^{(R+1)}(x)=g(Z^{(R)}(x))$) \\
+$\E$ & Expectation over $g$'s randomness (all equalities are deterministic when $g$ is deterministic) \\
+\bottomrule
+\end{tabular}
+\caption{Notation recap for hierarchical summarization. The table extends Appendix~\ref{app:notation} so the main text can stand alone.}
+\label{tab:notation-main}
+\end{table}
+
+\subsection{The Three Consistency Conditions}
+
+With the mechanics in place, we can ask what it would take for the hierarchy to behave exactly like the full document. The informal pipeline suggests a natural ``global wish list'': summarizing, concatenating, and re-summarizing should behave like an algebraic sketch whose query answers coincide with the oracle. Classical mergeable summaries in databases \citep{agarwal2013mergeable} realize this wish when the statistics of interest are commutative (counts, heavy hitters). Text is far messier. Concatenation is non-commutative ($u \concat v \neq v \concat u$), the summarizer is stochastic, and the oracle may care about discourse that spans blocks. We therefore cannot assume that a global law such as $\fstar(u \concat v) = \fstar(g(u) \concat g(v))$ holds everywhere. Instead, we ask for a set of \emph{local} laws on the realized leaves and merges.
+
+\paragraph{Condition 1: Sufficiency (C1).} The summary of every realized leaf must be a valid proxy for the raw block:
+\begin{equation}\tag{C1}\label{eq:leaf_sufficiency}
+\forall \text{ realized leaf } b:\quad g(b) \sim b.
+\end{equation}
+Once this holds, a leaf summary may replace its source block anywhere because the two strings are equivalent at the oracle. If an LLM cannot satisfy this condition even on a single paragraph (e.g., by dropping a name), the hierarchy fails immediately.
+
+\paragraph{Condition 2: Idempotence (C2).} Hierarchical pipelines often include optional clean-up passes that re-summarize a stored output to smooth the style or reduce length. For this to be safe, the summarizer must be a fixed point on its own range:
+\begin{equation}\tag{C2}\label{eq:leaf_idempotence}
+\forall \text{ summary } s \in \operatorname{range}(g):\quad g(s) \sim s.
+\end{equation}
+Without this condition, repeatedly normalizing a string could cause task information to drift.
+
+\paragraph{Condition 3: Merge Consistency (C3).} The summarization pipeline must commute with concatenation modulo the oracle:
+\begin{equation}\tag{C3}\label{eq:leaf_compatibility}
+\forall u, v \in \Strings:\quad
+\underbrace{u \concat v}_{\text{Raw}} \;\sim\;
+\underbrace{g(u \concat v)}_{\text{Joint}} \;\sim\;
+\underbrace{g\big(g(u) \concat g(v)\big)}_{\text{Disjoint}}.
+\end{equation}
+The first link asserts that jointly summarizing a span preserves its task value. The second link asserts that splitting the inputs before summarization is information-equivalent to processing them together.
+
+\subsection{Oracle Equivalence}
+
+Two strings $u, v \in \Strings$ are \emph{equivalent at the oracle}, denoted $u \sim v$, if their oracle outputs are indistinguishable:
+\[
+u \sim v \;\Longleftrightarrow\; \metric\big(\fstar(u), \fstar(v)\big) = 0.
+\]
+All conditions are stated modulo this relation. Because $\metric$ is a (pseudo)metric, $\sim$ is reflexive, symmetric, and transitive.
+
+Propagating $\sim$ through concatenation requires a context-compatibility property of the oracle:
+
+\begin{assumption}[Context-compatible oracle]\label{ass:context}
+For every context $w \in \Strings$, $u \sim v$ implies both $w \concat u \sim w \concat v$ and $u \concat w \sim v \concat w$.
+\end{assumption}
+
+Appendix~\ref{sec:global} records structural conditions on $g$ and $\fstar$ that guarantee Assumption~\ref{ass:context}. Without context compatibility the equivalence relation would not be a congruence and local checks would fail to propagate.
+
+\subsection{Supervision and Factorization}
+
+Downstream learning signals depend only on the oracle. Let $\sstar: \Strings \times \A \to \mathbb{R}$ denote an arbitrary supervision signal (a score, reward, or loss) and let $\A$ be the action or label space. We assume this supervision factors through the task value.
+
+\begin{assumption}[Conditional factorization]\label{ass:CF}
+There exists a measurable $\bar{Q}: \Y \times \A \to \mathbb{R}$ such that for every action $a \in \A$,
+\[
+\E\!\left[\sstar(X, a) \mid \fstar(X)\right] = \bar{Q}(\fstar(X), a) \quad \text{almost surely.}
+\]
+\end{assumption}
+
+This assumption covers standard classification (the loss depends only on the latent label), preference learning (the reward depends on the task semantics), and noisy annotators (the conditioning is on $X$). Once $\fstar(X)$ is known, there is no additional supervision signal left in the raw phrasing.

@@ -1,0 +1,176 @@
+\section{Sampling Theory and IPW Estimators}
+\label{app:sampling}
+
+This appendix provides the sampling-theoretic foundations underlying the audit framework, including Inverse Probability Weighting (IPW) and Horvitz-Thompson estimation.
+
+\subsection{Design-Based Sampling Framework}
+
+\begin{definition}[Sampling Design]
+A sampling design specifies:
+\begin{enumerate}
+    \item A population $\mathcal{U}$ of size $N$
+    \item Inclusion probabilities $\pi_i = \Pr[i \in S]$ where $S$ is the sample
+    \item A sample of size $n$
+\end{enumerate}
+\end{definition}
+
+\begin{assumption}[Positive Inclusion]
+All inclusion probabilities are strictly positive: $\pi_i > 0$ for all $i \in \mathcal{U}$.
+\end{assumption}
+
+\subsection{Horvitz-Thompson Estimator}
+
+\begin{definition}[HT Estimator]
+For population total $T = \sum_{i \in \mathcal{U}} y_i$:
+\[
+\hat{T}_{\text{HT}} = \sum_{i \in S} \frac{y_i}{\pi_i}
+\]
+\end{definition}
+
+\begin{theorem}[HT Unbiasedness]
+The Horvitz-Thompson estimator is design-unbiased:
+\[
+\E_S[\hat{T}_{\text{HT}}] = T
+\]
+\end{theorem}
+
+\begin{proof}
+\begin{align*}
+\E_S[\hat{T}_{\text{HT}}] &= \E_S\left[\sum_{i \in S} \frac{y_i}{\pi_i}\right] \\
+&= \sum_{i \in \mathcal{U}} \E_S[R_i] \cdot \frac{y_i}{\pi_i} \\
+&= \sum_{i \in \mathcal{U}} \pi_i \cdot \frac{y_i}{\pi_i} \\
+&= \sum_{i \in \mathcal{U}} y_i = T
+\end{align*}
+where $R_i = \mathbf{1}[i \in S]$ is the sample inclusion indicator.
+\end{proof}
+
+\subsection{Hajek Estimator}
+
+\begin{definition}[Hajek Estimator]
+For population mean $\bar{Y} = \frac{1}{N}\sum_{i \in \mathcal{U}} y_i$:
+\[
+\hat{\bar{Y}}_{\text{Hajek}} = \frac{\sum_{i \in S} y_i / \pi_i}{\sum_{i \in S} 1 / \pi_i}
+\]
+\end{definition}
+
+\begin{theorem}[Hajek Consistency]
+Under mild regularity conditions, the Hajek estimator is consistent:
+\[
+\hat{\bar{Y}}_{\text{Hajek}} \xrightarrow{p} \bar{Y}
+\]
+as $n \to \infty$.
+\end{theorem}
+
+\begin{definition}[Effective Sample Size]
+\[
+n_{\text{eff}} = \frac{\left(\sum_{i \in S} 1/\pi_i\right)^2}{\sum_{i \in S} 1/\pi_i^2}
+\]
+\end{definition}
+
+\begin{lemma}[ESS Properties]
+\begin{enumerate}
+    \item $n_{\text{eff}} > 0$ when $|S| > 0$
+    \item $n_{\text{eff}} \le |S|$ with equality when $\pi_i = \pi$ constant
+    \item $n_{\text{eff}}$ decreases as weight variability increases
+\end{enumerate}
+\end{lemma}
+
+\subsection{Connection to Audit Framework}
+
+The probabilistic audit uses stratified sampling across tree structure:
+
+\begin{definition}[Stratified Audit Sampling]
+\begin{enumerate}
+    \item \textbf{Leaf stratum:} Sample $n_\ell$ leaves uniformly, compute violation indicators
+    \item \textbf{Merge stratum:} Sample $n_m$ internal nodes, compute merge violations
+    \item \textbf{Idempotence stratum:} Sample $n_s$ summaries, test re-summarization
+\end{enumerate}
+\end{definition}
+
+\begin{theorem}[Stratified Audit Unbiasedness]
+The stratified estimator $\hat{p}_{\text{strat}} = \sum_k w_k \hat{p}_k$ is unbiased for the overall violation rate:
+\[
+\E[\hat{p}_{\text{strat}}] = \sum_k w_k p_k = p
+\]
+where $w_k$ are stratum weights and $p_k$ are within-stratum violation rates.
+\end{theorem}
+
+\subsection{Variance Reduction}
+
+\begin{theorem}[Stratification Variance]
+\[
+\text{Var}(\hat{p}_{\text{strat}}) = \sum_k \frac{w_k^2 p_k(1-p_k)}{n_k} \le \frac{p(1-p)}{n}
+\]
+with equality when strata are homogeneous.
+\end{theorem}
+
+\begin{proposition}[Optimal Allocation]
+Variance is minimized by Neyman allocation:
+\[
+n_k \propto w_k \sqrt{p_k(1-p_k)}
+\]
+\end{proposition}
+
+In practice, since $p_k$ is unknown, proportional allocation $n_k \propto w_k$ is used.
+
+\subsection{IPW for Biased Predictions}
+
+When audit sampling is non-uniform (e.g., focusing on high-risk regions), IPW corrects for selection bias.
+
+\begin{definition}[IPW Violation Estimator]
+\[
+\hat{p}_{\text{IPW}} = \frac{1}{n} \sum_{i \in S} \frac{\mathbf{1}\{D(\fstar(z_i), \fstar(x_i)) > 0\}}{\pi(x_i)}
+\]
+where $\pi(x) = \Pr[x \in S]$ is the sampling probability.
+\end{definition}
+
+\begin{theorem}[IPW Unbiasedness for Audit]
+If $\pi(x) > 0$ for all $x$ in the support:
+\[
+\E[\hat{p}_{\text{IPW}}] = \E_X[\mathbf{1}\{D(\fstar(Z(X)), \fstar(X)) > 0\}] = p_{\text{true}}
+\]
+\end{theorem}
+
+\subsection{Design-Based Supervised Learning}
+
+The DSL framework uses these sampling principles for unbiased estimation with learned predictions.
+
+\begin{definition}[DSL Estimator]
+Given predictions $\hat{y}_i$ and observed outcomes $y_i$ for sampled units:
+\[
+\hat{\mu}_{\text{DSL}} = \frac{1}{N}\sum_{i \in \mathcal{U}} \hat{y}_i + \frac{1}{n}\sum_{i \in S} \frac{y_i - \hat{y}_i}{\pi_i}
+\]
+\end{definition}
+
+\begin{theorem}[DSL Unbiasedness]
+The DSL estimator is design-unbiased regardless of prediction quality:
+\[
+\E_S[\hat{\mu}_{\text{DSL}}] = \bar{Y}
+\]
+\end{theorem}
+
+\begin{theorem}[Better Predictions, Smaller Variance]
+If predictions are more accurate (lower MSE), DSL variance decreases:
+\[
+\text{Var}(\hat{\mu}_{\text{DSL}}) = \frac{1}{N^2}\sum_{i \in \mathcal{U}} \frac{(y_i - \hat{y}_i)^2}{\pi_i}(1 - \pi_i) + O(n^{-1})
+\]
+\end{theorem}
+
+\subsection{Asymptotic Results}
+
+\begin{theorem}[CLT for Stratified Estimator]
+Under regularity conditions, as $n \to \infty$:
+\[
+\sqrt{n}(\hat{p}_{\text{strat}} - p) \xrightarrow{d} N(0, \sigma^2_{\text{strat}})
+\]
+where $\sigma^2_{\text{strat}} = \sum_k w_k^2 p_k(1-p_k) / \alpha_k$ and $\alpha_k = n_k/n$.
+\end{theorem}
+
+\begin{theorem}[Confidence Interval Coverage]
+The interval $\hat{p}_{\text{strat}} \pm z_{1-\alpha/2} \hat{\sigma}_{\text{strat}} / \sqrt{n}$ achieves asymptotically exact coverage:
+\[
+\Pr\left[p \in \left(\hat{p}_{\text{strat}} \pm z_{1-\alpha/2} \frac{\hat{\sigma}_{\text{strat}}}{\sqrt{n}}\right)\right] \to 1 - \alpha
+\]
+\end{theorem}
+
+These CLT statements are standard; we include them to clarify how stratified estimators support asymptotic confidence intervals in the audit setting.

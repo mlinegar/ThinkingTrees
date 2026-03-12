@@ -9,7 +9,7 @@ import Mathlib.Topology.Order.OrderClosed
 import Mathlib.Topology.Sequences
 
 /-!
-# FormalProofs/Probability/HellySelection.lean
+# FormalProofs/CLT/HellySelection.lean
 
 Compactness/Helly selection step for CDFs on rationals.
 We extract a subsequence with pointwise convergence on `ℚ` and record the monotone limit.

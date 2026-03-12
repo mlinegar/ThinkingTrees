@@ -15,8 +15,8 @@ python3
 
 ```bash
 ./scripts/start_dual_servers.sh
-# Small model: GPUs 0,1 → Port 8000 (Nemotron-30B-FP8)
-# Large model: GPUs 2,3 → Port 8001 (GenRM-NVFP4-235B)
+# Small model: GPUs 0,1 → Port 8000 (Nemotron-30B-NVFP4)
+# Large model: GPUs 2,3 → Port 8001 (Qwen3.5-397B-A17B-NVFP4 teacher)
 ```
 
 ### Single Server Options
@@ -25,6 +25,9 @@ python3
 ./scripts/start_dual_servers.sh --small-only  # Just port 8000
 ./scripts/start_dual_servers.sh --large-only  # Just port 8001
 ./scripts/start_vllm.sh <profile>             # Specific model profile
+./scripts/download_hf_model.sh Qwen/Qwen3-Embedding-8B  # Optional pre-download
+./scripts/start_embedding_server.sh           # Multilingual embedding server (port from settings)
+./scripts/start_vllm.sh qwen3-embedding-8b --port 8003  # (Legacy) embedding server launch
 ```
 
 ### Stop Servers
@@ -42,16 +45,92 @@ python3
 ./scripts/start_dual_servers.sh
 
 ./scripts/run_training_pipeline.sh \
+  --task manifesto_rile \
   --output-dir outputs/train_$(date +%Y%m%d_%H%M) \
   --train-samples 100 \
   --val-samples 30 \
   --test-samples 30 \
-  --enable-genrm \
-  --genrm-port 8001 \
+  --max-chunk-chars 8000 \
   --use-mini-trees \
   --optimizer bootstrap_random_search \
   --optimizer-budget heavy \
   --n-iterations 2
+```
+
+## Common Workflow: Batched RILE Paper Example
+
+```bash
+# Labour 1983 + comparison manifestos, batched path, 8000-char chunks
+python scripts/run_manifesto_batched_example.py \
+  --ids 51320_198306 51620_198306 51320_199705 \
+  --chunk-size 8000 \
+  --port 8000
+```
+
+## Common Workflow: Optimized Batched RILE Example
+
+```bash
+# One command: optimize scorer + leaf/merge summarizers, then run selected IDs
+# This runs fixed chunking with adaptive/honesty paths explicitly disabled.
+./scripts/run_manifesto_optimized_example.sh \
+  --ids 51320_198306 51620_198306 \
+  --chunk-size 8000 \
+  --train-samples 100 \
+  --val-samples 30 \
+  --port 8000
+```
+
+## Common Workflow: Method Stack Compare (Fast Smoke)
+
+```bash
+python scripts/run_method_compare.py \
+  --output-root outputs/method_compare_$(date +%Y%m%d_%H%M%S)
+
+python scripts/report_method_compare.py \
+  --manifest outputs/method_compare_YYYYmmdd_HHMMSS/method_compare_manifest.json
+```
+
+## Common Workflow: LawStress Benchmark (MVP)
+
+```bash
+# Generate synthetic C1/C2/C3 stress benchmark for information extraction
+# (records + JSONL docs; not a STEM/math/coding task generator)
+python scripts/generate_manifesto_lawstress.py \
+  --output-dir outputs/lawstress_mvp \
+  --teacher-base-url http://localhost:8000/v1 \
+  --teacher-model /mnt/data/models/nvidia/Qwen3.5-397B-A17B-NVFP4
+
+# Stage 1: summarize only (target small model)
+python scripts/eval_manifesto_lawstress.py \
+  --records outputs/lawstress_mvp/lawstress_records.jsonl \
+  --output-dir outputs/lawstress_eval \
+  --mode summarize_only \
+  --summarizer-model qwen3.5-4b
+
+# Stage 2: score-only pass with teacher scorer (GenRM disabled)
+python scripts/eval_manifesto_lawstress.py \
+  --records outputs/lawstress_mvp/lawstress_records.jsonl \
+  --output-dir outputs/lawstress_eval \
+  --mode score_and_judge_only \
+  --scorer-model /mnt/data/models/nvidia/Qwen3.5-397B-A17B-NVFP4 \
+  --disable-genrm
+```
+
+## Common Workflow: Teacher Trace Bootstrap (Real Anchors)
+
+```bash
+# Real manifesto -> score-preserving expansion -> summary traces
+./scripts/start_vllm.sh qwen3.5-397b-a17b-nvfp4 --port 8000 --cuda-devices 0,1,2,3
+
+python scripts/generate_manifesto_teacher_traces.py \
+  --output-dir outputs/teacher_trace_bootstrap \
+  --train-size 120 \
+  --val-size 30 \
+  --test-size 30 \
+  --teacher-base-url http://localhost:8000/v1 \
+  --teacher-model /mnt/data/models/nvidia/Qwen3.5-397B-A17B-NVFP4 \
+  --scorer-base-url http://localhost:8000/v1 \
+  --scorer-model /mnt/data/models/nvidia/Qwen3.5-397B-A17B-NVFP4
 ```
 
 ---
@@ -62,6 +141,11 @@ python3
 |--------|---------|
 | `start_dual_servers.sh` | Start both small (8000) and large (8001) models |
 | `run_training_pipeline.sh` | Domain-agnostic training with DSPy optimization (default: manifesto_rile) |
+| `run_method_compare.py` | One-command profile matrix for LLM / embedding / neural-operator / generator comparisons |
+| `report_method_compare.py` | Aggregates compare manifest into JSON + Markdown summaries |
+| `run_manifesto_batched_example.py` | Batched manifesto-ID runner for paper examples (chunk stats + predicted RILE) |
+| `run_manifesto_optimized_example.sh` | End-to-end optimized RILE example (train DSPy modules, then evaluate IDs) |
+| `generate_manifesto_teacher_traces.py` | Real-anchor teacher trace generator (score-preserving expansion + 2-hop summaries) |
 | `start_vllm.sh <profile>` | Start single model (reads config/settings.yaml) |
 | `stop_small_servers.sh` | Gracefully stop servers |
 
@@ -71,57 +155,125 @@ python3
 
 ```
 src/
-├── core/
-│   ├── data_models.py      # Node, Tree, AuditStatus/Result
-│   ├── llm_client.py       # LLMConfig, LLMClient (vLLM/SGLang/OpenAI)
-│   ├── signatures.py       # DSPy signatures (RecursiveSummary, OracleJudge, etc.)
-│   ├── strategy.py         # SummarizationStrategy, DSPyStrategy, CallableStrategy
-│   ├── scoring.py          # OracleScore, ScoringOracle
-│   ├── ops_checks.py       # CheckType, CheckConfig, CheckResult
-│   ├── batch_processor.py  # Async batched LLM client + request pooling
-│   ├── batch_orchestrator.py  # Global pipelined tree batching across documents
-│   └── output_parser.py    # Case-insensitive LLM output parsing
+├── core/                                  # Shared + Semantic Forests orchestration
+│   ├── data_models.py                     # Node, Tree, AuditStatus/Result
+│   ├── llm_client.py                      # LLMConfig, LLMClient (vLLM/SGLang/OpenAI)
+│   ├── strategy.py                        # SummarizationStrategy, DSPyStrategy, CallableStrategy
+│   ├── scoring.py                         # OracleScore, ScoringOracle
+│   ├── ops_checks.py                      # CheckType, CheckConfig, CheckResult
+│   ├── batch_processor.py                 # [SF] Async batched LLM client + request pooling
+│   ├── batch_orchestrator.py              # [SF] Global pipelined tree batching across documents
+│   ├── gpu_orchestrator.py                # [SF] GPU resource management
+│   └── vllm_runtime.py                    # [SF] vLLM-specific runtime adapter
 │
-├── tree/
-│   ├── builder.py          # TreeBuilder, BuildConfig, build(), build_test_tree()
-│   ├── auditor.py          # Auditor, AuditConfig, ReviewQueue
-│   ├── labeled.py          # LabeledNode, LabeledTree, LabeledDataset
-│   └── verification.py     # TreeVerifier, OracleNodeVerifier
+├── tree/                                  # C-TreePO core + shared
+│   ├── builder.py                         # TreeBuilder, BuildConfig, BuildResult
+│   ├── auditor.py                         # [CT] Auditor, AuditConfig, C1/C2/C3 checking
+│   ├── ipw.py                             # [CT] TreeIPW, Horvitz-Thompson, empirical Bernstein
+│   ├── ipw_simulation.py                  # [CT] IPW coverage validation
+│   ├── ipw_toy_problems.py                # [CT] Worst-case audit scenarios
+│   ├── mergeable_ablation.py              # [CT] k-m phase, chunk-quality sweep
+│   ├── learned_sketch.py                  # [CT] Neural sketch trained from oracle queries
+│   ├── learned_sketch_simulation.py       # [CT] Learned sketch vs HLL comparison
+│   ├── private_sfm_comparison.py          # [SF] Privacy-utility tradeoff
+│   ├── verification.py                    # OracleNodeVerifier
+│   └── labeled.py                         # LabeledNode, LabeledTree
 │
-├── training/
-│   ├── run_pipeline.py     # Main training entry point
-│   ├── preference/         # PreferencePair, PreferenceCollector, GenRMJudge
-│   ├── optimization/       # OptimizerRegistry, GEPA, MIPRO, Bootstrap
-│   ├── judges/             # Pairwise comparison judges (DSPy, GenRM, Oracle)
-│   ├── metrics/            # Training metrics
-│   ├── data_sources/       # Training data sources
-│   └── judge_optimization.py  # JudgeOptimizer
+├── preprocessing/                         # Fixed (shared) + adaptive (SF)
+│   ├── chunker.py                         # chunk_for_ops (fixed path) + AdaptiveChunkingConfig
+│   ├── adaptive_windows.py                # [SF] Coarse-to-fine windowing
+│   ├── window_adapters.py                 # [SF] Modality-specific adapters
+│   └── visual_feedback.py                 # [SF] Content-weighted feedback
+│
+├── runtime/                               # [SF] Runtime evaluation
+│   ├── loop.py, contracts.py, backbone.py # Core runtime
+│   ├── memory.py, verifier.py, repair.py  # Budget, verification, retry
+│   └── adapters/                          # RULER, LongBench, ContextBench
+│
+├── training/                              # Mostly [SF]
+│   ├── run_pipeline.py                    # [SF] Main training entry point
+│   ├── trl_training.py                    # [SF] TRL-based DPO/GRPO
+│   ├── preference/                        # [SF] PreferencePair, collection, GenRM
+│   └── judge_optimization.py              # Judge model optimization
+│
+├── feedback/                              # [SF] Feedback infrastructure
+│   ├── types.py, collector.py             # Feedback collection
+│   └── server.py, store.py               # Feedback service
+│
+├── stats/                                 # Shared
+│   └── sampling.py                        # PPS, systematic sampling
 │
 ├── tasks/
-│   ├── base.py             # TaskPlugin, AbstractTask, ScaleDefinition
-│   ├── registry.py         # TaskRegistry
-│   ├── scoring.py          # Generic ScoringTask
-│   └── manifesto/          # RILE building blocks (default task)
+│   └── manifesto/                         # RILE example (C-TreePO running example)
+│       ├── data_loader.py                 # ManifestoDataset, ManifestoSample
+│       ├── pipeline.py                    # ManifestoPipeline (chunk→summarize→merge→score)
+│       ├── rubrics.py                     # RILE_PRESERVATION_RUBRIC
+│       ├── oracle.py                      # RILE similarity scorer
+│       └── constants.py                   # RILE_MIN/MAX/RANGE
 │
-├── datasets/               # Dataset plugins (manifesto, jsonl)
-├── pipelines/              # BatchedDocPipeline
-└── preprocessing/
-    └── chunker.py          # DocumentChunker (token-based)
+├── harness.py                             # [CT] TreeAudit public API
+└── datasets/                              # Dataset plugins (manifesto, jsonl)
 
 scripts/
-├── start_dual_servers.sh       # Start small+large models
-├── run_training_pipeline.sh    # Bash wrapper for training
-├── stop_small_servers.sh       # Graceful shutdown
-└── start_vllm.sh               # Generic model launcher
+├── run_manifesto_batched_example.py       # [CT] Batched manifesto-ID running example
+├── run_ipw_ci_simulation.py               # [CT] IPW CI validation
+├── run_mergeable_*.py                     # [CT] Theory simulations
+├── run_learned_sketch_*.py                # [CT] Sec 7.4 learned sketch
+├── plot_*.py                              # Paper figures
+├── run_runtime_eval.py                    # [SF] Benchmark evaluation
+├── run_training_pipeline.sh               # [SF] Full training
+├── start_dual_servers.sh                  # Server management
+└── start_vllm.sh                          # Model launcher
 
-config/
-└── settings.yaml               # Model configs, generation params, all settings
+lean3/FormalProofs/                        # [CT] Machine-verified proofs (92 files)
 
-data/
-├── raw/manifesto_project_full/ # Raw Manifesto corpus
-├── results/manifesto_rile/     # Experiment results
-└── checkpoints/                # Model checkpoints
+# [CT] = C-TreePO scope, [SF] = Semantic Forests scope, unmarked = shared
 ```
+
+---
+
+## Paper Scope: C-TreePO vs Semantic Forests
+
+This codebase serves two papers from a single shared repo.
+
+### C-TreePO (Theory + Certification)
+
+Fixed chunking, three local laws, probabilistic audit, formal proofs, controlled simulations.
+
+| Component | Key Files |
+|-----------|-----------|
+| Three local laws (C1/C2/C3) | `src/tree/auditor.py`, `src/core/ops_checks.py` |
+| IPW audit theory | `src/tree/ipw.py`, `src/tree/ipw_simulation.py`, `src/tree/ipw_toy_problems.py` |
+| Mergeable ablations | `src/tree/mergeable_ablation.py` |
+| Learned sketch (Sec 7.4) | `src/tree/learned_sketch.py`, `src/tree/learned_sketch_simulation.py` |
+| Lean proofs | `lean3/FormalProofs/` (92 files) |
+| Public harness | `src/harness.py` |
+| Simulations | `scripts/run_ipw_ci_simulation.py`, `scripts/run_mergeable_*.py`, `scripts/run_learned_sketch_simulation.py` |
+| RILE example | `src/tasks/manifesto/` (simple fixed-chunking path) |
+
+### Semantic Forests (Systems + Scale)
+
+Learned/adaptive chunking, multi-tree orchestration, runtime evaluation, preference training at scale.
+
+| Component | Key Files |
+|-----------|-----------|
+| Adaptive chunking | `src/preprocessing/adaptive_windows.py`, `src/preprocessing/window_adapters.py` |
+| Batch orchestration | `src/core/batch_orchestrator.py`, `src/core/batch_processor.py` |
+| Runtime evaluation | `src/runtime/` |
+| Training pipeline | `src/training/run_pipeline.py`, `src/training/trl_training.py`, `src/training/preference/` |
+| Feedback infra | `src/feedback/` |
+| SFM comparison | `src/tree/private_sfm_comparison.py` |
+| Benchmarks | `scripts/run_runtime_eval.py`, `scripts/run_training_pipeline.sh` |
+
+### Shared Infrastructure
+
+Tree builder (`src/tree/builder.py`), data models (`src/core/data_models.py`), strategy protocol (`src/core/strategy.py`), LLM client (`src/core/llm_client.py`), fixed chunker (`src/preprocessing/chunker.py` with `strategy="axis"`), sampling utilities (`src/stats/sampling.py`), config (`config/settings.yaml`), server scripts.
+
+---
+
+## Theory Docs
+
+- `docs/treepo_preference_optimization.md` # TreePO formalization map (DPO/GRPO/PPO, sampling, DSL/IPW links)
 
 ---
 
@@ -151,7 +303,7 @@ predictor = task.predictor_factory()
 |------|---------|-------------|
 | `--domain` | manifesto_rile, summarization | Domain plugin to use (default: manifesto_rile) |
 | `--start-server` | - | Auto-start vLLM (default: requires running server) |
-| `--enable-genrm` | - | Use GenRM for preference learning |
+| `--enable-genrm` | blocked | Deprecated; use local-law bootstrap (teacher scorer + proxy/GEPA), no GenRM |
 | `--optimizer` | gepa, bootstrap, bootstrap_random_search, mipro, labeled_fewshot | Optimization algorithm |
 | `--optimizer-budget` | light, medium, heavy | Optimization intensity |
 | `--n-iterations` | 1, 2+, 0 | 1=single-pass, 2+=iterative, 0=until convergence |
@@ -160,12 +312,16 @@ predictor = task.predictor_factory()
 
 ## Models Reference
 
-| Model | Profile | GPUs | Port | Use Case |
-|-------|---------|------|------|----------|
-| Nemotron-30B-FP8 | `nemotron-30b-fp8` | 0,1 | 8000 | Default inference |
-| GenRM-NVFP4-235B | `genrm-nvfp4` | 2,3 | 8001 | Preference scoring |
-| Qwen3-80B | `qwen-80b` | 2 GPUs | - | Large training target |
-| Qwen3-30B-Thinking | `qwen-30b-thinking` | 4 GPUs | - | Draft model |
+**Default: Always use NVFP4 quantized versions.** All models below are NVFP4 unless noted.
+
+| Model | Profile | GPUs | Memory | Use Case |
+|-------|---------|------|--------|----------|
+| Qwen3-235B-A22B-Instruct | `qwen-235b` | 4 | ~34 GiB | Best quality inference (default) |
+| Nemotron-30B-A3B | `nemotron-30b-nvfp4` | 2 | ~17 GiB | Fast inference |
+| Qwen3-30B-A3B-Thinking | `qwen-30b-thinking` | 4 | ~17 GiB | Reasoning tasks |
+| Qwen3-Next-80B-A3B-Instruct | `qwen-80b` | 2 | ~22 GiB | Mid-size inference |
+| Qwen3.5-397B-A17B | `qwen3.5-397b-a17b-nvfp4` | 4 | ~95 GiB/GPU | Large teacher/scorer |
+| GLM-4.6 | `glm-4.6` | 4 | ~47 GiB | Alternative large model |
 
 ---
 
@@ -175,7 +331,8 @@ predictor = task.predictor_factory()
 
 ```bash
 curl http://localhost:8000/v1/models  # Small model
-curl http://localhost:8001/v1/models  # Large model (GenRM)
+curl http://localhost:8001/v1/models  # Large model (teacher/scorer)
+curl http://localhost:8003/v1/models  # Tiny embedding model (optional)
 ```
 
 ### View server logs
@@ -197,7 +354,7 @@ nvidia-smi
 |-------|----------|
 | "Connection refused" | Server not running. Start with `./scripts/start_dual_servers.sh` |
 | OOM errors | Stop other servers with `./scripts/stop_small_servers.sh --all` first |
-| Slow startup | GenRM can take 2-3 min to load. Check logs for "Warmup complete" |
+| Slow startup | Large NVFP4 models can take 2-3 min to load. Check logs for "Warmup complete" |
 | Port already in use | Kill existing process with `./scripts/stop_small_servers.sh --all` |
 
 ### Resume interrupted training

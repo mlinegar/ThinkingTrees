@@ -157,3 +157,24 @@ subsets to quantify judge error and include it in reporting.
 Training optimizes the sampled distribution; evaluation (IPW) re-targets the
 population distribution.
 
+## 11) Oracle utility transport (formalized)
+
+Recent Lean results connect oracle-valued utilities to tree sampling without
+separability assumptions. See `FormalProofs/OPT/OracleUtility.lean` and
+`FormalProofs/DSL/TreeIPW.lean`.
+
+Key statements:
+- `expected_utility_bound_pmf` and `expected_utility_bound_pmf_bounded`: expected
+  oracle-utility gap is bounded by expected oracle distortion; `expected_utility_bound_ZR`
+  and `expected_utility_bound_ZR_summable` give the ZR/multi-round forms.
+- `expected_utility_noise_bound_pmf` and `expected_utility_noise_bound_pmf_bounded`:
+  sensitivity to noisy truth labels is controlled by `L * dist(fhat x, fstar x)`
+  (summability is explicit or automatic under boundedness).
+- `ExpectedDocOracleUtility`, `ExpectedTreeOracleUtility`,
+  `tree_oracle_utility_gap_bounded`, `tree_oracle_utility_gap_bounded_ipw`:
+  tree/IPW recovery of oracle utility gaps via expected tree distortion.
+- `utility_gap_unified_gap_pure` plugs oracle-utility gaps into
+  `unified_preference_gap_bounded` under the pure-doc distribution.
+
+Calibration note: judge/surrogate error bounds are in
+`FormalProofs/DSL/JudgeCalibration.lean` (see `surrogate_bound`).

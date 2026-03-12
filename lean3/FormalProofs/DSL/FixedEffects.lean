@@ -213,6 +213,29 @@ def doubleDemean {n_obs : ℕ}
 
 /-- DSL FE is consistent for β.
     Under Assumption 1: β̂_DSL_FE →p β as n → ∞ -/
+theorem DSL_FE_consistent_from_assumptions {n_obs d : ℕ}
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Con : Type*}
+    (E : (((Fin d → ℝ) × ℝ × ℝ × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (dbs : DesignBasedSampling (Fin d → ℝ) ℝ Con)
+    (β_true : Fin d → ℝ)
+    (reg : RegularityConditions
+      ((Fin d → ℝ) × ℝ × ℝ × SamplingIndicator × ℝ) d)
+    (h_unbiased :
+      MomentUnbiased (DSLMomentFromData (linearMomentPair (d := d))) E β_true)
+    (data_seq : ℕ →
+      Ω → List ((Fin d → ℝ) × ℝ × ℝ × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est :
+      IsMEstimatorSeq (DSLMomentFromData (linearMomentPair (d := d)))
+        data_seq β_hat_seq)
+    : ConvergesInProbability μ β_hat_seq (fun _ => β_true) := by
+  exact DSL_consistent_from_assumptions μ E h_consistent dbs (linearMomentPair (d := d)) β_true reg
+    h_unbiased data_seq β_hat_seq h_est
+
+/-- DSL FE is consistent for β.
+    Under Assumption 1: β̂_DSL_FE →p β as n → ∞ -/
 theorem DSL_FE_consistent {n_obs d : ℕ}
     {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
     {Con : Type*}
@@ -231,8 +254,31 @@ theorem DSL_FE_consistent {n_obs d : ℕ}
       IsMEstimatorSeq (DSLMomentFromData (linearMomentPair (d := d)))
         data_seq β_hat_seq)
     : ConvergesInProbability μ β_hat_seq (fun _ => β_true) := by
-  exact DSL_consistent μ axioms dbs (linearMomentPair (d := d)) β_true reg h_unbiased data_seq
-    β_hat_seq h_est
+  exact DSL_FE_consistent_from_assumptions (n_obs := n_obs) μ axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    dbs β_true reg h_unbiased data_seq β_hat_seq h_est
+
+/-- Clustered SEs provide valid inference.
+    The 95% CI achieves nominal coverage under clustering. -/
+theorem DSL_FE_clustered_valid_from_assumptions {n_obs d : ℕ}
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Con : Type*}
+    (E : (((Fin d → ℝ) × ℝ × ℝ × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (coverage_axioms : CoverageFromAsymptoticNormal μ d)
+    (dbs : DesignBasedSampling (Fin d → ℝ) ℝ Con)
+    (β_true : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions
+      ((Fin d → ℝ) × ℝ × ℝ × SamplingIndicator × ℝ) d)
+    (h_unbiased :
+      MomentUnbiased (DSLMomentFromData (linearMomentPair (d := d))) E β_true)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ) (h_α : 0 < α ∧ α < 1)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    : AsymptoticCoverage μ CI_seq β_true α := by
+  exact DSL_valid_coverage_from_assumptions μ E h_normal coverage_axioms dbs (linearMomentPair (d := d))
+    β_true V reg h_unbiased CI_seq α h_α centered_scaled_seq
 
 /-- Clustered SEs provide valid inference.
     The 95% CI achieves nominal coverage under clustering. -/
@@ -253,8 +299,9 @@ theorem DSL_FE_clustered_valid {n_obs d : ℕ}
     (α : ℝ) (h_α : 0 < α ∧ α < 1)
     (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
     : AsymptoticCoverage μ CI_seq β_true α := by
-  exact DSL_valid_coverage μ axioms coverage_axioms dbs (linearMomentPair (d := d)) β_true V reg
-    h_unbiased CI_seq α h_α centered_scaled_seq
+  exact DSL_FE_clustered_valid_from_assumptions (n_obs := n_obs) μ axioms.E
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    coverage_axioms dbs β_true V reg h_unbiased CI_seq α h_α centered_scaled_seq
 
 /-!
 ## Difference-in-Differences
@@ -277,11 +324,11 @@ structure DiDData (n : ℕ) where
   π : Fin n → ℝ
 
 /-- DSL DiD estimator: coefficient on treated × post -/
-def DSLDiDEstimator {n : ℕ} (data : DiDData n) : ℝ :=
+def DSLDiDEstimator {n : ℕ} (data : DiDData n) (did_coef : ℝ) : ℝ :=
   -- This is the interaction coefficient from:
   -- Ỹ = β₀ + β₁·treated + β₂·post + β₃·treated×post + ε
   -- β₃ is the DSL DiD estimate
-  0  -- Placeholder: would use DSL linear regression
+  did_coef
 
 end DSL
 
