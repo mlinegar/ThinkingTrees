@@ -40,9 +40,13 @@ import FormalProofs.DSL.LinearRegression
 import FormalProofs.DSL.LogisticRegression
 import FormalProofs.DSL.CategoryProportion
 import FormalProofs.DSL.FixedEffects
+import FormalProofs.DSL.ConcreteCoverage
 import FormalProofs.DSL.TreeIPW
+import FormalProofs.DSL.RuntimeCertificates
 import FormalProofs.DSL.MergeableCertificates
 import FormalProofs.DSL.TreePOEndToEnd
+import FormalProofs.DSL.LabelRateBounds
+import FormalProofs.Econometrics.OLS.AsymptoticOLS
 
 set_option linter.mathlibStandardSet false
 
@@ -156,6 +160,310 @@ theorem DSL_valid_inference
     coverage_axioms dbs m β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq
     CI_seq α hα
 
+/-- Generic constructive DSL valid inference. This replaces the blanket
+coverage-transfer axiom with an explicit normal-coverage construction. -/
+theorem DSL_valid_inference_from_construction_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (E : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ)
+    (coverage_construction :
+      NormalCoverageConstruction μ centered_scaled_seq CI_seq β_star α V) :
+    ValidInference μ β_hat_seq β_star centered_scaled_seq V CI_seq α := by
+  refine ⟨?_, ?_, ?_⟩
+  · exact DSL_consistent_from_assumptions μ E h_consistent dbs m β_star reg h_unbiased data_seq
+      β_hat_seq h_est
+  · exact DSL_asymptotic_normal_from_assumptions μ E h_normal dbs m β_star V reg h_unbiased
+      centered_scaled_seq
+  · exact DSL_valid_coverage_from_construction_from_assumptions μ E h_normal dbs m β_star V reg
+      h_unbiased CI_seq α centered_scaled_seq coverage_construction
+
+/-- Axioms-packaged version of the generic constructive DSL valid-inference
+theorem. -/
+theorem DSL_valid_inference_from_construction
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (axioms : MEstimationAxioms Ω (Obs × Mis × Mis × SamplingIndicator × ℝ) μ d)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) axioms.E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ)
+    (coverage_construction :
+      NormalCoverageConstruction μ centered_scaled_seq CI_seq β_star α V) :
+    ValidInference μ β_hat_seq β_star centered_scaled_seq V CI_seq α := by
+  exact DSL_valid_inference_from_construction_from_assumptions μ axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    dbs m β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq α
+    coverage_construction
+
+/-- Concrete coordinatewise Wald-style DSL valid inference, avoiding the generic
+coverage-transfer axiom by using the first-principles multivariate coverage
+route after diagonal studentization. -/
+theorem DSL_valid_inference_coordStdNormal_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (E : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ)
+    (lower upper : Fin d → ℝ)
+    (h_interval : ∀ i, lower i ≤ upper i)
+    (h_event_eq :
+      ∀ n i,
+        {ω | β_star i ∈ Set.Icc (CI_seq n ω i).1 (CI_seq n ω i).2} =
+          {ω | centered_scaled_seq n ω i / Real.sqrt (V i i) ∈ Set.Icc (lower i) (upper i)})
+    (h_pos : ∀ i, 0 < V i i)
+    (h_calibration :
+      ∀ i,
+        (((stdNormalProbabilityMeasure : ProbabilityMeasure ℝ) : Measure ℝ)
+          (Set.Icc (lower i) (upper i))) = ENNReal.ofReal (1 - α)) :
+    ValidInference μ β_hat_seq β_star centered_scaled_seq V CI_seq α := by
+  refine ⟨?_, ?_, ?_⟩
+  · exact DSL_consistent_from_assumptions μ E h_consistent dbs m β_star reg h_unbiased data_seq β_hat_seq
+      h_est
+  · exact DSL_asymptotic_normal_from_assumptions μ E h_normal dbs m β_star V reg h_unbiased
+      centered_scaled_seq
+  · exact DSL_valid_coverage_coordStdNormal_from_assumptions μ E h_normal dbs m β_star V reg
+      h_unbiased CI_seq α centered_scaled_seq lower upper h_interval h_event_eq
+      h_pos h_calibration
+
+/-- Axioms-packaged version of the concrete coordinatewise Wald-style DSL valid
+inference theorem. -/
+theorem DSL_valid_inference_coordStdNormal
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (axioms : MEstimationAxioms Ω (Obs × Mis × Mis × SamplingIndicator × ℝ) μ d)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) axioms.E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ)
+    (lower upper : Fin d → ℝ)
+    (h_interval : ∀ i, lower i ≤ upper i)
+    (h_event_eq :
+      ∀ n i,
+        {ω | β_star i ∈ Set.Icc (CI_seq n ω i).1 (CI_seq n ω i).2} =
+          {ω | centered_scaled_seq n ω i / Real.sqrt (V i i) ∈ Set.Icc (lower i) (upper i)})
+    (h_pos : ∀ i, 0 < V i i)
+    (h_calibration :
+      ∀ i,
+        (((stdNormalProbabilityMeasure : ProbabilityMeasure ℝ) : Measure ℝ)
+          (Set.Icc (lower i) (upper i))) = ENNReal.ofReal (1 - α)) :
+    ValidInference μ β_hat_seq β_star centered_scaled_seq V CI_seq α := by
+  exact DSL_valid_inference_coordStdNormal_from_assumptions μ axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    dbs m β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq α lower upper
+    h_interval h_event_eq h_pos h_calibration
+
+/-- Symmetric critical-value specialization of the concrete studentized
+coordinatewise Wald DSL valid-inference route. -/
+theorem DSL_valid_inference_coordStdNormal_symm_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (E : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α z : ℝ)
+    (h_event_eq :
+      ∀ n i,
+        {ω | β_star i ∈ Set.Icc (CI_seq n ω i).1 (CI_seq n ω i).2} =
+          {ω | centered_scaled_seq n ω i / Real.sqrt (V i i) ∈ Set.Icc (-z) z})
+    (hz_nonneg : 0 ≤ z)
+    (h_pos : ∀ i, 0 < V i i)
+    (h_calibration :
+      (((stdNormalProbabilityMeasure : ProbabilityMeasure ℝ) : Measure ℝ)
+        (Set.Icc (-z) z)) = ENNReal.ofReal (1 - α)) :
+    ValidInference μ β_hat_seq β_star centered_scaled_seq V CI_seq α := by
+  exact DSL_valid_inference_coordStdNormal_from_assumptions μ E h_consistent h_normal
+    dbs m β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq α
+    (fun _ => -z) (fun _ => z) (fun _ => by simpa using neg_le_self hz_nonneg) h_event_eq
+    h_pos (fun _ => h_calibration)
+
+/-- Axioms-packaged symmetric critical-value specialization of the concrete
+studentized coordinatewise Wald DSL valid-inference route. -/
+theorem DSL_valid_inference_coordStdNormal_symm
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (axioms : MEstimationAxioms Ω (Obs × Mis × Mis × SamplingIndicator × ℝ) μ d)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) axioms.E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α z : ℝ)
+    (h_event_eq :
+      ∀ n i,
+        {ω | β_star i ∈ Set.Icc (CI_seq n ω i).1 (CI_seq n ω i).2} =
+          {ω | centered_scaled_seq n ω i / Real.sqrt (V i i) ∈ Set.Icc (-z) z})
+    (hz_nonneg : 0 ≤ z)
+    (h_pos : ∀ i, 0 < V i i)
+    (h_calibration :
+      (((stdNormalProbabilityMeasure : ProbabilityMeasure ℝ) : Measure ℝ)
+        (Set.Icc (-z) z)) = ENNReal.ofReal (1 - α)) :
+    ValidInference μ β_hat_seq β_star centered_scaled_seq V CI_seq α := by
+  exact DSL_valid_inference_coordStdNormal_symm_from_assumptions μ axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    dbs m β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq α z
+    h_event_eq hz_nonneg h_pos h_calibration
+
+/-- Concrete plug-in diagonal Wald DSL valid inference, where the studentizing
+variance comes from a covariance-estimator sequence rather than the population
+diagonal. -/
+theorem DSL_valid_inference_pluginStdNormal_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (E : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (V_hat_seq : ℕ → Ω → Matrix (Fin d) (Fin d) ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ)
+    (lower upper : Fin d → ℝ)
+    (h_interval : ∀ i, lower i ≤ upper i)
+    (h_event_eq :
+      ∀ n i,
+        {ω | β_star i ∈ Set.Icc (CI_seq n ω i).1 (CI_seq n ω i).2} =
+          {ω | pluginStudentizedStat centered_scaled_seq V_hat_seq n ω i ∈
+            Set.Icc (lower i) (upper i)})
+    (h_pos : ∀ i, 0 < V i i)
+    (h_Vhat_diag :
+      ∀ i,
+        ConvergesInProbability μ
+          (fun n ω => V_hat_seq n ω i i)
+          (fun _ => V i i))
+    (h_Vhat_diag_meas :
+      ∀ n i,
+        AEMeasurable (fun ω => V_hat_seq n ω i i) μ)
+    (h_calibration :
+      ∀ i,
+        (((stdNormalProbabilityMeasure : ProbabilityMeasure ℝ) : Measure ℝ)
+          (Set.Icc (lower i) (upper i))) = ENNReal.ofReal (1 - α)) :
+    ValidInference μ β_hat_seq β_star centered_scaled_seq V CI_seq α := by
+  refine ⟨?_, ?_, ?_⟩
+  · exact DSL_consistent_from_assumptions μ E h_consistent dbs m β_star reg h_unbiased
+      data_seq β_hat_seq h_est
+  · exact DSL_asymptotic_normal_from_assumptions μ E h_normal dbs m β_star V reg
+      h_unbiased centered_scaled_seq
+  · exact DSL_valid_coverage_pluginStdNormal_from_assumptions μ E h_normal dbs m β_star V reg
+      h_unbiased centered_scaled_seq V_hat_seq CI_seq α lower upper h_interval h_event_eq
+      h_pos h_Vhat_diag h_Vhat_diag_meas h_calibration
+
+/-- Axioms-packaged version of the concrete plug-in diagonal Wald valid
+inference route. -/
+theorem DSL_valid_inference_pluginStdNormal
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (axioms : MEstimationAxioms Ω (Obs × Mis × Mis × SamplingIndicator × ℝ) μ d)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) axioms.E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (V_hat_seq : ℕ → Ω → Matrix (Fin d) (Fin d) ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ)
+    (lower upper : Fin d → ℝ)
+    (h_interval : ∀ i, lower i ≤ upper i)
+    (h_event_eq :
+      ∀ n i,
+        {ω | β_star i ∈ Set.Icc (CI_seq n ω i).1 (CI_seq n ω i).2} =
+          {ω | pluginStudentizedStat centered_scaled_seq V_hat_seq n ω i ∈
+            Set.Icc (lower i) (upper i)})
+    (h_pos : ∀ i, 0 < V i i)
+    (h_Vhat_diag :
+      ∀ i,
+        ConvergesInProbability μ
+          (fun n ω => V_hat_seq n ω i i)
+          (fun _ => V i i))
+    (h_Vhat_diag_meas :
+      ∀ n i,
+        AEMeasurable (fun ω => V_hat_seq n ω i i) μ)
+    (h_calibration :
+      ∀ i,
+        (((stdNormalProbabilityMeasure : ProbabilityMeasure ℝ) : Measure ℝ)
+          (Set.Icc (lower i) (upper i))) = ENNReal.ofReal (1 - α)) :
+    ValidInference μ β_hat_seq β_star centered_scaled_seq V CI_seq α := by
+  exact DSL_valid_inference_pluginStdNormal_from_assumptions μ axioms.E
+    (mEstimatorConsistency_of_axioms μ d axioms)
+    (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
+    dbs m β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq V_hat_seq
+    CI_seq α lower upper h_interval h_event_eq h_pos h_Vhat_diag h_Vhat_diag_meas
+    h_calibration
+
 /-- **Theorem 1 (Oracle Parameter Form): DSL Provides Valid Inference**
 
 This variant names the estimand explicitly as the oracle parameter `β_oracle`,
@@ -267,6 +575,229 @@ theorem DSL_CI_coverage
     coverage_axioms dbs m β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq
     α hα
 
+/-- Corollary: concrete coordinatewise Wald-style DSL CI coverage converges to
+nominal level without the generic coverage axiom. -/
+theorem DSL_CI_coverage_coordStdNormal_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (E : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ)
+    (lower upper : Fin d → ℝ)
+    (h_interval : ∀ i, lower i ≤ upper i)
+    (h_event_eq :
+      ∀ n i,
+        {ω | β_star i ∈ Set.Icc (CI_seq n ω i).1 (CI_seq n ω i).2} =
+          {ω | centered_scaled_seq n ω i / Real.sqrt (V i i) ∈ Set.Icc (lower i) (upper i)})
+    (h_pos : ∀ i, 0 < V i i)
+    (h_calibration :
+      ∀ i,
+        (((stdNormalProbabilityMeasure : ProbabilityMeasure ℝ) : Measure ℝ)
+          (Set.Icc (lower i) (upper i))) = ENNReal.ofReal (1 - α)) :
+    AsymptoticCoverage μ CI_seq β_star α := by
+  exact (DSL_valid_inference_coordStdNormal_from_assumptions μ E h_consistent h_normal dbs m β_star V
+    reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq α lower upper h_interval
+    h_event_eq h_pos h_calibration).coverage
+
+/-- Axioms-packaged corollary for the concrete coordinatewise Wald coverage route. -/
+theorem DSL_CI_coverage_coordStdNormal
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (axioms : MEstimationAxioms Ω (Obs × Mis × Mis × SamplingIndicator × ℝ) μ d)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) axioms.E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ)
+    (lower upper : Fin d → ℝ)
+    (h_interval : ∀ i, lower i ≤ upper i)
+    (h_event_eq :
+      ∀ n i,
+        {ω | β_star i ∈ Set.Icc (CI_seq n ω i).1 (CI_seq n ω i).2} =
+          {ω | centered_scaled_seq n ω i / Real.sqrt (V i i) ∈ Set.Icc (lower i) (upper i)})
+    (h_pos : ∀ i, 0 < V i i)
+    (h_calibration :
+      ∀ i,
+        (((stdNormalProbabilityMeasure : ProbabilityMeasure ℝ) : Measure ℝ)
+          (Set.Icc (lower i) (upper i))) = ENNReal.ofReal (1 - α)) :
+    AsymptoticCoverage μ CI_seq β_star α := by
+  exact (DSL_valid_inference_coordStdNormal μ axioms dbs m β_star V reg h_unbiased data_seq β_hat_seq
+    h_est centered_scaled_seq CI_seq α lower upper h_interval h_event_eq h_pos
+    h_calibration).coverage
+
+/-- Symmetric critical-value specialization of the concrete studentized
+coordinatewise Wald DSL coverage route. -/
+theorem DSL_CI_coverage_coordStdNormal_symm_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (E : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α z : ℝ)
+    (h_event_eq :
+      ∀ n i,
+        {ω | β_star i ∈ Set.Icc (CI_seq n ω i).1 (CI_seq n ω i).2} =
+          {ω | centered_scaled_seq n ω i / Real.sqrt (V i i) ∈ Set.Icc (-z) z})
+    (hz_nonneg : 0 ≤ z)
+    (h_pos : ∀ i, 0 < V i i)
+    (h_calibration :
+      (((stdNormalProbabilityMeasure : ProbabilityMeasure ℝ) : Measure ℝ)
+        (Set.Icc (-z) z)) = ENNReal.ofReal (1 - α)) :
+    AsymptoticCoverage μ CI_seq β_star α := by
+  exact (DSL_valid_inference_coordStdNormal_symm_from_assumptions μ E h_consistent h_normal
+    dbs m β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq α z
+    h_event_eq hz_nonneg h_pos h_calibration).coverage
+
+/-- Axioms-packaged symmetric critical-value specialization of the concrete
+studentized coordinatewise Wald DSL coverage route. -/
+theorem DSL_CI_coverage_coordStdNormal_symm
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (axioms : MEstimationAxioms Ω (Obs × Mis × Mis × SamplingIndicator × ℝ) μ d)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) axioms.E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α z : ℝ)
+    (h_event_eq :
+      ∀ n i,
+        {ω | β_star i ∈ Set.Icc (CI_seq n ω i).1 (CI_seq n ω i).2} =
+          {ω | centered_scaled_seq n ω i / Real.sqrt (V i i) ∈ Set.Icc (-z) z})
+    (hz_nonneg : 0 ≤ z)
+    (h_pos : ∀ i, 0 < V i i)
+    (h_calibration :
+      (((stdNormalProbabilityMeasure : ProbabilityMeasure ℝ) : Measure ℝ)
+        (Set.Icc (-z) z)) = ENNReal.ofReal (1 - α)) :
+    AsymptoticCoverage μ CI_seq β_star α := by
+  exact (DSL_valid_inference_coordStdNormal_symm μ axioms dbs m β_star V reg h_unbiased
+    data_seq β_hat_seq h_est centered_scaled_seq CI_seq α z h_event_eq hz_nonneg h_pos
+    h_calibration).coverage
+
+/-- Corollary: CI coverage on the concrete plug-in diagonal Wald lane. -/
+theorem DSL_CI_coverage_pluginStdNormal_from_assumptions
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (E : ((Obs × Mis × Mis × SamplingIndicator × ℝ) → Fin d → ℝ) → Fin d → ℝ)
+    (h_consistent : MEstimatorConsistencyAssumption μ d E)
+    (h_normal : MEstimatorAsymptoticNormalAssumption μ d E)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (V_hat_seq : ℕ → Ω → Matrix (Fin d) (Fin d) ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ)
+    (lower upper : Fin d → ℝ)
+    (h_interval : ∀ i, lower i ≤ upper i)
+    (h_event_eq :
+      ∀ n i,
+        {ω | β_star i ∈ Set.Icc (CI_seq n ω i).1 (CI_seq n ω i).2} =
+          {ω | pluginStudentizedStat centered_scaled_seq V_hat_seq n ω i ∈
+            Set.Icc (lower i) (upper i)})
+    (h_pos : ∀ i, 0 < V i i)
+    (h_Vhat_diag :
+      ∀ i,
+        ConvergesInProbability μ
+          (fun n ω => V_hat_seq n ω i i)
+          (fun _ => V i i))
+    (h_Vhat_diag_meas :
+      ∀ n i,
+        AEMeasurable (fun ω => V_hat_seq n ω i i) μ)
+    (h_calibration :
+      ∀ i,
+        (((stdNormalProbabilityMeasure : ProbabilityMeasure ℝ) : Measure ℝ)
+          (Set.Icc (lower i) (upper i))) = ENNReal.ofReal (1 - α)) :
+    AsymptoticCoverage μ CI_seq β_star α := by
+  exact (DSL_valid_inference_pluginStdNormal_from_assumptions μ E h_consistent h_normal dbs m
+    β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq V_hat_seq CI_seq α
+    lower upper h_interval h_event_eq h_pos h_Vhat_diag h_Vhat_diag_meas h_calibration).coverage
+
+/-- Axioms-packaged CI coverage on the concrete plug-in diagonal Wald lane. -/
+theorem DSL_CI_coverage_pluginStdNormal
+    {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
+    {Obs Mis Con : Type*} {d : ℕ}
+    (axioms : MEstimationAxioms Ω (Obs × Mis × Mis × SamplingIndicator × ℝ) μ d)
+    (dbs : DesignBasedSampling Obs Mis Con)
+    (m : MomentFunction (Obs × Mis) d)
+    (β_star : Fin d → ℝ)
+    (V : Matrix (Fin d) (Fin d) ℝ)
+    (reg : RegularityConditions (Obs × Mis × Mis × SamplingIndicator × ℝ) d)
+    (h_unbiased : MomentUnbiased (DSLMomentFromData m) axioms.E β_star)
+    (data_seq : ℕ → Ω → List (Obs × Mis × Mis × SamplingIndicator × ℝ))
+    (β_hat_seq : ℕ → Ω → Fin d → ℝ)
+    (h_est : IsMEstimatorSeq (DSLMomentFromData m) data_seq β_hat_seq)
+    (centered_scaled_seq : ℕ → Ω → Fin d → ℝ)
+    (V_hat_seq : ℕ → Ω → Matrix (Fin d) (Fin d) ℝ)
+    (CI_seq : ℕ → Ω → Fin d → ℝ × ℝ)
+    (α : ℝ)
+    (lower upper : Fin d → ℝ)
+    (h_interval : ∀ i, lower i ≤ upper i)
+    (h_event_eq :
+      ∀ n i,
+        {ω | β_star i ∈ Set.Icc (CI_seq n ω i).1 (CI_seq n ω i).2} =
+          {ω | pluginStudentizedStat centered_scaled_seq V_hat_seq n ω i ∈
+            Set.Icc (lower i) (upper i)})
+    (h_pos : ∀ i, 0 < V i i)
+    (h_Vhat_diag :
+      ∀ i,
+        ConvergesInProbability μ
+          (fun n ω => V_hat_seq n ω i i)
+          (fun _ => V i i))
+    (h_Vhat_diag_meas :
+      ∀ n i,
+        AEMeasurable (fun ω => V_hat_seq n ω i i) μ)
+    (h_calibration :
+      ∀ i,
+        (((stdNormalProbabilityMeasure : ProbabilityMeasure ℝ) : Measure ℝ)
+          (Set.Icc (lower i) (upper i))) = ENNReal.ofReal (1 - α)) :
+    AsymptoticCoverage μ CI_seq β_star α := by
+  exact (DSL_valid_inference_pluginStdNormal μ axioms dbs m β_star V reg h_unbiased data_seq
+    β_hat_seq h_est centered_scaled_seq V_hat_seq CI_seq α lower upper h_interval h_event_eq
+    h_pos h_Vhat_diag h_Vhat_diag_meas h_calibration).coverage
+
 /-- Corollary (Oracle Parameter Form): DSL CI coverage converges to nominal level. -/
 theorem DSL_CI_coverage_oracle_from_assumptions
     {Ω : Type*} [MeasurableSpace Ω] (μ : Measure Ω) [IsProbabilityMeasure μ]
@@ -366,6 +897,32 @@ abbrev calibration_rmse_representativeness :=
 /-- Re-export: backward-compatible calibration assumption alias. -/
 abbrev calibration_axioms_representativeness :=
   @CalibrationAxioms
+
+/-- Re-export: population judge bias under a finite PMF. -/
+abbrev population_judge_bias_export :=
+  @populationJudgeBias
+
+/-- Re-export: population judge RMSE under a finite PMF. -/
+abbrev population_judge_rmse_export :=
+  @populationJudgeRMSE
+
+/-- Re-export: held-out bias-envelope route to `CalibrationRMSEBound`. -/
+abbrev calibration_rmse_from_abs_trueBias_export :=
+  @CalibrationRMSEBound_of_abs_trueBias_le
+
+/-- Re-export: confidence-interval-membership route to `CalibrationRMSEBound`. -/
+abbrev calibration_rmse_from_biasConfidenceInterval_export :=
+  @CalibrationRMSEBound_of_mem_biasConfidenceInterval
+
+/-- Re-export: event-level `CalibrationRMSEBound` production from a population
+RMSE event and a held-out bias-interval event. -/
+abbrev calibration_rmse_event_from_biasConfidence_event_export :=
+  @calibrationRMSEBound_event_of_biasConfidence_event
+
+/-- Re-export: event-level judge-gap bound from a held-out bias-confidence
+event plus a population RMSE envelope event. -/
+abbrev surrogate_bound_pmf_calibration2_event_from_biasConfidence_event_export :=
+  @surrogate_bound_pmf_calibration2_event_of_biasConfidence_event
 
 /-- Re-export: generic clustered confidence-interval coverage from an error event. -/
 abbrev clustered_confidence_interval_coverage_of_error_event_export :=
@@ -495,6 +1052,78 @@ abbrev computeDSLBound_valid_from_joint_interval_event_with_oracleMeasurement_ex
   @computeDSLBound_valid_from_joint_interval_event_with_oracleMeasurement
 
 /-!
+## Sequential Audit Wrappers
+-/
+
+/-- Re-export: scheduled union bound for countable bad-event budgets. -/
+abbrev scheduled_iUnion_bound_export :=
+  @scheduled_iUnion_bound
+
+/-- Re-export: stopped-time bad-event bound from a scheduled family. -/
+abbrev stopped_event_bound_of_scheduled_events_export :=
+  @stopped_event_bound_of_scheduled_events
+
+/-- Re-export: anytime-valid stopped-horizon IPW violation-rate EB bound. -/
+abbrev stopped_ipw_violation_rate_empirical_bernstein_export :=
+  @stopped_ipw_violation_rate_empirical_bernstein
+
+/-- Re-export: axioms-packaged anytime-valid stopped-horizon IPW violation-rate
+EB bound. -/
+abbrev stopped_ipw_violation_rate_empirical_bernstein_from_axioms_export :=
+  @stopped_ipw_violation_rate_empirical_bernstein_from_axioms
+
+/-- Re-export: anytime-valid stopped-horizon IPW preference-loss EB bound. -/
+abbrev stopped_ipw_preference_loss_empirical_bernstein_export :=
+  @stopped_ipw_preference_loss_empirical_bernstein
+
+/-- Re-export: axioms-packaged anytime-valid stopped-horizon IPW preference-loss
+EB bound. -/
+abbrev stopped_ipw_preference_loss_empirical_bernstein_from_axioms_export :=
+  @stopped_ipw_preference_loss_empirical_bernstein_from_axioms
+
+/-!
+## Runtime Certificate Checkers
+-/
+
+/-- Re-export: checked runtime DSL artifacts recover the pointwise interval
+membership upper bound. -/
+abbrev runtimeDSLArtifact_upperBound_of_interval_membership_export :=
+  @RuntimeDSLArtifact.upperBound_of_interval_membership_of_check
+
+/-- Re-export: oracle-measurement version of the checked interval-membership
+runtime certificate. -/
+abbrev runtimeDSLArtifact_upperBound_of_interval_membership_with_oracleMeasurement_export :=
+  @RuntimeDSLArtifact.upperBound_of_interval_membership_with_oracleMeasurement_of_check
+
+/-- Re-export: event-based validity of a checked runtime DSL artifact. -/
+abbrev runtimeDSLArtifact_valid_from_events_export :=
+  @RuntimeDSLArtifact.valid_from_events_of_check
+
+/-- Re-export: oracle-measurement event-based validity of a checked runtime DSL
+artifact. -/
+abbrev runtimeDSLArtifact_valid_from_events_with_oracleMeasurement_export :=
+  @RuntimeDSLArtifact.valid_from_events_with_oracleMeasurement_of_check
+
+/-- Re-export: joint-interval-event validity of a checked runtime DSL artifact. -/
+abbrev runtimeDSLArtifact_valid_from_joint_interval_event_export :=
+  @RuntimeDSLArtifact.valid_from_joint_interval_event_of_check
+
+/-- Re-export: oracle-measurement joint-interval-event validity of a checked
+runtime DSL artifact. -/
+abbrev runtimeDSLArtifact_valid_from_joint_interval_event_with_oracleMeasurement_export :=
+  @RuntimeDSLArtifact.valid_from_joint_interval_event_with_oracleMeasurement_of_check
+
+/-- Re-export: checked nodewise audit artifacts recover the exact audited
+upper-bound package encoded by the empirical certificate. -/
+abbrev runtimeNodewiseAuditArtifact_upper_bounds_export :=
+  @RuntimeNodewiseAuditArtifact.audited_upper_bounds_eq_of_check
+
+/-- Re-export: checked nodewise audit artifacts transport to the existing
+approximate-local-law bundle. -/
+abbrev runtimeNodewiseAuditArtifact_approx_bundle_export :=
+  @RuntimeNodewiseAuditArtifact.approx_bundle_eq_of_check
+
+/-!
 ## TreePO End-to-End Certificates
 -/
 
@@ -522,6 +1151,16 @@ abbrev grpo_pl_treepo_end_to_end_gen_with_oracleMeasurement_export :=
 abbrev grpo_rl_treepo_end_to_end_with_oracleMeasurement_export :=
   @grpo_rl_treepo_end_to_end_certificate_with_oracleMeasurement
 
+/-- Re-export: GRPO-RL end-to-end certificate from a primitive pointwise
+loss-Lipschitz hypothesis on the finite group space. -/
+abbrev grpo_rl_treepo_end_to_end_pointwise_export :=
+  @grpo_rl_treepo_end_to_end_certificate_of_pointwise
+
+/-- Re-export: GRPO-RL pointwise-route end-to-end certificate with oracle
+measurement. -/
+abbrev grpo_rl_treepo_end_to_end_pointwise_with_oracleMeasurement_export :=
+  @grpo_rl_treepo_end_to_end_certificate_of_pointwise_with_oracleMeasurement
+
 /-!
 ## TreePO Mergeable-Certificate Bridge
 -/
@@ -540,6 +1179,11 @@ abbrev grpo_pl_tree_gap_sketch_upper := @grpo_pl_tree_gap_bounded_by_sketch_uppe
 
 /-- GRPO-RL TreePO gap bound with externally supplied sketch upper bound. -/
 abbrev grpo_rl_tree_gap_sketch_upper := @grpo_rl_tree_gap_bounded_by_sketch_upper
+
+/-- GRPO-RL TreePO gap bound with externally supplied sketch upper bound from a
+primitive pointwise loss-Lipschitz hypothesis. -/
+abbrev grpo_rl_tree_gap_sketch_upper_pointwise :=
+  @grpo_rl_tree_gap_bounded_by_sketch_upper_of_pointwise
 
 /-- KLL availability: hierarchical mergeability at fixed randomness. -/
 abbrev kll_hierarchical_mergeability_available_export :=
@@ -972,6 +1616,72 @@ theorem formal_results_summary
     (mEstimatorAsymptoticNormal_of_axioms μ d axioms)
     coverage_axioms dbs m β_star V reg h_unbiased data_seq β_hat_seq h_est centered_scaled_seq CI_seq
     α hα E h_true h_bias hE_linear
+
+/-- Concrete 1D OLS Wald coverage from convergence of the t-statistic cdf to the standard normal cdf. -/
+abbrev ols_wald_coverage_from_tstat_cdf_stdNormal :=
+  @Econometrics.OLS.asymptotic_ci_coverage_from_tstat_cdf_to_stdNormal
+
+/-- Generic 1D first-principles coverage transfer from cdf convergence to the
+standard normal law plus a coverage-event equivalence. -/
+abbrev coverage_one_dim_from_cdf_stdNormal_eventEq :=
+  @asymptoticCoverage_oneDim_of_cdfConvergesToStdNormal_of_eventEq
+
+/-- Fully generic coordinatewise first-principles coverage witness. -/
+abbrev coordinate_coverage_limit_witness :=
+  @CoordinateCoverageLimitWitness
+
+/-- Generic constructive coverage interface from asymptotic normality. -/
+abbrev normal_coverage_construction :=
+  @NormalCoverageConstruction
+
+/-- Coverage derived from a generic coordinatewise limit witness. -/
+abbrev coverage_from_limit_witness :=
+  @CoordinateCoverageLimitWitness.asymptoticCoverage
+
+/-- Coverage derived from a generic normal-coverage construction. -/
+abbrev coverage_from_normal_construction :=
+  @NormalCoverageConstruction.asymptoticCoverage
+
+/-- DSL coverage derived from a generic normal-coverage construction. -/
+abbrev DSL_coverage_from_normal_construction :=
+  @DSL_valid_coverage_from_construction
+
+/-- DSL valid inference derived from a generic normal-coverage construction. -/
+abbrev DSL_valid_inference_from_normal_construction :=
+  @DSL_valid_inference_from_construction
+
+/-- Generic multivariate coordinatewise coverage transfer from weak convergence
+of the full statistic vector plus explicit coordinate-strip event identities. -/
+abbrev coverage_multivariate_from_tendstoInDistribution_coordIcc_eventEq :=
+  @asymptoticCoverage_of_tendstoInDistribution_of_coordIcc_of_eventEq
+
+/-- Multivariate coordinatewise coverage when the weak limit has standard-normal
+coordinate marginals. -/
+abbrev coverage_multivariate_from_tendstoInDistribution_coordStdNormal_eventEq :=
+  @asymptoticCoverage_of_tendstoInDistribution_of_coordStdNormal_of_eventEq
+
+/-- Multivariate coordinatewise coverage from a multivariate normal limit after
+diagonal studentization. -/
+abbrev coverage_multivariate_from_convergesInDistributionToNormal_standardized_eventEq :=
+  @asymptoticCoverage_of_convergesInDistributionToNormal_standardized_of_eventEq
+
+/-- Symmetric-critical-value specialization of the studentized multivariate
+coordinatewise coverage route. -/
+abbrev coverage_multivariate_from_convergesInDistributionToNormal_standardized_symm_eventEq :=
+  @asymptoticCoverage_of_convergesInDistributionToNormal_standardized_symm_of_eventEq
+
+/-- Plug-in diagonal covariance version of the multivariate coordinatewise
+coverage route. -/
+abbrev coverage_multivariate_from_convergesInDistributionToNormal_plugin_eventEq :=
+  @asymptoticCoverage_of_convergesInDistributionToNormal_plugin_of_eventEq
+
+/-- Curated export: plug-in diagonal Wald valid inference route. -/
+abbrev dsl_valid_inference_pluginStdNormal_export :=
+  @DSL_valid_inference_pluginStdNormal
+
+/-- Curated export: plug-in diagonal Wald coverage route. -/
+abbrev dsl_ci_coverage_pluginStdNormal_export :=
+  @DSL_CI_coverage_pluginStdNormal
 
 end DSL
 

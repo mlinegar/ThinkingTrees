@@ -20,9 +20,29 @@ Figure~\ref{fig:learned-sketch-curves} shows learning curves for different state
 
 These checks support two points. First, in this controlled setup, the oracle-query signal used for auditing is sufficient to learn the merge law without direct knowledge of the underlying data-generating process. Second, the $m < k$ sufficiency boundary remains in place for learned sketches when the oracle's sufficient statistic is genuinely $k$-dimensional.
 
+\subsection{Full-Tree Shared-$g$ Supervision}
+
+\textbf{What this tests:} whether a single learned readout $g$ can be applied to the full realized tree while keeping document-level supervision separate from sampled-node IPW estimation. In these runs, each document always contributes a full-document label $y_{\mathrm{doc}}=f^\ast(x)$ at the top, but node-level supervision is observed only on a random sampled subset of the realized node population $U(x)$. The root is not hard-coded as always sampled inside this node law; when it is part of the sampled-node channel it simply has its own logged propensity, exactly like any other internal node.
+
+On held-out fully labeled trees, we therefore report two distinct quantities. The first is the document-vs-final-summary top loss, evaluated directly from the complete document labels. The second is the full-tree node objective induced by the shared readout $g$, for which we compare the exact full-node mean to the naive sampled mean, Horvitz--Thompson mean, and H\'ajek mean computed from the logged sampled nodes. Depth and node-type breakdowns are reported separately so that top-level document accuracy is not conflated with finite-population node-risk estimation.
+
 \begin{figure}[t]
     \centering
     \includegraphics[width=0.95\linewidth]{learned_sketch_curves.png}
     \caption{Learning the merge rule from oracle feedback. Left: root MSE (per-type count prediction) during training, indexed by state budget $m$ with $k=4$ types. When $m \ge k$, the learned sketch converges to near-zero error; when $m < k$, the error plateaus at a nonzero floor. Right: final threshold accuracy (``all types present'') of the learned sketch versus the hand-designed type-aware sketch. The $m < k$ boundary binds both.}
     \label{fig:learned-sketch-curves}
 \end{figure}
+
+\subsection{Tree--FNO Parity in the Single-Leaf Regime}\label{sec:single-leaf-parity}
+
+\textbf{What this tests:} whether the tree architecture, when configured with a single leaf spanning the full document, achieves empirical parity with the flat FNO baseline. In this regime the tree has no merge operations and the local laws hold vacuously: C1 (leaf sufficiency) is trivial because the leaf \emph{is} the document, and C2 (merge consistency) is trivial because no internal nodes exist ($\texttt{internal\_nodes}(\texttt{leaf}\;b) = \varnothing$, so the universal quantifier in L2 is vacuously true). The \texttt{single\_leaf\_one\_pass} corollary therefore guarantees zero expected distortion whenever L1 holds, regardless of law weights or merge-network parameters. The hierarchical reduction is definitionally the encoder: $\texttt{reduce}\;g\;(\texttt{leaf}\;b) = g\;b$.
+
+At the implementation level, the tree model (\texttt{FNOCountSketch}) and the standalone FNO baseline (\texttt{FNOCountPredictor}) share the same 1D FNO processing core---token embedding, Fourier layers, masked mean pooling---but differ in their readout heads: the tree uses a two-stage projection (leaf projector then scalar readout with sigmoid), while the FNO uses a classification head with cross-entropy loss. In the single-leaf regime the tree's merge network exists but is never invoked (the code returns the leaf state directly). This experiment therefore tests \emph{empirical} parity: whether these architectural differences at the readout layer are negligible in practice when the FNO core is matched.
+
+The experiment sweeps leaf granularity on a controlled Markov changepoint DGP with 128-token documents:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{8 leaves} (\texttt{fixed\_leaf\_tokens=16}): standard tree regime with active merge operations.
+    \item \textbf{2 leaves} (\texttt{fixed\_leaf\_tokens=64}): reduced tree with one merge.
+    \item \textbf{1 leaf} (\texttt{fixed\_leaf\_tokens=128}): single-leaf regime; tree collapses to a flat operator.
+\end{itemize}
+Five recipe variants systematically separate three confounds: optimization procedure (training schedule, checkpoint metric), model capacity (state/hidden dimensions), and leaf architecture (FNO-matched leaf defaults). All runs share the same training, validation, and test documents from a single prepared corpus with prefix-nested training sets. If the tree matches FNO in the single-leaf regime and diverges only when the merge function is active, this confirms that the tree--FNO gap is attributable to the merge path rather than to incidental recipe or readout differences.

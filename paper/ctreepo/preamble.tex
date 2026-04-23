@@ -25,8 +25,19 @@
     urlcolor=blue!50!black
 }
 
+% Asset layout (see paper/ctreepo/CONVENTIONS.md). Each example owns a
+% subtree under assets/<example>/{figures,tables}/. Legacy paths kept
+% below as fall-throughs while we finish migrating the older sections;
+% new figures and tables MUST land under the assets/ tree.
 \graphicspath{
+    {assets/markov/figures/}
+    {assets/hll/figures/}
+    {assets/sketches/figures/}
+    {assets/benoit/figures/}
     {../../outputs/}
+    {../../outputs/markov_v5_simple_current_plots_20260415_233539/figures/}
+    {../../outputs/markov_v5_sticky_allocation_policy_paper_20260416/figures/}
+    {../../outputs/allocation_figure_variants/}
     {../../doc/old/figures/cld/}
     {../figures/}
     {figures/}
@@ -72,6 +83,15 @@
 \newcommand{\emptystr}{\emptyset}
 \newcommand{\One}{\mathbb{I}}
 \DeclareMathOperator*{\argmin}{arg\,min}
+
+% Temporary FIXME marker for work-in-progress passages; remove once
+% the material it marks has been finalized.
+\newcommand{\fixme}[1]{\textbf{\textcolor{red}{[FIXME: #1]}}}
+
+% Lean artifact repo names. Placeholders; swap for final repository URLs
+% when the Lean codebase is published.
+\newcommand{\leanrepo}{\texttt{mlinegar/FormalCTreePO}}
+\newcommand{\probrepo}{\texttt{mlinegar/FormalProbability}}
 
 % TikZ setup
 \usetikzlibrary{arrows.meta, positioning, calc, fit, backgrounds, shapes.geometric}

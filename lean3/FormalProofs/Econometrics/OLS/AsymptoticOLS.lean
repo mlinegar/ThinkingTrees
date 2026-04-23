@@ -29,6 +29,7 @@ FormalProofs/CLT/CLT.lean to derive asymptotic normality.
 import Mathlib
 import FormalProofs.CLT.Core
 import FormalProofs.DSL.AsymptoticTheory
+import FormalProofs.DSL.ConcreteCoverage
 import FormalProofs.Econometrics.OLS.GaussMarkov
 
 set_option linter.mathlibStandardSet false
@@ -826,6 +827,101 @@ def WaldCISeq1 {k : ℕ} {Ω : Type*}
 /-- Coordinate view of β_true as a 1-dim target. -/
 def CoordBeta1 {k : ℕ} (β_true : Fin k → ℝ) (j : Fin k) : Fin 1 → ℝ :=
   fun _ => β_true j
+
+/-- The law of the coordinate-wise t-statistic sequence. -/
+def TStatLawSeq {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (β_hat_seq : ℕ → Ω → Fin k → ℝ)
+    (β_true : Fin k → ℝ)
+    (SE_seq : ℕ → Ω → Fin k → ℝ)
+    (j : Fin k)
+    (h_tstat_meas :
+      ∀ n, Measurable (fun ω => AsymptoticTStat (β_hat_seq n ω) β_true (SE_seq n ω) j)) :
+    ℕ → ProbabilityMeasure ℝ :=
+  DSL.LawSeq1D μ
+    (fun n ω => AsymptoticTStat (β_hat_seq n ω) β_true (SE_seq n ω) j)
+    h_tstat_meas
+
+/-- Concrete cdf convergence of the t-statistic law sequence to `N(0,1)`. -/
+def TStatCDFConvergesToStdNormal {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (β_hat_seq : ℕ → Ω → Fin k → ℝ)
+    (β_true : Fin k → ℝ)
+    (SE_seq : ℕ → Ω → Fin k → ℝ)
+    (j : Fin k)
+    (h_tstat_meas :
+      ∀ n, Measurable (fun ω => AsymptoticTStat (β_hat_seq n ω) β_true (SE_seq n ω) j)) :
+    Prop :=
+  DSL.CDFConvergesToStdNormal
+    (TStatLawSeq μ β_hat_seq β_true SE_seq j h_tstat_meas)
+
+lemma beta_mem_asymptoticCI_iff_tstat_mem {k : ℕ}
+    (β_hat β_true SE : Fin k → ℝ) (j : Fin k) (z_alpha : ℝ)
+    (h_se : 0 < SE j) :
+    β_true j ∈ Set.Icc (AsymptoticCI β_hat SE z_alpha j).1 (AsymptoticCI β_hat SE z_alpha j).2 ↔
+      AsymptoticTStat β_hat β_true SE j ∈ Set.Icc (-z_alpha) z_alpha := by
+  constructor
+  · intro h_cov
+    rcases h_cov with ⟨h_lo, h_hi⟩
+    have h_lower : β_hat j - z_alpha * SE j ≤ β_true j := by
+      simpa [AsymptoticCI] using h_lo
+    have h_upper : β_true j ≤ β_hat j + z_alpha * SE j := by
+      simpa [AsymptoticCI] using h_hi
+    have h_lo' : (-z_alpha) * SE j ≤ β_hat j - β_true j := by
+      linarith
+    have h_hi' : β_hat j - β_true j ≤ z_alpha * SE j := by
+      linarith
+    constructor
+    · simpa [AsymptoticTStat, Set.mem_Icc] using (le_div_iff₀ h_se).2 h_lo'
+    · simpa [AsymptoticTStat, Set.mem_Icc] using (div_le_iff₀ h_se).2 h_hi'
+  · intro h_t
+    rcases h_t with ⟨h_lo, h_hi⟩
+    have h_lo' : -z_alpha * SE j ≤ β_hat j - β_true j := by
+      exact (le_div_iff₀ h_se).1 (by simpa [AsymptoticTStat] using h_lo)
+    have h_hi' : β_hat j - β_true j ≤ z_alpha * SE j := by
+      exact (div_le_iff₀ h_se).1 (by simpa [AsymptoticTStat] using h_hi)
+    constructor
+    · simpa [AsymptoticCI] using (show β_hat j - z_alpha * SE j ≤ β_true j by linarith [h_hi'])
+    · simpa [AsymptoticCI] using (show β_true j ≤ β_hat j + z_alpha * SE j by linarith [h_lo'])
+
+/-- A concrete Wald-coverage route from convergence of the t-statistic cdf to the standard normal cdf. -/
+theorem asymptotic_ci_coverage_from_tstat_cdf_to_stdNormal {k : ℕ} {Ω : Type*}
+    [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (β_hat_seq : ℕ → Ω → Fin k → ℝ)
+    (β_true : Fin k → ℝ)
+    (SE_seq : ℕ → Ω → Fin k → ℝ)
+    (j : Fin k)
+    (α z_alpha : ℝ)
+    (h_z_nonneg : 0 ≤ z_alpha)
+    (h_consistent_se : PositiveSESeq SE_seq)
+    (h_tstat_meas :
+      ∀ n, Measurable (fun ω => AsymptoticTStat (β_hat_seq n ω) β_true (SE_seq n ω) j))
+    (h_tstat_cdf :
+      TStatCDFConvergesToStdNormal μ β_hat_seq β_true SE_seq j h_tstat_meas)
+    (h_calibration :
+      (((DSL.stdNormalProbabilityMeasure : ProbabilityMeasure ℝ) : Measure ℝ)
+        (Set.Icc (-z_alpha) z_alpha)) = ENNReal.ofReal (1 - α)) :
+    DSL.AsymptoticCoverage μ
+      (WaldCISeq1 β_hat_seq SE_seq z_alpha j)
+      (CoordBeta1 β_true j)
+      α := by
+  refine DSL.asymptoticCoverage_oneDim_of_cdfConvergesToStdNormal_of_eventEq
+    (μ := μ)
+    (stat_seq := fun n ω => AsymptoticTStat (β_hat_seq n ω) β_true (SE_seq n ω) j)
+    (CI_seq := WaldCISeq1 β_hat_seq SE_seq z_alpha j)
+    (β_star := CoordBeta1 β_true j)
+    (α := α) (a := -z_alpha) (b := z_alpha)
+    (hab := by linarith)
+    (h_stat_meas := h_tstat_meas)
+    (h_cdf := h_tstat_cdf)
+    (h_event_eq := ?_)
+    (h_calibration := h_calibration)
+  intro n
+  ext ω
+  simpa [CoordBeta1, WaldCISeq1, AsymptoticCI, AsymptoticTStat] using
+    (beta_mem_asymptoticCI_iff_tstat_mem (β_hat := β_hat_seq n ω) (β_true := β_true)
+      (SE := SE_seq n ω) (j := j) (z_alpha := z_alpha) (h_se := h_consistent_se n ω j))
 
 /-- Asymptotic coverage of Wald confidence intervals -/
 theorem asymptotic_ci_coverage {k : ℕ} {Ω : Type*} [MeasurableSpace Ω]

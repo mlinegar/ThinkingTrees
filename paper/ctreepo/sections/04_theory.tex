@@ -99,6 +99,9 @@ Hence $g$ is a classical mergeable summary for $\fstar$.
 \paragraph{Practical significance.}
 This reduction shows what C-TreePO adds. When a hand-designed merge operator already exists, the framework collapses back to the classical mergeable-summary setting. For semantic scoring and preference extraction, the merge rule must instead be learned and audited.
 
+\paragraph{Empirical check.}
+Appendix~\ref{app:classical-parity} exhibits this collapse numerically on HyperLogLog. Running a classical HLL (native plus the Apache DataSketches reference) through the unified \texttt{fit()} framework with $n_{\mathrm{leaves}} \in \{1, 2, 4, 8, 16\}$ yields byte-identical register states between TreePO-reduced and flat pipelines for the register-based implementation, and estimate-equivalence within the HLL relative standard error for the DataSketches reference. The same pipeline can swap its oracle $\fstar$ from analytic cardinality to the HLL's own scoring head, and under that oracle a fully end-to-end learned $g$ and $f$ track the classical sketch within a small multiple of the RSE floor; a constrained variant in which $g$ must produce outputs readable by the classical HLL estimator degrades with $L$, quantifying the cost of the register-space constraint on depth.
+
 \subsection{Preference Learning Equivalence}
 
 The next step is the Optimization Stack. The structural theorems above only say that the summary preserves the oracle value. To conclude that training on summaries targets the same population objective as training on full documents, we need the downstream preference signal to depend on the document \emph{only through} that preserved oracle value.
@@ -145,7 +148,7 @@ GRPO-RL & All $\pi$ oracle-meas.\ & Group gen.\ oracle-indexed & Reward oracle-m
 \end{table}
 
 \paragraph{Practical implication.}
-These equivalences mean that annotators can be shown summaries $Z^{(R)}$ instead of full documents when collecting preferences. In the RILE example, annotators score manifesto summaries rather than reading the full manifesto. Under the Optimization Stack, minimizing the summary-based objective targets the same population argmin set as minimizing the full-document objective.
+These equivalences mean that annotators can be shown summaries $Z^{(R)}$ instead of full documents when collecting preferences. In a semantic deployment such as RILE scoring, annotators would score manifesto summaries rather than reading the full manifesto; in the controlled setting of Section~\ref{sec:example}, the tree's root prediction replaces the full-document oracle query. Under the Optimization Stack, minimizing the summary-based objective targets the same population argmin set as minimizing the full-document objective.
 
 \subsection{Quantitative Gap Bounds}
 

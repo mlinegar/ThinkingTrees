@@ -186,6 +186,12 @@ theorem ipw_preference_loss_connection_tree
     (htExp_unbiased (p := treeUnitPMF model) (pi := pi)
       (hpi_pos := hpi_pos) (hpi_le := hpi_le) (treeUnitLoss model loss))
 
+/-- Citeable alias: the full realized node population is the TreePO finite population. -/
+abbrev ExpectedFullNodePopulationPreferenceLoss := @OPT.ExpectedTreePreferenceLoss
+
+/-- Citeable alias for the corresponding IPW unbiasedness statement. -/
+abbrev full_node_population_preference_loss_unbiased := @ipw_preference_loss_connection_tree
+
 end TreePopulation
 
 /-!
@@ -564,6 +570,12 @@ def ExpectedTreeOracleUtility
     (fstar : Strings → Y) (u : OracleUtility2 Y) : ℝ :=
   ∑' x, (model.docDist x).toReal *
     ∑' u_node, (model.nodeSampler x u_node).toReal * u (fstar (model.nodeSpan u_node)) (fstar x)
+
+/-- Citeable alias: document-level oracle target `y_doc = f*(x)`. -/
+abbrev ExpectedDocumentOracleUtility := @ExpectedDocOracleUtility
+
+/-- Citeable alias: tree/final-summary-side oracle utility target. -/
+abbrev ExpectedFinalSummaryOracleUtility := @ExpectedTreeOracleUtility
 
 /-- Document-level expected oracle utility with noisy truth labels. -/
 def ExpectedDocOracleUtilityNoise
@@ -1139,6 +1151,10 @@ theorem tree_oracle_utility_gap_bounded_ipw
     (gap := ExpectedDocOracleUtility model fstar u - ExpectedTreeOracleUtility model fstar u)
     (L := L) h_gap
 
+/-- Citeable alias emphasizing document labels vs. tree/final-summary utility. -/
+abbrev document_label_vs_tree_oracle_utility_gap_bounded_ipw :=
+  @tree_oracle_utility_gap_bounded_ipw
+
 /-- End-to-end oracle utility bound with noisy truth labels (IPW form). -/
 theorem tree_oracle_utility_gap_noisy_bounded_ipw
     (model : OPT.TreePreferenceSamplingModel Strings Node A k)
@@ -1171,6 +1187,10 @@ theorem tree_oracle_utility_gap_noisy_bounded_ipw
       (ipw_tree_distortion_unbiased (model := model) (fstar := fstar)
         (pi := pi) (hpi_pos := hpi_pos) (hpi_le := hpi_le)).symm
   simpa [h_ipw] using h_gap
+
+/-- Citeable decomposition: full-document truth vs. sampled tree-unit estimation. -/
+abbrev document_truth_vs_sampled_tree_estimation_decomposition :=
+  @tree_oracle_utility_gap_noisy_bounded_ipw
 
 /-- GRPO-RL TreePO gap bound via IPW (constant group generator). -/
 theorem grpo_pl_tree_gap_bounded_ipw
@@ -1410,6 +1430,60 @@ theorem grpo_rl_tree_gap_bounded_ipw
     (gap := ExpectedGRPORLLoss pol pol_old pol_ref reward eps beta model.docDist (fun _ => g) -
       OPT.ExpectedTreePreferenceLoss model loss)
     (L := (L : ℝ)) h_gap
+
+/-- GRPO-RL TreePO gap bound via IPW from a primitive pointwise loss-Lipschitz
+hypothesis on the finite group space. -/
+theorem grpo_rl_tree_gap_bounded_ipw_of_pointwise
+    {Strings Node A Y : Type*} [Monoid Strings] [PseudoMetricSpace Y]
+    {k : ℕ} [Fintype Strings] [Fintype Node] [Fintype A]
+    [DecidableEq Strings] [DecidableEq Node] [DecidableEq A]
+    (model : OPT.TreePreferenceSamplingModel Strings Node A k)
+    (fstar : Strings → Y)
+    (pol pol_old pol_ref : Policy' Strings A)
+    (reward : Strings → A → ℝ)
+    (eps beta : ℝ)
+    (g : PMF (Fin k → A))
+    (L : ℝ≥0)
+    (h_group : ∀ u, model.groupGen u = g)
+    (h_pol_lip : GRPOPolicyLipschitz pol fstar L)
+    (h_old_lip : GRPOPolicyLipschitz pol_old fstar L)
+    (h_ref_lip : GRPOPolicyLipschitz pol_ref fstar L)
+    (h_reward_lip : RewardLipschitzGRPO reward fstar L)
+    (h_point :
+      ∀ x z (group : Fin k → A),
+        |GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group -
+         GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group| ≤
+        (L : ℝ) * dist (fstar x) (fstar z))
+    (pi : TreeUnit Strings Node A k → ℝ)
+    (hpi_pos : ∀ i, 0 < pi i)
+    (hpi_le : ∀ i, pi i ≤ 1) :
+    |ExpectedGRPORLLoss pol pol_old pol_ref reward eps beta model.docDist (fun _ => g) -
+        OPT.ExpectedTreePreferenceLoss model
+          (fun x group => GRPORLLossPointwise pol pol_old pol_ref reward eps beta x group)| ≤
+      (L : ℝ) *
+        ∫ ω, htExpEstimator (p := treeUnitPMF model) (pi := pi)
+              (treeDistortion model fstar) ω
+            ∂bernoulliProductMeasure pi hpi_pos hpi_le := by
+  have h_rum : ∀ x z,
+      ExpectedGRPORLLossLipschitz k pol pol_old pol_ref reward eps beta fstar g L
+        h_pol_lip h_old_lip h_ref_lip h_reward_lip x z := by
+    intro x z
+    exact ExpectedGRPORLLossLipschitz_of_pointwise_finite
+      (pol := pol) (pol_old := pol_old) (pol_ref := pol_ref)
+      (reward := reward) (eps := eps) (beta := beta) (fstar := fstar)
+      (g := g) (L := L)
+      (h_pol_lip := h_pol_lip) (h_old_lip := h_old_lip)
+      (h_ref_lip := h_ref_lip) (h_reward_lip := h_reward_lip)
+      h_point x z
+  exact grpo_rl_tree_gap_bounded_ipw
+    (model := model) (fstar := fstar)
+    (pol := pol) (pol_old := pol_old) (pol_ref := pol_ref)
+    (reward := reward) (eps := eps) (beta := beta)
+    (g := g) (L := L) (h_group := h_group)
+    (h_pol_lip := h_pol_lip) (h_old_lip := h_old_lip)
+    (h_ref_lip := h_ref_lip) (h_reward_lip := h_reward_lip)
+    (h_rum := h_rum)
+    (pi := pi) (hpi_pos := hpi_pos) (hpi_le := hpi_le)
 
 /-- DPO TreePO gap bound via IPW (pairs encoded as singleton groups). -/
 theorem dpo_tree_gap_bounded_ipw
@@ -4054,6 +4128,165 @@ theorem dsl_bound_valid_with_oracleMeasurement
     (oracle_err := oracle_err)
     (δ_oracle := δ_oracle) (δ_cal := δ_cal) (δ_est := δ_est)
     h_est_nonneg h_oracle h_cal h_est
+
+/-!
+## Section 6.6: Sequential Audit Stopping
+
+These wrappers turn any fixed-horizon event family with a scheduled failure
+budget into an anytime-valid bound for a data-dependent stopping rule. The
+stopping rule itself need not be measurable for the set-theoretic inclusion
+argument used below.
+-/
+
+/-- A scheduled family of bad-event bounds implies a bound on the union over all
+times. -/
+theorem scheduled_iUnion_bound
+    {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω)
+    (E : ℕ → Set Ω)
+    (δ : ℕ → ENNReal)
+    (hE : ∀ n, μ (E n) ≤ δ n) :
+    μ (⋃ n, E n) ≤ ∑' n, δ n := by
+  have h_union : μ (⋃ n, E n) ≤ ∑' n, μ (E n) := measure_iUnion_le (μ := μ) (s := E)
+  exact h_union.trans (ENNReal.tsum_le_tsum hE)
+
+/-- If every horizon-specific bad event is scheduled with its own failure budget,
+then the bad event evaluated at an arbitrary stopping time inherits the sum of
+those budgets. -/
+theorem stopped_event_bound_of_scheduled_events
+    {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω)
+    (E : ℕ → Set Ω)
+    (τ : Ω → ℕ)
+    (δ : ℕ → ENNReal)
+    (hE : ∀ n, μ (E n) ≤ δ n) :
+    μ {ω | ω ∈ E (τ ω)} ≤ ∑' n, δ n := by
+  have h_subset : {ω | ω ∈ E (τ ω)} ⊆ ⋃ n, E n := by
+    intro ω hω
+    exact Set.mem_iUnion.mpr ⟨τ ω, hω⟩
+  exact (measure_mono h_subset).trans (scheduled_iUnion_bound μ E δ hE)
+
+/-- Anytime-valid IPW violation-rate empirical-Bernstein bound from a scheduled
+family of fixed-horizon events. -/
+theorem stopped_ipw_violation_rate_empirical_bernstein
+    {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (samples_seq : ℕ → Ω → List TreeSample)
+    (τ : Ω → ℕ)
+    (mean_true : ℝ)
+    (δ : ℕ → ℝ)
+    (h_event :
+      ∀ n,
+        μ {ω |
+          |ipwViolationRate (samples_seq n ω) - mean_true| ≥
+            empiricalBernsteinRadius
+              (toWeightedSamples (samples_seq n ω)) (δ n) 1} ≤
+          ENNReal.ofReal (δ n)) :
+    μ {ω |
+      |ipwViolationRate (samples_seq (τ ω) ω) - mean_true| ≥
+        empiricalBernsteinRadius
+          (toWeightedSamples (samples_seq (τ ω) ω)) (δ (τ ω)) 1} ≤
+      ∑' n, ENNReal.ofReal (δ n) := by
+  exact stopped_event_bound_of_scheduled_events
+    (μ := μ)
+    (E := fun n => {ω |
+      |ipwViolationRate (samples_seq n ω) - mean_true| ≥
+        empiricalBernsteinRadius
+          (toWeightedSamples (samples_seq n ω)) (δ n) 1})
+    (τ := τ)
+    (δ := fun n => ENNReal.ofReal (δ n))
+    h_event
+
+/-- Anytime-valid IPW violation-rate empirical-Bernstein bound from the
+existing fixed-horizon EB axioms interface. -/
+theorem stopped_ipw_violation_rate_empirical_bernstein_from_axioms
+    {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (samples_seq : ℕ → Ω → List TreeSample)
+    (τ : Ω → ℕ)
+    (mean_true : ℝ)
+    (h_nonempty : ∀ n ω, samples_seq n ω ≠ [])
+    (axioms :
+      ∀ n,
+        EmpiricalBernsteinAxioms μ
+          (fun ω => toWeightedSamples (samples_seq n ω)) mean_true 1)
+    (δ : ℕ → ℝ)
+    (hδ_pos : ∀ n, 0 < δ n)
+    (hδ_lt : ∀ n, δ n < 1) :
+    μ {ω |
+      |ipwViolationRate (samples_seq (τ ω) ω) - mean_true| ≥
+        empiricalBernsteinRadius
+          (toWeightedSamples (samples_seq (τ ω) ω)) (δ (τ ω)) 1} ≤
+      ∑' n, ENNReal.ofReal (δ n) := by
+  refine stopped_ipw_violation_rate_empirical_bernstein
+    (μ := μ) (samples_seq := samples_seq) (τ := τ)
+    (mean_true := mean_true) (δ := δ) ?_
+  intro n
+  exact ipw_violation_rate_empirical_bernstein_from_axioms
+    (μ := μ) (samples := samples_seq n) (mean_true := mean_true)
+    (h_nonempty := h_nonempty n) (axioms := axioms n)
+    (δ := δ n) (hδ_pos := hδ_pos n) (hδ_lt := hδ_lt n)
+
+/-- Anytime-valid IPW preference-loss empirical-Bernstein bound from a
+scheduled family of fixed-horizon events. -/
+theorem stopped_ipw_preference_loss_empirical_bernstein
+    {Ω Strings Node A : Type*} {k : ℕ} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (samples_seq : ℕ → Ω → List (TreePreferenceSample Strings Node A k))
+    (τ : Ω → ℕ)
+    (mean_true range : ℝ)
+    (δ : ℕ → ℝ)
+    (h_event :
+      ∀ n,
+        μ {ω |
+          |ipwPreferenceLoss (samples_seq n ω) - mean_true| ≥
+            empiricalBernsteinRadius
+              (toWeightedPrefSamples (samples_seq n ω)) (δ n) range} ≤
+          ENNReal.ofReal (δ n)) :
+    μ {ω |
+      |ipwPreferenceLoss (samples_seq (τ ω) ω) - mean_true| ≥
+        empiricalBernsteinRadius
+          (toWeightedPrefSamples (samples_seq (τ ω) ω)) (δ (τ ω)) range} ≤
+      ∑' n, ENNReal.ofReal (δ n) := by
+  exact stopped_event_bound_of_scheduled_events
+    (μ := μ)
+    (E := fun n => {ω |
+      |ipwPreferenceLoss (samples_seq n ω) - mean_true| ≥
+        empiricalBernsteinRadius
+          (toWeightedPrefSamples (samples_seq n ω)) (δ n) range})
+    (τ := τ)
+    (δ := fun n => ENNReal.ofReal (δ n))
+    h_event
+
+/-- Anytime-valid IPW preference-loss empirical-Bernstein bound from the
+existing fixed-horizon EB axioms interface. -/
+theorem stopped_ipw_preference_loss_empirical_bernstein_from_axioms
+    {Ω Strings Node A : Type*} {k : ℕ} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (samples_seq : ℕ → Ω → List (TreePreferenceSample Strings Node A k))
+    (τ : Ω → ℕ)
+    (mean_true range : ℝ)
+    (h_nonempty : ∀ n ω, samples_seq n ω ≠ [])
+    (axioms :
+      ∀ n,
+        EmpiricalBernsteinAxioms μ
+          (fun ω => toWeightedPrefSamples (samples_seq n ω)) mean_true range)
+    (δ : ℕ → ℝ)
+    (hδ_pos : ∀ n, 0 < δ n)
+    (hδ_lt : ∀ n, δ n < 1) :
+    μ {ω |
+      |ipwPreferenceLoss (samples_seq (τ ω) ω) - mean_true| ≥
+        empiricalBernsteinRadius
+          (toWeightedPrefSamples (samples_seq (τ ω) ω)) (δ (τ ω)) range} ≤
+      ∑' n, ENNReal.ofReal (δ n) := by
+  refine stopped_ipw_preference_loss_empirical_bernstein
+    (μ := μ) (samples_seq := samples_seq) (τ := τ)
+    (mean_true := mean_true) (range := range) (δ := δ) ?_
+  intro n
+  exact ipw_preference_loss_empirical_bernstein_from_axioms
+    (μ := μ) (samples := samples_seq n) (mean_true := mean_true) (range := range)
+    (h_nonempty := h_nonempty n) (axioms := axioms n)
+    (δ := δ n) (hδ_pos := hδ_pos n) (hδ_lt := hδ_lt n)
 
 /-!
 ## Section 7: Practical Diagnostics

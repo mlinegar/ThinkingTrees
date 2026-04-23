@@ -295,6 +295,103 @@ theorem grpo_pl_treepo_end_to_end_certificate_with_oracleMeasurement
           ∂bernoulliProductMeasure pi hpi_pos hpi_le)
     h_oracle h_gap
 
+/-- First-principles end-to-end TreePO certificate for fixed-ranker
+Plackett-Luce GRPO-PL with constant group generator. This discharges the
+abstract expected-Lipschitz hypothesis using the proved fixed-ranker route. -/
+theorem grpo_pl_treepo_end_to_end_certificate_plackettLuce_fixed_ranker
+    {Strings Node A Y : Type*} [Monoid Strings] [PseudoMetricSpace Y]
+    {k : ℕ} [Fintype Strings] [Fintype Node] [Fintype A]
+    [DecidableEq Strings] [DecidableEq Node] [DecidableEq A]
+    (hk : 0 < k)
+    (model : OPT.TreePreferenceSamplingModel Strings Node A k)
+    (fstar : Strings → Y)
+    (pol : Policy' Strings A) (ranker : Strings → GroupRanker A k)
+    (g : PMF (Fin k → A))
+    (L_pol : ℝ≥0)
+    (h_group : ∀ u, model.groupGen u = g)
+    (h_pol_lip : GRPOPolicyLipschitz pol fstar L_pol)
+    (h_ranker : OracleIndexedRanker ranker fstar)
+    (h_ranker_fixed : ∀ x z group, ranker x group = ranker z group)
+    (pi : TreeUnit Strings Node A k → ℝ)
+    (hpi_pos : ∀ i, 0 < pi i)
+    (hpi_le : ∀ i, pi i ≤ 1) :
+    let loss : Strings → (Fin k → A) → ℝ :=
+      fun x group => GRPOLossPointwise pol x group (ranker x group)
+    (∫ ω, htExpEstimator (p := treeUnitPMF model) (pi := pi) (treeUnitLoss model loss) ω
+      ∂bernoulliProductMeasure pi hpi_pos hpi_le =
+      OPT.ExpectedTreePreferenceLoss model loss) ∧
+    (|ExpectedGRPOLoss pol ranker model.docDist (fun _ => g) -
+        OPT.ExpectedTreePreferenceLoss model loss| ≤
+      (((2 : ℝ≥0) * (k : ℝ≥0)) * L_pol : ℝ) *
+        ∫ ω, htExpEstimator (p := treeUnitPMF model) (pi := pi)
+              (treeDistortion model fstar) ω
+          ∂bernoulliProductMeasure pi hpi_pos hpi_le) := by
+  classical
+  dsimp
+  refine ⟨?_, ?_⟩
+  · exact ipw_preference_loss_connection_tree model _ pi hpi_pos hpi_le
+  · simpa using
+      (grpo_pl_tree_gap_bounded_ipw_plackettLuce_fixed_ranker
+        (hk := hk) (model := model) (fstar := fstar) (pol := pol)
+        (ranker := ranker) (g := g) (L_pol := L_pol) (h_group := h_group)
+        (h_pol_lip := h_pol_lip) (h_ranker := h_ranker)
+        (h_ranker_fixed := h_ranker_fixed)
+        (pi := pi) (hpi_pos := hpi_pos) (hpi_le := hpi_le))
+
+/-- Fixed-ranker Plackett-Luce GRPO-PL end-to-end certificate with an optional
+oracle-measurement layer above the oracle-indexed target. -/
+theorem grpo_pl_treepo_end_to_end_certificate_plackettLuce_fixed_ranker_with_oracleMeasurement
+    {Strings Node A Y : Type*} [Monoid Strings] [PseudoMetricSpace Y]
+    {k : ℕ} [Fintype Strings] [Fintype Node] [Fintype A]
+    [DecidableEq Strings] [DecidableEq Node] [DecidableEq A]
+    (hk : 0 < k)
+    (model : OPT.TreePreferenceSamplingModel Strings Node A k)
+    (fstar : Strings → Y)
+    (pol : Policy' Strings A) (ranker : Strings → GroupRanker A k)
+    (g : PMF (Fin k → A))
+    (L_pol : ℝ≥0)
+    (h_group : ∀ u, model.groupGen u = g)
+    (h_pol_lip : GRPOPolicyLipschitz pol fstar L_pol)
+    (h_ranker : OracleIndexedRanker ranker fstar)
+    (h_ranker_fixed : ∀ x z group, ranker x group = ranker z group)
+    (pi : TreeUnit Strings Node A k → ℝ)
+    (hpi_pos : ∀ i, 0 < pi i)
+    (hpi_le : ∀ i, pi i ≤ 1)
+    (loss_true oracle_err : ℝ)
+    (h_oracle :
+      |loss_true - ExpectedGRPOLoss pol ranker model.docDist (fun _ => g)| ≤ oracle_err) :
+    let loss : Strings → (Fin k → A) → ℝ :=
+      fun x group => GRPOLossPointwise pol x group (ranker x group)
+    (∫ ω, htExpEstimator (p := treeUnitPMF model) (pi := pi) (treeUnitLoss model loss) ω
+      ∂bernoulliProductMeasure pi hpi_pos hpi_le =
+      OPT.ExpectedTreePreferenceLoss model loss) ∧
+    (|loss_true - OPT.ExpectedTreePreferenceLoss model loss| ≤
+      oracle_err +
+        (((2 : ℝ≥0) * (k : ℝ≥0)) * L_pol : ℝ) *
+          ∫ ω, htExpEstimator (p := treeUnitPMF model) (pi := pi)
+                (treeDistortion model fstar) ω
+            ∂bernoulliProductMeasure pi hpi_pos hpi_le) := by
+  classical
+  dsimp
+  rcases grpo_pl_treepo_end_to_end_certificate_plackettLuce_fixed_ranker
+      (hk := hk) (model := model) (fstar := fstar) (pol := pol)
+      (ranker := ranker) (g := g) (L_pol := L_pol) (h_group := h_group)
+      (h_pol_lip := h_pol_lip) (h_ranker := h_ranker)
+      (h_ranker_fixed := h_ranker_fixed)
+      (pi := pi) (hpi_pos := hpi_pos) (hpi_le := hpi_le) with ⟨h_obj, h_gap⟩
+  refine ⟨h_obj, ?_⟩
+  exact treepo_loss_gap_with_oracleMeasurement
+    (loss_true := loss_true)
+    (loss_oracle := ExpectedGRPOLoss pol ranker model.docDist (fun _ => g))
+    (loss_tree := OPT.ExpectedTreePreferenceLoss model
+      (fun x group => GRPOLossPointwise pol x group (ranker x group)))
+    (oracle_err := oracle_err)
+    (tree_bound := (((2 : ℝ≥0) * (k : ℝ≥0)) * L_pol : ℝ) *
+      ∫ ω, htExpEstimator (p := treeUnitPMF model) (pi := pi)
+            (treeDistortion model fstar) ω
+          ∂bernoulliProductMeasure pi hpi_pos hpi_le)
+    h_oracle h_gap
+
 /-- End-to-end TreePO certificate for GRPO-PL with span-induced doc-dependent group generator:
 objective unbiasedness + IPW distortion gap bound. -/
 theorem grpo_pl_treepo_end_to_end_gen_certificate
@@ -498,6 +595,124 @@ theorem grpo_rl_treepo_end_to_end_certificate_with_oracleMeasurement
       (h_pol_lip := h_pol_lip) (h_old_lip := h_old_lip)
       (h_ref_lip := h_ref_lip) (h_reward_lip := h_reward_lip)
       (h_rum := h_rum)
+      (pi := pi) (hpi_pos := hpi_pos) (hpi_le := hpi_le) with ⟨h_obj, h_gap⟩
+  refine ⟨h_obj, ?_⟩
+  exact treepo_loss_gap_with_oracleMeasurement
+    (loss_true := loss_true)
+    (loss_oracle := ExpectedGRPORLLoss pol pol_old pol_ref reward eps beta model.docDist (fun _ => g))
+    (loss_tree := OPT.ExpectedTreePreferenceLoss model
+      (fun x group => GRPORLLossPointwise pol pol_old pol_ref reward eps beta x group))
+    (oracle_err := oracle_err)
+    (tree_bound := (L : ℝ) *
+      ∫ ω, htExpEstimator (p := treeUnitPMF model) (pi := pi)
+            (treeDistortion model fstar) ω
+          ∂bernoulliProductMeasure pi hpi_pos hpi_le)
+    h_oracle h_gap
+
+/-- End-to-end TreePO certificate for GRPO-RL from a primitive pointwise
+loss-Lipschitz hypothesis on the finite group space. -/
+theorem grpo_rl_treepo_end_to_end_certificate_of_pointwise
+    {Strings Node A Y : Type*} [Monoid Strings] [PseudoMetricSpace Y]
+    {k : ℕ} [Fintype Strings] [Fintype Node] [Fintype A]
+    [DecidableEq Strings] [DecidableEq Node] [DecidableEq A]
+    (model : OPT.TreePreferenceSamplingModel Strings Node A k)
+    (fstar : Strings → Y)
+    (pol pol_old pol_ref : Policy' Strings A)
+    (reward : Strings → A → ℝ)
+    (eps beta : ℝ)
+    (g : PMF (Fin k → A))
+    (L : ℝ≥0)
+    (h_group : ∀ u, model.groupGen u = g)
+    (h_pol_lip : GRPOPolicyLipschitz pol fstar L)
+    (h_old_lip : GRPOPolicyLipschitz pol_old fstar L)
+    (h_ref_lip : GRPOPolicyLipschitz pol_ref fstar L)
+    (h_reward_lip : RewardLipschitzGRPO reward fstar L)
+    (h_point :
+      ∀ x z (group : Fin k → A),
+        |GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group -
+         GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group| ≤
+        (L : ℝ) * dist (fstar x) (fstar z))
+    (pi : TreeUnit Strings Node A k → ℝ)
+    (hpi_pos : ∀ i, 0 < pi i)
+    (hpi_le : ∀ i, pi i ≤ 1) :
+    let loss : Strings → (Fin k → A) → ℝ :=
+      fun x group => GRPORLLossPointwise pol pol_old pol_ref reward eps beta x group
+    (∫ ω, htExpEstimator (p := treeUnitPMF model) (pi := pi) (treeUnitLoss model loss) ω
+      ∂bernoulliProductMeasure pi hpi_pos hpi_le =
+      OPT.ExpectedTreePreferenceLoss model loss) ∧
+    (|ExpectedGRPORLLoss pol pol_old pol_ref reward eps beta model.docDist (fun _ => g) -
+        OPT.ExpectedTreePreferenceLoss model loss| ≤
+      (L : ℝ) *
+        ∫ ω, htExpEstimator (p := treeUnitPMF model) (pi := pi)
+              (treeDistortion model fstar) ω
+          ∂bernoulliProductMeasure pi hpi_pos hpi_le) := by
+  classical
+  dsimp
+  refine ⟨?_, ?_⟩
+  · exact ipw_preference_loss_connection_tree model _ pi hpi_pos hpi_le
+  · simpa using
+      (grpo_rl_tree_gap_bounded_ipw_of_pointwise
+        (model := model) (fstar := fstar)
+        (pol := pol) (pol_old := pol_old) (pol_ref := pol_ref)
+        (reward := reward) (eps := eps) (beta := beta)
+        (g := g) (L := L) (h_group := h_group)
+        (h_pol_lip := h_pol_lip) (h_old_lip := h_old_lip)
+        (h_ref_lip := h_ref_lip) (h_reward_lip := h_reward_lip)
+        (h_point := h_point)
+        (pi := pi) (hpi_pos := hpi_pos) (hpi_le := hpi_le))
+
+/-- GRPO-RL pointwise-route end-to-end certificate with an optional
+oracle-measurement layer above the oracle-indexed target. -/
+theorem grpo_rl_treepo_end_to_end_certificate_of_pointwise_with_oracleMeasurement
+    {Strings Node A Y : Type*} [Monoid Strings] [PseudoMetricSpace Y]
+    {k : ℕ} [Fintype Strings] [Fintype Node] [Fintype A]
+    [DecidableEq Strings] [DecidableEq Node] [DecidableEq A]
+    (model : OPT.TreePreferenceSamplingModel Strings Node A k)
+    (fstar : Strings → Y)
+    (pol pol_old pol_ref : Policy' Strings A)
+    (reward : Strings → A → ℝ)
+    (eps beta : ℝ)
+    (g : PMF (Fin k → A))
+    (L : ℝ≥0)
+    (h_group : ∀ u, model.groupGen u = g)
+    (h_pol_lip : GRPOPolicyLipschitz pol fstar L)
+    (h_old_lip : GRPOPolicyLipschitz pol_old fstar L)
+    (h_ref_lip : GRPOPolicyLipschitz pol_ref fstar L)
+    (h_reward_lip : RewardLipschitzGRPO reward fstar L)
+    (h_point :
+      ∀ x z (group : Fin k → A),
+        |GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group -
+         GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group| ≤
+        (L : ℝ) * dist (fstar x) (fstar z))
+    (pi : TreeUnit Strings Node A k → ℝ)
+    (hpi_pos : ∀ i, 0 < pi i)
+    (hpi_le : ∀ i, pi i ≤ 1)
+    (loss_true oracle_err : ℝ)
+    (h_oracle :
+      |loss_true -
+          ExpectedGRPORLLoss pol pol_old pol_ref reward eps beta model.docDist (fun _ => g)| ≤
+        oracle_err) :
+    let loss : Strings → (Fin k → A) → ℝ :=
+      fun x group => GRPORLLossPointwise pol pol_old pol_ref reward eps beta x group
+    (∫ ω, htExpEstimator (p := treeUnitPMF model) (pi := pi) (treeUnitLoss model loss) ω
+      ∂bernoulliProductMeasure pi hpi_pos hpi_le =
+      OPT.ExpectedTreePreferenceLoss model loss) ∧
+    (|loss_true - OPT.ExpectedTreePreferenceLoss model loss| ≤
+      oracle_err +
+        (L : ℝ) *
+          ∫ ω, htExpEstimator (p := treeUnitPMF model) (pi := pi)
+                (treeDistortion model fstar) ω
+            ∂bernoulliProductMeasure pi hpi_pos hpi_le) := by
+  classical
+  dsimp
+  rcases grpo_rl_treepo_end_to_end_certificate_of_pointwise
+      (model := model) (fstar := fstar)
+      (pol := pol) (pol_old := pol_old) (pol_ref := pol_ref)
+      (reward := reward) (eps := eps) (beta := beta)
+      (g := g) (L := L) (h_group := h_group)
+      (h_pol_lip := h_pol_lip) (h_old_lip := h_old_lip)
+      (h_ref_lip := h_ref_lip) (h_reward_lip := h_reward_lip)
+      (h_point := h_point)
       (pi := pi) (hpi_pos := hpi_pos) (hpi_le := hpi_le) with ⟨h_obj, h_gap⟩
   refine ⟨h_obj, ?_⟩
   exact treepo_loss_gap_with_oracleMeasurement

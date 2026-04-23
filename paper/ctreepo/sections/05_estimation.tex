@@ -2,6 +2,18 @@
 
 The theory says that local validity composes. The audit turns that structural fact into an operational workflow for a deployed tree. We do not check every node; instead we sample a finite set of leaves, merge nodes, and re-summarized outputs, run local oracle checks on those sampled units, and transport the resulting estimates into a distortion or gap certificate.
 
+For a realized document $x$, let $U(x)$ denote the finite population of \emph{all realized nodes} in its reduction tree: leaves, internal merges, and the root. The node-sampling law assigns each $u \in U(x)$ its own logged propensity $\pi_u \in (0,1]$. There is no root special-casing in this node-population definition: if the root participates in the sampled-node estimand, it does so through its own propensity just like every other realized node.
+
+This node-population estimand is distinct from the always-available document-level supervision channel used in our simulations. We write
+\[
+y_{\mathrm{doc}} := f^\ast(x)
+\]
+for the full-document label, and
+\[
+y_{\mathrm{tree}}
+\]
+for the final-summary/tree-side oracle target or prediction. These coincide only under exact preservation or exact-control assumptions. Outside those regimes, the top/document loss and the sampled-node tree loss are different objects and should be reported separately.
+
 \paragraph{The audit in four steps.}
 \begin{enumerate}[leftmargin=1.5em]
     \item Sample units from the finite populations of leaves, merge nodes, and optional re-summarization nodes.
@@ -90,11 +102,14 @@ These statistics describe \emph{edge failure rates}, not correctness of an indiv
 
 \subsection{Design-Based Estimation}
 
-We cannot afford to query the oracle at every node, so we sample. This is a finite-population survey problem: the audit units form a population, we draw a random subset, and we want an unbiased estimate of the population mean. The standard tool is the Horvitz--Thompson estimator, which reweights each sampled unit by the inverse of its inclusion probability. For queried unit $i$ with inclusion indicator $Z_i$, propensity $\pi_i$, and contribution $Y_i$:
+We cannot afford to query the oracle at every node, so we sample. This is a finite-population survey problem: the audit units form a population, we draw a random subset, and we want an unbiased estimate of the population mean. For document $x$, the relevant finite population is $U(x)$ itself, not just the subset that happened to be queried. The standard tool is the Horvitz--Thompson estimator, which reweights each sampled unit by the inverse of its inclusion probability. For queried unit $i$ with inclusion indicator $Z_i$, propensity $\pi_i$, and contribution $Y_i$:
 \[
 \hat{\mu}_{\mathrm{HT}} = \frac{1}{N}\sum_{i \in \mathcal{U}} \frac{Z_i}{\pi_i}Y_i.
 \]
 This estimator is conditionally unbiased for the population mean under the usual positivity and logged-propensity conditions.
+
+\paragraph{Document labels vs.\ sampled-node estimation.}
+The HT estimand above concerns the sampled-node population mean over $\mathcal{U}=\bigcup_x U(x)$. The full-document label $y_{\mathrm{doc}}$ is a separate complete-label channel and therefore does not require IPW correction. In the shared-$g$ simulations below, we train the same readout on every realized node, but we evaluate and report two quantities separately: (i) the document-level top loss against $y_{\mathrm{doc}}$, and (ii) the sampled-node full-tree estimand, with naive, HT, and H\'ajek estimators computed from the logged node samples.
 
 The practical bound stack decomposes target error into calibration, estimation, and clipping envelopes in objective units. Writing
 \[
@@ -148,5 +163,8 @@ so $\pi_{\min}$ is the primary robustness lever. Practically, certificates shoul
 \subsection{From Audit to Optimization}
 
 Because the audit identifies \emph{which} edges fail and \emph{which} condition each failure violates, it also provides supervision for prompt engineering. In practice, one can treat leaf and merge prompts as parameters $\theta$ and update them against the violation signal. In this way, the same audit supports both certification and tuning.
+
+\paragraph{Empirical supervision split.}
+In the full-tree shared-$g$ experiments, every document supplies a complete document-level label at the top, while only a random sampled subset of realized nodes in $U(x)$ receives node-level feedback. The root is not hard-coded as always sampled in that node law; it simply has its own logged propensity when it is part of the sampled-node channel. Held-out evaluation therefore reports the exact full-node objective, the sampled-node naive/HT/H\'ajek estimates, and the separate document-vs-final-summary top loss.
 
 Adaptive chunking and learned judges introduce interference paths. To keep evaluation valid, reporting must be honest with respect to adaptation roles (chunker, summarizer, oracle): adaptation on train-role partitions, evaluation on held-out role intersections. Full details of the honesty protocol are deferred to the companion paper.

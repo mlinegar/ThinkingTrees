@@ -1,19 +1,76 @@
 \section{Information-Theoretic View of OPS}\label{sec:info-sieve}
 
-This appendix makes explicit the connection between Oracle-Preserving Summarization (OPS) and the \emph{Information Sieve} of \citet{steeg2016informationsieve}. The sieve decomposes an input $X$ into a latent factor $Y$ and \emph{remainder information} $\bar X$ such that $(Y,\bar X)$ reconstructs $X$ exactly while $Y$ captures as much multivariate dependence (Total Correlation) as possible and $\bar X$ is independent of $Y$. OPS instantiates the same architecture, but the objective is supervised: rather than maximizing dependence within $X$, we require that the retained summary $Z=g(X)$ be a sufficient statistic for the oracle $f^*(X)$.
+This appendix records the narrow information-theoretic interpretation supported
+by the current formalization. The right reading of OPS is \emph{oracle-sufficient
+compression}, not generic lossless compression of raw text. The retained summary
+need only preserve the distinctions relevant to the chosen oracle $\fstar$ and
+to downstream objectives that factor through $\fstar$.
 
-\begin{theorem}[Oracle information decomposition]\label{thm:info-decomp}
-Let $X$ be a block or node in the hierarchy, let $Z=g(X)$ be its summary, and let $\nu$ denote any (possibly stochastic) remainder such that $X$ is measurable with respect to $(Z,\nu)$. Then
+\begin{theorem}[Oracle sufficiency under the joint raw/summary law]\label{thm:info-suff-joint}
+Fix a deterministic tree schedule $x \mapsto T(x)$, a stochastic summarizer $g$,
+and a number of rounds $R \ge 1$. Let $X$ denote a raw document drawn from the
+document law and let $Z$ denote the realized summary produced by the C-TreePO
+pipeline on that document. If the local laws hold on every scheduled tree and
+globally for $g$, then
 \[
-I(X; f^*) \;=\; I(Z; f^*) \;+\; I(\nu; f^* \mid Z).
+\fstar(Z) = \fstar(X) \qquad \text{almost surely.}
 \]
-In particular, $Z$ preserves all oracle information if and only if $I(\nu; f^* \mid Z)=0$.
+Consequently there exists a measurable map $h$ such that
+\[
+\fstar(X) = h(Z) \qquad \text{almost surely.}
+\]
 \end{theorem}
 
 \begin{proof}
-Apply the chain rule for mutual information with $X = (Z,\nu)$.
+This is exactly the fixed-partition joint-law bridge formalized in Lean: local
+laws imply zero oracle distortion on the support of the joint law, hence oracle
+equality almost surely, and the almost-sure Doob--Dynkin factorization follows.
 \end{proof}
 
-Condition~(C1) (Sufficiency) enforces $I(\nu; f^* \mid Z)=0$ at every realized leaf by checking that the oracle agrees on $b$ and $g(b)$. Condition~(C2) (Merge Consistency) ensures that when $Z$ is formed by hierarchically merging child summaries $(Z_{u_L},Z_{u_R})$, the remainder created at that merge is also orthogonal to $f^*$. Combining Theorem~\ref{thm:info-decomp} with the incremental construction of the Information Sieve (Theorem~2.1 of \citet{steeg2016informationsieve}) yields an additive view of the hierarchy: each merge acts as a sieve layer whose discarded bits are independent of the oracle. Consequently, if the local audits certify that $I(\nu; f^* \mid Z)=0$ on every edge, the root summary preserves the full mutual information $I(X_{\text{root}}; f^*)$ present in the original document.
+Theorem~\ref{thm:info-suff-joint} is the formal justification for describing the
+summary as \emph{oracle-sufficient}. It says that once the realized summary is
+known, the raw document contains no additional information for the oracle task.
+This is a Blackwell-style statement about task-relevant information, not a
+source-coding statement about reconstructing the original text.
 
-Finally, Section~5 of \citet{steeg2016informationsieve} observes that discarding the remainder induces a lossy compression of the raw input. OPS inherits this interpretation: summaries $g(x)$ need not suffice to reconstruct the surface text, but they are \emph{lossless with respect to $f^*$}. The ``loss'' lives entirely in the nuisance remainder, which by design is independent of the oracle and therefore irrelevant for downstream coding tasks.
+\begin{corollary}[Zero task-relevant KLIC]\label{cor:info-klic}
+Suppose a downstream supervision density is oracle-indexed, meaning that for
+some measurable $\bar p$,
+\[
+p(x,y) = \bar p(\fstar(x), y).
+\]
+Under the same joint-law assumptions as Theorem~\ref{thm:info-suff-joint},
+\[
+\mathrm{KL}\!\bigl(p(X,\cdot)\,\|\,p(Z,\cdot)\bigr) = 0
+\qquad \text{almost surely.}
+\]
+\end{corollary}
+
+\begin{proof}
+If $\fstar(X)=\fstar(Z)$ almost surely and the density factors through
+$\fstar$, then the two conditional densities agree pointwise almost surely; the
+KL divergence therefore vanishes almost surely.
+\end{proof}
+
+The same bridge yields a score-transport statement for oracle-factorized
+supervision: conditioning the raw-document score on the realized summary
+preserves the oracle-indexed score under the joint law. This is the
+information-theoretic sense in which C-TreePO preserves the downstream training
+signal.
+
+\paragraph{Anti-overclaim.}
+Three scope limits are important.
+\begin{enumerate}[nosep]
+    \item The framework does \emph{not} promise reconstruction of the surface text.
+    \item It does \emph{not} preserve objectives that depend on features outside the chosen oracle $\fstar$.
+    \item If a downstream readout separates documents inside one oracle fiber, the guarantees no longer apply.
+\end{enumerate}
+
+\paragraph{Relation to the Information Sieve.}
+The analogy to the Information Sieve of \citet{steeg2016informationsieve} is
+therefore heuristic rather than a full theorem-level identification. Both views
+distinguish retained structure from discarded remainder, but our formalized
+claim is only that the retained summary is sufficient for the supervised oracle
+task. A fuller Shannon or mutual-information treatment can be added later in a
+finite-support extension, but it is not required for the main theorem claims of
+this paper.

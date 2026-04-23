@@ -100,6 +100,36 @@ theorem one_pass (g : Summarizer Strings) (T : BinTree Strings) (x : Strings) (f
     have := nodewise_preservation g T ( root T ) fstar h_root h1 h2; aesop;
 
 /-!
+## Single-Leaf Degenerate Case
+-/
+
+/-- **L2 is vacuously true for a single-leaf tree.**
+
+When the tree is just `BinTree.leaf b`, `internal_nodes T = []`,
+so the universal quantifier in L2 ranges over an empty set. -/
+theorem L2_vacuous_of_leaf (g : Summarizer Strings) (b : Strings) (fstar : Strings → Y) :
+  L2 g (BinTree.leaf b) fstar := by
+    intro p hp; simp [internal_nodes] at hp
+
+/-- **Single-leaf one-pass preservation.**
+
+For a single-leaf tree, only L1 is needed: L2 holds vacuously,
+so if the leaf encoder preserves the oracle, root distortion is zero.
+This is the formal basis for the tree–FNO parity claim: when the
+tree has one leaf spanning the full document, it computes `g(b)` and
+the preservation guarantee depends only on `g` being L1-faithful. -/
+theorem single_leaf_one_pass (g : Summarizer Strings) (b : Strings) (fstar : Strings → Y)
+  (h1 : L1 g (BinTree.leaf b) fstar) :
+  Egu g (root (BinTree.leaf b)) (fun z => D fstar z (S (BinTree.leaf b))) = 0 :=
+    one_pass g (BinTree.leaf b) (S (BinTree.leaf b)) fstar rfl h1 (L2_vacuous_of_leaf g b fstar)
+
+/-- **Single-leaf reduction is just the encoder.**
+
+`reduce g (BinTree.leaf b) = g b` holds definitionally. -/
+theorem single_leaf_reduces_to_encoder (g : Summarizer Strings) (b : Strings) :
+  reduce g (BinTree.leaf b) = g b := by rfl
+
+/-!
 ## Schedule Invariance
 -/
 

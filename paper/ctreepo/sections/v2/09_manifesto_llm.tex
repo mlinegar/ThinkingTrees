@@ -1,0 +1,352 @@
+\section{Semantic Extension: Manifesto Measurement at Scale}\label{sec:manifesto-llm}
+
+The theorems of Section~\ref{sec:theorems} are stated over an abstract oracle $\fstar$; they do not care whether $\fstar$ is a distinct-count query (Section~\ref{sec:hll-parity}), a color-transition count (Section~\ref{sec:markov-walkthrough}), or a rubric-driven semantic score. This section picks up the last of those and closes the classical-to-learned arc. The summarizer $g$ is a prompted language model, the merge is an LLM-friendly prompt, the readout $f$ is a second LLM call under a scoring rubric that maps the root summary to a seven-point scale, the oracle $\fstar$ is the rubric social scientists actually use, and the target benchmark is the recent comparative-politics paper \citet{BenoitEtAl2025}, which establishes the current empirical bar for LLM-based political-text measurement.
+
+This is a deliberately different choice of parametric family --- and a
+different optimizer path --- from the FNO pipeline of
+Section~\ref{sec:fno-primer}. Neither $g$ nor $f$ is a neural-operator
+stack whose weights we train with gradient descent on a local-law loss;
+both are fixed LLM checkpoints driven by rubric prompts. The
+optimization we actually perform is over the prompts, chunk sizes, and
+audit design, not over the weights of $g$ or $f$. What remains shared
+across the two pipelines is exactly what the paper set out to make
+shared. First, the training objective is still
+$J_\lambda$ from Equation~\eqref{eq:oracle-projection-objective}, with
+oracle-fit weight $(1-\lambda)$ and a single local-law projection
+weight $\lambda$ on the leaf, merge, and idempotence probes; what
+differs from Section~\ref{sec:fno-primer} is the parameter space being
+minimized over (prompts and chunking here, FNO weights there), not the
+shape of $J_\lambda$. By the iff of Section~\ref{sec:theorems}, that
+same $\lambda$-weighting is also the structural-error assumption for
+the Manifesto setting. Second, the local-law audit of
+Section~\ref{sec:estimation} is still meaningful, because it only needs
+realized leaf, merge, and on-range calls plus logged sampling
+propensities; the estimator does not care whether the weights behind
+those calls are FNO parameters or a decoding temperature. Third, the
+gap bound of Section~\ref{sec:discussion} is still the right object,
+because it is stated on $f$ and $g$, not on a particular
+parameterization. The architecture-level transformer inclusion of
+Section~\ref{sec:fno-primer} explains why finite attention stacks sit
+inside the equation-(6) neural-operator family as a formal matter, but
+it is not a runtime certificate for a particular checkpoint --- and,
+more to the point, it is not doing load-bearing work here. The
+load-bearing correctness step is the same audited operator interface as
+the Markov and mergeable-sketch sections, now instantiated with an LLM
+summarizer and an LLM-scored readout.
+
+We ask whether a single open-weight model driven through the same local laws can match or exceed Benoit's $18$-score ensemble of three proprietary frontier LLMs on the same corpus, at an order-of-magnitude lower compute. The short answer is yes: at an $8\mathrm{K}$-character leaf, C-TreePO on Gemma-4-31B-NVFP4 produces a macro Pearson $r$ of $0.829$ against expert-survey means, vs.\ $0.817$ for Benoit's proprietary ensemble and $0.793$ for the matched Gemma-3-27B open-weight replication. The headline is preservation in action. The rest of this section shows what preservation buys: chunk-invariance as a diagnostic, compute cost as a consequence, and the oracle-grounded training path as the natural next step.
+
+\subsection{From Cardinality to RILE}
+
+In the HLL case the oracle was
+$\fstar(x) = |\{\text{distinct items in } x\}|$, an integer-valued query
+a commutative sketch can compute analytically. Here we replace it by
+the scoring rubrics standardized by \citet{BenoitEtAl2025}, which place
+every party platform on a seven-point scale for each of six policy
+dimensions: economic (public services vs.\ taxation), social
+(liberal vs.\ conservative), immigration, European integration,
+environment, and decentralization. For a span $x$ of manifesto text and
+dimension $d$, $\fstar_d(x) \in \{1,\dots,7\}$ is the rubric-indexed
+judgment a trained coder would assign; the full oracle is the $6$-vector
+$(\fstar_1(x),\dots,\fstar_6(x))$. This is rubric-driven semantics, not
+a closed-form algorithm. Its computation requires a human-readable
+scoring context and either an expert coder or a language model
+instructed by that context. There is no hand-designed mergeable sketch
+for it --- which is precisely the regime the paper exists to cover.
+
+\subsection{Benoit et al.'s Protocol as the Benchmark}
+
+\citet{BenoitEtAl2025} score $235$ Manifesto Project platforms from
+parliamentary democracies matched to expert-survey years, plus $23$
+Kl\"uver coalition agreements. Each manifesto--dimension pair runs
+through a two-stage pipeline: a summarizer produces a $300$--$400$ word
+English summary, then a scorer reads that summary and emits an integer
+on the seven-point scale. Their headline ensembles
+$3 \text{ LLMs} \times 2 \text{ shot-settings} \times 3 \text{ summaries}
+= 18$ scores per manifesto--dimension. Three published numbers matter
+    for what follows. Table~3 reports the expert--expert reference
+($0.78$--$0.95$ Pearson $r$ across dimensions, macro $0.873$);
+Figure~1 gives the proprietary ensemble headline ($0.49$--$0.92$,
+macro $0.817$); Table~6 adds an open-weight replication with
+Gemma-3-27B-IT (macro $0.793$). The per-dimension correlations, not
+just the macro, are what a contender must reproduce.
+
+\subsection{Plugging the C-Tree into the Benoit Corpus}
+
+We reuse Benoit's expert-mean benchmarks and manifesto crosswalks
+without modification, so the results below are directly stackable next
+to the numbers just cited. The only substitution is the pipeline. A
+manifesto is partitioned into contiguous character spans of size
+$c\in\{4\mathrm{K},8\mathrm{K},16\mathrm{K},24\mathrm{K},32\mathrm{K},64\mathrm{K}\}$;
+each span is summarized by a single shared language model
+(\textsc{Gemma-4-31B-IT-NVFP4}) under a rubric that names the
+preservation categories drawn from Benoit's scoring contexts; adjacent
+summaries are merged pairwise under the same rubric up to a root;
+and the root summary is then scored on the seven-point scale. Two
+pipeline variants are reported:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Per-dimension C-Tree.} One summarizer and one scorer
+          per dimension; six independent trees per manifesto. The
+          rubric at every node names only that dimension's preservation
+          categories. This is the setting the theorems of
+          Section~\ref{sec:theorems} were stated for.
+    \item \textbf{Joint C-Tree.} A single summarizer per manifesto
+          with a union rubric covering all six dimensions; the
+          resulting root summary is scored six times, once per
+          dimension. The scoring stage is reordered so all $N$
+          scoring calls for one dimension execute consecutively,
+          which lets the per-dimension system prompt be reused across
+          calls and amortizes the dominant prefill cost.
+\end{itemize}
+
+Both variants close under the same three local laws as the HLL and
+Markov sections: C1 (leaf sufficiency) requires each leaf summary to
+preserve the rubric-relevant evidence in its span; C2 (idempotence)
+requires re-summarizing a leaf summary to leave the predicted score
+unchanged; C3 (merge consistency) requires the ordered merge summary to
+preserve the same rubric evidence as the corresponding raw union span.
+Order-swap or permutation probes are useful stress tests when the chosen
+rubric treats quasi-sentence evidence as bag-like, but they are not the
+core C3 law. In the language of Section~\ref{sec:theorems}, the prompt-only
+pipeline is a semantic instantiation of the same operator-plus-projection
+interface: oracle fit comes from the root score, while local-law weights
+and audits target the theorem-eligible subspace. The joint variant adds
+one invariant not stated as a fourth law: the same leaf summary must
+support all six scorers. Empirically this invariant matters more than any
+within-law tightening because it forces $g$ to compress without discarding
+dimension-specific evidence.
+
+\subsection{Headline: Matching and Exceeding the Ensemble at One Model}\label{sec:benoit-headline}
+
+Table~\ref{tab:benoit-headline} reports per-dimension Pearson $r$
+against Benoit's expert-survey means for the proprietary ensemble, the
+matched Gemma-3-27B open-weight replication, and five C-TreePO
+configurations on \textsc{Gemma-4-31B-IT-NVFP4}. Two rows carry the
+claim.
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Per-dimension C-Tree, $c = 8\mathrm{K}$ leaves.}
+          Macro $0.829$, above the proprietary ensemble's $0.817$ and
+          $+0.036$ above the matched open-weight replication. The
+          three dimensions with the biggest gain against Gemma-3
+          are decentralization ($+0.093$), economic ($+0.079$), and
+          EU ($+0.061$). The losses are environment ($-0.021$) and
+          immigration ($-0.006$).
+        \item \textbf{Per-dimension C-Tree, $c = 4\mathrm{K}$ leaves}
+          (tiny-leaf extension). Macro $0.842$, within $0.031$ of
+          Benoit's \emph{expert--expert} reference ($0.873$). The
+          two dimensions where we exceed that empirical reference are
+          EU and decentralization --- both flagged by Benoit as
+          low-variance boundary cases in their Figures~2--3.
+\end{itemize}
+
+\begin{table}[t]
+    \centering
+    \resizebox{\linewidth}{!}{\input{assets/benoit/tables/benoit_comparison_pearson.tex}}
+    \caption{Pearson $r$ against Benoit expert-survey means across six
+    policy dimensions. The first block reproduces
+    \citet{BenoitEtAl2025}'s published numbers (Fig.~1 proprietary
+    ensemble, Tab.~3 expert--expert reference, Tab.~6 open-weight
+    replication at Gemma-3-27B). The remaining blocks are C-TreePO on
+    Gemma-4-31B-NVFP4 across chunk sizes $c$, under the per-dimension
+    and joint variants. The macro column is the unweighted mean
+    across dimensions for each row. Full per-cell table with
+    coverage, ablations, and compute accounting appears in
+    Appendix~\ref{app:benoit-replication}.}\label{tab:benoit-headline}
+\end{table}
+
+Three structural statements follow from the table.
+
+First, a single open-weight model matches a frontier ensemble. The per-dimension row at $c = 8\mathrm{K}$ (macro $0.829$) exceeds a three-frontier-LLM ensemble with $18$ scores per manifesto--dimension (macro $0.817$), on one open-weight model with one score per manifesto--dimension. The ensemble effect that \citet{BenoitEtAl2025} emphasize is therefore not necessary for open-weight replication on this corpus. A tree over a single model recovers the same macro-level agreement; the per-dimension dispersion tracks theirs to within sampling noise on five of six dimensions.
+
+Second, correlations are stable across chunk size. Across chunk sizes varying by $16\times$ ($c = 4\mathrm{K}$ to $c = 64\mathrm{K}$), macro $r$ varies by only $0.027$ in the per-dimension variant. Every dimension holds its rank-order across chunk sizes except decentralization, whose correlation \emph{improves} as leaves shrink: $0.489$ at $c = 64\mathrm{K}$ rising to $0.584$ at $c = 2\mathrm{K}$. This is Proposition~\ref{prop:mergeable-reduction}'s prediction for a semantic oracle: under local-law validity the root-level score does not depend on the chunk schedule. The one dimension where it does depend is the one Benoit's own Figures~2--3 flag as a boundary case: coders and experts disagree about what local evidence resolves decentralization, so the smaller-leaf regime that forces the tree to surface that evidence buys real correlation. This is the Markov counter of Section~\ref{sec:markov-interlude} reappearing in real data: when the oracle cares about between-leaf interactions, more leaves help.
+
+Third, the compute gap is roughly two orders of magnitude. The published \citet{BenoitEtAl2025} pipeline makes $18$ LLM calls per
+manifesto--dimension, split across three proprietary frontier models,
+for a corpus-wide total of $235 \times 6 \times 18 \approx 25{,}000$
+frontier-API calls (plus an extra $23 \times 6 \times 18$ for the
+Kl\"uver coalition agreements). The joint C-Tree variant makes
+$2\lceil n_{\text{chars}}/c\rceil - 1 + 6$ calls per manifesto: one
+summarize call per leaf, one merge call per internal node, and one
+score call per dimension. For a typical manifesto with $c = 8\mathrm{K}$
+leaves ($\approx 6$ leaves and $5$ internal merges) that is $17$ LM
+calls against a single open-weight model on local hardware, versus
+$18 \times 6 = 108$ frontier-API calls in Benoit's ensemble. At frontier
+API list prices the compute gap is roughly two orders of magnitude per
+manifesto; the full corpus runs reported in
+Table~\ref{tab:benoit-headline} completed on a local GPU node inside a
+working day. Appendix~\ref{app:benoit-replication} documents the
+scoring-call reordering that Benoit's fixed-per-manifesto interleaving
+prevents, and the wall-clock profile.
+
+\subsection{Alternating \texorpdfstring{$f/g$}{f/g} Optimization}\label{sec:rile-fg-ladder}
+
+The headline table above freezes a single prompt for the summarizer/merge
+program $g$ and a single prompt for the scorer/readout program $f$, then
+sweeps only over chunk size. The general way we train this kind of
+pipeline, though, is iterative. Start with an initial pair
+$(f^0, g^0)$, then pair them against each other in a ladder
+\[
+    f^0 g^0 \;\to\; f^1 g^0 \;\to\; f^1 g^1 \;\to\; f^2 g^1 \;\to\;
+    f^2 g^2 \;\to\; f^3 g^2 \;\to\; f^3 g^3,
+\]
+where $f^a g^b$ means "use the scorer after $a$ scorer-side prompt
+optimizations and the summarizer after $b$ summarizer-side prompt
+optimizations"; it is a stage label, not multiplication. Each step
+re-optimizes one side against the current version of the other. In the
+LLM regime "optimization" still means prompt-program search rather than
+gradient descent on weights, so the framing of the preceding subsections ---
+parameter-space minimization over prompts, not over the checkpoints
+themselves --- is preserved. What the ladder adds is a principled way
+for the scorer's instructions to co-adapt to the summarizer's output
+distribution, and vice versa, rather than optimizing one in isolation.
+
+The fully populated lane reported here inherits Benoit's archived
+GPT-4o summary as $g^0 = g^{\mathrm{Benoit}}$ and starts from our
+scorer-only optimized prompt as $f^1$. Its plotted anchor is therefore
+$f^1 g^0$, not a fresh $f^0 g^0$ cell. This is the natural continuation
+of the fixed-summary scorer ablations in Appendix~\ref{app:benoit-replication},
+and it lets the ladder ask what additional summarizer updates buy once
+the scorer has already been tuned on Benoit's summary distribution. The
+    cleaner "raw-init" variant, where $(f^0, g^0)$ both come from the
+    own-Gemma baseline, is the setting we ultimately want the framework to
+    solve; its early-leaf rows are already complete (see
+Appendix~\ref{app:rile-fg-ladder}) and \fixme{full raw-init grid is
+populating; narrative will expand once the 2026-04-24 refresh
+completes}.
+
+Two reference points frame the numbers below. The upper reference
+for external Pearson is the expert-expert agreement on the economic
+dimension reported by \citet{BenoitEtAl2025}'s Table~3, $r = 0.880$
+    --- an empirical expert-expert reference for this dimension, not a
+    mathematical upper bound. The lower reference for the
+internal-external Pearson gap is $0$: the gap is internal Pearson
+against the teacher trace minus external Pearson against expert means,
+so values near zero say the scorer's internal agreement is not pulling
+away from the paper-facing expert benchmark.
+
+We focus the write-up here on the Benoit-init lane because it is the
+only bundle that is currently fully populated across the six leaf
+sizes; the raw-init lane is in flight and the vignette it implies is
+flagged separately below. \fixme{raw-init lane will change the shape
+of this paragraph once the 2026-04-24 refresh completes --- current
+expectation is that the raw-init numbers roughly track the Benoit
+ones, so the qualitative takeaway stays the same.}
+
+The main empirical takeaway is leaf-size robustness: on the economic
+dimension, the per-leaf best external Pearson sits at $r = 0.885$
+(leaf 1024), $0.886$ (leaf 2048), $0.886$ (leaf 4096), $0.879$ (leaf
+8192) --- a $0.007$-wide band ($[0.879, 0.886]$) straddling the
+$r = 0.880$ expert-expert reference across an $8\times$ range of
+leaf sizes, with three of the four cells at or above it.
+Below $\sim 1024$ tokens the method degrades gracefully
+($r = 0.861$ at leaf $512$, $r = 0.830$ at leaf $256$), which is the
+semantic analogue of the Markov counter's "leaves must be wide enough
+to carry the between-leaf evidence" constraint from
+Section~\ref{sec:markov-interlude}. The same chunk-invariance pattern
+Table~\ref{tab:benoit-headline} reports for the fixed-prompt pipeline
+($\pm 0.027$ macro across $16\times$ leaf variation) is thus
+reproduced here under iterative training, which is the non-obvious
+    outcome: alternating DSPy-medium updates preserve the fixed-prompt
+    pipeline's chunk-insensitivity and leave the realized operator near
+    the expert-expert reference rather than clearly below it.
+
+The alternating updates do not purchase the plateau at the cost of
+the local-law probes the audit of
+Section~\ref{sec:estimation} relies on: across every populated
+Benoit-init cell, internal Pearson stays in $[0.953, 0.990]$ and the
+internal-external Pearson gap stays in $[0.086, 0.161]$. The ladder's
+best Benoit-init cell reaches $r = 0.886$ on economic, a $+0.049$
+improvement over the strongest scorer-only ablation ($r = 0.837$) and
+$+0.064$ over the BootstrapFewShot scorer-only ablation ($r = 0.822$;
+Appendix~\ref{app:benoit-replication}). Those baselines optimize only
+$f$ while holding the summary distribution fixed, so the remaining gain
+is the summarizer-update half of the loop.
+\fixme{pilot is economic-dimension only; multi-dimension extension
+pending.} \fixme{absolute-$r$ comparison to the §9.4 per-dim headline
+($0.939$ at $c = 8\mathrm{K}$ chars) is deferred --- the ladder's leaf
+axis is in tokens and a matched-leaf fixed-prompt DSPy-medium
+baseline has not been re-run.}
+
+A raw-init variant where $(f^0, g^0)$ are both drawn from the
+own-Gemma baseline pipeline (no Benoit summaries) is in flight. At
+the sole cell where both sides have been updated once (leaf $256$,
+$f^1 g^1$), external Pearson reaches $r = 0.909$ --- above the
+$0.880$ expert-expert reference on this held-out split --- and the
+internal-external Pearson gap tightens to $0.056$ in the same step.
+We do not lean on this vignette in the main body because the
+raw-init grid is only $\sim 15\%$ complete as of writing;
+    Appendix~\ref{app:rile-fg-ladder} reports the completed cells. \fixme{
+once the raw-init grid lands (ETA 2026-04-24 refresh), fold it into
+this paragraph; if it tracks the Benoit-init lane shape, collapse to a
+single sentence stating both lanes agree on the leaf-size-robustness
+claim.}
+
+\subsection{Oracle-Grounded Supervision for Local Laws}\label{sec:rile-oracle}
+
+The headline above uses a prompt-only summarizer and scorer with no
+training against internal-node oracles. The Manifesto corpus, however,
+contains enough expert structure to close the training loop: expert
+quasi-sentence codings are available for $2{,}157$ platforms
+($\sim\!2.27$M coded spans), which gives ground-truth oracle values at
+every leaf (whatever span the leaf covers) and at every internal node
+(the union-span of its two children). The oracle-grounded local-law
+supervision path that works in the Markov and HLL settings transfers
+to the Manifesto corpus with no oracle redesign --- the quasi-sentence
+annotations are already there. A planned training pipeline that turns
+those annotations into explicit C1/C2/C3 supervision signals is
+described in Appendix~\ref{app:benoit-replication}; results are a
+work-in-progress companion and will be added on convergence.
+
+\subsection{Connecting Back: DPO and GRPO on Oracle-Preserving Summaries}
+
+Theorem~\ref{thm:pref-equiv} makes the headline operationally useful
+beyond correlation. When downstream preference training targets the
+same oracle --- ``which summary better captures the manifesto's
+position on dimension $d$?'' --- preferences can be collected on root
+summaries $Z^{(R)}$ rather than on full documents $X$. Under local
+preservation and the context-compatibility condition of
+Assumption~\ref{ass:context}, the summary-based and
+document-based DPO and GRPO population minimizers coincide; when
+preservation is approximate, Theorem~\ref{thm:unified-gap} turns the
+realized-violation estimate $\Delta_R$ into a quantitative drift
+envelope on the training objective. The relevant side assumption is
+oracle-indexed preferences:
+
+\begin{assumption}[Oracle-indexed preferences]\label{ass:pref}
+Given manifestos $x_1, x_2$ with oracle values
+$y_1 = \fstar(x_1)$, $y_2 = \fstar(x_2)$, the probability that a human
+prefers response $a_1$ to $a_2$ depends only on $(y_1, y_2, a_1, a_2)$,
+not on the raw texts.
+\end{assumption}
+
+For a content-based rubric this is plausible: if two manifestos share
+the same six-dimensional score and the same prompt, an ideally
+calibrated annotator's preference depends on content, not surface
+style. It can fail when annotators are swayed by tone, register, or
+formatting --- the usual DPO-data pathologies \citep{RafailovEtAl2023DPO}.
+In that case Theorem~\ref{thm:unified-gap} replaces an equality with a
+finite-sample envelope, and the operational recommendation is either
+to widen the oracle to include the relevant stylistic features or to
+report the certificate and let it carry the sensitivity.
+
+The workflow implied by the theorems is to build hierarchies with a chosen chunk schedule (the present section settles on $c = 8\mathrm{K}$ as a default; the tiny-leaf extension at $c = 4\mathrm{K}$ is the cheapest path to the expert-reference line on the two boundary dimensions), audit with the sampling design of Section~\ref{sec:estimation} to bound $\Delta_R$, collect preferences on summaries rather than on full documents, train DPO or GRPO on the resulting (summary, preference) pairs, and deploy, reporting both the downstream estimate and the audit-based preference-gap certificate.
+
+\subsection{Takeaway}
+
+The Benoit replication closes the semantic-extension claim with a
+concrete head-to-head. The same local-law machinery that recovered
+HyperLogLog byte-for-byte (Section~\ref{sec:hll-parity}) and that
+handled the Markov counter (Section~\ref{sec:markov-walkthrough})
+reproduces the current published empirical bar for LLM-based
+manifesto measurement on a single open-weight model, with per-dimension
+agreement that ranks with the proprietary ensemble and a chunk-invariance
+pattern that tracks the theory's projection story: when local-law error is
+small, changing the chunk schedule moves the realized operator within the
+same theorem-eligible region rather than changing the target. The compute story is that
+mergeability is not rhetorical here: once local laws hold, the tree
+buys empirical parity with frontier ensembles \emph{and} the option to
+audit the compression path with a design-based envelope rather than
+treating it as a hidden engineering detail. The next section turns
+that audit into a deployable estimand.

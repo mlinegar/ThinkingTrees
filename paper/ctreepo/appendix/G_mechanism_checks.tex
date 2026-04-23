@@ -1,0 +1,58 @@
+\section{Controlled Mechanism Checks}\label{app:mechanism-checks}
+
+This appendix is self-contained. It collects the controlled simulations
+that test the paper's mechanism claims in isolation --- phase behavior
+on the toy sketch, failure attribution on a complexity ladder, learning
+a merge rule from oracle feedback alone, full-tree shared-$g$ supervision
+with sampled-node IPW, and tree--FNO parity in the single-leaf regime.
+Each subsection asks whether a specific failure or recovery pattern
+predicted by the theory appears when ground truth is known exactly. None
+of these results are headline claims; they are diagnostics that let a
+reader stress-test the theory piece by piece. The same appendix also
+documents the FNO-head architecture and the repo-wide $2\times$ headroom
+invariant that Section~\ref{sec:fno-primer} points to.
+
+\subsection{Phase Behavior}
+
+\textbf{What this tests:} whether the toy sketch exhibits the predicted sharp sufficiency boundary. Sweeps across $(k,m)$ configurations show a sharp transition at $m = k$: the supported regime ($m \ge k$) delivers low mean absolute bias, while the unsupported regime ($m < k$) yields persistent bias that does not close with additional samples. The same experiments show that leaf granularity and selection budget are separate control axes: fine-grained leaves with insufficient budget still fail (selection bottleneck), while coarser leaves with adequate budget can succeed (sufficient retention).
+
+\subsection{Failure Attribution}
+
+\textbf{What this tests:} whether failures can be attributed to the local laws rather than to undifferentiated model error. Targeted ablations on a complexity ladder are consistent with interpretable failure modes. The ``missing-stat'' variant (analogous to $m < k$) and ``wrong-chunker'' variant (misaligned partitioning) fail in the regimes predicted by the theory, corresponding to C3 violations (insufficient merge-state capacity) and C1 violations (leaf partitions that split interaction-bearing information). Positive controls remain stable throughout. Additional plots for the complexity ladder are deferred to the companion paper.
+
+\subsection{Learning the Sketch from Oracle Feedback}\label{sec:learned-sketch}
+
+\textbf{What this tests:} whether the same local oracle signal used for auditing can also train a merge rule. The preceding simulations use hand-designed merge rules (the top-$m$ algebraic sketch). We therefore replace that rule with a small neural network (two-layer MLP, ${\sim}\!3$K parameters) that encodes leaf indicators into an $m$-dimensional state, merges two child states into a parent state, and reads out predicted per-type counts from any node state. Training uses only local oracle queries at randomly sampled tree nodes---the same probabilistic audit signal from Section~\ref{sec:estimation}, now used with gradients.
+
+To create a task where the sufficiency boundary is information-theoretic rather than just algebraic, we assign each indicator position a \emph{type} (round-robin: position $i$ has type $i \bmod k$) and ask the oracle to report the $k$-vector of per-type spike counts. This makes the sufficient statistic genuinely $k$-dimensional: to predict all $k$ type counts independently, the state must carry at least $k$ dimensions of information. The linear readout from $m$ state dimensions to $k$ outputs has rank $\min(m, k)$, so when $m < k$ it cannot independently recover all $k$ counts regardless of what the encoder and merge function learn.
+
+Figure~\ref{fig:learned-sketch-curves} shows learning curves for different state budgets $m$ with $k=4$ types. When $m \ge k$, the learned sketch converges to near-zero MSE and approaches the hand-designed type-aware sketch. When $m < k$, the MSE plateaus at a nonzero floor that training cannot overcome---the bottleneck is structural. The hand-designed sketch exhibits the same boundary: with $m < k$ tracked types, some dimensions are lost at every merge.
+
+These checks support two points. First, in this controlled setup, the oracle-query signal used for auditing is sufficient to learn the merge law without direct knowledge of the underlying data-generating process. Second, the $m < k$ sufficiency boundary remains in place for learned sketches when the oracle's sufficient statistic is genuinely $k$-dimensional.
+
+\subsection{Full-Tree Shared-$g$ Supervision}
+
+\textbf{What this tests:} whether a single learned readout $g$ can be applied to the full realized tree while keeping document-level supervision separate from sampled-node IPW estimation. In these runs, each document always contributes a full-document label $y_{\mathrm{doc}}=f^\ast(x)$ at the top, but node-level supervision is observed only on a random sampled subset of the realized node population $U(x)$. The root is not hard-coded as always sampled inside this node law; when it is part of the sampled-node channel it simply has its own logged propensity, exactly like any other internal node.
+
+On held-out fully labeled trees, we therefore report two distinct quantities. The first is the document-vs-final-summary top loss, evaluated directly from the complete document labels. The second is the full-tree node objective induced by the shared readout $g$, for which we compare the exact full-node mean to the naive sampled mean, Horvitz--Thompson mean, and H\'ajek mean computed from the logged sampled nodes. Depth and node-type breakdowns are reported separately so that top-level document accuracy is not conflated with finite-population node-risk estimation.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{learned_sketch_curves.png}
+    \caption{Learning the merge rule from oracle feedback. Left: root MSE (per-type count prediction) during training, indexed by state budget $m$ with $k=4$ types. When $m \ge k$, the learned sketch converges to near-zero error; when $m < k$, the error plateaus at a nonzero floor. Right: final threshold accuracy (``all types present'') of the learned sketch versus the hand-designed type-aware sketch. The $m < k$ boundary binds both.}
+    \label{fig:learned-sketch-curves}
+\end{figure}
+
+\subsection{Tree--FNO Parity in the Single-Leaf Regime}\label{sec:single-leaf-parity}
+
+\textbf{What this tests:} whether the tree architecture, when configured with a single leaf spanning the full document, achieves empirical parity with the flat FNO baseline. In this regime the tree has no merge operations and the local laws hold vacuously: C1 (leaf sufficiency) is trivial because the leaf \emph{is} the document, and C2 (merge consistency) is trivial because no internal nodes exist ($\texttt{internal\_nodes}(\texttt{leaf}\;b) = \varnothing$, so the universal quantifier in L2 is vacuously true). The \texttt{single\_leaf\_one\_pass} corollary therefore guarantees zero expected distortion whenever L1 holds, regardless of law weights or merge-network parameters. The hierarchical reduction is definitionally the encoder: $\texttt{reduce}\;g\;(\texttt{leaf}\;b) = g\;b$.
+
+At the implementation level, the tree model (\texttt{FNOCountSketch}) and the standalone FNO baseline (\texttt{FNOCountPredictor}) share the same 1D FNO processing core---token embedding, Fourier layers, masked mean pooling---but differ in their readout heads: the tree uses a two-stage projection (leaf projector then scalar readout with sigmoid), while the FNO uses a classification head with cross-entropy loss. In the single-leaf regime the tree's merge network exists but is never invoked (the code returns the leaf state directly). This experiment therefore tests \emph{empirical} parity: whether these architectural differences at the readout layer are negligible in practice when the FNO core is matched.
+
+The experiment sweeps leaf granularity on a controlled Markov changepoint DGP with 128-token documents:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{8 leaves} (\texttt{fixed\_leaf\_tokens=16}): standard tree regime with active merge operations.
+    \item \textbf{2 leaves} (\texttt{fixed\_leaf\_tokens=64}): reduced tree with one merge.
+    \item \textbf{1 leaf} (\texttt{fixed\_leaf\_tokens=128}): single-leaf regime; tree collapses to a flat operator.
+\end{itemize}
+Five recipe variants systematically separate three confounds: optimization procedure (training schedule, checkpoint metric), model capacity (state/hidden dimensions), and leaf architecture (FNO-matched leaf defaults). All runs share the same training, validation, and test documents from a single prepared corpus with prefix-nested training sets. If the tree matches FNO in the single-leaf regime and diverges only when the merge function is active, this confirms that the tree--FNO gap is attributable to the merge path rather than to incidental recipe or readout differences.

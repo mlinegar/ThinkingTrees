@@ -85,6 +85,19 @@ def OracleMeasurablePolicyPointwiseEpsilonArgmin {Strings A Y : Type*} [PseudoMe
     Set (Policy Strings A) :=
   OracleMeasurableParamPointwiseEpsilonArgmin loss DPO.OracleMeasurable fstar eps
 
+/-- A lightweight optimizer-output certificate: the selected parameter is an
+`ε`-minimizer of the surrogate objective. -/
+def SurrogateOptimizerCertificate {Θ : Type*}
+    (lossSur : Θ → ℝ) (θhat : Θ) (ε : ℝ) : Prop :=
+  θhat ∈ ParamEpsilonArgmin lossSur ε
+
+/-- Oracle-measurable optimizer-output certificate. -/
+def OracleMeasurableSurrogateOptimizerCertificate
+    {Strings Y Θ : Type*} [PseudoMetricSpace Y]
+    (lossSur : Θ → ℝ) (isMeasurable : Θ → (Strings → Y) → Prop)
+    (fstar : Strings → Y) (θhat : Θ) (ε : ℝ) : Prop :=
+  θhat ∈ OracleMeasurableParamEpsilonArgmin lossSur isMeasurable fstar ε
+
 /-- Uniformly perturbing an unconstrained objective by at most `ε` turns exact
 surrogate minimizers into `2ε`-minimizers for the true objective. -/
 theorem paramArgmin_subset_epsilonArgmin_of_uniform_loss_perturbation
@@ -106,6 +119,28 @@ theorem paramArgmin_subset_epsilonArgmin_of_uniform_loss_perturbation
     linarith
   linarith [hθ θ', hθupper, hθ'lower]
 
+/-- Uniform objective perturbation transfers surrogate `ε`-minimizers to true
+`(ε + 2δ)`-minimizers. -/
+theorem paramEpsilonArgmin_subset_epsilonArgmin_of_uniform_loss_perturbation
+    {Θ : Type*}
+    (lossTrue lossSur : Θ → ℝ)
+    (ε_sur δ : ℝ)
+    (hclose : ∀ θ, |lossTrue θ - lossSur θ| ≤ δ) :
+    ParamEpsilonArgmin lossSur ε_sur ⊆
+      ParamEpsilonArgmin lossTrue (ε_sur + 2 * δ) := by
+  intro θ hθ
+  dsimp [ParamEpsilonArgmin] at hθ ⊢
+  intro θ'
+  have hθclose := hclose θ
+  have hθ'close := hclose θ'
+  have hθupper : lossTrue θ ≤ lossSur θ + δ := by
+    have h := abs_le.mp hθclose
+    linarith
+  have hθ'lower : lossSur θ' ≤ lossTrue θ' + δ := by
+    have h := abs_le.mp hθ'close
+    linarith
+  linarith [hθ θ', hθupper, hθ'lower]
+
 /-- Non-uniform objective perturbations turn exact surrogate minimizers into a
 pointwise-slack argmin set for the true objective. -/
 theorem paramArgmin_subset_pointwiseEpsilonArgmin_of_nonuniform_loss_perturbation
@@ -116,6 +151,30 @@ theorem paramArgmin_subset_pointwiseEpsilonArgmin_of_nonuniform_loss_perturbatio
     ParamArgmin lossSur ⊆ ParamPointwiseEpsilonArgmin lossTrue eps := by
   intro θ hθ
   dsimp [ParamArgmin, ParamPointwiseEpsilonArgmin] at hθ ⊢
+  intro θ'
+  have hθclose := hclose θ
+  have hθ'close := hclose θ'
+  have hθupper : lossTrue θ ≤ lossSur θ + eps θ := by
+    have h := abs_le.mp hθclose
+    linarith
+  have hθ'lower : lossSur θ' ≤ lossTrue θ' + eps θ' := by
+    have h := abs_le.mp hθ'close
+    linarith
+  linarith [hθ θ', hθupper, hθ'lower]
+
+/-- Non-uniform objective perturbations transfer surrogate `ε`-minimizers to a
+pointwise-slack argmin set for the true objective. The fixed optimizer slack is
+split symmetrically across both comparison points. -/
+theorem paramEpsilonArgmin_subset_pointwiseEpsilonArgmin_of_nonuniform_loss_perturbation
+    {Θ : Type*}
+    (lossTrue lossSur : Θ → ℝ)
+    (ε_sur : ℝ)
+    (eps : Θ → ℝ)
+    (hclose : ∀ θ, |lossTrue θ - lossSur θ| ≤ eps θ) :
+    ParamEpsilonArgmin lossSur ε_sur ⊆
+      ParamPointwiseEpsilonArgmin lossTrue (fun θ => eps θ + ε_sur / 2) := by
+  intro θ hθ
+  dsimp [ParamEpsilonArgmin, ParamPointwiseEpsilonArgmin] at hθ ⊢
   intro θ'
   have hθclose := hclose θ
   have hθ'close := hclose θ'
@@ -153,6 +212,31 @@ theorem constrainedParamArgmin_subset_epsilonArgmin_of_uniform_loss_perturbation
       linarith
     linarith [hmin θ' hfeas', hθupper, hθ'lower]
 
+/-- Uniform objective perturbation transfers constrained surrogate
+`ε`-minimizers to constrained true `(ε + 2δ)`-minimizers. -/
+theorem constrainedParamEpsilonArgmin_subset_epsilonArgmin_of_uniform_loss_perturbation
+    {Θ : Type*}
+    (lossTrue lossSur : Θ → ℝ)
+    (feasible : Θ → Prop)
+    (ε_sur δ : ℝ)
+    (hclose : ∀ θ, feasible θ → |lossTrue θ - lossSur θ| ≤ δ) :
+    ConstrainedParamEpsilonArgmin lossSur feasible ε_sur ⊆
+      ConstrainedParamEpsilonArgmin lossTrue feasible (ε_sur + 2 * δ) := by
+  intro θ hθ
+  rcases hθ with ⟨hfeas, hmin⟩
+  constructor
+  · exact hfeas
+  · intro θ' hfeas'
+    have hθclose := hclose θ hfeas
+    have hθ'close := hclose θ' hfeas'
+    have hθupper : lossTrue θ ≤ lossSur θ + δ := by
+      have h := abs_le.mp hθclose
+      linarith
+    have hθ'lower : lossSur θ' ≤ lossTrue θ' + δ := by
+      have h := abs_le.mp hθ'close
+      linarith
+    linarith [hmin θ' hfeas', hθupper, hθ'lower]
+
 /-- Non-uniform perturbation version of
 `constrainedParamArgmin_subset_epsilonArgmin_of_uniform_loss_perturbation`. -/
 theorem constrainedParamArgmin_subset_pointwiseEpsilonArgmin_of_nonuniform_loss_perturbation
@@ -163,6 +247,33 @@ theorem constrainedParamArgmin_subset_pointwiseEpsilonArgmin_of_nonuniform_loss_
     (hclose : ∀ θ, feasible θ → |lossTrue θ - lossSur θ| ≤ eps θ) :
     ConstrainedParamEpsilonArgmin lossSur feasible 0 ⊆
       ConstrainedParamPointwiseEpsilonArgmin lossTrue feasible eps := by
+  intro θ hθ
+  rcases hθ with ⟨hfeas, hmin⟩
+  constructor
+  · exact hfeas
+  · intro θ' hfeas'
+    have hθclose := hclose θ hfeas
+    have hθ'close := hclose θ' hfeas'
+    have hθupper : lossTrue θ ≤ lossSur θ + eps θ := by
+      have h := abs_le.mp hθclose
+      linarith
+    have hθ'lower : lossSur θ' ≤ lossTrue θ' + eps θ' := by
+      have h := abs_le.mp hθ'close
+      linarith
+    linarith [hmin θ' hfeas', hθupper, hθ'lower]
+
+/-- Non-uniform perturbation transfers constrained surrogate `ε`-minimizers to
+the corresponding constrained pointwise-slack true argmin set. -/
+theorem constrainedParamEpsilonArgmin_subset_pointwiseEpsilonArgmin_of_nonuniform_loss_perturbation
+    {Θ : Type*}
+    (lossTrue lossSur : Θ → ℝ)
+    (feasible : Θ → Prop)
+    (ε_sur : ℝ)
+    (eps : Θ → ℝ)
+    (hclose : ∀ θ, feasible θ → |lossTrue θ - lossSur θ| ≤ eps θ) :
+    ConstrainedParamEpsilonArgmin lossSur feasible ε_sur ⊆
+      ConstrainedParamPointwiseEpsilonArgmin lossTrue feasible
+        (fun θ => eps θ + ε_sur / 2) := by
   intro θ hθ
   rcases hθ with ⟨hfeas, hmin⟩
   constructor
@@ -205,6 +316,33 @@ theorem oracleMeasurableParamArgmin_subset_epsilonArgmin_of_uniform_loss_perturb
       linarith
     linarith [hmin θ' hMeas', hθupper, hθ'lower]
 
+/-- Uniform objective perturbation transfers oracle-measurable surrogate
+`ε`-minimizers to oracle-measurable true `(ε + 2δ)`-minimizers. -/
+theorem oracleMeasurableParamEpsilonArgmin_subset_epsilonArgmin_of_uniform_loss_perturbation
+    {Strings Y Θ : Type*} [PseudoMetricSpace Y]
+    (lossTrue lossSur : Θ → ℝ)
+    (isMeasurable : Θ → (Strings → Y) → Prop)
+    (fstar : Strings → Y)
+    (ε_sur δ : ℝ)
+    (hclose : ∀ θ, isMeasurable θ fstar → |lossTrue θ - lossSur θ| ≤ δ) :
+    OracleMeasurableParamEpsilonArgmin lossSur isMeasurable fstar ε_sur ⊆
+      OracleMeasurableParamEpsilonArgmin lossTrue isMeasurable fstar
+        (ε_sur + 2 * δ) := by
+  intro θ hθ
+  rcases hθ with ⟨hMeas, hmin⟩
+  constructor
+  · exact hMeas
+  · intro θ' hMeas'
+    have hθclose := hclose θ hMeas
+    have hθ'close := hclose θ' hMeas'
+    have hθupper : lossTrue θ ≤ lossSur θ + δ := by
+      have h := abs_le.mp hθclose
+      linarith
+    have hθ'lower : lossSur θ' ≤ lossTrue θ' + δ := by
+      have h := abs_le.mp hθ'close
+      linarith
+    linarith [hmin θ' hMeas', hθupper, hθ'lower]
+
 /-- Non-uniform perturbation version of
 `oracleMeasurableParamArgmin_subset_epsilonArgmin_of_uniform_loss_perturbation`. -/
 theorem oracleMeasurableParamArgmin_subset_pointwiseEpsilonArgmin_of_nonuniform_loss_perturbation
@@ -216,6 +354,34 @@ theorem oracleMeasurableParamArgmin_subset_pointwiseEpsilonArgmin_of_nonuniform_
     (hclose : ∀ θ, isMeasurable θ fstar → |lossTrue θ - lossSur θ| ≤ eps θ) :
     OracleMeasurableParamArgmin lossSur isMeasurable fstar ⊆
       OracleMeasurableParamPointwiseEpsilonArgmin lossTrue isMeasurable fstar eps := by
+  intro θ hθ
+  rcases hθ with ⟨hMeas, hmin⟩
+  constructor
+  · exact hMeas
+  · intro θ' hMeas'
+    have hθclose := hclose θ hMeas
+    have hθ'close := hclose θ' hMeas'
+    have hθupper : lossTrue θ ≤ lossSur θ + eps θ := by
+      have h := abs_le.mp hθclose
+      linarith
+    have hθ'lower : lossSur θ' ≤ lossTrue θ' + eps θ' := by
+      have h := abs_le.mp hθ'close
+      linarith
+    linarith [hmin θ' hMeas', hθupper, hθ'lower]
+
+/-- Non-uniform perturbation transfers oracle-measurable surrogate
+`ε`-minimizers to oracle-measurable pointwise-slack true argmins. -/
+theorem oracleMeasurableParamEpsilonArgmin_subset_pointwiseEpsilonArgmin_of_nonuniform_loss_perturbation
+    {Strings Y Θ : Type*} [PseudoMetricSpace Y]
+    (lossTrue lossSur : Θ → ℝ)
+    (isMeasurable : Θ → (Strings → Y) → Prop)
+    (fstar : Strings → Y)
+    (ε_sur : ℝ)
+    (eps : Θ → ℝ)
+    (hclose : ∀ θ, isMeasurable θ fstar → |lossTrue θ - lossSur θ| ≤ eps θ) :
+    OracleMeasurableParamEpsilonArgmin lossSur isMeasurable fstar ε_sur ⊆
+      OracleMeasurableParamPointwiseEpsilonArgmin lossTrue isMeasurable fstar
+        (fun θ => eps θ + ε_sur / 2) := by
   intro θ hθ
   rcases hθ with ⟨hMeas, hmin⟩
   constructor
@@ -270,6 +436,41 @@ theorem oracleMeasurableParamArgmin_subset_epsilonArgmin_of_uniform_two_stage_lo
       (isMeasurable := isMeasurable) (fstar := fstar)
       (ε := ε_oracle + ε_transport) hcloseTotal)
 
+/-- Two-stage uniform perturbation transfers oracle-measurable surrogate
+`ε`-minimizers to true `(ε + 2(ε₁ + ε₂))`-minimizers. -/
+theorem oracleMeasurableParamEpsilonArgmin_subset_epsilonArgmin_of_uniform_two_stage_loss_perturbation
+    {Strings Y Θ : Type*} [PseudoMetricSpace Y]
+    (lossTrue lossOracle lossSur : Θ → ℝ)
+    (isMeasurable : Θ → (Strings → Y) → Prop)
+    (fstar : Strings → Y)
+    (ε_sur ε_oracle ε_transport : ℝ)
+    (hcloseOracle :
+      ∀ θ, isMeasurable θ fstar → |lossTrue θ - lossOracle θ| ≤ ε_oracle)
+    (hcloseTransport :
+      ∀ θ, isMeasurable θ fstar → |lossOracle θ - lossSur θ| ≤ ε_transport) :
+    OracleMeasurableParamEpsilonArgmin lossSur isMeasurable fstar ε_sur ⊆
+      OracleMeasurableParamEpsilonArgmin lossTrue isMeasurable fstar
+        (ε_sur + 2 * (ε_oracle + ε_transport)) := by
+  have hcloseTotal :
+      ∀ θ, isMeasurable θ fstar →
+        |lossTrue θ - lossSur θ| ≤ ε_oracle + ε_transport := by
+    intro θ hMeas
+    have h1 := hcloseOracle θ hMeas
+    have h2 := hcloseTransport θ hMeas
+    have h_triangle :
+        |lossTrue θ - lossSur θ| ≤
+          |lossTrue θ - lossOracle θ| + |lossOracle θ - lossSur θ| := by
+      have hdecomp :
+          lossTrue θ - lossSur θ =
+            (lossTrue θ - lossOracle θ) + (lossOracle θ - lossSur θ) := by
+        ring
+      rw [hdecomp]
+      exact abs_add_le _ _
+    linarith
+  exact
+    oracleMeasurableParamEpsilonArgmin_subset_epsilonArgmin_of_uniform_loss_perturbation
+      lossTrue lossSur isMeasurable fstar ε_sur (ε_oracle + ε_transport) hcloseTotal
+
 /-- Non-uniform two-stage perturbation calculus. -/
 theorem oracleMeasurableParamArgmin_subset_pointwiseEpsilonArgmin_of_nonuniform_two_stage_loss_perturbation
     {Strings Y Θ : Type*} [PseudoMetricSpace Y]
@@ -305,6 +506,95 @@ theorem oracleMeasurableParamArgmin_subset_pointwiseEpsilonArgmin_of_nonuniform_
       (lossTrue := lossTrue) (lossSur := lossSur)
       (isMeasurable := isMeasurable) (fstar := fstar)
       (eps := fun θ => epsOracle θ + epsTransport θ) hcloseTotal)
+
+/-- Two-stage pointwise perturbation transfers oracle-measurable surrogate
+`ε`-minimizers to pointwise-slack true argmins. -/
+theorem oracleMeasurableParamEpsilonArgmin_subset_pointwiseEpsilonArgmin_of_nonuniform_two_stage_loss_perturbation
+    {Strings Y Θ : Type*} [PseudoMetricSpace Y]
+    (lossTrue lossOracle lossSur : Θ → ℝ)
+    (isMeasurable : Θ → (Strings → Y) → Prop)
+    (fstar : Strings → Y)
+    (ε_sur : ℝ)
+    (epsOracle epsTransport : Θ → ℝ)
+    (hcloseOracle :
+      ∀ θ, isMeasurable θ fstar → |lossTrue θ - lossOracle θ| ≤ epsOracle θ)
+    (hcloseTransport :
+      ∀ θ, isMeasurable θ fstar → |lossOracle θ - lossSur θ| ≤ epsTransport θ) :
+    OracleMeasurableParamEpsilonArgmin lossSur isMeasurable fstar ε_sur ⊆
+      OracleMeasurableParamPointwiseEpsilonArgmin lossTrue isMeasurable fstar
+        (fun θ => epsOracle θ + epsTransport θ + ε_sur / 2) := by
+  have hcloseTotal :
+      ∀ θ, isMeasurable θ fstar →
+        |lossTrue θ - lossSur θ| ≤ epsOracle θ + epsTransport θ := by
+    intro θ hMeas
+    have h1 := hcloseOracle θ hMeas
+    have h2 := hcloseTransport θ hMeas
+    have h_triangle :
+        |lossTrue θ - lossSur θ| ≤
+          |lossTrue θ - lossOracle θ| + |lossOracle θ - lossSur θ| := by
+      have hdecomp :
+          lossTrue θ - lossSur θ =
+            (lossTrue θ - lossOracle θ) + (lossOracle θ - lossSur θ) := by
+        ring
+      rw [hdecomp]
+      exact abs_add_le _ _
+    linarith
+  exact
+    oracleMeasurableParamEpsilonArgmin_subset_pointwiseEpsilonArgmin_of_nonuniform_loss_perturbation
+      lossTrue lossSur isMeasurable fstar ε_sur
+      (fun θ => epsOracle θ + epsTransport θ) hcloseTotal
+
+/-- Certificate wrapper for the uniform perturbation transfer theorem. -/
+theorem surrogateOptimizerCertificate_true_epsilonArgmin_of_uniform_loss_perturbation
+    {Θ : Type*}
+    (lossTrue lossSur : Θ → ℝ)
+    (θhat : Θ)
+    (ε_sur δ : ℝ)
+    (hclose : ∀ θ, |lossTrue θ - lossSur θ| ≤ δ)
+    (hcert : SurrogateOptimizerCertificate lossSur θhat ε_sur) :
+    θhat ∈ ParamEpsilonArgmin lossTrue (ε_sur + 2 * δ) := by
+  exact paramEpsilonArgmin_subset_epsilonArgmin_of_uniform_loss_perturbation
+    lossTrue lossSur ε_sur δ hclose hcert
+
+/-- Oracle-measurable certificate wrapper for uniform perturbation transfer. -/
+theorem oracleMeasurableSurrogateOptimizerCertificate_true_epsilonArgmin_of_uniform_loss_perturbation
+    {Strings Y Θ : Type*} [PseudoMetricSpace Y]
+    (lossTrue lossSur : Θ → ℝ)
+    (isMeasurable : Θ → (Strings → Y) → Prop)
+    (fstar : Strings → Y)
+    (θhat : Θ)
+    (ε_sur δ : ℝ)
+    (hclose : ∀ θ, isMeasurable θ fstar → |lossTrue θ - lossSur θ| ≤ δ)
+    (hcert :
+      OracleMeasurableSurrogateOptimizerCertificate
+        lossSur isMeasurable fstar θhat ε_sur) :
+    θhat ∈ OracleMeasurableParamEpsilonArgmin lossTrue isMeasurable fstar
+      (ε_sur + 2 * δ) := by
+  exact oracleMeasurableParamEpsilonArgmin_subset_epsilonArgmin_of_uniform_loss_perturbation
+    lossTrue lossSur isMeasurable fstar ε_sur δ hclose hcert
+
+/-- Oracle-measurable certificate wrapper for two-stage uniform perturbation
+transfer. -/
+theorem oracleMeasurableSurrogateOptimizerCertificate_true_epsilonArgmin_of_uniform_two_stage_loss_perturbation
+    {Strings Y Θ : Type*} [PseudoMetricSpace Y]
+    (lossTrue lossOracle lossSur : Θ → ℝ)
+    (isMeasurable : Θ → (Strings → Y) → Prop)
+    (fstar : Strings → Y)
+    (θhat : Θ)
+    (ε_sur ε_oracle ε_transport : ℝ)
+    (hcloseOracle :
+      ∀ θ, isMeasurable θ fstar → |lossTrue θ - lossOracle θ| ≤ ε_oracle)
+    (hcloseTransport :
+      ∀ θ, isMeasurable θ fstar → |lossOracle θ - lossSur θ| ≤ ε_transport)
+    (hcert :
+      OracleMeasurableSurrogateOptimizerCertificate
+        lossSur isMeasurable fstar θhat ε_sur) :
+    θhat ∈ OracleMeasurableParamEpsilonArgmin lossTrue isMeasurable fstar
+      (ε_sur + 2 * (ε_oracle + ε_transport)) := by
+  exact
+    oracleMeasurableParamEpsilonArgmin_subset_epsilonArgmin_of_uniform_two_stage_loss_perturbation
+      lossTrue lossOracle lossSur isMeasurable fstar ε_sur ε_oracle ε_transport
+      hcloseOracle hcloseTransport hcert
 
 /-- Expected objective induced by a stochastic adaptive tree policy. -/
 noncomputable def ExpectedAdaptiveTreeObjective {Strings Θ : Type*}

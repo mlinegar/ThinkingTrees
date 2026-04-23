@@ -303,6 +303,49 @@ theorem hllRegisterOperator_root_exact (T : BinTree (HLLState m)) :
           rfl
     _ = S T := HLLState.reduceDeterministic_id (m := m) (T := T)
 
+/-- **C1 (Leaf Sufficiency)**: HLL register states satisfy L1.
+    Building from raw data (identity encode) preserves oracle exactly. -/
+theorem hllRegisterOperator_L1 (fstar : HLLState m → Y)
+    (T : BinTree (HLLState m)) :
+    L1
+      (deterministicSummarizer (summaryFromSketch (hllRegisterOperator m)))
+      T fstar := by
+  exact L1_of_pointwise
+    (s := summaryFromSketch (hllRegisterOperator m))
+    (fstar := fstar) (T := T)
+    (identitySketch_leaf_preserving fstar)
+
+/-- **C3 (Merge Consistency)**: HLL register states satisfy L2
+    under merge-compatible oracle.
+    Elementwise max is exact — the sketch of the union equals the max of sketches. -/
+theorem hllRegisterOperator_L2 (fstar : HLLState m → Y)
+    (T : BinTree (HLLState m))
+    (h_merge : SketchMergeCompatible (hllRegisterOperator m) fstar) :
+    L2
+      (deterministicSummarizer (summaryFromSketch (hllRegisterOperator m)))
+      T fstar := by
+  exact L2_of_treewise
+    (s := summaryFromSketch (hllRegisterOperator m))
+    (fstar := fstar) (T := T)
+    (treewise_preserving_of_sketch
+      (op := hllRegisterOperator m)
+      (fstar := fstar)
+      (identitySketch_leaf_preserving fstar)
+      h_merge
+      (identitySketch_summary_compatible (Strings := HLLState m)))
+
+/-- **Full local-law bundle** for HLL register states under merge-compatible oracle.
+    All three laws (C1, C2, C3) hold when the theorem-domain objects are register states. -/
+theorem hllRegisterOperator_local_laws_bundle (fstar : HLLState m → Y)
+    (T : BinTree (HLLState m))
+    (h_merge : SketchMergeCompatible (hllRegisterOperator m) fstar) :
+    LocalLawsBundle
+      (deterministicSummarizer (summaryFromSketch (hllRegisterOperator m)))
+      T fstar :=
+  ⟨hllRegisterOperator_L1 fstar T,
+   hllRegisterOperator_L2 fstar T h_merge,
+   hllRegisterOperator_L3 fstar⟩
+
 end HLLRegisterOperator
 
 end FormalProofs.OPT

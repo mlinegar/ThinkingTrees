@@ -1,15 +1,15 @@
 \section{Full Proofs}\label{app:proofs}
 
-\subsection{Proof of Proposition~\ref{prop:m_lt_k}}\label{app:proof-m-lt-k}
+\subsection{Sketch Sufficiency Boundary}\label{app:proof-m-lt-k}
+
+The following observation motivates the general mechanism: when a bounded sketch cannot represent the interaction the oracle depends on, the failure is structural and more data cannot fix it.
+
+\begin{proposition}[Failure Boundary for $m < k$]\label{prop:m_lt_k}
+For a threshold target $\tau_k(r) := \One\{C(r) \ge k\}$ on binary indicators $r \in \{0,1\}^n$ with $C(r) = \sum_j r_j$, if a top-$m$ sketch retains only $m < k$ indicators, there exist inputs with identical sketch state but different target values. No estimator restricted to that sketch class can recover $\tau_k$ without ambiguity.
+\end{proposition}
 
 \begin{proof}
 Fix integers $k,m$ with $1 \le m < k$.
-Consider documents represented by binary event indicators
-$r = (r_1, \dots, r_n) \in \{0,1\}^n$ and count functional
-$C(r) = \sum_{j=1}^n r_j$.
-Define target $\tau_k(r) := \One\{C(r) \ge k\}$.
-Let $S_m(r)$ denote any top-$m$ sketch that retains only the $m$ largest event indicators.
-
 Construct two documents:
 \[
 r^{-} = (\underbrace{1,\dots,1}_{m\ \text{times}}, 0, \dots, 0), \qquad
@@ -20,7 +20,6 @@ $\tau_k(r^-) = 0$ and $\tau_k(r^+) = 1$.
 However, both sequences have at least $m$ unit entries, and all top-$m$ retained entries are ones.
 Hence $S_m(r^-) = S_m(r^+)$.
 Therefore two inputs with identical sketch state yield different target values.
-No estimator that depends only on $S_m(\cdot)$ can recover $\tau_k$ without ambiguity.
 \end{proof}
 
 \subsection{Proof of Theorem~\ref{thm:one-pass} (Preservation)}\label{app:proof-preservation}
@@ -104,6 +103,134 @@ Therefore $\oplus_g$ is associative modulo oracle.
 
 Thus $g$ satisfies the classical mergeable-summary conditions under induced merge $\oplus_g$.
 \end{proof}
+
+\subsection{Kovachki Finite-Dimensionalization Lemmas}\label{app:kovachki-finite-dimensionalization}
+
+The neural-operator step used in Section~\ref{sec:fno-primer} is not a
+black box from ``continuous operator'' directly to ``certified
+C-TreePO summarizer.'' It has three parts. Lemma~21 supplies compactness
+for the union of finite-rank approximating images. Lemma~22 uses that
+compactness to finite-dimensionalize the target operator on the compact
+set. Theorems~11 and~13 then supply the neural-architecture
+approximation statements. We record the C-TreePO-used Lemma~21/22 layer
+below and route its output into the local-law bridge of
+Appendix~\ref{app:approx-via-neural-operators}.
+
+\paragraph{Kovachki Lemma 21, compact union.}
+Let $X,Y$ be Banach spaces, $F:X\to Y$ continuous, $K\subset X$
+compact, and $F_n:X\to Y$ continuous with
+\[
+\lim_{n\to\infty}\sup_{x\in K}\|F(x)-F_n(x)\|_Y=0.
+\]
+Then
+\[
+W=\bigcup_{n\ge 1}F_n(K)\cup F(K)
+\]
+is compact in $Y$. In the paper proof this is the device that lets one
+apply uniform continuity of $G$ on one compact set containing both the
+original compact $K$ and the finite-rank approximating images
+$U_n^X(K)$. For the Lipschitz or globally uniformly continuous targets
+we actually use in the C-TreePO bridge, the compact-union premise is
+discharged directly by the uniform continuity of $G$ on the union $W$
+above; the realized-call proof then proceeds without needing the
+Lemma~21 stability hypothesis as a separate assumption.
+
+\paragraph{Kovachki Lemma 22, finite-dimensionalization.}
+Let $X,Y$ be Banach spaces with the approximation property and let
+$G:X\to Y$ be continuous. For every compact $K\subset X$ and
+$\varepsilon>0$, there are $J,J'\in\mathbb{N}$, continuous linear maps
+$F_J:X\to\mathbb{R}^{J}$ and $G_{J'}:\mathbb{R}^{J'}\to Y$, and a
+continuous map $\phi:\mathbb{R}^{J}\to\mathbb{R}^{J'}$ such that
+\[
+\sup_{x\in K}
+\left\|G(x)-\bigl(G_{J'}\circ\phi\circ F_J\bigr)(x)\right\|_Y
+\le \varepsilon.
+\]
+Moreover, $F_J$ can be written as a finite list of input functionals,
+\[
+F_J(x)=(w_1(x),\ldots,w_J(x)),\qquad w_j\in X^\ast,
+\]
+and $G_{J'}$ can be written as a finite expansion,
+\[
+G_{J'}(v)=\sum_{j=1}^{J'}v_j\beta_j,\qquad \beta_j\in Y.
+\]
+If $Y$ has a basis, the output representers can be chosen from a basis
+extension. The two displayed forms (the finite-coordinate encoder $F_J$
+and the finite expansion $G_{J'}$) are the finite-coordinate
+presentation of the approximation property; this is equivalent to the
+standard finite-rank-operator definition of AP. When the target $G$ is
+uniformly continuous, the Lemma~21 stability argument discharges
+automatically; the constructor then produces the full
+$G_{J'}\circ\phi\circ F_J$ witness with its uniform compact error bound
+as a direct corollary.
+
+\paragraph{How this enters C-TreePO.}
+For each realized call site, Lemma~22 produces a finite-dimensionalized
+operator with a chosen tolerance, which is exactly the input the
+uniform-on-compact approximation interface consumes. In the common
+uniformly continuous case, AP, compactness, and uniform continuity
+together yield that interface directly. The same witness is recorded
+separately at each realized leaf, merge, and on-range call, after the
+Banach-space representation has been transported to that call's domain
+and codomain. Composing these witnesses with
+Proposition~\ref{prop:neural-operator-bridge} gives approximate
+theorem-backedness. Thus Lemma~22 helps the proof only up to the point
+of producing realized-call approximation budgets; C1--C3 and the
+audit/local-law theorems still perform the certification step.
+
+\subsection{Neural-Operator Realization-to-Local-Law Bridge}\label{app:approx-via-neural-operators}
+
+Section~\ref{sec:fno-primer} isolates the only part of the neural-operator
+literature this paper uses. The external approximation theorem supplies an
+ideal-to-realized approximation witness on compact realized-call sets. The
+finite-dimensionalization part of that route is the Lemma~21/22 layer
+spelled out in Appendix~\ref{app:kovachki-finite-dimensionalization}; the
+equation-(6) architecture approximation remains the named external
+Theorem~11/13 input.
+
+Let $s^\dagger$ be an ideal deterministic summarizer on a fixed tree $T$,
+and suppose $s^\dagger$ is exact theorem-backed. Choose three compact
+realized-call sets: one for realized leaves, one for realized merge calls,
+and one for the root-level on-range re-summary call. A Section~9-style
+neural-operator approximation theorem is then invoked only to assert the
+existence of a realized operator $s$ with uniform error at most
+$\varepsilon$ on those compact sets.
+
+What does \emph{not} happen is an automatic jump from operator error to
+the paper's approximate local laws. The audit layer is phrased in terms
+of violation probabilities, so one still needs explicit transfer
+assumptions modelling how a uniform approximation tolerance $\varepsilon$
+propagates to leaf, merge, and idempotence budgets
+$(\varepsilon_{\mathrm{leaf}}, \varepsilon_{\mathrm{merge}},
+\varepsilon_{\mathrm{idemp}})$. Proposition~\ref{prop:neural-operator-bridge}
+packages this propagation: the approximate-local-law bundle it produces
+is exactly the three displayed budgets plus a proof that the realized
+operator satisfies C1/C2/C3 up to those budgets.
+
+Once the bridge has produced an approximate-local-law bundle, the rest
+of the proof route is exactly the one already used elsewhere in the
+paper. The approximate-gap theorem gives
+\[
+\Delta_R \;\le\;
+\varepsilon_{\mathrm{leaf}}
+\;+\;
+\varepsilon_{\mathrm{merge}}
+\;+\;
+(R-1)\,\varepsilon_{\mathrm{idemp}},
+\]
+and Theorem~\ref{thm:unified-gap} then transports this distortion budget to
+the method-specific objective gap. So the role of the neural-operator theory
+is precise: it is the realizability argument for obtaining a summarized
+operator with a chosen upstream tolerance on the realized call compacts.
+The local-law and audit machinery still does the certification work.
+The regularized training surface uses the same bridge through
+\texttt{oracleProjectionObjective\_le\_of\_uniformApproxExactTheoremBacked},
+which is why the objective in Equation~\eqref{eq:oracle-projection-objective}
+can be read as oracle approximation plus projection toward the local-law
+subspace rather than as a new proof route. Appendix~\ref{app:projection-interpretation}
+records the accompanying iff: this projection reading is equivalent to
+saying that the approximation error is structured so that its zero set is
+exactly the exact local-law subspace.
 
 \subsection{Supporting Lemmas for the Gap Bound}\label{app:supporting-lemmas}
 
@@ -218,7 +345,7 @@ The audited preference-gap bound composes two independently established results:
 
 \begin{proof}
 \textbf{Part (a): Distortion objects and HT unbiasedness.}
-Fix a realized tree-population $\mathcal{U}$ with $N := |\mathcal{U}|$. For each unit $i \in \mathcal{U}$, define
+Fix a realized tree-population $\mathcal{U}=\bigcup_x U(x)$ with $N := |\mathcal{U}|$, where $U(x)$ contains \emph{all realized nodes} of document $x$ (including the root). For each unit $i \in \mathcal{U}$, define
 \[
 d_i^{\star}:=\metric\!\big(\fstar(s_i),\fstar(S(i))\big),\qquad
 d_i^{J}:=\metric\!\big(f(s_i),f(S(i))\big),
@@ -239,6 +366,8 @@ Conditional unbiasedness is immediate:
 =\frac{1}{N}\sum_{i\in\mathcal{U}} d_i^{J}
 =\mu_{\mathrm{dist}}^{J}.
 \]
+
+The full-document label $y_{\mathrm{doc}}=f^\ast(x)$ is a separate complete-label object and is not itself the node-population estimand unless the top node is explicitly included in $\mathcal{U}$ through the node-sampling law. Likewise the final-summary/tree-side quantity $y_{\mathrm{tree}}$ is a different object from $y_{\mathrm{doc}}$ except under exact preservation or exact-control assumptions. The HT statement here concerns only the sampled-node finite-population mean over $\mathcal{U}$; the document-level top loss is evaluated directly from the complete document labels.
 
 \textbf{Part (b): Method transport.}
 By Theorem~\ref{thm:unified-gap}, for the method-specific constant $C_{\mathrm{meth}}$,
@@ -276,3 +405,22 @@ followed by triangle inequality and $\hat{\mu}_{\mathrm{dist}}\ge 0$ (nonnegativ
 \textbf{Part (d): High-probability form.}
 If $\Prob(\mathcal{E}) \ge 1-\delta$, the same inequality holds with probability at least $1-\delta$. In practice, $\mathcal{E}$ is formed by intersecting concentration/calibration events; e.g., when separate events $\mathcal{E}_{\mathrm{cal}},\mathcal{E}_{\mathrm{est}},\mathcal{E}_{\mathrm{clip}}$ are used, one may set $\mathcal{E}:=\mathcal{E}_{\mathrm{cal}}\cap\mathcal{E}_{\mathrm{est}}\cap\mathcal{E}_{\mathrm{clip}}$ and apply a union bound to obtain an explicit confidence level.
 \end{proof}
+
+\subsection{Audit Robustness: Adversarial Sampling}\label{app:audit-robustness}
+
+The HT guarantee is robust to non-benign sampling designs: unbiasedness does not require friendly sampling, only correct logged propensities and strict positivity. This supports constrained worst-case analysis.
+
+Define a design class
+\[
+\mathcal{D}(\pi_{\min},\kappa)
+:=\left\{\pi:\ \pi_i\in[\pi_{\min},\kappa\pi_{\min}],\ \sum_{i\in\mathcal{U}}\pi_i=n\right\},
+\]
+which constrains the antagonist by a minimum inclusion probability and a propensity spread cap. Within this class, an adversary can increase variance by skewing mass toward high-risk units, but cannot alter the target expectation when HT reweighting uses the true logged $\pi_i$.
+
+For independent Bernoulli inclusion with bounded distortions $0\le Y_i\le D_{\max}$, the conditional variance obeys
+\[
+\mathrm{Var}\!\left(\hat{\mu}_{\mathrm{HT}}\mid\mathcal{F}\right)
+\le
+\frac{D_{\max}^2}{N}\cdot \frac{1-\pi_{\min}}{\pi_{\min}},
+\]
+so $\pi_{\min}$ is the primary robustness lever. Practically, certificates should therefore be reported over a stress-test grid of $(\pi_{\min}, w_{\max})$ values rather than for a single nominal design.

@@ -1,0 +1,110 @@
+\section{Walk-Through: Markov Changepoint Results}\label{sec:markov-walkthrough}
+
+With the FNO primer in hand we can walk through the simple-example results the paper hinges on. The task is the one from Section~\ref{sec:markov-interlude}: count topic changes in a $128$-token document drawn from a hidden Markov chain over colors. The models are a flat FNO applied to the full document and a tree of FNO leaves merged by a small learned MLP. Training fits the root oracle while local losses put projection pressure on the learned operator: leaf supervision targets C1, merge supervision targets C3, and stability probes target the same C2/idempotence subspace used in the theorem layer.\footnote{This is the projection side of the iff from Section~\ref{sec:theorems}: local losses push the learned operator into the C1/C2/C3 subspace. The audit of Section~\ref{sec:estimation} is the structural-error side of the same iff: it samples the approximation error and reports how far from zero it is on that subspace. Training and audit are two views of one object, not two separate mechanisms --- which is why the $\lambda$-weighted local-law losses and $\hat\Delta_R$ share the same leaf / merge / idempotence decomposition.}
+
+\subsection{Models}\label{sec:fno-baseline}
+
+Both models use the same neural-network backbone --- a Fourier neural
+operator as described in Section~\ref{sec:fno-primer}.\footnote{Architecture: $128$-wide Fourier layers, $8$ modes, $4$ layers. The flat FNO feeds the pooled output through a classification head (cross-entropy). The tree applies the same FNO to each leaf, concatenates the pooled output with first/last token features, and passes the result through a shared encoder $g$ (MLP). The merge projector maps two child states to a summary of the same dimension, then applies the same $g$. FNO parameters are shared across all leaves.} They differ only in how the backbone is applied:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Flat FNO:} one pass over the full $128$ tokens. MAE $0.496$.
+    \item \textbf{Tree:} the same FNO applied to each leaf (e.g., $8$ leaves of $16$ tokens), then a learned merge combines sibling states pairwise up to the root. MAE $0.198$---a $60\%$ reduction.
+\end{itemize}
+
+The tree's training loss adds local terms (each leaf and merge node predicts the count on its span) to the FNO's root loss.\footnote{Stage~1 ($10$ epochs): only local terms, no root supervision. Stage~2 ($30$ epochs): root loss added at $20\%$ weight, local terms at $80\%$. The flat FNO trains $40$ epochs with root loss only.} With one leaf spanning the full document, the tree reduces to the flat FNO, confirming that the gains come from decomposition.
+
+\subsection{Experimental Setup}\label{sec:experiment-setup}
+
+Table~\ref{tab:dgp} summarizes both benchmarks. The hard case has $3{\times}$ more colors and $2{\times}$ the boundary density in the same $128$ tokens---harder not because the task is unidentifiable (palettes are disjoint) but because the tree must carry more information.
+
+\begin{table}[t]
+    \centering
+    \small
+    \begin{tabular}{lcc}
+        \toprule
+        & \textbf{Simple} & \textbf{Hard} \\
+        \midrule
+        Hidden colors $K$ & 4 & 12 \\
+        Document length & \multicolumn{2}{c}{128 tokens} \\
+        Synonym tokens per color & \multicolumn{2}{c}{4 (disjoint palettes)} \\
+        \midrule
+        Switch probability $h$ & $0.039$ & $0.079$ \\
+        Expected topic changes & ${\sim}5$ & ${\sim}10$ \\
+        \bottomrule
+    \end{tabular}
+    \caption{\textbf{Data-generating process.}
+    At each position the hidden color stays (prob.\ $1{-}h$) or switches to a uniformly random alternative (prob.\ $h/(K{-}1)$ each). The observed token is drawn uniformly from that color's $4$-token palette. Both benchmarks use $10{,}240$ training documents.}
+    \label{tab:dgp}
+\end{table}
+
+\paragraph{Supervision budget.}
+We vary the fraction of documents receiving root (full-document) labels from $100\%$ down to $10\%$.
+
+To understand the reallocation policies, think in terms of \emph{token mass}. At $100\%$, we observe the count on all $128$ tokens of every document---$10{,}240$ full-document labels, for a total budget of $10{,}240 \times 128 = 1{,}310{,}720$ token-observations. At $50\%$, only half the documents get root labels, so the root budget drops to $5{,}120 \times 128 = 655{,}360$ token-observations. The reallocation policies ask: what if we \emph{keep the same total token budget} as $100\%$, but split it---$50\%$ as root labels and $50\%$ as local labels on smaller spans? A leaf label on a $16$-token span counts as $16$ token-observations (one-eighth of a root label), so we need $8$ leaf labels to replace one root label's worth of budget.
+
+Three policies distribute the local portion differently:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Leaf-only (blue):} all local budget goes to leaf-level count labels.
+    \item \textbf{Depth-equal (purple):} local budget split equally across non-root tree depths.
+    \item \textbf{Balanced-node (rose):} local budget split equally across all non-root nodes.
+\end{itemize}
+At leaf sizes $128$ and $64$ there are no non-root internal nodes, so all three policies are identical; they diverge starting at leaf~$32$. The green curve uses root labels only (lower total budget); amber is the flat FNO.
+
+\paragraph{Protocol.}
+Every panel uses the same $10{,}240$-document training bundle and the same fixed $1{,}024$-document test set (data seed held at $0$). Within the root-only family (green), the set of documents receiving root labels at $r\%$ is a nested prefix subset of the set at $r'\%$ whenever $r<r'$, i.e., $\mathrm{docs}(r{=}10\%)\subset\mathrm{docs}(r{=}20\%)\subset\cdots\subset\mathrm{docs}(r{=}100\%)$. The same nesting holds within the reallocation-policy family (blue/purple/rose), both for root labels and for the additional local labels. The root-only family and the reallocation family sample from slightly different seeded orderings (overlap ${\approx}\,90\%$ at $r{=}90\%$), so the two families are jointly calibrated but not identical doc-for-doc. Each configuration is trained with a single seed; the stage-1 checkpoint is shared across all panels in a column, so differences are driven entirely by stage-2 supervision.
+
+\subsection{Results}\label{sec:results}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{markov_simple_leaf_mass.png}
+    \caption{\textbf{Simple case ($4$ colors, ${\sim}5$ changes): what happens when we split the supervision budget between root labels and local labels?}
+    Each panel fixes a root-label share ($10{,}240$ docs total).
+    \emph{x}: leaf size (leaves per doc). \emph{y}: test MAE (lower is better).
+    \textcolor{green!50!black}{\textbf{Green}}: root labels only (lower total token budget).
+    \textcolor{blue!70!black}{\textbf{Blue}}/\textcolor{violet}{\textbf{purple}}/\textcolor{red!50!blue}{\textbf{rose}}: same total token budget as $100\%$, split between root and local labels (three allocation policies; see text).
+    \textcolor{orange!80!black}{\textbf{Amber}}: flat FNO.
+    At leaf~$128$: hollow diamond = 1-leaf tree (parity check, matches FNO red~X); gray triangle = richer local targets (ceiling).
+    In aggregate the three reallocation curves track each other, and the tree outperforms FNO at every budget. A few single-seed outliers remain visible---most prominently the leaf-only curve in the R90 panel and the depth-equal curve in the R80 panel, both at the 1-leaf geometry where local labels coincide with the root label. These are expected from the single-seed protocol above and do not reflect differences in the document subsets.}
+    \label{fig:simple-leaf-mass}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{markov_hard_leaf_mass.png}
+    \caption{\textbf{Hard case ($12$ colors, ${\sim}10$ changes): same budget-splitting comparison.}
+    Same layout as Figure~\ref{fig:simple-leaf-mass}, and same protocol: nested root- and local-label subsets within each policy family, shared test set, single training seed per cell. Tree still outperforms FNO at every budget (MAE $0.83$--$1.21$ vs.\ $1.25$--$2.43$). Allocation policies overlap, confirming the finding. Margins compressed; policy divergence sharper at low budgets.}
+    \label{fig:hard-leaf-mass}
+\end{figure}
+
+Three findings emerge from Figures~\ref{fig:simple-leaf-mass} and \ref{fig:hard-leaf-mass}:
+
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Decomposition does not lose information.} The tree matches or improves on the flat FNO at every supervision level, in both benchmarks. The one-leaf parity check (hollow diamond = FNO red~X at leaf~$128$) confirms the gains come from the decomposition.
+    \item \textbf{The supervision budget can be split.} Keeping the same total token budget but replacing some root labels with local labels on smaller spans produces nearly the same root accuracy. The allocation policy (leaf-only, depth-equal, balanced-node) barely matters in aggregate---with single-seed outliers visible in a handful of cells; averaging across seeds should remove those without changing the ordering.
+    \item \textbf{Limits are real.} The hard case compresses the advantage. Very low root budgets degrade all policies, and the allocation curves diverge more---with $12$ colors, local counts are noisier proxies for the global count.
+\end{enumerate}
+
+\paragraph{How far can the budget be split?}
+Figure~\ref{fig:budget-split} isolates this question. Each panel fixes a leaf geometry and sweeps the fraction of the total token budget allocated to root (full-document) labels; the remainder is spent on local (sub-span) labels, keeping total token budget fixed. At $100\%$ all budget is root labels; at $10\%$ most is local.
+
+Two reference lines anchor the comparison. The green star at $100\%$ is the all-root baseline: every document gets a full-document label, and the tree also receives oracle-derived local supervision through its training objective.\footnote{All tree experiments receive oracle-derived local law labels (leaf and merge counts, boundary colors) through the C1 and C3 training terms. The budget-split experiment tests an \emph{additional} channel: count-only labels from the token-mass budget. At $100\%$ root, the additional local channel is inactive; as root share decreases, the freed budget is redirected to count-only local labels.} The green line (root labels only) shows what happens when we simply reduce the root budget without compensating---total budget shrinks, and accuracy degrades.
+
+The reallocation policies (blue, purple, rose) tell a different story. They keep total budget fixed and redirect the freed mass to local labels. Performance stays close to the all-root reference from $100\%$ down to about $40\%$ root share, then degrades below $20\%$. Roughly half the root labels can be replaced by local labels at little cost. The three allocation policies (leaf-only, depth-equal, balanced-node) produce nearly identical results.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{markov_budget_split.png}
+    \caption{\textbf{How does splitting the token budget between root and local labels affect accuracy?}
+    Total token budget is held fixed at the $100\%$ level across the blue/purple/rose curves.
+    \emph{x}-axis: what fraction of that budget is spent on root (full-document) labels; the rest goes to local (sub-span) labels. Each panel fixes a leaf geometry (only leaf~$32$, $16$, $8$ shown---these are the geometries with non-root internal nodes where allocation policies can differ).
+    \textcolor{green!50!black}{\textbf{Green star}}: all-root reference ($100\%$ root).
+    \textcolor{green!50!black}{\textbf{Green line}}: root labels only at each share (total budget \emph{shrinks}---no local compensation).
+    \textcolor{blue!70!black}{\textbf{Blue}}/\textcolor{violet}{\textbf{purple}}/\textcolor{red!50!blue}{\textbf{rose}}: three local-allocation policies (total budget fixed).
+    \textcolor{orange!80!black}{\textbf{Amber}}: flat FNO at each root share.
+    The reallocation curves stay flat from $100\%$ down to ${\sim}40\%$ root, then degrade---roughly half the root labels can be replaced by local labels at no cost to accuracy.}
+    \label{fig:budget-split}
+\end{figure}
+
+That the allocation policies overlap and that local labels can replace root labels at equal total cost both reflect the same property of this task: the oracle decomposes into additive leaf-local terms plus an ordered boundary correction, which is precisely the C1-plus-C3 structure the audit samples. When the task fits the local laws in this way, local supervision buys the same root accuracy as a proportionately larger root budget because it moves the model toward the local-law-constrained subspace the theorems use. The tree can match or improve on the flat baseline because it has access to supervision at every level of the hierarchy. The classical-mergeable-sketch case of Section~\ref{sec:hll-parity} is the exact limit: for HyperLogLog the decomposition is algebraically exact and the tree becomes byte-identical to the flat reference. In semantic settings (Section~\ref{sec:manifesto-llm}) the sufficient statistic is richer and the merge rule a learned neural network, but the same operator-plus-projection argument applies: rubric-coded spans are the local signal the audit samples and the local supervision that C1 and C3 enable.

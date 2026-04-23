@@ -2196,6 +2196,102 @@ lemma ExpectedGRPOLossLipschitz_plackettLuce_fixed_ranker_all {Strings A Y : Typ
       (hk := hk) (pol := pol) (ranker := ranker) (fstar := fstar) (g := g)
       (L_pol := L_pol) (h_pol_lip := h_pol_lip) (h_ranker := h_ranker)
       (h_ranker_fixed := h_ranker_fixed) (x := x) (z := z))
+
+/-- GRPO-RL expected loss is Lipschitz when the pointwise GRPO-RL loss is
+Lipschitz on the finite group space.
+
+This is a fully proved narrowing of the abstract expected-loss interface used
+throughout the GRPO-RL gap theorems. -/
+lemma ExpectedGRPORLLossLipschitz_of_pointwise_finite {Strings A Y : Type*}
+    [PseudoMetricSpace Y] {k : ℕ} [Fintype A] [DecidableEq A]
+    (pol pol_old pol_ref : Policy' Strings A)
+    (reward : Strings → A → ℝ)
+    (eps beta : ℝ) (fstar : Strings → Y) (g : PMF (Fin k → A)) (L : ℝ≥0)
+    (h_pol_lip : GRPOPolicyLipschitz pol fstar L)
+    (h_old_lip : GRPOPolicyLipschitz pol_old fstar L)
+    (h_ref_lip : GRPOPolicyLipschitz pol_ref fstar L)
+    (h_reward_lip : RewardLipschitzGRPO reward fstar L)
+    (h_point :
+      ∀ x z (group : Fin k → A),
+        |GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group -
+         GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group| ≤
+        (L : ℝ) * dist (fstar x) (fstar z))
+    (x z : Strings) :
+    ExpectedGRPORLLossLipschitz k pol pol_old pol_ref reward eps beta fstar g L
+      h_pol_lip h_old_lip h_ref_lip h_reward_lip x z := by
+  classical
+  have hsum :
+      |∑ group, (g group).toReal *
+          GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group -
+        ∑ group, (g group).toReal *
+          GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group| ≤
+      (L : ℝ) * dist (fstar x) (fstar z) := by
+    have h_sub :
+        (∑ group, (g group).toReal *
+            GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group) -
+          ∑ group, (g group).toReal *
+            GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group =
+        ∑ group, (g group).toReal *
+          (GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group -
+            GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group) := by
+      symm
+      calc
+        ∑ group, (g group).toReal *
+            (GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group -
+              GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group) =
+          ∑ group, ((g group).toReal *
+              GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group -
+            (g group).toReal *
+              GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group) := by
+            apply Finset.sum_congr rfl
+            intro group _
+            ring
+        _ =
+          (∑ group, (g group).toReal *
+              GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group) -
+            ∑ group, (g group).toReal *
+              GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group := by
+          simp [Finset.sum_sub_distrib]
+    calc
+      |∑ group, (g group).toReal *
+          GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group -
+        ∑ group, (g group).toReal *
+          GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group|
+          =
+        |∑ group, (g group).toReal *
+            (GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group -
+              GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group)| := by
+              simp [h_sub]
+      _ ≤ ∑ group, |(g group).toReal *
+            (GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group -
+              GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group)| := by
+              exact Finset.abs_sum_le_sum_abs _ _
+      _ = ∑ group, (g group).toReal *
+            |GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group -
+              GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group| := by
+              apply Finset.sum_congr rfl
+              intro group _
+              rw [abs_mul, abs_of_nonneg ENNReal.toReal_nonneg]
+      _ ≤ ∑ group, (g group).toReal * ((L : ℝ) * dist (fstar x) (fstar z)) := by
+              apply Finset.sum_le_sum
+              intro group _
+              exact mul_le_mul_of_nonneg_left (h_point x z group) ENNReal.toReal_nonneg
+      _ = (L : ℝ) * dist (fstar x) (fstar z) := by
+              have hsum' : (∑ group, (g group).toReal) = 1 := by
+                simpa [tsum_fintype] using (PMF.toReal_tsum_coe g)
+              have hconst :
+                  ∑ group, (g group).toReal * ((L : ℝ) * dist (fstar x) (fstar z)) =
+                    ((L : ℝ) * dist (fstar x) (fstar z)) * ∑ group, (g group).toReal := by
+                have h' :
+                    ∑ group, (g group).toReal * ((L : ℝ) * dist (fstar x) (fstar z)) =
+                      ∑ group, ((L : ℝ) * dist (fstar x) (fstar z)) * (g group).toReal := by
+                    apply Finset.sum_congr rfl
+                    intro group _
+                    ring
+                rw [h', Finset.mul_sum]
+              rw [hconst, hsum', mul_one]
+  simpa [ExpectedGRPORLLossLipschitz, ExpectedGroupLossLipschitz,
+    RUM.ExpectedGroupLossLipschitz, tsum_fintype] using hsum
 /-!
 ### GRPO Plackett-Luce Quantitative Bounds
 
@@ -2419,7 +2515,7 @@ This lemma follows directly from the `ExpectedGRPOLossLipschitz` assumption,
 justified by the Random Utility Model (continuous underlying utilities).
 
 Previously, this was derived from a pointwise Lipschitz bound, but that approach
-required a `sorry` because rankings are discontinuous pointwise (rankings can
+required a placeholder proof because rankings are discontinuous pointwise (rankings can
 jump at ties). The expected version holds because ties have measure zero under
 continuous noise distributions. -/
 lemma E_group_grpo_lipschitz {k : ℕ}
@@ -2844,6 +2940,67 @@ theorem grpo_rl_gap_bundle {k : ℕ}
     (h_pol_lip := assump.h_pol_lip) (h_old_lip := assump.h_old_lip)
     (h_ref_lip := assump.h_ref_lip) (h_reward_lip := assump.h_reward_lip)
     (h_rum := assump.h_rum) (h_gen_fixed := assump.h_gen_fixed) (h_Δ := assump.h_Δ)
+
+/-- **GRPO-RL Gap Bound (Pointwise-Lipschitz Route)**
+
+This variant replaces the abstract expected-loss Lipschitz assumption with a
+primitive pointwise Lipschitz hypothesis on `GRPORLLossPointwise`. -/
+theorem grpo_rl_gap_bounded_of_pointwise {k : ℕ} [Fintype A] [DecidableEq A]
+    (fstar : Strings → Y)
+    (pol pol_old pol_ref : Policy' Strings A)
+    (reward : Strings → A → ℝ)
+    (eps beta : ℝ)
+    (gen : GroupGenerator Strings A k)
+    (μ_X μ_Z : PMF Strings)
+    (L_grpo_rl : ℝ≥0)
+    (Δ_R : ℝ)
+    (D_max : ℝ) (hD_max : 0 ≤ D_max)
+    (h_dist_bound : ∀ x z, dist (fstar x) (fstar z) ≤ D_max)
+    (Loss_max : ℝ) (hLoss_max : 0 ≤ Loss_max)
+    (hLoss_bound : ∀ x (group : Fin k → A),
+      |GRPORLLossPointwise pol pol_old pol_ref reward eps beta x group| ≤ Loss_max)
+    (h_pol_lip : GRPOPolicyLipschitz pol fstar L_grpo_rl)
+    (h_old_lip : GRPOPolicyLipschitz pol_old fstar L_grpo_rl)
+    (h_ref_lip : GRPOPolicyLipschitz pol_ref fstar L_grpo_rl)
+    (h_reward_lip : RewardLipschitzGRPO reward fstar L_grpo_rl)
+    (h_point :
+      ∀ x z (group : Fin k → A),
+        |GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group -
+         GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group| ≤
+        (L_grpo_rl : ℝ) * dist (fstar x) (fstar z))
+    (h_gen_fixed : ∀ x x', gen x = gen x')
+    (h_Δ : Δ_R = ∑' z, ∑' x, (μ_Z z).toReal * (μ_X x).toReal * dist (fstar z) (fstar x)) :
+    |ExpectedGRPORLLoss pol pol_old pol_ref reward eps beta μ_X gen -
+     ExpectedGRPORLLoss pol pol_old pol_ref reward eps beta μ_Z gen| ≤
+    L_grpo_rl * Δ_R := by
+  classical
+  have h_rum : ∀ x z,
+      ExpectedGRPORLLossLipschitz k pol pol_old pol_ref reward eps beta fstar (gen x) L_grpo_rl
+        h_pol_lip h_old_lip h_ref_lip h_reward_lip x z := by
+    intro x z
+    let g := gen (Classical.arbitrary Strings)
+    have hgen_eq : ∀ x', gen x' = g := fun x' => h_gen_fixed x' _
+    have h_rum_g :
+        ExpectedGRPORLLossLipschitz k pol pol_old pol_ref reward eps beta fstar g L_grpo_rl
+          h_pol_lip h_old_lip h_ref_lip h_reward_lip x z :=
+      ExpectedGRPORLLossLipschitz_of_pointwise_finite
+        (pol := pol) (pol_old := pol_old) (pol_ref := pol_ref)
+        (reward := reward) (eps := eps) (beta := beta) (fstar := fstar)
+        (g := g) (L := L_grpo_rl)
+        (h_pol_lip := h_pol_lip) (h_old_lip := h_old_lip)
+        (h_ref_lip := h_ref_lip) (h_reward_lip := h_reward_lip)
+        h_point x z
+    simpa [hgen_eq x] using h_rum_g
+  exact grpo_rl_gap_bounded (k := k) (fstar := fstar)
+    (pol := pol) (pol_old := pol_old) (pol_ref := pol_ref)
+    (reward := reward) (eps := eps) (beta := beta) (gen := gen)
+    (μ_X := μ_X) (μ_Z := μ_Z)
+    (L_grpo_rl := L_grpo_rl) (Δ_R := Δ_R)
+    (D_max := D_max) (hD_max := hD_max) (h_dist_bound := h_dist_bound)
+    (Loss_max := Loss_max) (hLoss_max := hLoss_max) (hLoss_bound := hLoss_bound)
+    (h_pol_lip := h_pol_lip) (h_old_lip := h_old_lip)
+    (h_ref_lip := h_ref_lip) (h_reward_lip := h_reward_lip)
+    (h_rum := h_rum) (h_gen_fixed := h_gen_fixed) (h_Δ := h_Δ)
 
 /-- GRPO-RL gap is zero when local laws hold.
 

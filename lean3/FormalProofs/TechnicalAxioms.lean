@@ -62,7 +62,7 @@ For any PMF p and function f, the series ∑ p(z) * f(z) is summable.
 
 **Location**: ExpectationTheory.lean:112
 
-**Status**: Proper `axiom` declaration (not `sorry`). Deprecated in favor of bounded alternative.
+**Status**: Proper assumption declaration (not a placeholder proof). Deprecated in favor of bounded alternative.
 
 **Mathematical justification**: For bounded f, this follows from absolute convergence
 since ∑ p(z) = 1. The axiom extends to unbounded f, which is technically unsound

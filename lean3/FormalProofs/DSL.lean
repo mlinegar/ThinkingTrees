@@ -16,7 +16,9 @@ import FormalProofs.DSL.MomentFunctions
 import FormalProofs.DSL.DSLEstimator
 
 -- Asymptotic theory
+import FormalProofs.DSL.AsymptoticCore
 import FormalProofs.DSL.AsymptoticTheory
+import FormalProofs.DSL.ConcreteCoverage
 
 -- Bias analysis
 import FormalProofs.DSL.BiasAnalysis
@@ -35,9 +37,11 @@ import FormalProofs.DSL.CategoryProportion
 import FormalProofs.DSL.FixedEffects
 
 -- Main theorems summary
+import FormalProofs.DSL.RuntimeCertificates
 import FormalProofs.DSL.MergeableCertificates
 import FormalProofs.DSL.MainTheorems
 import FormalProofs.DSL.TreePOEndToEnd
+import FormalProofs.DSL.LabelRateBounds
 
 /-!
 # FormalProofs/DSL.lean
@@ -77,6 +81,7 @@ Key assumptions:
 | SamplingTheory | Design-based sampling, Assumption 1 |
 | MomentFunctions | GLM moment functions |
 | DSLEstimator | Core estimator, design-adjusted outcomes |
+| AsymptoticCore | Shared asymptotic-limit and coverage definitions |
 | AsymptoticTheory | Consistency, normality, variance |
 | BiasAnalysis | Bias from ignoring prediction errors |
 | VarianceDecomposition | Power analysis, efficiency |

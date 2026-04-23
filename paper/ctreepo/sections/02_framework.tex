@@ -74,7 +74,7 @@ C3: Merge Consistency & $u \concat v \sim g(u \concat v) \sim g(g(u)\concat g(v)
 \begin{equation}\tag{C1}\label{eq:leaf_sufficiency}
 \forall \text{ realized leaf } b:\quad g(b) \sim b.
 \end{equation}
-In the RILE example, C1 fails as soon as a chapter summary drops a policy position the scoring rubric inspects.
+In the changepoint example, C1 fails when a leaf summary drops the identity of a boundary-adjacent color that the counting oracle inspects. In a semantic setting, C1 fails when a chapter summary drops a policy position the scoring rubric needs.
 
 \paragraph{Condition 2: Idempotence (C2).}
 \begin{equation}\tag{C2}\label{eq:leaf_idempotence}
@@ -115,7 +115,7 @@ To propagate local equivalences up the tree we need one more property: if two pa
 For every context $w \in \Strings$, $u \sim v$ implies both $w \concat u \sim w \concat v$ and $u \concat w \sim v \concat w$.
 \end{assumption}
 
-This is what makes the tree induction work: replacing one child with an oracle-equivalent string must not change the parent's oracle value. For content-based tasks such as RILE scoring or rubric-driven extraction, this is often plausible. It can fail for discourse-sensitive tasks such as irony or rhetorical tone, where replacing a locally equivalent span may change how neighboring text is interpreted.
+This is what makes the tree induction work: replacing one child with an oracle-equivalent string must not change the parent's oracle value. For content-based tasks such as changepoint counting, RILE scoring, or rubric-driven extraction, this is often plausible. It can fail for discourse-sensitive tasks such as irony or rhetorical tone, where replacing a locally equivalent span may change how neighboring text is interpreted.
 
 \subsection{Named Assumption Bundles}
 
@@ -138,3 +138,27 @@ Certificate Stack & Optimization Stack + transport, calibration, sampling assump
 
 \paragraph{Structural vs.\ downstream assumptions.}
 The first two bundles govern the compression object itself: do local checks compose to a faithful root summary? The latter two bundles add assumptions about the downstream preference signal and about finite-sample transport from audit statistics to optimization guarantees. This split is deliberate and will be used again in Sections~\ref{sec:theorems} and \ref{sec:verification}.
+
+\subsection{Connection to Classical Mergeable Sketches}
+
+The C-TreePO framework generalizes classical mergeable sketches from data systems, where the goal is to replace raw data shards with compact local states whose pairwise merges still preserve a global query. Table~\ref{tab:sketch-mapping} makes the correspondence explicit. Under the stronger deterministic assumptions of Proposition~\ref{prop:mergeable-reduction}, the semantic tree collapses back to the classical mergeable-summary setting. The point of C-TreePO is that for semantic tasks no hand-designed merge operator is usually available, so the sketch must be learned and then audited.
+
+\begin{table}[t]
+    \centering
+    \small
+    \begin{tabular}{p{0.46\linewidth}p{0.46\linewidth}}
+        \toprule
+        Classical mergeable sketch & C-TreePO semantic compression \\
+        \midrule
+        Data shard $d_i$ & Leaf text block $b_i$ \\
+        Bounded sketch state $S_B(d_i)$ & Leaf summary $s_i = g(b_i)$ \\
+        Merge operator $\oplus_B$ & Learned merge $g(s_{u_L}\concat s_{u_R})$ \\
+        Query (e.g., distinct count, frequency) & Oracle query $\fstar(x)$ (task value) \\
+        Memory budget $B$ controls what survives merges & Summary budget controls interaction-bearing content retention \\
+        Correctness by algebraic proof (no runtime check) & Correctness by probabilistic audit (Section~\ref{sec:estimation}) \\
+        Error = sketch estimation variance & Error = $L \cdot \Delta_R$ + estimation envelopes (Theorem~\ref{thm:e2e}) \\
+        \bottomrule
+    \end{tabular}
+    \caption{Mapping from a classical mergeable sketch to the C-TreePO setting. In classical sketches, the merge operator is hand-designed and algebraically exact; in C-TreePO, it is learned and certified by audit.}
+    \label{tab:sketch-mapping}
+\end{table}

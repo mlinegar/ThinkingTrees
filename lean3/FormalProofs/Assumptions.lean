@@ -1,6 +1,7 @@
 import FormalProofs.OPT.LocalLaws
 import FormalProofs.OPT.GlobalAssumptions
 import FormalProofs.OPT.ScoreTransport
+import FormalProofs.OPT.InformationSufficiency
 import FormalProofs.OPT.PreferenceLearning
 import FormalProofs.OPT.PreferenceBounds
 
@@ -224,6 +225,25 @@ abbrev doob_dynkin_oracle_iff := @oracle_factorization_iff_sigma_subset
 
 /-- Doob-Dynkin oracle IFF (a.e.): factorization a.e. iff sigma-Z a.e.-measurability. -/
 abbrev doob_dynkin_oracle_ae_iff := @oracle_factorization_ae_iff_aestronglyMeasurable
+
+/-- Oracle-indexed conditional densities for task-relevant KLIC statements. -/
+abbrev OracleIndexedTaskDensity := @FormalProofs.OPT.OracleIndexedConditionalDensity
+
+/-- Stochastic fixed-partition bridge: local laws imply oracle equality a.e. under the joint law. -/
+abbrev stochastic_local_laws_oracle_eq_ae :=
+  @FormalProofs.OPT.jointTreeSummaryLaw_oracle_eq_ae_of_localLaws
+
+/-- Stochastic fixed-partition bridge: local laws imply a.e. oracle factorization through summaries. -/
+abbrev oracle_sufficiency_joint_law_ae :=
+  @FormalProofs.OPT.jointTreeSummaryLaw_oracle_factorizationAE_of_localLaws
+
+/-- Zero task-relevant KLIC under oracle-indexed supervision and the fixed-partition joint law. -/
+abbrev zero_task_relevant_klic_joint_law_ae :=
+  @FormalProofs.OPT.jointTreeSummaryLaw_taskRelevantKLIC_zero_ae_of_localLaws
+
+/-- Deterministic collision impossibility: merging oracle-distinct inputs blocks any decoder. -/
+abbrev summary_collision_impossibility :=
+  @FormalProofs.OPT.no_oracle_decoder_of_summary_collision
 
 /-!
 ## Section 4: Lipschitz Assumptions (for Quantitative Bounds)

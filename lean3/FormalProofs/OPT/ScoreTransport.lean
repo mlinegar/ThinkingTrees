@@ -344,9 +344,9 @@ When the supervision signal S*(X, a) factors through the oracle f*(X), meaning:
 
 Then the effective score function is oracle-measurable: it depends on X only through f*(X).
 
-This is the fundamental "sufficiency" property for score transport: conditional
+This is the fundamental sufficiency property for score transport: conditional
 factorization ensures that supervision information can be represented purely in
-terms of oracle values, enabling lossless summarization. -/
+terms of oracle values, enabling task-relevant compression. -/
 theorem prop4_cf_implies_oracle_measurable
     (Sstar : Strings' → A → ℝ) (fstar : Strings' → Y') (X : Ω → Strings')
     (hX : @Measurable Ω Strings' m₀ _ X)
@@ -389,6 +389,95 @@ theorem prop5_score_transport
     ∫ ω, Sstar (X ω) a ∂μ = ∫ ω, SummaryScore' Sstar X Z μ a ω ∂μ ∧
     ∫ ω, Sstar (X ω) a ∂μ = ∫ ω, hCF.choose (fstar (X ω)) a ∂μ :=
   blackwell_transport' Sstar fstar X Z hX hZ hfstar hCF hσ a hint
+
+/-- A.e. oracle factorization is enough to recover the oracle-factored score
+form after conditioning on `Z`.
+
+This is the measure-theoretic transport surface used by the stochastic
+joint-law bridge: we only need `f*(X)` to agree almost surely with some
+measurable decoder of `Z`, not a pointwise sigma-containment statement. -/
+lemma condexp_oracle_factored_ae'
+    (Sstar : Strings' → A → ℝ) (fstar : Strings' → Y') (X Z : Ω → Strings')
+    (hX : @Measurable Ω Strings' m₀ _ X) (hZ : @Measurable Ω Strings' m₀ _ Z)
+    (_hfstar : Measurable fstar)
+    [_hμZ : SigmaFinite (μ.trim hZ.comap_le)]
+    [_hμX : SigmaFinite (μ.trim hX.comap_le)]
+    (hσ_ZX : MeasurableSpace.comap Z ‹_› ≤ MeasurableSpace.comap X ‹_›)
+    (hFacAE : OracleFactorizationAE' fstar X Z μ)
+    (hCF : ConditionalFactorization' Sstar fstar X μ hX)
+    (a : A) (hint : Integrable (fun ω => Sstar (X ω) a) μ) :
+    SummaryScore' Sstar X Z μ a =ᵐ[μ] fun ω => hCF.choose (fstar (X ω)) a := by
+  let Qbar := hCF.choose
+  have hQbar_meas : ∀ a', Measurable (fun y => Qbar y a') := hCF.choose_spec.1
+  have hQbar_ae : μ[fun ω => Sstar (X ω) a | MeasurableSpace.comap X ‹_›] =ᵐ[μ]
+      fun ω => Qbar (fstar (X ω)) a := hCF.choose_spec.2 a
+  rcases hFacAE with ⟨decode, hdecode_meas, hdecode_eq⟩
+  let mZ := MeasurableSpace.comap Z ‹_›
+  let mX := MeasurableSpace.comap X ‹_›
+  have hmZ_le_m0 : mZ ≤ m₀ := hZ.comap_le
+  have hZX_ae :
+      (fun ω => Qbar (fstar (X ω)) a) =ᵐ[μ] fun ω => Qbar (decode (Z ω)) a := by
+    filter_upwards [hdecode_eq] with ω hω
+    exact congrArg (fun y => Qbar y a) hω
+  have hQbarZX_meas : StronglyMeasurable[mZ] (fun ω => Qbar (decode (Z ω)) a) := by
+    apply Measurable.stronglyMeasurable
+    have hZ_meas : Measurable[mZ] Z := by simpa using (comap_measurable (f := Z))
+    exact (hQbar_meas a).comp (hdecode_meas.comp hZ_meas)
+  have hQbar_int : Integrable (fun ω => Qbar (fstar (X ω)) a) μ := by
+    exact (integrable_congr hQbar_ae).mp integrable_condExp
+  have hQbarZX_int : Integrable (fun ω => Qbar (decode (Z ω)) a) μ := by
+    exact (integrable_congr hZX_ae).mp hQbar_int
+  unfold SummaryScore'
+  have tower :
+      μ[μ[fun ω => Sstar (X ω) a | mX] | mZ] =ᵐ[μ] μ[fun ω => Sstar (X ω) a | mZ] :=
+    condExp_condExp_of_le hσ_ZX hX.comap_le
+  have step2 :
+      μ[μ[fun ω => Sstar (X ω) a | mX] | mZ] =ᵐ[μ]
+        μ[fun ω => Qbar (fstar (X ω)) a | mZ] :=
+    condExp_congr_ae hQbar_ae
+  have step3 :
+      μ[fun ω => Qbar (fstar (X ω)) a | mZ] =ᵐ[μ]
+        fun ω => Qbar (fstar (X ω)) a := by
+    calc
+      μ[fun ω => Qbar (fstar (X ω)) a | mZ]
+          =ᵐ[μ] μ[fun ω => Qbar (decode (Z ω)) a | mZ] := condExp_congr_ae hZX_ae
+      _ =ᵐ[μ] fun ω => Qbar (decode (Z ω)) a :=
+        Filter.EventuallyEq.of_eq <|
+          condExp_of_stronglyMeasurable hmZ_le_m0 hQbarZX_meas hQbarZX_int
+      _ =ᵐ[μ] fun ω => Qbar (fstar (X ω)) a := hZX_ae.symm
+  calc
+    μ[fun ω => Sstar (X ω) a | mZ]
+        =ᵐ[μ] μ[μ[fun ω => Sstar (X ω) a | mX] | mZ] := tower.symm
+    _ =ᵐ[μ] μ[fun ω => Qbar (fstar (X ω)) a | mZ] := step2
+    _ =ᵐ[μ] fun ω => Qbar (fstar (X ω)) a := step3
+
+/-- A.e. factorization version of score transport.
+
+Compared with `prop5_score_transport`, this theorem does not require a
+pointwise sigma-containment statement. It only needs the oracle value of the
+raw document to factor almost surely through the summary variable. -/
+theorem blackwell_transport_ae'
+    (Sstar : Strings' → A → ℝ) (fstar : Strings' → Y') (X Z : Ω → Strings')
+    (hX : @Measurable Ω Strings' m₀ _ X) (hZ : @Measurable Ω Strings' m₀ _ Z)
+    (hfstar : Measurable fstar)
+    [_hμZ : SigmaFinite (μ.trim hZ.comap_le)]
+    [_hμX : SigmaFinite (μ.trim hX.comap_le)]
+    (hσ_ZX : MeasurableSpace.comap Z ‹_› ≤ MeasurableSpace.comap X ‹_›)
+    (hFacAE : OracleFactorizationAE' fstar X Z μ)
+    (hCF : ConditionalFactorization' Sstar fstar X μ hX)
+    (a : A) (hint : Integrable (fun ω => Sstar (X ω) a) μ) :
+    ∫ ω, Sstar (X ω) a ∂μ = ∫ ω, SummaryScore' Sstar X Z μ a ω ∂μ ∧
+    ∫ ω, Sstar (X ω) a ∂μ = ∫ ω, hCF.choose (fstar (X ω)) a ∂μ := by
+  constructor
+  · unfold SummaryScore'
+    exact (MeasureTheory.integral_condExp hZ.comap_le).symm
+  · calc
+      ∫ ω, Sstar (X ω) a ∂μ = ∫ ω, SummaryScore' Sstar X Z μ a ω ∂μ := by
+        unfold SummaryScore'
+        exact (MeasureTheory.integral_condExp hZ.comap_le).symm
+      _ = ∫ ω, hCF.choose (fstar (X ω)) a ∂μ := by
+        apply integral_congr_ae
+        exact condexp_oracle_factored_ae' Sstar fstar X Z hX hZ hfstar hσ_ZX hFacAE hCF a hint
 
 /-- If score transport fails for an action `a`, then at least one structural
 assumption must fail: either CF fails, or oracle factorization through `Z` fails.
@@ -452,9 +541,9 @@ exactly recovers the oracle-factored score:
 
   E[S*(X, a) | Z] =ᵐ Q̄(f*(X), a)
 
-This is the "lossless" property: the summary Z contains all relevant oracle
-information, so conditioning on Z gives the same result as conditioning on
-the full oracle. -/
+This is the oracle-sufficiency property: the summary `Z` contains all
+task-relevant oracle information, so conditioning on `Z` gives the same result
+as conditioning on the oracle-indexed score. -/
 theorem prop5_score_factorization_corollary
     (Sstar : Strings' → A → ℝ) (fstar : Strings' → Y') (X Z : Ω → Strings')
     (hX : @Measurable Ω Strings' m₀ _ X) (hZ : @Measurable Ω Strings' m₀ _ Z)
@@ -467,6 +556,24 @@ theorem prop5_score_factorization_corollary
     (a : A) (hint : Integrable (fun ω => Sstar (X ω) a) μ) :
     SummaryScore' Sstar X Z μ a =ᵐ[μ] fun ω => hCF.choose (fstar (X ω)) a :=
   condexp_oracle_factored' Sstar fstar X Z hX hZ hfstar hσ hσ_ZX hCF a hint
+
+/-- A.e. factorization corollary for Proposition 5.
+
+The summary is oracle-sufficient for the score if the oracle value of the raw
+document factors almost surely through `Z`. This is the stochastic version used
+for the C-TreePO joint-law bridge. -/
+theorem prop5_score_factorization_corollary_ae
+    (Sstar : Strings' → A → ℝ) (fstar : Strings' → Y') (X Z : Ω → Strings')
+    (hX : @Measurable Ω Strings' m₀ _ X) (hZ : @Measurable Ω Strings' m₀ _ Z)
+    (hfstar : Measurable fstar)
+    [_hμZ : SigmaFinite (μ.trim hZ.comap_le)]
+    [_hμX : SigmaFinite (μ.trim hX.comap_le)]
+    (hσ_ZX : MeasurableSpace.comap Z ‹_› ≤ MeasurableSpace.comap X ‹_›)
+    (hFacAE : OracleFactorizationAE' fstar X Z μ)
+    (hCF : ConditionalFactorization' Sstar fstar X μ hX)
+    (a : A) (hint : Integrable (fun ω => Sstar (X ω) a) μ) :
+    SummaryScore' Sstar X Z μ a =ᵐ[μ] fun ω => hCF.choose (fstar (X ω)) a :=
+  condexp_oracle_factored_ae' Sstar fstar X Z hX hZ hfstar hσ_ZX hFacAE hCF a hint
 
 /-- If local laws bridge to oracle sigma containment, then score factorization follows.
 

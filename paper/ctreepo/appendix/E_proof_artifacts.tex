@@ -1,202 +1,120 @@
 \section{Proof Map and Lean Crosswalk}\label{app:proof-artifacts}
 
+Here we link each claim in the paper to its Lean formalization. Paths
+in the table below are relative to the main repository, \leanrepo;
+foundational probability lemmas this artifact depends on live in
+\probrepo.
+
 \subsection{Result Map}
 
 \begin{table}[h]
 \centering
 \small
-\begin{tabular}{p{0.33\linewidth}p{0.22\linewidth}p{0.38\linewidth}}
+\begin{tabular}{p{0.28\linewidth}p{0.34\linewidth}p{0.30\linewidth}}
 \toprule
-Paper result & Full proof location & Lean anchor(s) \\
+Paper result & Theorem / proof names & Files \\
 \midrule
 Theorem~\ref{thm:one-pass}, Corollaries~\ref{cor:schedule}, \ref{cor:folds} &
-Appendix~\ref{app:proof-preservation} &
-\texttt{one\_pass}, \texttt{schedule\_invariance}, \texttt{fold\_of\_folds}
-in \texttt{lean3/FormalProofs/OPT/PreservationTheorems.lean} \\
+\texttt{one\_pass}, \texttt{schedule\_invariance}, \texttt{fold\_of\_folds} &
+\texttt{OPT/PreservationTheorems.lean} \\
 
 Theorem~\ref{thm:multi-round} &
-Appendix~\ref{app:proof-preservation} &
-\texttt{multi\_round\_proper} (plus wrappers
-\texttt{multi\_round\_bounded}, \texttt{multi\_round\_typeclass})
-in \texttt{lean3/FormalProofs/OPT/ExpectationTheory.lean} \\
+\texttt{multi\_round\_proper}, \texttt{multi\_round\_bounded}, \texttt{multi\_round\_typeclass} &
+\texttt{OPT/ExpectationTheory.lean} \\
 
 Theorem~\ref{thm:fixed-partition} &
-Appendix~\ref{app:fixed-partition} &
-Corollary by instantiating \texttt{multi\_round\_proper} to the deterministic
-tree map $x \mapsto \mathcal{T}_\Pi(x)$; named re-export
-\texttt{fixed\_partition\_extension\_instantiation} in
-\texttt{lean3/FormalProofs/OPT/MainTheorems.lean} \\
+\texttt{fixed\_partition\_extension\_instantiation} (corollary of \texttt{multi\_round\_proper}) &
+\texttt{OPT/MainTheorems.lean} \\
 
 Proposition~\ref{prop:mergeable-reduction} &
-Appendix~\ref{app:proof-mergeable} &
-\texttt{prop3\_mergeable\_classical}
-(\texttt{GlobalAssumptions.lean}), and
-\texttt{ops\_reduction\_to\_classical\_mergeable}
-(\texttt{MergeableReduction.lean}) \\
+\texttt{prop3\_mergeable\_classical}, \texttt{ops\_reduction\_to\_classical\_mergeable} &
+\texttt{OPT/GlobalAssumptions.lean}, \texttt{OPT/MergeableReduction.lean} \\
+
+Proposition~\ref{prop:neural-operator-bridge} &
+\texttt{DiscretizationInvariantFamily}, \texttt{UniformOperatorApproxOnCompact}, \texttt{NeuralOperatorUniversalApproxUniform}, \texttt{approxLocalLawsBundle\_of\_uniformApproxExactTheoremBacked}, \texttt{approxTheoremBacked\_of\_uniformApproxExactTheoremBacked} &
+\texttt{ML/NeuralOperatorCore.lean}, \texttt{ML/NeuralOperatorApproximation.lean}, \texttt{OPT/NeuralOperatorTheoremBridge.lean} \\
+
+Kovachki Lemmas~21--22 finite-dimensionalization layer &
+\texttt{FiniteCoordinateEncoder}, \texttt{FiniteCoordinateDecoder}, \texttt{finiteRankApproximationProperty\_iff\_standard}, \texttt{KovachkiLemma21Stability}, \texttt{kovachkiLemma21Stability\_of\_uniformContinuous}, \texttt{kovachki\_compact\_iUnion\_image\_of\_uniform\_limit}, \texttt{FiniteDimensionalizationOnCompact}, \texttt{kovachki\_finiteDimensionalization\_on\_compact}, \texttt{kovachki\_finiteDimensionalization\_on\_compact\_of\_uniformContinuous}, \texttt{uniformOperatorApproxOnCompact\_of\_kovachkiFiniteDimensionalization}, \texttt{uniformApproxOnCompact\_exists\_of\_kovachkiFiniteDimensionalization\_of\_uniformContinuous}, \texttt{approxTheoremBacked\_of\_kovachkiFiniteDimensionalization} &
+\texttt{ML/KovachkiFiniteDimensionalization.lean}, \texttt{ML/NeuralOperatorApproximation.lean}, \texttt{OPT/NeuralOperatorTheoremBridge.lean} \\
+
+Equation~\eqref{eq:equation6-no} neural-operator approximation interfaces &
+\texttt{Equation6NeuralOperator}, \texttt{Equation6NeuralOperatorClass}, \texttt{Equation6UniversalApproxUniform}, \texttt{Equation6UniversalApproxL2}; external input: \citet[Theorems~11,13]{Kovachki23NeuralOperator} &
+\texttt{ML/NeuralOperatorArchitecture.lean} \\
+
+Transformer-as-neural-operator architecture inclusion &
+\texttt{singleHeadAttention\_eq\_discretizedKernelLayer}, \texttt{transformerBlock\_is\_neuralOperatorLayer}, \texttt{transformerEncoder\_is\_equation6NeuralOperator}, \texttt{transformerEncoder\_mem\_equation6Class} &
+\texttt{ML/TransformerAsNeuralOperator.lean} \\
+
+Proposition~\ref{prop:law-constrained-no} &
+\texttt{NeuralOperatorClass}, \texttt{CertifiedSubfamily}, \texttt{MergeableSketchSummaryClass}, \texttt{ExactLocalLawNeuralOperators}, \texttt{ApproxLocalLawNeuralOperators}, \texttt{NeuralOperatorMergeableSketchOverlap}, \texttt{mergeableSketchSummaryClass\_subset\_exactLocalLawSubspace}, \texttt{mergeableSketch\_overlap\_subset\_exactLocalLawNeuralOperators} &
+\texttt{OPT/NeuralOperatorSpaces.lean} \\
+
+Oracle/projection objective, Equation~\eqref{eq:oracle-projection-objective} &
+\texttt{oracleProjectionObjectiveWeights}, \texttt{oracleProjectionObjective}, \texttt{oracleProjectionObjective\_lam\_zero}, \texttt{oracleProjectionObjective\_lam\_one}, \texttt{oracleProjectionObjective\_le\_of\_uniformApproxExactTheoremBacked} &
+\texttt{OPT/RegularizedObjective.lean} \\
 
 Theorem~\ref{thm:pref-equiv} &
-Appendix~\ref{app:proof-equivalence} &
-\texttt{preference\_learning\_equivalence},
-\texttt{grpo\_equivalence},
-\texttt{grpo\_rl\_equivalence}
-in \texttt{lean3/FormalProofs/OPT/PreferenceLearning.lean};
-\texttt{dpo\_equivalence}
-in \texttt{lean3/FormalProofs/OPT/PreferenceBounds.lean} \\
+\texttt{preference\_learning\_equivalence}, \texttt{grpo\_equivalence}, \texttt{grpo\_rl\_equivalence}, \texttt{dpo\_equivalence} &
+\texttt{OPT/PreferenceLearning.lean}, \texttt{OPT/PreferenceBounds.lean} \\
 
 Theorem~\ref{thm:unified-gap} &
-Appendix~\ref{app:proof-equivalence} &
-\texttt{unified\_preference\_gap\_bounded}
-in \texttt{lean3/FormalProofs/OPT/PreferenceBounds.lean} \\
+\texttt{unified\_preference\_gap\_bounded} &
+\texttt{OPT/PreferenceBounds.lean} \\
 
 Example~\ref{ex:c2-independent} (C2 independence) &
-Appendix~\ref{app:counterexample} &
-\texttt{thm10\_1\_L3\_not\_derivable}
-in \texttt{lean3/FormalProofs/OPT/CounterexampleExistence.lean} \\
+\texttt{thm10\_1\_L3\_not\_derivable} &
+\texttt{OPT/CounterexampleExistence.lean} \\
 
 Theorem~\ref{thm:e2e} &
-Appendix~\ref{app:proof-e2e} &
-\texttt{treepo\_objective\_unbiased},
-\texttt{treepo\_distortion\_unbiased},
-\texttt{dpo\_treepo\_end\_to\_end\_certificate},
-\texttt{grpo\_pl\_treepo\_end\_to\_end\_certificate},
-\texttt{grpo\_pl\_treepo\_end\_to\_end\_gen\_certificate},
-\texttt{grpo\_rl\_treepo\_end\_to\_end\_certificate}
-in \texttt{lean3/FormalProofs/DSL/TreePOEndToEnd.lean} \\
+\texttt{treepo\_objective\_unbiased}, \texttt{treepo\_distortion\_unbiased}, \texttt{ExpectedFullNodePopulationPreferenceLoss}, \texttt{ExpectedDocumentOracleUtility}, \texttt{ExpectedFinalSummaryOracleUtility}, \texttt{document\_label\_vs\_tree\_oracle\_utility\_gap\_bounded\_ipw}, \texttt{document\_truth\_vs\_sampled\_tree\_estimation\_decomposition}, \texttt{dpo\_treepo\_end\_to\_end\_certificate}, \texttt{grpo\_pl\_treepo\_end\_to\_end\_certificate}, \texttt{grpo\_pl\_treepo\_end\_to\_end\_gen\_certificate}, \texttt{grpo\_rl\_treepo\_end\_to\_end\_certificate} &
+\texttt{DSL/TreePOEndToEnd.lean} \\
+
+Discussion headline: gap-bound decomposition and its three pieces &
+\texttt{paper\_main\_gap\_bound\_theorem}, \texttt{paper\_calibration\_fixed\_theorem}, \texttt{paper\_envelope\_rate\_theorem}, \texttt{paper\_global\_local\_decomposition\_theorem}, \texttt{labelEnvelope\_strict\_mono}, \texttt{labelEnvelope\_antitone} &
+\texttt{DSL/LabelRateBounds.lean} \\
+
+Function-space overlap (mergeable neural operators) and oracle-plus-projection decomposition &
+\texttt{MergeableNeuralOperator}, \texttt{MergeableSketchSummaryClass}, \texttt{NeuralOperatorMergeableSketchOverlap}, \texttt{paper\_neural\_operator\_mergeable\_overlap\_theorem}, \texttt{paper\_neural\_operator\_induces\_sketch\_adapter}, \texttt{paper\_neural\_operator\_induces\_sketch\_adapter\_decode\_eq}, \texttt{ofGlobalPreservation}, \texttt{ExactLocalLawSubspace}, \texttt{ApproxLocalLawSubspace}, \texttt{ExactLocalLawNeuralOperators}, \texttt{ApproxLocalLawNeuralOperators}, \texttt{approxLocalLawSubspace\_mono}, \texttt{OraclePlusProjection}, \texttt{balancedObjective}, \texttt{balanced\_objective\_lam\_zero}, \texttt{balanced\_objective\_lam\_one}, \texttt{balanced\_objective\_nonneg}, \texttt{balanced\_objective\_lam\_monotone}, \texttt{paper\_mergeable\_subset\_exactLocalLawSubspace} &
+\texttt{OPT/NeuralOperatorSpaces.lean}, \texttt{OPT/RegularizedObjective.lean} \\
+
+Projection interpretation (local-law weights as a projection) &
+\texttt{zeroProjectionSet}, \texttt{FaithfulProjectionPenalty}, \texttt{LocalLawWeightsAreProjection}, \texttt{LocalLawWeightsAreProjectionOn}, \texttt{ApproximationErrorStructuredByLocalLaws}, \texttt{ApproximationErrorStructuredByLocalLawsOn}, \texttt{localLawWeightsAreProjection\_iff\_approximationErrorStructuredByLocalLaws}, \texttt{localLawWeightsAreProjectionOn\_iff\_approximationErrorStructuredByLocalLawsOn}, \texttt{faithfulProjectionPenalty\_iff\_approximationErrorStructuredByLocalLaws}, \texttt{paper\_zeroProjectionSet\_eq\_exactLocalLawSubspace}, \texttt{paper\_projection\_eq\_learnable\_local\_law\_subspace} &
+\texttt{OPT/NeuralOperatorSpaces.lean} \\
 \bottomrule
 \end{tabular}
-\caption{Paper-to-Lean crosswalk with theorem-level anchors.}
+\caption{Paper-to-Lean crosswalk: each paper result, the named Lean theorems/structures that formalize it, and the files where those names live (relative to \leanrepo).}
 \end{table}
 
-\subsection{Assumption Alignment Notes}
+\subsection{Paper-to-Formalization Notes}
 
-\paragraph{(1) Law naming map (paper vs Lean).}
-In Lean, the local-law names are
+A few places in the paper use slightly different packaging than the
+formalization does; these notes record the translation.
+
+\paragraph{Law naming.} The paper's C1/C2/C3 correspond to the
+formalization's L1/L3/L2 respectively:
 \[
 \text{C1} \leftrightarrow \text{L1},\qquad
 \text{C2} \leftrightarrow \text{L3},\qquad
-\text{C3} \leftrightarrow \text{L2},
+\text{C3} \leftrightarrow \text{L2}.
 \]
-as defined in \texttt{lean3/FormalProofs/OPT/LocalLaws.lean}.
+The swap between C2/C3 and L2/L3 reflects an older ordering convention
+inside the formalization and is purely cosmetic.
 
-\paragraph{(2) C3/context packaging difference.}
-The paper presents C3 as a two-link merge chain with context compatibility
-(Assumption~\ref{ass:context}) used explicitly in proofs.
-Lean's \texttt{L2} is packaged directly as internal-node zero distortion
-\[
-E[D(\texttt{reduce }g\ \texttt{node},\ S(\texttt{node}))]=0,
-\]
-so some context propagation steps are absorbed into the local hypothesis form.
-This is a presentation/packaging difference, not a change in the certified target.
+\paragraph{C3 vs L2 packaging.} The paper states C3 as a two-link merge
+chain that uses context compatibility
+(Assumption~\ref{ass:context}) explicitly in proofs. The formalization
+packages L2 directly as internal-node zero distortion,
+$E[D(\mathrm{reduce}\,g\,\mathrm{node},\,S(\mathrm{node}))]=0$, absorbing
+some context-propagation steps into the local hypothesis form. This is
+a presentation choice; the certified target is the same.
 
-\paragraph{(3) Boundedness in formal multi-round proofs.}
-The main axiom-free Lean theorem \texttt{multi\_round\_proper} carries explicit boundedness
-inputs \texttt{M, hM, hbound} for summability. The paper's narrative statements are matched
-either by supplying these bounds directly or via the typeclass wrapper
-\texttt{multi\_round\_typeclass} on bounded metric spaces.
+\paragraph{Distortion symbols.} The formalization distinguishes the
+document-level $\Delta_R$ from the generic audited-population means
+$\mu_{\mathrm{dist}}^\star,\mu_{\mathrm{dist}}^J$ that appear in the
+envelope algebra of \S\ref{sec:estimation}. The two coincide only under
+an explicit unit/coupling identification; the paper follows the same
+distinction.
 
-\paragraph{(4) Audited bound (Theorem~\ref{thm:e2e}) vs Lean decomposition.}
-The paper states the audited gap with explicit envelopes
-$B_{\mathrm{cal}}, B_{\mathrm{est}}, B_{\mathrm{clip}}$ and event-level guarantees.
-Lean's DSL layer formalizes both the deterministic envelope algebra and the
-high-probability event composition, including
-\texttt{treepo\_gap\_with\_calibration\_and\_estimation},
-\texttt{treepo\_gap\_with\_calibration\_estimation\_clipping},
-\texttt{dsl\_abs\_gap\_bound\_from\_estimate\_high\_prob}, and
-\texttt{dsl\_abs\_gap\_bound\_from\_clipped\_estimate\_high\_prob}
-in \texttt{lean3/FormalProofs/DSL/TreeIPW.lean}.
-The paper-level $B_{\mathrm{cal}},B_{\mathrm{est}},B_{\mathrm{clip}}$ notation
-is a naming layer over these formal objects.
-
-\paragraph{(5) Fixed-partition theorem status in Lean.}
-Appendix~\ref{app:fixed-partition} is represented in Lean as a deterministic-instantiation corollary of
-\texttt{multi\_round\_proper}; the named re-export is
-\texttt{fixed\_partition\_extension\_instantiation} in \texttt{OPT/MainTheorems.lean}.
-This is a packaging choice; the assumption profile is the same (local laws on realized calls plus boundedness side conditions when required).
-
-\paragraph{(6) Distortion-symbol mapping note.}
-Lean distinguishes document-level $\Delta_R$ objects (see \texttt{coupling\_delta\_eq\_delta\_r\_zr}
-and \texttt{delta\_r\_zr\_zero\_of\_local\_laws} re-exported in
-\texttt{OPT/MainTheorems.lean}) from generic audited-population means used in DSL envelopes.
-The paper follows the same distinction: audited unit-population means $\mu_{\mathrm{dist}}^\star,\mu_{\mathrm{dist}}^J$
-coincide with $\Delta_R$ only under an explicit unit/coupling identification.
-
-\subsection{Formalization Coverage (Explicit)}
-
-\begin{table}[h]
-\centering
-\small
-\begin{tabular}{p{0.31\linewidth}p{0.16\linewidth}p{0.46\linewidth}}
-\toprule
-Component & Status & Lean artifact(s) \\
-\midrule
-Local laws $\Rightarrow$ one-pass / multi-round preservation &
-Fully mechanized &
-\texttt{one\_pass}, \texttt{multi\_round\_proper} (+ wrappers) \\
-
-Schedule / fold-of-folds invariance &
-Fully mechanized &
-\texttt{schedule\_invariance}, \texttt{fold\_of\_folds} \\
-
-Preference-objective equivalence (DPO, GRPO-PL, GRPO-RL) &
-Fully mechanized &
-\texttt{dpo\_equivalence},
-\texttt{grpo\_equivalence},
-\texttt{grpo\_rl\_equivalence},
-\texttt{preference\_learning\_equivalence} \\
-
-Unified Lipschitz gap transport &
-Fully mechanized &
-\texttt{unified\_preference\_gap\_bounded} \\
-
-HT/IPW unbiasedness and method-specific TreePO end-to-end certificates &
-Fully mechanized &
-\texttt{treepo\_objective\_unbiased},
-\texttt{treepo\_distortion\_unbiased},
-\texttt{dpo\_treepo\_end\_to\_end\_certificate},
-\texttt{grpo\_pl\_treepo\_end\_to\_end\_certificate},
-\texttt{grpo\_pl\_treepo\_end\_to\_end\_gen\_certificate},
-\texttt{grpo\_rl\_treepo\_end\_to\_end\_certificate} \\
-
-Calibration/estimation/clipping envelope algebra and one-shot
-high-probability composition &
-Fully mechanized &
-\texttt{treepo\_gap\_with\_calibration\_and\_estimation},
-\texttt{treepo\_gap\_with\_calibration\_estimation\_clipping},
-\texttt{dsl\_abs\_gap\_bound\_from\_estimate\_high\_prob},
-\texttt{dsl\_abs\_gap\_bound\_from\_clipped\_estimate\_high\_prob},
-\texttt{dsl\_bound\_valid\_from\_events},
-\texttt{computeDSLBound\_valid\_from\_events} \\
-
-Fixed-partition extension &
-Mechanized by instantiation &
-Corollary from \texttt{multi\_round\_proper}; re-exported as
-\texttt{fixed\_partition\_extension\_instantiation} \\
-
-Calibration representativeness assumption for judge transport &
-Mechanized assumption object &
-\texttt{CalibrationRMSEBound} (alias \texttt{CalibrationAxioms}) in
-\texttt{DSL/JudgeCalibration.lean};
-re-export \texttt{calibration\_rmse\_representativeness} in
-\texttt{DSL/MainTheorems.lean} \\
-
-Choice of concrete calibration dataset/protocol and numeric
-hyperparameters (e.g., $z$, clipping threshold, split of $\delta$ budget) &
-Paper/deployment choice &
-Not a theorem target; supplied as external inputs to mechanized envelopes \\
-\bottomrule
-\end{tabular}
-\caption{Explicit mechanization boundary: what is theorem-mechanized versus what is deployment input.}
-\end{table}
-
-\subsection{Reproducibility Commands}
-
-\begin{verbatim}
-# Rebuild manuscript PDF
-cd paper/ctreepo
-latexmk -pdf -interaction=nonstopmode main_new.tex
-
-# Build core Lean theorem bundles
-cd ../../lean3
-lake build FormalProofs.OPT.MainTheorems
-lake build FormalProofs.DSL.MainTheorems
-\end{verbatim}
+Build commands for the manuscript and the formalization live in
+\texttt{paper/ctreepo/REPRODUCIBILITY.md}.

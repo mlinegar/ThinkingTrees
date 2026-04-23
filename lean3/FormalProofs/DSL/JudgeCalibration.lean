@@ -336,6 +336,31 @@ abbrev CalibrationAxioms {Ω : Type*} [Fintype Ω]
     (p : PMF Ω) (oracle judge : Ω → ℝ) (cal : CalibrationSet) (z : ℝ) : Prop :=
   CalibrationRMSEBound p oracle judge cal z
 
+/-- Population bias of the judge relative to the oracle under a finite PMF. -/
+def populationJudgeBias {Ω : Type*} [Fintype Ω]
+    (p : PMF Ω) (oracle judge : Ω → ℝ) : ℝ :=
+  ∑' ω, (p ω).toReal * (judge ω - oracle ω)
+
+/-- Population RMSE of the judge relative to the oracle under a finite PMF. -/
+def populationJudgeRMSE {Ω : Type*} [Fintype Ω]
+    (p : PMF Ω) (oracle judge : Ω → ℝ) : ℝ :=
+  Real.sqrt (∑' ω, (p ω).toReal * (oracle ω - judge ω)^2)
+
+lemma CalibrationRMSEBound_iff_populationJudgeRMSE_le {Ω : Type*} [Fintype Ω]
+    (p : PMF Ω) (oracle judge : Ω → ℝ) (cal : CalibrationSet) (z : ℝ) :
+    CalibrationRMSEBound p oracle judge cal z ↔
+      populationJudgeRMSE p oracle judge ≤ absbiasUpperBound cal z + judgeStd cal := by
+  rfl
+
+theorem CalibrationRMSEBound_of_abs_trueBias_le
+    {Ω : Type*} [Fintype Ω]
+    (p : PMF Ω) (oracle judge : Ω → ℝ)
+    (cal : CalibrationSet) (z true_bias : ℝ)
+    (h_rmse : populationJudgeRMSE p oracle judge ≤ |true_bias| + judgeStd cal)
+    (h_bias : |true_bias| ≤ absbiasUpperBound cal z) :
+    CalibrationRMSEBound p oracle judge cal z := by
+  exact le_trans h_rmse (by linarith)
+
 lemma absbiasUpperBound_ge_absbias (cal : CalibrationSet) (z : ℝ)
     (h_z : 0 ≤ z) : absJudgeBias cal ≤ absbiasUpperBound cal z := by
   unfold absbiasUpperBound
@@ -666,6 +691,21 @@ theorem abs_trueBias_le_absbiasUpperBound_of_mem_biasConfidenceInterval
         h_radius).mp h_mem
   exact abs_trueBias_le_absbiasUpperBound_of_abs_sub_le cal true_bias z h_err
 
+theorem CalibrationRMSEBound_of_mem_biasConfidenceInterval
+    {Ω : Type*} [Fintype Ω]
+    (p : PMF Ω) (oracle judge : Ω → ℝ)
+    (cal : CalibrationSet) (z true_bias : ℝ)
+    (h_z : 0 ≤ z)
+    (h_rmse : populationJudgeRMSE p oracle judge ≤ |true_bias| + judgeStd cal)
+    (h_mem : true_bias ∈ Set.Icc
+      (biasConfidenceInterval cal z).1
+      (biasConfidenceInterval cal z).2) :
+    CalibrationRMSEBound p oracle judge cal z := by
+  exact CalibrationRMSEBound_of_abs_trueBias_le
+    (p := p) (oracle := oracle) (judge := judge) (cal := cal) (z := z)
+    (true_bias := true_bias) h_rmse
+    (abs_trueBias_le_absbiasUpperBound_of_mem_biasConfidenceInterval cal true_bias z h_z h_mem)
+
 theorem judgeBiasConfidenceInterval_coverage_of_error_event
     {Ω : Type*} [MeasurableSpace Ω]
     (μ : MeasureTheory.Measure Ω)
@@ -745,6 +785,104 @@ theorem judgeClusteredBiasConfidenceInterval_coverage_of_error_event
       (se := fun ω => clusteredBiasSE (cal_seq ω) (get_doc_id (cal_seq ω)))
       (q := q)
       h_event)
+
+theorem calibrationRMSEBound_event_of_populationRMSE_event
+    {Ξ : Type*} [MeasurableSpace Ξ]
+    (μ : MeasureTheory.Measure Ξ)
+    (cal_seq : Ξ → CalibrationSet)
+    {Ω : Type*} [Fintype Ω]
+    (p : PMF Ω) (oracle judge : Ω → ℝ)
+    (z : ℝ)
+    (q : ENNReal)
+    (h_event : q ≤ μ {ω |
+      populationJudgeRMSE p oracle judge ≤
+        absbiasUpperBound (cal_seq ω) z + judgeStd (cal_seq ω)}) :
+    q ≤ μ {ω | CalibrationRMSEBound p oracle judge (cal_seq ω) z} := by
+  simpa [CalibrationRMSEBound, populationJudgeRMSE] using h_event
+
+theorem calibrationRMSEBound_event_of_biasConfidence_event
+    {Ξ : Type*} [MeasurableSpace Ξ]
+    (μ : MeasureTheory.Measure Ξ)
+    (cal_seq : Ξ → CalibrationSet)
+    {Ω : Type*} [Fintype Ω]
+    (p : PMF Ω) (oracle judge : Ω → ℝ)
+    (true_bias z : ℝ)
+    (q : ENNReal)
+    (h_z : 0 ≤ z)
+    (h_event : q ≤ μ {ω |
+      true_bias ∈ Set.Icc
+        (biasConfidenceInterval (cal_seq ω) z).1
+        (biasConfidenceInterval (cal_seq ω) z).2 ∧
+      populationJudgeRMSE p oracle judge ≤
+        |true_bias| + judgeStd (cal_seq ω)}) :
+    q ≤ μ {ω | CalibrationRMSEBound p oracle judge (cal_seq ω) z} := by
+  have h_subset :
+      {ω |
+        true_bias ∈ Set.Icc
+          (biasConfidenceInterval (cal_seq ω) z).1
+          (biasConfidenceInterval (cal_seq ω) z).2 ∧
+        populationJudgeRMSE p oracle judge ≤
+          |true_bias| + judgeStd (cal_seq ω)} ⊆
+        {ω | CalibrationRMSEBound p oracle judge (cal_seq ω) z} := by
+    intro ω hω
+    exact CalibrationRMSEBound_of_mem_biasConfidenceInterval
+      (p := p) (oracle := oracle) (judge := judge)
+      (cal := cal_seq ω) (z := z) (true_bias := true_bias)
+      h_z hω.2 hω.1
+  exact le_trans h_event (MeasureTheory.measure_mono h_subset)
+
+theorem surrogate_bound_pmf_calibration2_event_of_rmse_event
+    {Ξ : Type*} [MeasurableSpace Ξ]
+    (μ : MeasureTheory.Measure Ξ)
+    (cal_seq : Ξ → CalibrationSet)
+    {Ω : Type*} [Fintype Ω]
+    (p : PMF Ω) (oracle judge : Ω → ℝ) (G : ℝ → ℝ)
+    (z : ℝ := 1.96)
+    (hL : GapLipschitz G (2 : ℝ≥0))
+    (q : ENNReal)
+    (h_event : q ≤ μ {ω | CalibrationRMSEBound p oracle judge (cal_seq ω) z}) :
+    q ≤ μ {ω |
+      |gapOracle p G oracle - gapJudge p G judge| ≤
+        judgeCalibrationErrorBound (cal_seq ω) z} := by
+  have h_subset :
+      {ω | CalibrationRMSEBound p oracle judge (cal_seq ω) z} ⊆
+        {ω |
+          |gapOracle p G oracle - gapJudge p G judge| ≤
+            judgeCalibrationErrorBound (cal_seq ω) z} := by
+    intro ω hω
+    exact surrogate_bound_pmf_calibration2_axioms
+      (p := p) (oracle := oracle) (judge := judge)
+      (G := G) (cal := cal_seq ω) (z := z) hL hω
+  exact le_trans h_event (MeasureTheory.measure_mono h_subset)
+
+theorem surrogate_bound_pmf_calibration2_event_of_biasConfidence_event
+    {Ξ : Type*} [MeasurableSpace Ξ]
+    (μ : MeasureTheory.Measure Ξ)
+    (cal_seq : Ξ → CalibrationSet)
+    {Ω : Type*} [Fintype Ω]
+    (p : PMF Ω) (oracle judge : Ω → ℝ) (G : ℝ → ℝ)
+    (true_bias z : ℝ)
+    (hL : GapLipschitz G (2 : ℝ≥0))
+    (q : ENNReal)
+    (h_z : 0 ≤ z)
+    (h_event : q ≤ μ {ω |
+      true_bias ∈ Set.Icc
+        (biasConfidenceInterval (cal_seq ω) z).1
+        (biasConfidenceInterval (cal_seq ω) z).2 ∧
+      populationJudgeRMSE p oracle judge ≤
+        |true_bias| + judgeStd (cal_seq ω)}) :
+    q ≤ μ {ω |
+      |gapOracle p G oracle - gapJudge p G judge| ≤
+        judgeCalibrationErrorBound (cal_seq ω) z} := by
+  exact surrogate_bound_pmf_calibration2_event_of_rmse_event
+    (μ := μ) (cal_seq := cal_seq)
+    (p := p) (oracle := oracle) (judge := judge) (G := G)
+    (z := z) hL (q := q)
+    (calibrationRMSEBound_event_of_biasConfidence_event
+      (μ := μ) (cal_seq := cal_seq)
+      (p := p) (oracle := oracle) (judge := judge)
+      (true_bias := true_bias) (z := z)
+      (q := q) h_z h_event)
 
 /-!
 ## Section 9: Validity Theorems

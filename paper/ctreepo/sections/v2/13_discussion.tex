@@ -1,0 +1,92 @@
+\section{Discussion}\label{sec:discussion}
+
+The theorems in Section~\ref{sec:theorems} preserve the oracle when the local laws hold, and the experiments in Sections~\ref{sec:markov-walkthrough}, \ref{sec:hll-parity}, and~\ref{sec:manifesto-llm} exercise that preservation on three progressively richer oracles. This short section states the resulting trade-off in plain language.
+
+\subsection{The Finite-Sample Gap Decomposition}\label{sec:discussion-tradeoff}
+
+Under the local laws, the finite-sample gap between a preference
+objective on tree summaries and the corresponding full-document
+objective decomposes into three non-negative pieces:
+\begin{equation}\label{eq:discussion-bound}
+|G|
+\;\le\;
+\underbrace{\hat{\Delta}_R}_{\text{empirical IPW estimate}}
+\;+\;
+\underbrace{B_{\mathrm{cal}}}_{\text{fixed residual}}
+\;+\;
+\underbrace{\text{SE}(n_{\mathrm{global}} + n_{\mathrm{local}})}_{\text{shrinking envelope}}.
+\end{equation}
+This is the decomposition the main gap-bound theorem gives on any audit-produced certificate (Appendix~\ref{app:proof-artifacts}). The three pieces behave differently, and each one reads most cleanly under one side of the projection/structured-error iff.
+
+The empirical term $\hat{\Delta}_R$ --- read under the \emph{structural-error} framing --- is an IPW union bound over sampled leaves, merges, and idempotence rounds; equivalently, it is the audit's empirical estimate of how far the approximation error fails to vanish on the C1/C2/C3 subspace. It is zero when the audit reports zero violations and grows linearly with the realized violation rate. Section~\ref{sec:fno-primer} and Appendix~\ref{app:approx-via-neural-operators} give the approximation-theoretic counterpart: a practitioner chooses an upstream operator tolerance $\varepsilon$ on compact realized calls and then converts that tolerance, through explicit transfer moduli, into audited leaf/merge/idempotence budgets. Accordingly, $\hat{\Delta}_R$ is the audited manifestation of a representation-design target, not a term the paper sets by fiat.
+
+The fixed residual $B_{\mathrm{cal}}$ --- read under the \emph{projection} framing --- is the irreducible projection gap between the judge's C1/C2/C3 subspace and the oracle's: the gap between the judge used during training and the task oracle the researcher ultimately cares about. It is a function of the calibration set and the confidence level only, so it does not depend on how many downstream labels the practitioner subsequently collects: if the judge is the oracle, $B_{\mathrm{cal}} = 0$; otherwise it is the irreducible residual of the measurement instrument.
+
+The envelope $\text{SE}(n_{\mathrm{global}} + n_{\mathrm{local}})$ is the part that pays for labels; it is framing-agnostic, because it is sampling noise on whichever of the two framings the audit is measuring. The idealized envelope $C / \sqrt{n+1}$ is non-negative, bounded above by the structural constant $C$, and strictly decreasing in $n$ whenever $C > 0$; the separate-monotonicity statement extends this to two label types, so holding one kind of label fixed, adding the other still tightens the envelope. Concretely, $n_{\mathrm{global}}$ counts full-document labels and $n_{\mathrm{local}}$ counts sampled audit nodes; both feed the same envelope.
+
+The function-space view also clarifies what the training regularizer is
+doing. The per-law-weighted generalization of
+Equation~\eqref{eq:oracle-projection-objective}
+(Appendix~\ref{app:oracle-plus-projection}) has one term fitting the
+oracle and a $\lambda$-weighted local-law term pushing the realized
+operator toward the local-law-constrained subspace. The endpoint theorems make the
+interpretation literal: $\lambda=0$ is pure oracle risk, and $\lambda=1$
+is pure projection penalty. Appendix~\ref{app:projection-interpretation}
+spells out the corresponding iff: treating the local-law weights as a
+projection and treating the approximation error as structured by C1/C2/C3
+are the same formal assumption. That is why the same language applies to
+the examples above: HLL starts inside the subspace, the Markov tree learns
+an ordered boundary-sensitive member of it, and the manifesto pipeline
+uses audits to estimate how close the LLM operator lands to it.
+
+\subsection{Global and Local Labels}
+
+The global/local separation is exactly what the budget-split
+experiment in Section~\ref{sec:markov-walkthrough} demonstrates.
+Replacing some fraction of root labels by a proportionate amount of
+local labels (at matched token mass) leaves root accuracy essentially
+unchanged all the way down to about $40\%$ root share, because the
+envelope responds to the \emph{total} label count, not to the ratio
+of its two components. The global/local decomposition theorem referenced
+above is the formal statement that backs this empirical observation.
+
+\subsection{Scope}
+
+Equation~\eqref{eq:discussion-bound} is a conditional guarantee: it
+assumes the local laws hold on the realized tree, which
+Section~\ref{sec:estimation}'s audit checks. Tasks whose oracle does
+not decompose into a locally checkable sufficient statistic --- e.g.\
+rhetorical-tone or discourse-level semantics in which replacing a
+span with a locally equivalent one changes how neighboring text is
+interpreted --- will show high C1/C3 violation rates under the audit,
+and the bound will honestly report that the tree's root prediction is
+no better than a flat baseline on such tasks. The framework does not
+``always'' apply; it applies \emph{when the audit says it applies}.
+
+\subsection{Applications in Social-Scientific Measurement}
+
+The experiments in this paper span three points on the classical-to-learned
+gradient. At the classical limit (Section~\ref{sec:hll-parity}), the
+oracle is a distinct-count query, the merge is algebraically exact,
+$B_{\mathrm{cal}} = 0$, and the envelope collapses: the tree is
+byte-identical to the flat reference. On the Markov changepoint task
+(Section~\ref{sec:markov-walkthrough}), the oracle is additive with a
+boundary correction; the tree pays a small estimation envelope but
+matches or improves on the flat baseline across the supervision
+budget. On Manifesto-Project RILE scoring (Section~\ref{sec:manifesto-llm})
+the oracle is rubric-driven, $B_{\mathrm{cal}}$ is the judge/expert
+gap, and the envelope shrinks with either pile of labels a
+practitioner can supply.
+
+Many social-scientific measurement problems share the Manifesto
+shape: rubrics with locally codable categories, span-grounded
+expert judgments, and aggregates that decompose across sections,
+chapters, or acts. Comparative-politics party-position scoring
+\citep{BenoitEtAl2025,ManifestoProject2025a}, policy-agenda coding,
+clinical narrative review, and legal-corpus analysis all fit this
+description. The practical value of the framework in these settings
+is that Equation~\eqref{eq:discussion-bound} turns long-document
+annotation into an audit-budget problem: a fixed calibration set
+sets $B_{\mathrm{cal}}$ once, and any combination of global and
+local labels the researcher can collect tightens the envelope along
+the monotone curve $C/\sqrt{n+1}$.

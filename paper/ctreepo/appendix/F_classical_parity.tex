@@ -1,0 +1,283 @@
+\section{HyperLogLog Parity: Reproduction Details}\label{app:classical-parity}
+
+Section~\ref{sec:hll-parity} summarizes the HyperLogLog parity
+experiment. This appendix covers the pieces a reader would need in
+order to re-run the experiment, understand the learned-$g$
+register-space analysis, and audit the full per-cell grid. Code, raw
+outputs, and the benchmark driver live under
+\texttt{scripts/run\_classical\_parity\_benchmark.py} in the companion
+repository; full logged outputs are in \texttt{outputs/classical\_parity/hll/}.
+
+\subsection{Protocol}
+
+Every cell in the sweep is a training call with a zero-optimization
+trainer that wraps a classical HLL into the tree reduction. Setting
+$n_{\mathrm{leaves}} = 1$ recovers the flat reference;
+$n_{\mathrm{leaves}} = L$ runs the tree reduction with the same
+other knobs held constant. Two classical HLL implementations share
+the protocol. The \textbf{native} path is a plain register-based
+implementation whose merge is pointwise max on a \texttt{uint8}
+register array, so register state is byte-deterministic across any
+A1--A3-satisfying pipeline. The \textbf{DataSketches} path wraps
+Apache DataSketches' HLL sketch and union: its internal representation
+transitions between list, sparse, and dense modes based on cardinality,
+so the serialized bytes of an equivalent summary can depend on the
+build path even though the estimate does not.
+
+\paragraph{Oracle function as a swappable knob.}
+The oracle $\fstar$ is a configurable argument on the parity preset
+with two standard choices. The \emph{analytic} setting uses true
+distinct cardinality, $\fstar(x) = |\mathrm{set}(x)|$. The
+\emph{HLL-reference} setting replaces it with the classical HLL's own
+scoring head, $\fstar(x) = \alpha_m m^2 / \sum_j 2^{-r_j}$ applied to
+the flat token span. The same $\fstar$ defines per-leaf (C1),
+per-merge (C3), and root targets, so a learned merge $g$ trained under
+HLL-reference receives exactly the classical sketch's scoring as
+supervision at every node.
+
+\subsection{Sweep Grid}
+
+The default grid (used for Figure~\ref{fig:classical-parity-hll} and
+Table~\ref{tab:classical-parity-hll}) is:
+
+\begin{itemize}
+\item \textbf{Classical methods:} backends $\{$native, DataSketches$\}$ $\times$ precisions $\{7, 9, 11, 13\}$ $\times$ leaf counts $\{1, 2, 4, 8, 16\}$ $\times$ oracle kinds $\{$analytic, HLL-reference$\}$ $\times$ $3$ seeds $= 240$ cells.
+\item \textbf{Learned methods:} $\{g$-only, $f{+}g\}$ $\times$ precisions $\{7, 9, 11, 13\}$ $\times$ leaf counts $\{1, 2, 4, 8, 16\}$ $\times$ oracle kind HLL-reference $\times$ $3$ seeds $= 120$ cells.
+\end{itemize}
+
+Total: $360$ cells, run in parallel over CPU cores. On a 128-core host
+the full sweep completes in a few minutes.
+
+\subsection{Learned Variants in Detail}\label{app:classical-parity-variants}
+
+The learned methods share the same per-leaf (C1), per-merge (C3), and root
+targets supplied by the chosen oracle (HLL-reference or analytic). The
+broad classical-sketch suite recognises four canonical variants, built from
+two single-component primitives composed in stage order:
+
+The architecture is uniform across variants: a learned readout $f$, a
+learned merge $g$, and a small merge adapter all exist at the same
+sizes. "Held fixed" means the component's weights are not updated this
+stage; there is no identity-merge passthrough or fixed-sigmoid readout
+edge case. A held-fixed component starts from a deterministic seeded
+init (or from a caller-supplied checkpoint via
+\texttt{init\_f\_from}/\texttt{init\_g\_from}) and stays there.
+
+We use \emph{joint} as the umbrella codename for any schedule that
+trains both components (i.e.\ any variant string with both \texttt{f}
+and \texttt{g}); $f$ and $g$ stand alone for the single-component
+schedules. So the experimental rows fall under three method
+codenames: \texttt{learned\_f}, \texttt{learned\_g}, and
+\texttt{learned\_joint}, with the specific schedule (e.g.\ \texttt{fg}
+vs \texttt{gf} vs \texttt{fgf}) recorded as a per-row variant tag.
+
+\begin{itemize}
+\item \textbf{$f$:} one f stage. Train $f$; $g$ stays at its base.
+\item \textbf{$g$:} one g stage. Train $g$; $f$ stays at its base. (In
+  the HLL parity experiment specifically, the broad-suite model is
+  replaced by a register-space-constrained sibling whose fixed readout
+  is the classical HLL estimator formula
+  $\alpha_m m^2 / \sum_j 2^{-r_j}$; the broad scalar-sketch model has
+  no structured fixed readout.)
+\item \textbf{joint} (canonical schedule \texttt{fg}): f stage, then g
+  stage. After the f stage, freeze the trained $f$ and train $g$
+  against it.
+\item \textbf{joint, $g$-first} (schedule \texttt{gf}): g stage, then
+  f stage. Symmetric ordering of the same joint training; useful as an
+  ablation of which component leads.
+\end{itemize}
+
+The variant string is the schedule. Each letter is one
+\texttt{fit()}-dispatched training stage that updates that component;
+the next stage's frozen counterpart is loaded from the prior stage's
+checkpoint, and a same-letter stage later in the string warm-starts
+from that component's most recent prior checkpoint. So the underlying
+$f$ and $g$ models accumulate improvements as the schedule runs.
+Longer schedules such as \texttt{fgf} or \texttt{fgfgf} (a multi-pass
+joint) compose the same way.
+
+All four variants train with the oracle-plus-projection loss of
+Equation~\eqref{eq:oracle-projection-objective-generalized} at
+$\lambda = 0.3$ and uniform $\rho_i = 1$, with $150$ epochs per stage
+over $128$ training documents, CPU-only (so the staged variants take
+twice the wall time of the single-stage ones for the same per-stage
+budget). Either $f$ or $g$ may additionally be \emph{supplied} as a
+pretrained submodule via \texttt{init\_f\_from} / \texttt{init\_g\_from};
+when supplied, it warm-starts the corresponding stage instead of
+defaulting to fresh random init.
+
+The variant string is interpreted character-by-character, so longer
+sequences such as $fgf$ (``train $f$, then $g$, then $f$ again'') compose
+naturally and share the same staged-checkpoint chaining. Joint
+single-call training (one optimizer over both components) is not used.
+
+\subsection{The Register-Space Constraint in Detail}
+
+The headline scaling divergence (Section~\ref{sec:hll-parity}) deserves
+more quantitative detail. At precision $p = 13$:
+
+\begin{itemize}
+\item \texttt{learned\_gf} improves with $L$: relative MAE $\approx 0.27$ at $L=2$, $\approx 0.19$ at $L=8$, $\approx 0.19$ at $L=16$. Deeper trees give more gradient signal and the learned $f$ can compensate for imprecision anywhere in the state.
+\item \texttt{learned\_g} degrades with $L$: relative MAE $\approx 0.27$ at $L=1$, $\approx 0.43$ at $L=2$, $\approx 0.78$ at $L=8$, $\approx 0.86$ at $L=16$. Each merge's error channels through a fixed non-learnable readout, so mismatches at internal nodes compound rather than average out.
+\end{itemize}
+
+The two variants are trained on identical data with identical
+hyperparameters; the only structural difference is whether the readout
+is learnable. The gap and its direction-of-scaling with $L$ is therefore
+a clean statement: some learned-$g$ settings pay a real cost when the
+readout must live in the classical sketch's exact state space.
+
+\subsection{Training-Budget Verification}
+
+We ran the sweep at both $30$ and $150$ epochs to verify that the
+\texttt{learned\_g} plateau is structural rather than a budget artifact.
+At $p=13$, \texttt{learned\_g}'s relative MAE at $L=16$ moves from
+$\approx 0.86$ (30 epochs) to $\approx 0.89$ (150 epochs); at $L=8$ from
+$\approx 0.78$ to $\approx 0.72$; at $L=2$ from $\approx 0.43$ to
+$\approx 0.50$. The magnitudes bounce within single-seed noise across
+the two budgets; the direction of scaling with $L$ is identical.
+\texttt{learned\_gf} shows the mirror-image stability: at $p=13, L=8$ it
+holds $\approx 0.18$--$0.19$ across both budgets.
+
+The register-space constraint is therefore not a training-rate issue:
+$5\times$ the training budget does not close the gap between
+\texttt{learned\_g} and \texttt{learned\_gf}. The structural point ---
+that a $g$ whose outputs must live in the classical sketch's exact state
+space pays a real cost that compounds with tree depth --- is a
+converged observation, not a convergence artifact. A practitioner
+building on this framework who does not need byte-for-byte parity with
+a specific reference sketch should pick the end-to-end learned path.
+
+\subsection{Extension to Other Classical Sketches}
+
+A broader comparison suite beyond the HLL reproduction table compares
+native HLL and Apache DataSketches HLL, CPC, Theta, Count-Min, Frequent
+Items, KLL, classic quantiles, REQ, and t-digest against exact controls
+and a deliberately wrong sum-of-leaf-uniques baseline. Tuple and VarOpt
+supply the sampling/tuple family. The default grid mirrors the HLL
+parity grid structure: capacities
+\(\{\text{small},\text{medium},\text{large}\}\) crossed with leaf counts
+\(L\in\{1,2,4,8,16\}\) and seeds. The report emits memory/error curves,
+merge-schedule spread, empirical bound coverage, and distance to the
+best official DataSketches row for each query family.
+This broad grid is also routed through the unified
+\texttt{fit()} abstraction as a zero-optimization trainer, so the HLL
+parity rows, the multi-sketch official baselines, and learned companions
+share one orchestration path. For scalar sketch readouts where an
+official state is not differentiable or not the desired representation,
+the companion learned-\(f{+}g\) task trains both the latent merge state
+and the scalar readout jointly against either exact targets or official
+sketch query functions. The same broad grid also includes a learned-\(g\)
+variant with a fixed non-trainable scalar readout, isolating how much of
+the performance comes from learning a locally compositional merge state
+rather than from adapting the readout.
+
+We therefore separate three statuses. \emph{Theorem-backed} rows have a
+formal local-law artifact (tracked in Appendix~\ref{app:proof-artifacts})
+and a runtime adapter. \emph{Official empirical} rows wrap the Apache
+DataSketches implementation and are checked by the benchmark, but are
+not presented as formal theorems for that exact library implementation.
+\emph{Control} rows are exact references or negative baselines. Current
+theorem-backed local-law bundles cover HLL, Count-Min, KLL quantiles,
+GK's sequential quantile surface, and the paper's bigram/Markov-count
+sketches. CPC, Theta/KMV, Frequent Items, classic quantiles, REQ,
+t-digest, Tuple, and VarOpt are empirical-only until corresponding
+formal artifacts are added.
+
+\begin{table}[h]
+    \centering
+    \small
+    \begin{tabular}{p{0.28\linewidth}p{0.22\linewidth}p{0.40\linewidth}}
+        \toprule
+        Sketch family & Status in this paper & Runtime comparison \\
+        \midrule
+        Native HLL & theorem-backed & In-repo register sketch; byte-exact tree/flat check \\
+        DataSketches HLL & official empirical & Apache DataSketches HLL estimate-equivalence check \\
+        Count-Min, KLL & theorem-backed + official empirical & Formal local-law artifacts plus DataSketches adapters \\
+        GK & theorem-backed & Sequential-merge theorem only; no DataSketches runtime row \\
+        CPC, Theta/KMV, Frequent Items, classic quantiles, REQ, t-digest & official empirical & DataSketches adapters; no formal theorem claimed \\
+        Tuple, VarOpt & official empirical & DataSketches tuple/sampling adapters; no formal theorem claimed \\
+        exact set & control & Exact ground truth for distinct counting \\
+        sum of leaf uniques & negative control & Deliberately wrong non-mergeable distinct-count baseline \\
+        \bottomrule
+    \end{tabular}
+    \caption{Implementation status used by the broad classical-sketch comparison suite.}
+    \label{tab:classical-sketch-status}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{classical_sketches_summary.png}
+    \caption{Broad classical-sketch comparison suite by sketch family. Each
+    curve reports the best large-capacity row for one method class, averaged
+    across the query heads in the family. The official floor is flat at zero
+    for exact or near-exact families; the learned curves show how the learned
+    merge state improves as the tree supplies more local-law supervision.}
+    \label{fig:classical-sketches-summary}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{classical_sketches_gold_gap.png}
+    \caption{Learned rows shown as excess RMSE above the official-sketch floor.
+    The vertical axis is \(\mathrm{RMSE}_{\mathrm{learned}} -
+    \min_{\mathrm{official}}\mathrm{RMSE}_{\mathrm{official}}\), so zero is
+    the best official DataSketches or in-repo sketch available for that query.
+    Distinct counting and set union show decreasing excess error as \(L\)
+    increases, while quantile heads are already close to the official floor.}
+    \label{fig:classical-sketches-gold-gap}
+\end{figure}
+
+\begin{figure}[p]
+    \centering
+    \includegraphics[width=\linewidth]{classical_sketches_method_official.png}
+    \caption{Raw, unnormalized error curves for the official empirical sketch
+    rows. Each panel is a query head and each curve is a capacity preset.}
+    \label{fig:classical-sketches-method-official}
+\end{figure}
+
+\begin{figure}[p]
+    \centering
+    \includegraphics[width=\linewidth]{classical_sketches_method_learned_f.png}
+    \caption{Raw, unnormalized error curves for the learned-\(f\) rows with a
+    deterministic identity merge. This isolates the contribution of the
+    learned readout when the merge state is not learned.}
+    \label{fig:classical-sketches-method-learned-f}
+\end{figure}
+
+\begin{figure}[p]
+    \centering
+    \includegraphics[width=\linewidth]{classical_sketches_method_learned_g.png}
+    \caption{Raw, unnormalized error curves for the learned-\(g\) rows with a
+    fixed scalar readout. This isolates the contribution of the learned
+    locally compositional merge state.}
+    \label{fig:classical-sketches-method-learned-g}
+\end{figure}
+
+\begin{figure}[p]
+    \centering
+    \includegraphics[width=\linewidth]{classical_sketches_method_learned_joint.png}
+    \caption{Raw, unnormalized error curves for the learned-joint rows.
+    Multi-letter schedules (\texttt{fg}, \texttt{gf}, longer) all roll up
+    to the joint codename; the per-row \texttt{learned\_variant} field
+    in the aggregate CSV records the specific schedule.}
+    \label{fig:classical-sketches-method-learned-joint}
+\end{figure}
+
+\begin{table}[t]
+    \centering
+    \small
+    \input{assets/sketches/tables/classical_sketches_compact.tex}
+    \caption{Compact learned-overlay summary for the broad classical-sketch
+    grid. For each query family, the table reports the best large-capacity
+    official row and the best large-capacity learned-\(g\) and
+    learned-joint companions.}
+    \label{tab:classical-sketches-compact}
+\end{table}
+
+Conceptually, C-TreePO reduces to these classical sketches whenever the
+task oracle \(\fstar\) is set equal to the official sketch query function
+and the leaf/merge state is constrained to the official sketch state.
+The HLL register-space experiment is the tightest reproduction of that
+collapse; the broader suite supplies the same comparison harness across
+the other standard mergeable-sketch families.

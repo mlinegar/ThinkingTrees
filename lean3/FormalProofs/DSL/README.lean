@@ -28,8 +28,14 @@ for causal inference and robust estimation. It provides infrastructure for:
 | `judgeBiasConfidenceInterval_coverage_of_error_event` | JudgeCalibration | Judge-bias confidence-interval coverage reduces to the corresponding bias-error event |
 | `abs_trueBias_le_absbiasUpperBound_of_mem_biasConfidenceInterval` | JudgeCalibration | If the true bias lies in the judge-bias confidence interval, the absolute-bias envelope is valid |
 | `judgeClusteredBiasConfidenceInterval_coverage_of_error_event` | JudgeCalibration | Clustered judge-bias confidence-interval coverage reduces to the corresponding clustered bias-error event |
+| `CalibrationRMSEBound_of_mem_biasConfidenceInterval` | JudgeCalibration | A held-out bias confidence interval can directly discharge the calibration RMSE interface |
+| `surrogate_bound_pmf_calibration2_event_of_biasConfidence_event` | JudgeCalibration | A held-out calibration event lifts directly into the PMF surrogate-gap validity event |
+| `DSL_valid_inference_pluginStdNormal` | MainTheorems | Plug-in diagonal covariance Wald validity from asymptotic normality, covariance consistency, and event identities |
 | `computeDSLBound_valid_from_joint_interval_event` | TreeIPW | `computeDSLBound` is valid on any event where the judge-side gap lies in its clustered confidence interval and calibration is controlled |
 | `computeDSLBound_valid_from_joint_interval_event_with_oracleMeasurement` | TreeIPW | Oracle-measurement version of the joint interval/calibration validity theorem |
+| `stopped_ipw_violation_rate_empirical_bernstein` | TreeIPW | Scheduled fixed-horizon IPW concentration events lift to an anytime-valid stopped audit bound |
+| `RuntimeDSLArtifact.valid_from_events_of_check` | RuntimeCertificates | A checked runtime DSL artifact is sound for the existing high-probability `computeDSLBound` guarantee |
+| `RuntimeNodewiseAuditArtifact.approx_bundle_eq_of_check` | RuntimeCertificates | A checked nodewise audit artifact transports directly to the existing approximate-local-law bundle |
 | `treepo_loss_gap_with_oracleMeasurement` | TreePOEndToEnd | Generic end-to-end bridge from true loss to oracle loss to tree objective; exact-oracle is the zero-error special case |
 | `dpo_treepo_end_to_end_certificate_with_oracleMeasurement` | TreePOEndToEnd | DPO end-to-end TreePO certificate lifted to a possibly noisy oracle target |
 | `grpo_pl_treepo_end_to_end_certificate_with_oracleMeasurement` | TreePOEndToEnd | GRPO-PL end-to-end TreePO certificate lifted to a possibly noisy oracle target |
@@ -52,6 +58,7 @@ DSL/
 ├── CrossFitting.lean          # Sample splitting for bias reduction
 ├── MomentFunctions.lean       # Moment conditions for estimation
 ├── DSLEstimator.lean          # Debiased/double ML estimator
+├── AsymptoticCore.lean        # Shared asymptotic-limit and coverage definitions
 ├── AsymptoticTheory.lean      # Asymptotic normality results
 ├── BiasAnalysis.lean          # Bias decomposition
 ├── VarianceDecomposition.lean # Variance estimation
@@ -68,6 +75,7 @@ DSL/
 ├── ClusteredVariance.lean     # Clustered standard errors
 ├── JudgeCalibration.lean      # Judge model calibration
 ├── TreeIPW.lean               # IPW for tree-structured data
+├── RuntimeCertificates.lean   # Runtime artifact checkers and soundness theorems
 ├── MergeableCertificates.lean # Sketch-to-TreePO certificate transport
 └── TreePOEndToEnd.lean        # End-to-end TreePO method certificates
 ```
@@ -117,4 +125,42 @@ which is cleaner for a formalization that aims to be modular.
 | `CalibrationRMSEBound` (`CalibrationAxioms` alias) | JudgeCalibration | Calibration RMSE bound | Representativeness of calibration set |
 
 See `FormalProofs/Axioms.lean` for detailed documentation of each assumption structure.
+
+The coordinatewise Wald lane now also has a concrete first-principles route:
+`DSL_valid_coverage_coordStdNormal*` and `DSL_valid_inference_coordStdNormal*`
+in `AsymptoticTheory.lean` / `MainTheorems.lean` remove the generic coverage
+axiom when multivariate weak convergence, positive diagonal variances, and
+explicit coverage-event identities for the diagonally studentized statistic are
+supplied. The `*_symm` wrappers package the common symmetric critical-value
+case `[-z, z]`.
+
+More generally, the module now exposes a generic constructive coverage
+interface:
+- `CoverageEventWitness`
+- `CoordinateCoverageLimitWitness`
+- `NormalCoverageConstruction`
+
+These separate the event identity, the limit-law witness, and the
+asymptotic-normality-to-coverage construction, and they power
+`DSL_valid_coverage_from_construction*` and
+`DSL_valid_inference_from_construction*`.
+
+For implementation-facing inference, the same file now also exposes a plug-in
+route:
+`DSL_valid_coverage_pluginStdNormal*` and
+`DSL_valid_inference_pluginStdNormal*` replace population-only studentization
+with a diagonal covariance estimator `V̂ₙ`, assuming only convergence in
+probability of the estimated diagonal standard errors, positive limiting
+variances, and explicit plug-in event identities.
+
+For implementation-facing certification, `JudgeCalibration.lean`,
+`TreeIPW.lean`, and `RuntimeCertificates.lean` now cover three additional
+surfaces:
+- held-out calibration evidence can discharge `CalibrationRMSEBound` and then
+  flow directly into PMF surrogate-gap bounds;
+- scheduled fixed-horizon IPW bad-event families can be lifted to stopped-time
+  anytime-valid bounds; and
+- stored runtime artifacts can be checked and then reused as soundness
+  witnesses for the existing `computeDSLBound` and approximate-local-law
+  theorem surfaces.
 -/

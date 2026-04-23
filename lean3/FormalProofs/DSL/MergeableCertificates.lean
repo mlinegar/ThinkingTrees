@@ -133,6 +133,52 @@ theorem grpo_pl_tree_gap_bounded_by_sketch_upper
   have hL : 0 ≤ (L : ℝ) := by positivity
   exact tree_gap_bound_transport_upper hL h_ipw h_upper
 
+/-- First-principles GRPO-PL certificate after substituting an upper bound on
+IPW distortion for the fixed-ranker Plackett-Luce path. This discharges the
+abstract expected-Lipschitz hypothesis using the proved fixed-ranker lemma. -/
+theorem grpo_pl_tree_gap_bounded_by_sketch_upper_plackettLuce_fixed_ranker
+    {Strings Node A Y : Type*} [Monoid Strings] [PseudoMetricSpace Y]
+    {k : ℕ} [Fintype Strings] [Fintype Node] [Fintype A]
+    [DecidableEq Strings] [DecidableEq Node] [DecidableEq A]
+    (hk : 0 < k)
+    (model : OPT.TreePreferenceSamplingModel Strings Node A k)
+    (fstar : Strings → Y)
+    (pol : Policy' Strings A) (ranker : Strings → GroupRanker A k)
+    (g : PMF (Fin k → A))
+    (L_pol : ℝ≥0)
+    (h_group : ∀ u, model.groupGen u = g)
+    (h_pol_lip : GRPOPolicyLipschitz pol fstar L_pol)
+    (h_ranker : OracleIndexedRanker ranker fstar)
+    (h_ranker_fixed : ∀ x z group, ranker x group = ranker z group)
+    (pi : TreeUnit Strings Node A k → ℝ)
+    (hpi_pos : ∀ i, 0 < pi i)
+    (hpi_le : ∀ i, pi i ≤ 1)
+    (U : ℝ)
+    (h_upper :
+      ∫ ω, htExpEstimator (p := treeUnitPMF model) (pi := pi)
+            (treeDistortion model fstar) ω
+          ∂bernoulliProductMeasure pi hpi_pos hpi_le ≤ U) :
+    |ExpectedGRPOLoss pol ranker model.docDist (fun _ => g) -
+        OPT.ExpectedTreePreferenceLoss model
+          (fun x group => GRPOLossPointwise pol x group (ranker x group))| ≤
+      (((2 : ℝ≥0) * (k : ℝ≥0)) * L_pol : ℝ) * U := by
+  have h_ipw :
+      |ExpectedGRPOLoss pol ranker model.docDist (fun _ => g) -
+        OPT.ExpectedTreePreferenceLoss model
+          (fun x group => GRPOLossPointwise pol x group (ranker x group))| ≤
+      (((2 : ℝ≥0) * (k : ℝ≥0)) * L_pol : ℝ) *
+        ∫ ω, htExpEstimator (p := treeUnitPMF model) (pi := pi)
+              (treeDistortion model fstar) ω
+            ∂bernoulliProductMeasure pi hpi_pos hpi_le :=
+    grpo_pl_tree_gap_bounded_ipw_plackettLuce_fixed_ranker
+      (hk := hk) (model := model) (fstar := fstar) (pol := pol)
+      (ranker := ranker) (g := g) (L_pol := L_pol) (h_group := h_group)
+      (h_pol_lip := h_pol_lip) (h_ranker := h_ranker)
+      (h_ranker_fixed := h_ranker_fixed)
+      (pi := pi) (hpi_pos := hpi_pos) (hpi_le := hpi_le)
+  have hL : 0 ≤ (((2 : ℝ≥0) * (k : ℝ≥0)) * L_pol : ℝ) := by positivity
+  exact tree_gap_bound_transport_upper hL h_ipw h_upper
+
 /-- GRPO-RL TreePO certificate after substituting an upper bound on IPW distortion. -/
 theorem grpo_rl_tree_gap_bounded_by_sketch_upper
     {Strings Node A Y : Type*} [Monoid Strings] [PseudoMetricSpace Y]
@@ -180,6 +226,61 @@ theorem grpo_rl_tree_gap_bounded_by_sketch_upper
       (h_pol_lip := h_pol_lip) (h_old_lip := h_old_lip)
       (h_ref_lip := h_ref_lip) (h_reward_lip := h_reward_lip)
       (h_rum := h_rum)
+      (pi := pi) (hpi_pos := hpi_pos) (hpi_le := hpi_le)
+  have hL : 0 ≤ (L : ℝ) := by positivity
+  exact tree_gap_bound_transport_upper hL h_ipw h_upper
+
+/-- GRPO-RL sketch-upper certificate from a primitive pointwise loss-Lipschitz
+hypothesis on the finite group space. -/
+theorem grpo_rl_tree_gap_bounded_by_sketch_upper_of_pointwise
+    {Strings Node A Y : Type*} [Monoid Strings] [PseudoMetricSpace Y]
+    {k : ℕ} [Fintype Strings] [Fintype Node] [Fintype A]
+    [DecidableEq Strings] [DecidableEq Node] [DecidableEq A]
+    (model : OPT.TreePreferenceSamplingModel Strings Node A k)
+    (fstar : Strings → Y)
+    (pol pol_old pol_ref : Policy' Strings A)
+    (reward : Strings → A → ℝ)
+    (eps beta : ℝ)
+    (g : PMF (Fin k → A))
+    (L : ℝ≥0)
+    (h_group : ∀ u, model.groupGen u = g)
+    (h_pol_lip : GRPOPolicyLipschitz pol fstar L)
+    (h_old_lip : GRPOPolicyLipschitz pol_old fstar L)
+    (h_ref_lip : GRPOPolicyLipschitz pol_ref fstar L)
+    (h_reward_lip : RewardLipschitzGRPO reward fstar L)
+    (h_point :
+      ∀ x z (group : Fin k → A),
+        |GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta x group -
+         GRPORLLossPointwise (k := k) pol pol_old pol_ref reward eps beta z group| ≤
+        (L : ℝ) * dist (fstar x) (fstar z))
+    (pi : TreeUnit Strings Node A k → ℝ)
+    (hpi_pos : ∀ i, 0 < pi i)
+    (hpi_le : ∀ i, pi i ≤ 1)
+    (U : ℝ)
+    (h_upper :
+      ∫ ω, htExpEstimator (p := treeUnitPMF model) (pi := pi)
+            (treeDistortion model fstar) ω
+          ∂bernoulliProductMeasure pi hpi_pos hpi_le ≤ U) :
+    |ExpectedGRPORLLoss pol pol_old pol_ref reward eps beta model.docDist (fun _ => g) -
+        OPT.ExpectedTreePreferenceLoss model
+          (fun x group => GRPORLLossPointwise pol pol_old pol_ref reward eps beta x group)| ≤
+      (L : ℝ) * U := by
+  have h_ipw :
+      |ExpectedGRPORLLoss pol pol_old pol_ref reward eps beta model.docDist (fun _ => g) -
+        OPT.ExpectedTreePreferenceLoss model
+          (fun x group => GRPORLLossPointwise pol pol_old pol_ref reward eps beta x group)| ≤
+      (L : ℝ) *
+        ∫ ω, htExpEstimator (p := treeUnitPMF model) (pi := pi)
+              (treeDistortion model fstar) ω
+            ∂bernoulliProductMeasure pi hpi_pos hpi_le :=
+    grpo_rl_tree_gap_bounded_ipw_of_pointwise
+      (model := model) (fstar := fstar)
+      (pol := pol) (pol_old := pol_old) (pol_ref := pol_ref)
+      (reward := reward) (eps := eps) (beta := beta)
+      (g := g) (L := L) (h_group := h_group)
+      (h_pol_lip := h_pol_lip) (h_old_lip := h_old_lip)
+      (h_ref_lip := h_ref_lip) (h_reward_lip := h_reward_lip)
+      (h_point := h_point)
       (pi := pi) (hpi_pos := hpi_pos) (hpi_le := hpi_le)
   have hL : 0 ≤ (L : ℝ) := by positivity
   exact tree_gap_bound_transport_upper hL h_ipw h_upper

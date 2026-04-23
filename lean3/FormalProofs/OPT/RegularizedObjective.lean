@@ -1,4 +1,5 @@
 import FormalProofs.OPT.ApproximateLocalLaws
+import FormalProofs.OPT.NeuralOperatorTheoremBridge
 
 /-!
 # FormalProofs/OPT/RegularizedObjective.lean
@@ -280,6 +281,149 @@ theorem frontierRegularizedObjectiveWeights_one_lawStrength
         idemp := regularizerWeight * shares.idemp } := by
   ext <;> simp [frontierRegularizedObjectiveWeights]
 
+/-- Oracle/projection objective weights.  The parameter `lam` moves mass from
+the oracle-distortion term to the local-law projection penalty, while `shares`
+chooses the split across C1/C2/C3. -/
+def oracleProjectionObjectiveWeights
+    (lam : ℝ) (shares : LawComponentShares) : RegularizedObjectiveWeights where
+  distortion := 1 - lam
+  summary := 0
+  leaf := lam * shares.leaf
+  merge := lam * shares.merge
+  idemp := lam * shares.idemp
+
+/-- At `lam = 0`, the oracle/projection weights are pure oracle distortion. -/
+theorem oracleProjectionObjectiveWeights_lam_zero
+    (shares : LawComponentShares) :
+    oracleProjectionObjectiveWeights 0 shares =
+      { distortion := 1
+        summary := 0
+        leaf := 0
+        merge := 0
+        idemp := 0 } := by
+  ext <;> simp [oracleProjectionObjectiveWeights]
+
+/-- At `lam = 1`, the oracle/projection weights are pure local-law projection
+penalty, with no oracle-distortion mass. -/
+theorem oracleProjectionObjectiveWeights_lam_one
+    (shares : LawComponentShares) :
+    oracleProjectionObjectiveWeights 1 shares =
+      { distortion := 0
+        summary := 0
+        leaf := shares.leaf
+        merge := shares.merge
+        idemp := shares.idemp } := by
+  ext <;> simp [oracleProjectionObjectiveWeights]
+
+/-- Nonnegativity of the oracle/projection weights under the standard simplex
+constraints. -/
+theorem oracleProjectionObjectiveWeights_nonneg
+    (lam : ℝ) (shares : LawComponentShares)
+    (hLamNonneg : 0 ≤ lam) (hLamLeOne : lam ≤ 1)
+    (hLeaf : 0 ≤ shares.leaf) (hMerge : 0 ≤ shares.merge) (hIdemp : 0 ≤ shares.idemp) :
+    0 ≤ (oracleProjectionObjectiveWeights lam shares).distortion
+      ∧ 0 ≤ (oracleProjectionObjectiveWeights lam shares).summary
+      ∧ 0 ≤ (oracleProjectionObjectiveWeights lam shares).leaf
+      ∧ 0 ≤ (oracleProjectionObjectiveWeights lam shares).merge
+      ∧ 0 ≤ (oracleProjectionObjectiveWeights lam shares).idemp := by
+  constructor
+  · dsimp [oracleProjectionObjectiveWeights]
+    linarith
+  constructor
+  · dsimp [oracleProjectionObjectiveWeights]
+    exact le_rfl
+  constructor
+  · dsimp [oracleProjectionObjectiveWeights]
+    exact mul_nonneg hLamNonneg hLeaf
+  constructor
+  · dsimp [oracleProjectionObjectiveWeights]
+    exact mul_nonneg hLamNonneg hMerge
+  · dsimp [oracleProjectionObjectiveWeights]
+    exact mul_nonneg hLamNonneg hIdemp
+
+/-- If the local-law shares sum to one, the oracle/projection weights also have
+unit total mass. -/
+theorem oracleProjectionObjectiveWeights_total_mass
+    (lam : ℝ) (shares : LawComponentShares)
+    (hShares : shares.leaf + shares.merge + shares.idemp = 1) :
+    (oracleProjectionObjectiveWeights lam shares).distortion
+      + (oracleProjectionObjectiveWeights lam shares).summary
+      + (oracleProjectionObjectiveWeights lam shares).leaf
+      + (oracleProjectionObjectiveWeights lam shares).merge
+      + (oracleProjectionObjectiveWeights lam shares).idemp
+      = 1 := by
+  calc
+    (oracleProjectionObjectiveWeights lam shares).distortion
+        + (oracleProjectionObjectiveWeights lam shares).summary
+        + (oracleProjectionObjectiveWeights lam shares).leaf
+        + (oracleProjectionObjectiveWeights lam shares).merge
+        + (oracleProjectionObjectiveWeights lam shares).idemp
+      = 1 - lam + lam * (shares.leaf + shares.merge + shares.idemp) := by
+          dsimp [oracleProjectionObjectiveWeights]
+          ring
+    _ = 1 - lam + lam * 1 := by
+          rw [hShares]
+    _ = 1 := by
+          ring
+
+/-- The paper-facing oracle/projection objective:
+
+`(1-lam) * oracle risk + lam * local-law projection penalty`.
+
+The idempotence term carries the same `(R-1)` round scaling as the existing
+approximate-gap theorem. -/
+def oracleProjectionObjective
+    (g : Summarizer Strings)
+    (x : Strings) (R : ℕ) (T : BinTree Strings)
+    (fstar : Strings → Y)
+    (lam : ℝ) (shares : LawComponentShares)
+    (laws : ApproxLocalLawsBundle g T fstar) : ℝ :=
+  (1 - lam) * Δ_R_ZR g x R T fstar
+    + lam *
+      (shares.leaf * laws.epsLeaf
+        + shares.merge * laws.epsMerge
+        + shares.idemp * (((R : ℝ) - 1) * laws.epsIdemp))
+
+/-- The direct oracle/projection objective is exactly the certified regularized
+objective with zero summary-cost weight and `oracleProjectionObjectiveWeights`. -/
+theorem oracleProjectionObjective_eq_certifiedRegularizedObjective
+    (g : Summarizer Strings)
+    (x : Strings) (R : ℕ) (T : BinTree Strings)
+    (fstar : Strings → Y)
+    (cost : SummaryCost Strings)
+    (lam : ℝ) (shares : LawComponentShares)
+    (laws : ApproxLocalLawsBundle g T fstar) :
+    oracleProjectionObjective g x R T fstar lam shares laws =
+      certifiedRegularizedObjective g x R T fstar cost
+        (oracleProjectionObjectiveWeights lam shares) laws := by
+  simp [oracleProjectionObjective, certifiedRegularizedObjective,
+    oracleRiskObjective, certifiedLawPenalty, oracleProjectionObjectiveWeights]
+  ring
+
+/-- At `lam = 0`, the objective is pure oracle risk. -/
+theorem oracleProjectionObjective_lam_zero
+    (g : Summarizer Strings)
+    (x : Strings) (R : ℕ) (T : BinTree Strings)
+    (fstar : Strings → Y)
+    (shares : LawComponentShares)
+    (laws : ApproxLocalLawsBundle g T fstar) :
+    oracleProjectionObjective g x R T fstar 0 shares laws =
+      Δ_R_ZR g x R T fstar := by
+  simp [oracleProjectionObjective]
+
+/-- At `lam = 1`, the objective is pure local-law projection penalty. -/
+theorem oracleProjectionObjective_lam_one
+    (g : Summarizer Strings)
+    (x : Strings) (R : ℕ) (T : BinTree Strings)
+    (fstar : Strings → Y)
+    (shares : LawComponentShares)
+    (laws : ApproxLocalLawsBundle g T fstar) :
+    oracleProjectionObjective g x R T fstar 1 shares laws =
+      shares.leaf * laws.epsLeaf
+        + shares.merge * laws.epsMerge
+        + shares.idemp * (((R : ℝ) - 1) * laws.epsIdemp) := by
+  simp [oracleProjectionObjective]
+
 /-- Oracle-risk objective bounded by the approximate local-law bundle. -/
 theorem oracleRiskObjective_le_of_approx_bundle
     (g : Summarizer Strings)
@@ -346,5 +490,45 @@ theorem certifiedRegularizedObjective_le_of_approx_bundle
   refine le_trans hadd ?_
   ring_nf
   exact le_rfl
+
+/-- Neural-operator bridge for the oracle/projection objective: uniform
+approximation on realized-call compacts plus transfer assumptions yields the
+approximate local-law bundle, and the existing approximate-gap theorem then
+bounds the oracle part by the same symbolic C1/C2/C3 budgets. -/
+theorem oracleProjectionObjective_le_of_uniformApproxExactTheoremBacked
+    [PseudoMetricSpace Strings]
+    {sStar sApprox : Strings → Strings}
+    {T : BinTree Strings} {fstar : Strings → Y} {ε : ℝ}
+    (hExact : ExactTheoremBacked (deterministicSummarizer sStar) T fstar)
+    (hBridge : NeuralOperatorTheoremBridgeAssumptions sStar sApprox T fstar ε)
+    (x : Strings) (R : ℕ) (hp : S T = x) (hR : R ≥ 1)
+    (hbound : ∀ z, D fstar z x ≤ 1)
+    (hbound_global : ∀ w z, D fstar w z ≤ 1)
+    (h_mono : ∀ p,
+      pIdemp (deterministicSummarizer sApprox) fstar
+        (p.bind (deterministicSummarizer sApprox)) ≤
+      pIdemp (deterministicSummarizer sApprox) fstar p)
+    (lam : ℝ) (shares : LawComponentShares)
+    (hLamOracle : 0 ≤ 1 - lam) :
+    let laws :=
+      approxLocalLawsBundle_of_uniformApproxExactTheoremBacked hExact hBridge
+    oracleProjectionObjective
+        (deterministicSummarizer sApprox) x R T fstar lam shares laws ≤
+      (1 - lam) *
+        (laws.epsLeaf + laws.epsMerge + ((R : ℝ) - 1) * laws.epsIdemp)
+        + lam *
+          (shares.leaf * laws.epsLeaf
+            + shares.merge * laws.epsMerge
+            + shares.idemp * (((R : ℝ) - 1) * laws.epsIdemp)) := by
+  intro laws
+  have hΔ :
+      Δ_R_ZR (deterministicSummarizer sApprox) x R T fstar ≤
+        laws.epsLeaf + laws.epsMerge + ((R : ℝ) - 1) * laws.epsIdemp :=
+    Δ_R_ZR_le_of_approx_bundle
+      (deterministicSummarizer sApprox) T fstar x R hp hR hbound hbound_global h_mono laws
+  unfold oracleProjectionObjective
+  exact add_le_add
+    (mul_le_mul_of_nonneg_left hΔ hLamOracle)
+    le_rfl
 
 end FormalProofs.OPT
