@@ -794,6 +794,7 @@ class VLLMServerManager:
         health_check_interval: float = 2.0,
         cuda_devices: Optional[str] = None,  # e.g., "0,1" or "2,3"
         tensor_parallel: Optional[int] = None,  # Override config tensor_parallel
+        extra_args: Optional[List[str]] = None,
     ):
         """
         Initialize server manager.
@@ -816,6 +817,7 @@ class VLLMServerManager:
         self.health_check_interval = health_check_interval
         self.cuda_devices = cuda_devices
         self.tensor_parallel_override = tensor_parallel
+        self.extra_args = list(extra_args or [])
 
         self._process: Optional[subprocess.Popen] = None
         self._config: Optional[Dict[str, Any]] = None
@@ -878,6 +880,8 @@ class VLLMServerManager:
         runtime_args = self._config.get("runtime_args") or []
         if runtime_args:
             cmd.extend(list(runtime_args))
+        if self.extra_args:
+            cmd.extend(self.extra_args)
 
         # Build environment with optional CUDA device isolation
         env = os.environ.copy()
@@ -1098,6 +1102,7 @@ class SGLangServerManager:
         health_check_interval: float = 2.0,
         cuda_devices: Optional[str] = None,
         tensor_parallel: Optional[int] = None,
+        extra_args: Optional[List[str]] = None,
     ):
         self.profile = profile
         self.port = port
@@ -1107,6 +1112,7 @@ class SGLangServerManager:
         self.health_check_interval = health_check_interval
         self.cuda_devices = cuda_devices
         self.tensor_parallel_override = tensor_parallel
+        self.extra_args = list(extra_args or [])
 
         self._process: Optional[subprocess.Popen] = None
         self._config: Optional[Dict[str, Any]] = None
@@ -1185,6 +1191,8 @@ class SGLangServerManager:
         cuda_graph_max_bs = int(self._config.get("cuda_graph_max_bs", 0) or 0)
         if cuda_graph_max_bs > 0:
             cmd.extend(["--cuda-graph-max-bs", str(cuda_graph_max_bs)])
+        if self.extra_args:
+            cmd.extend(self.extra_args)
 
         # Build environment with optional CUDA device isolation
         env = os.environ.copy()

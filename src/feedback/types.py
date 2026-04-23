@@ -11,7 +11,8 @@ The key abstraction is the FeedbackRequest/FeedbackResponse pair:
 - FeedbackResponse carries whatever the collector provides
 
 Responses are always convertible to:
-- PreferencePair (backward-compatible pairwise training)
+- SupervisionDataset / ResponseJudgment / ComparativeJudgment
+- BinaryComparison (backward-compatible binary projection)
 - DSPy metric dict {'score': float, 'feedback': str} (optimizer-compatible)
 - FlaggedItem update fields (human review bridge)
 
@@ -50,8 +51,8 @@ Usage:
     metric = response.to_dspy_metric()
     # {'score': 4.2, 'feedback': 'Summary A better preserves the key arguments.'}
 
-    # Convert to PreferencePair
-    pair = response.to_preference_pair(request)
+    # Convert to a binary comparison
+    pair = response.to_binary_comparison(request)
 """
 
 import json
@@ -61,6 +62,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
+
+from src.core.logged_supervision import ObservationUnitKind, SamplingMetadata
+from src.core.supervision_metadata import judgment_supervision_metadata
+from src.training.supervision import (
+    BinaryComparison,
+    BinaryProjectionDataset,
+    ResponseJudgment,
+    SupervisionDataset,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,10 +155,9 @@ class FeedbackRequest:
     law_type: str = "sufficiency"
 
     # IPW propensity (propagated from audit)
-    doc_propensity: float = DEFAULT_PROPENSITY
-    node_propensity: float = DEFAULT_PROPENSITY
-    label_propensity: float = DEFAULT_PROPENSITY
-    sampling_scheme: Optional[str] = None
+    sampling: SamplingMetadata = field(
+        default_factory=lambda: SamplingMetadata(unit_kind=ObservationUnitKind.PAIR)
+    )
 
     # Metadata
     priority: int = 0
@@ -163,6 +172,10 @@ class FeedbackRequest:
                 self.dimensions = [FeedbackDimension(kind="pairwise")]
             else:
                 self.dimensions = [FeedbackDimension(kind="scalar")]
+        if not isinstance(self.sampling, SamplingMetadata):
+            self.sampling = SamplingMetadata.from_dict(self.sampling)
+        if self.sampling.unit_kind is None:
+            self.sampling = self.sampling.with_updates(unit_kind=ObservationUnitKind.PAIR)
 
     @property
     def is_pairwise(self) -> bool:
@@ -170,7 +183,7 @@ class FeedbackRequest:
 
     @property
     def joint_propensity(self) -> float:
-        return self.doc_propensity * self.node_propensity * self.label_propensity
+        return self.sampling.effective_joint_propensity(min_propensity=0.0)
 
     @classmethod
     def from_flagged_item(cls, item: Any) -> "FeedbackRequest":
@@ -215,10 +228,7 @@ class FeedbackRequest:
             "tree_id": self.tree_id,
             "source_doc_id": self.source_doc_id,
             "law_type": self.law_type,
-            "doc_propensity": self.doc_propensity,
-            "node_propensity": self.node_propensity,
-            "label_propensity": self.label_propensity,
-            "sampling_scheme": self.sampling_scheme,
+            "sampling": self.sampling.to_dict(),
             "priority": self.priority,
             "context": self.context,
             "created_at": self.created_at,
@@ -229,6 +239,14 @@ class FeedbackRequest:
         d = dict(data)
         if "dimensions" in d:
             d["dimensions"] = [FeedbackDimension.from_dict(dim) for dim in d["dimensions"]]
+        if "sampling" not in d:
+            d["sampling"] = {
+                "document_propensity": d.pop("doc_propensity", DEFAULT_PROPENSITY),
+                "unit_propensity": d.pop("node_propensity", DEFAULT_PROPENSITY),
+                "label_propensity": d.pop("label_propensity", DEFAULT_PROPENSITY),
+                "sampling_scheme": d.pop("sampling_scheme", None),
+                "unit_kind": "pair",
+            }
         return cls(**d)
 
 
@@ -248,7 +266,9 @@ class FeedbackResponse:
 
     Always convertible to:
     - DSPy metric dict via ``to_dspy_metric()``
-    - PreferencePair via ``to_preference_pair(request)``
+    - ResponseJudgment / ComparativeJudgment via supervision helpers
+    - BinaryComparison via ``to_binary_comparison(request)``
+    - PreferencePair via ``to_preference_pair(request)`` for compatibility
     - FlaggedItem update via ``to_flagged_item_update()``
     """
     # Identity (matches request)
@@ -282,6 +302,93 @@ class FeedbackResponse:
         if self.timestamp is None:
             self.timestamp = datetime.now().isoformat()
 
+    @classmethod
+    def from_human_feedback(
+        cls,
+        *,
+        request_id: str,
+        preferred: Optional[Literal["A", "B", "tie"]] = None,
+        scores: Optional[Dict[str, float]] = None,
+        critique: str = "",
+        reasoning: str = "",
+        confidence: float = 1.0,
+        score_estimate_a: Optional[float] = None,
+        score_estimate_b: Optional[float] = None,
+        extra: Optional[Dict[str, Any]] = None,
+        judge_model: str = "",
+    ) -> "FeedbackResponse":
+        """Create a canonical human-sourced response for programmatic or API use."""
+        return cls(
+            request_id=request_id,
+            preferred=preferred,
+            scores=dict(scores or {}),
+            critique=critique,
+            reasoning=reasoning,
+            confidence=confidence,
+            score_estimate_a=score_estimate_a,
+            score_estimate_b=score_estimate_b,
+            extra=dict(extra or {}),
+            source="human",
+            judge_model=judge_model,
+        )
+
+    @classmethod
+    def from_human_pairwise_feedback(
+        cls,
+        *,
+        request_id: str,
+        preferred: Literal["A", "B", "tie"],
+        reasoning: str = "",
+        critique: str = "",
+        confidence: float = 1.0,
+        score_estimate_a: Optional[float] = None,
+        score_estimate_b: Optional[float] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> "FeedbackResponse":
+        """Create a human pairwise response that can project to binary/comparative supervision."""
+        return cls.from_human_feedback(
+            request_id=request_id,
+            preferred=preferred,
+            reasoning=reasoning,
+            critique=critique,
+            confidence=confidence,
+            score_estimate_a=score_estimate_a,
+            score_estimate_b=score_estimate_b,
+            extra=extra,
+        )
+
+    @classmethod
+    def from_human_scalar_feedback(
+        cls,
+        *,
+        request_id: str,
+        score: float,
+        dimension_name: str = "score",
+        reasoning: str = "",
+        critique: str = "",
+        confidence: float = 1.0,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> "FeedbackResponse":
+        """Create a human scalar response that can project to response supervision."""
+        return cls.from_human_feedback(
+            request_id=request_id,
+            scores={str(dimension_name): float(score)},
+            reasoning=reasoning,
+            critique=critique,
+            confidence=confidence,
+            extra=extra,
+        )
+
+    def _combined_reasoning(self) -> str:
+        reasoning = str(self.reasoning or "").strip()
+        critique = str(self.critique or "").strip()
+        parts: List[str] = []
+        if reasoning:
+            parts.append(reasoning)
+        if critique and (not reasoning or critique not in reasoning):
+            parts.append(critique)
+        return "\n".join(parts).strip()
+
     # --- DSPy compatibility ---
 
     def to_dspy_metric(self) -> Dict[str, Any]:
@@ -307,47 +414,123 @@ class FeedbackResponse:
         else:
             score = 0.5
 
-        reasoning = str(self.reasoning or "").strip()
-        critique = str(self.critique or "").strip()
-        parts: List[str] = []
-        if reasoning:
-            parts.append(reasoning)
-        if critique:
-            if not reasoning or critique not in reasoning:
-                parts.append(critique)
-        feedback = "\n".join(parts).strip()
+        feedback = self._combined_reasoning()
         return {"score": score, "feedback": feedback}
 
-    # --- PreferencePair compatibility ---
+    def to_response_judgment(
+        self,
+        request: "FeedbackRequest",
+        *,
+        response_id: Optional[str] = None,
+        response_text: Optional[str] = None,
+        score_value: Optional[float] = None,
+    ) -> ResponseJudgment:
+        """Convert scalar feedback into a canonical response judgment."""
+        scalar_dimension = next(
+            (dimension for dimension in request.dimensions if dimension.kind == "scalar"),
+            None,
+        )
+        signal_name = (
+            (scalar_dimension.name if scalar_dimension and scalar_dimension.name else None)
+            or self.extra.get("response_signal_name")
+            or next(iter(self.scores.keys()), None)
+            or "response_score"
+        )
+        signal_min: Optional[float] = None
+        signal_max: Optional[float] = None
+        if scalar_dimension is not None and scalar_dimension.scale is not None:
+            signal_min, signal_max = scalar_dimension.scale
+        else:
+            signal_min = self.extra.get("response_signal_min")
+            signal_max = self.extra.get("response_signal_max")
 
-    def to_preference_pair(
+        if score_value is None:
+            if scalar_dimension and scalar_dimension.name and scalar_dimension.name in self.scores:
+                score_value = self.scores[scalar_dimension.name]
+            elif self.scores:
+                score_value = next(iter(self.scores.values()))
+            elif self.score_estimate_a is not None:
+                score_value = self.score_estimate_a
+            else:
+                metric = self.to_dspy_metric()
+                score_value = metric["score"]
+
+        resolved_response_id = response_id or ("A" if request.text_b is None else "A")
+        resolved_response_text = response_text or request.text_a
+        return ResponseJudgment(
+            judgment_id=f"{self.request_id}:{resolved_response_id}",
+            source_example_id=request.node_id or request.request_id,
+            original_text=request.original_text,
+            rubric=request.rubric,
+            response=resolved_response_text,
+            response_id=resolved_response_id,
+            reference_score=request.reference_score or 0.0,
+            law_type=request.law_type,
+            source_doc_id=request.source_doc_id,
+            sampling=request.sampling,
+            supervision_metadata=judgment_supervision_metadata(
+                application_name="feedback_collection",
+                law_type=request.law_type,
+                response_signal_name=signal_name,
+                response_signal_min=signal_min,
+                response_signal_max=signal_max,
+                metadata={
+                    "request_id": request.request_id,
+                    "feedback_source": self.source,
+                },
+            ),
+            response_signal_value=score_value,
+            judge_model=self.judge_model,
+            timestamp=self.timestamp,
+            truth_label_source=self.source,
+            metadata={
+                "reasoning": self.reasoning,
+                "critique": self.critique,
+                "source": self.source,
+                **dict(self.extra),
+            },
+        )
+
+    def to_comparative_judgment(
         self,
         request: "FeedbackRequest",
         pair_id: Optional[str] = None,
     ) -> Any:
-        """Convert to PreferencePair for backward-compatible training.
+        """Convert pairwise feedback into a canonical comparative judgment."""
+        if request.text_b is None:
+            raise ValueError("Comparative judgments require pairwise feedback with text_b.")
+        return self.to_binary_comparison(request, pair_id=pair_id).to_comparative_judgment()
 
-        Requires the original FeedbackRequest for context fields.
-        Propagates all propensity metadata from the request.
+    # --- Binary comparison compatibility ---
 
-        Returns:
-            PreferencePair instance
-        """
-        from src.training.preference.types import PreferencePair
+    def to_binary_comparison(
+        self,
+        request: "FeedbackRequest",
+        pair_id: Optional[str] = None,
+    ) -> BinaryComparison:
+        """Convert pairwise human/LLM/oracle feedback into a canonical binary comparison."""
+        combined_reasoning = self._combined_reasoning()
+        supervision = judgment_supervision_metadata(
+            application_name="feedback_collection",
+            supervision_channel_name="judgment_supervision",
+            supervision_signal_name="judgment",
+            preference_family="pairwise",
+            law_type=request.law_type,
+            comparison_signal_name=self.extra.get("comparison_signal_name"),
+            comparison_signal_min=self.extra.get("comparison_signal_min"),
+            comparison_signal_max=self.extra.get("comparison_signal_max"),
+            response_signal_name=self.extra.get("response_signal_name"),
+            response_signal_min=self.extra.get("response_signal_min"),
+            response_signal_max=self.extra.get("response_signal_max"),
+            metadata={
+                "request_id": request.request_id,
+                "feedback_source": self.source,
+            },
+        )
 
-        rationale_parts: List[str] = []
-        reasoning = str(self.reasoning or "").strip()
-        critique = str(self.critique or "").strip()
-        if reasoning:
-            rationale_parts.append(reasoning)
-        if critique:
-            if not reasoning or critique not in reasoning:
-                rationale_parts.append(critique)
-        combined_reasoning = "\n".join(rationale_parts).strip()
-
-        return PreferencePair(
+        return BinaryComparison(
             pair_id=pair_id or self.request_id,
-            source_example_id=request.node_id or "",
+            source_example_id=request.node_id or request.request_id,
             original_text=request.original_text,
             rubric=request.rubric,
             reference_score=request.reference_score or 0.0,
@@ -358,14 +541,23 @@ class FeedbackResponse:
             confidence=self.confidence,
             score_estimate_a=self.score_estimate_a,
             score_estimate_b=self.score_estimate_b,
+            comparison_signal_value=self.extra.get("comparison_signal_value"),
             judge_model=self.judge_model,
-            doc_propensity=request.doc_propensity,
-            node_propensity=request.node_propensity,
-            label_propensity=request.label_propensity,
-            sampling_scheme=request.sampling_scheme,
+            sampling=request.sampling,
+            preference_supervision=supervision,
             source_doc_id=request.source_doc_id,
+            truth_label_source=self.source,
+            source_observation_ids=[request.request_id],
             law_type=request.law_type,
         )
+
+    def to_preference_pair(
+        self,
+        request: "FeedbackRequest",
+        pair_id: Optional[str] = None,
+    ) -> Any:
+        """Backward-compatible alias for ``to_binary_comparison``."""
+        return self.to_binary_comparison(request, pair_id=pair_id)
 
     # --- FlaggedItem compatibility ---
 
@@ -380,15 +572,7 @@ class FeedbackResponse:
         else:
             approved = True
 
-        reasoning = str(self.reasoning or "").strip()
-        critique = str(self.critique or "").strip()
-        rationale_parts: List[str] = []
-        if reasoning:
-            rationale_parts.append(reasoning)
-        if critique:
-            if not reasoning or critique not in reasoning:
-                rationale_parts.append(critique)
-        review_reasoning = "\n".join(rationale_parts).strip()
+        review_reasoning = self._combined_reasoning()
 
         return {
             "reviewed": True,
@@ -433,7 +617,7 @@ class FeedbackResponse:
 class FeedbackDataset:
     """Collection of feedback request/response pairs with export capabilities.
 
-    Provides conversion to PreferenceDataset (backward-compatible),
+    Provides conversion to SupervisionDataset, binary compatibility exports,
     DSPy examples, reward model format, and propensity diagnostics.
     """
 
@@ -478,18 +662,54 @@ class FeedbackDataset:
     # --- Export to existing formats ---
 
     def to_preference_dataset(self) -> Any:
-        """Convert pairwise items to PreferenceDataset.
+        """Compatibility wrapper over the primary supervision dataset."""
+        return self.to_binary_projection_dataset(projection="adjacent")
 
-        Only includes items where text_b is set and preferred is set.
-        Propensity metadata is preserved.
-        """
-        from src.training.preference.types import PreferenceDataset
+    def to_binary_projection_dataset(
+        self,
+        *,
+        projection: str = "adjacent",
+    ) -> BinaryProjectionDataset:
+        """Convert completed feedback directly into the canonical binary projection dataset."""
+        return self.to_supervision_dataset().project_binary(projection=projection)
 
-        pairs = []
+    def to_supervision_dataset(
+        self,
+        *,
+        include_pairwise_response_scores: bool = True,
+    ) -> SupervisionDataset:
+        """Convert mixed feedback into the primary supervision surface."""
+        dataset = SupervisionDataset()
         for request, response in self.items:
             if request.is_pairwise and response.preferred is not None:
-                pairs.append(response.to_preference_pair(request))
-        return PreferenceDataset(pairs)
+                dataset.add_comparative_judgment(
+                    response.to_comparative_judgment(request)
+                )
+                if include_pairwise_response_scores:
+                    if response.score_estimate_a is not None:
+                        dataset.add_response_judgment(
+                            response.to_response_judgment(
+                                request,
+                                response_id="A",
+                                response_text=request.text_a,
+                                score_value=response.score_estimate_a,
+                            )
+                        )
+                    if (
+                        request.text_b is not None
+                        and response.score_estimate_b is not None
+                    ):
+                        dataset.add_response_judgment(
+                            response.to_response_judgment(
+                                request,
+                                response_id="B",
+                                response_text=request.text_b,
+                                score_value=response.score_estimate_b,
+                            )
+                        )
+            elif not request.is_pairwise:
+                dataset.add_response_judgment(response.to_response_judgment(request))
+        return dataset
 
     def to_dspy_examples(self) -> list:
         """Convert to DSPy examples with score/feedback fields.
@@ -526,32 +746,8 @@ class FeedbackDataset:
         return examples
 
     def to_reward_model_format(self) -> List[Dict[str, Any]]:
-        """Export for reward model training.
-
-        Each item becomes one or two entries (one per text_a/text_b)
-        with scalar scores.
-        """
-        rm_data = []
-        for request, response in self.items:
-            metric = response.to_dspy_metric()
-            base = {
-                "request_id": request.request_id,
-                "original_text": request.original_text,
-                "rubric": request.rubric,
-                "law_type": request.law_type,
-                "reference_score": request.reference_score,
-                "sample_weight": 1.0 / max(MIN_PROPENSITY, request.joint_propensity),
-                "source": response.source,
-            }
-            if request.text_b is not None:
-                # Pairwise: score both
-                score_a = response.score_estimate_a if response.score_estimate_a is not None else metric["score"]
-                score_b = response.score_estimate_b if response.score_estimate_b is not None else (1.0 - metric["score"])
-                rm_data.append({**base, "response": request.text_a, "score": score_a, "response_id": "A"})
-                rm_data.append({**base, "response": request.text_b, "score": score_b, "response_id": "B"})
-            else:
-                rm_data.append({**base, "response": request.text_a, "score": metric["score"]})
-        return rm_data
+        """Export scalar reward-model rows from the primary supervision surface."""
+        return self.to_supervision_dataset().to_scalar_reward_records()
 
     # --- Propensity diagnostics ---
 

@@ -851,6 +851,32 @@ def default_merge_prompt(left: str, right: str, rubric: str) -> List[Dict[str, s
     ]
 
 
+def default_resummary_prompt(summary: str, rubric: str, *, round_index: Optional[int] = None) -> List[Dict[str, str]]:
+    """Default resummary/refinement prompt for idempotence checks or L3 refinement."""
+    rubric_clean = str(rubric or "").strip()
+    round_line = f"Refinement round: {int(round_index)}\n\n" if round_index is not None else ""
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You refine an existing summary.\n"
+                "Rewrite the summary to be more concise and coherent while preserving all rubric-relevant facts.\n"
+                "Output ONLY the revised summary text.\n"
+                "- No preamble (do not write things like 'We need to refine...').\n"
+                "- No reasoning, analysis, or chain-of-thought.\n"
+                "- Do not restate the rubric.\n\n"
+                "Preservation rubric (what must be preserved):\n"
+                f"{rubric_clean}\n\n"
+                "Return ONLY the revised summary text (no labels, no markdown)."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"{round_line}{str(summary or '')}",
+        },
+    ]
+
+
 def default_unified_prompt(text: str, rubric: str) -> List[Dict[str, str]]:
     """
     Unified summarization prompt for both leaf and merge operations.

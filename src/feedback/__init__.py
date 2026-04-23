@@ -58,6 +58,8 @@ from src.feedback.collector import (
     list_collectors,
     register_collector,
 )
+from src.feedback.store import FeedbackStore
+from src.feedback.collectors.human import HumanCollector
 
 # Import concrete collectors to trigger registration
 import src.feedback.collectors  # noqa: F401
@@ -68,6 +70,8 @@ __all__ = [
     "FeedbackResponse",
     "FeedbackDataset",
     "FeedbackCollector",
+    "FeedbackStore",
+    "HumanCollector",
     "PreferenceDeriverAdapter",
     "get_collector",
     "list_collectors",

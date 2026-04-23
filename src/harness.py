@@ -57,7 +57,11 @@ from src.tree.ipw import (
     effective_sample_size,
     analyze_tree_samples,
 )
-from src.training.preference.types import PreferencePair, PreferenceDataset
+from src.training.supervision import (
+    BinaryComparison,
+    SupervisionDataset,
+    save_supervision_artifact_bundle,
+)
 from src.feedback.types import FeedbackDataset, FeedbackRequest, FeedbackResponse
 
 logger = logging.getLogger(__name__)
@@ -156,7 +160,7 @@ class HarnessResult:
 
     certificate: AuditCertificate
     trees: List[Tree]
-    preferences: PreferenceDataset
+    supervision: SupervisionDataset
     trace: List[Dict[str, Any]]
     audit_reports: List[AuditReport]
     feedback: Optional[FeedbackDataset] = None
@@ -170,8 +174,10 @@ class HarnessResult:
         # Certificate
         (out / "certificate.json").write_text(self.certificate.to_json())
 
-        # Preferences
-        self.preferences.save(str(out / "preferences.json"))
+        save_supervision_artifact_bundle(
+            self.supervision,
+            supervision_path=out / "supervision.json",
+        )
 
         # Feedback
         if self.feedback and len(self.feedback) > 0:
@@ -496,7 +502,7 @@ class TreeAudit:
     ) -> HarnessResult:
         """Audit trees from build results and produce HarnessResult."""
         trees: List[Tree] = []
-        all_preferences: List[PreferencePair] = []
+        all_binary_comparisons: List[BinaryComparison] = []
         all_samples: List[TreeSample] = []
         audit_reports: List[AuditReport] = []
         trace: List[Dict[str, Any]] = []
@@ -518,11 +524,11 @@ class TreeAudit:
             tree = result.tree
             trees.append(tree)
 
-            # Collect preferences from tournament
-            if result.preferences:
-                for pref in result.preferences:
+            binary_projection = result.supervision.project_binary(projection="adjacent")
+            if binary_projection.comparisons:
+                for pref in binary_projection.comparisons:
                     pref.source_doc_id = doc_id
-                all_preferences.extend(result.preferences)
+                all_binary_comparisons.extend(binary_projection.comparisons)
 
             n_leaves = tree.leaf_count
             n_merges = max(0, n_leaves - 1)
@@ -541,17 +547,36 @@ class TreeAudit:
                 audit_reports.append(report)
                 all_samples.extend(report.to_tree_samples())
 
-            # Propagate design-time inclusion probabilities to preference pairs
-            if report is not None and result.preferences and report.inclusion_probability_map:
+            # Propagate design-time inclusion probabilities to binary supervision rows
+            if report is not None and binary_projection.comparisons and report.inclusion_probability_map:
+                from src.core.logged_supervision import ObservationUnitKind, SamplingMetadata
+                from src.tree.compositional_learning import SHARED_SAMPLED_QUERY_POLICY_NAME
+
                 prob_map = report.inclusion_probability_map
-                for pref in result.preferences:
+                observation_ids_by_unit = {
+                    str(observation.unit_id): str(observation.observation_id)
+                    for observation in (report.logged_observations or [])
+                }
+                for pref in binary_projection.comparisons:
                     example_id = pref.source_example_id or ""
                     # Strip doc_id prefix if present (batched mode tags: "doc_id:leaf_N")
                     node_ref = example_id.rsplit(":", 1)[-1] if ":" in example_id else example_id
                     prop = prob_map.get(node_ref)
                     if prop is not None:
-                        pref.node_propensity = prop
-                        pref.sampling_scheme = report.sampling_strategy
+                        base_sampling = getattr(pref, "sampling", None)
+                        if not isinstance(base_sampling, SamplingMetadata):
+                            base_sampling = SamplingMetadata(unit_kind=ObservationUnitKind.PAIR)
+                        pref.sampling = base_sampling.with_updates(
+                            document_propensity=1.0,
+                            unit_propensity=float(prop),
+                            label_propensity=1.0,
+                            sampling_scheme=report.sampling_strategy,
+                            policy_name=SHARED_SAMPLED_QUERY_POLICY_NAME,
+                            unit_kind=ObservationUnitKind.PAIR,
+                            supports_ipw_estimation=True,
+                        )
+                        if node_ref in observation_ids_by_unit:
+                            pref.source_observation_ids = [observation_ids_by_unit[node_ref]]
 
             elapsed = time.monotonic() - t0
             trace.append({
@@ -601,7 +626,11 @@ class TreeAudit:
         return HarnessResult(
             certificate=certificate,
             trees=trees,
-            preferences=PreferenceDataset(all_preferences),
+            supervision=SupervisionDataset(
+                comparative_judgments=[
+                    pair.to_comparative_judgment() for pair in all_binary_comparisons
+                ]
+            ),
             trace=trace,
             audit_reports=audit_reports,
             feedback=feedback_dataset,
@@ -697,6 +726,9 @@ class TreeAudit:
         content, rubric, and propensity metadata. Routes through all configured
         feedback collectors and aggregates responses into a FeedbackDataset.
         """
+        from src.core.logged_supervision import ObservationUnitKind, SamplingMetadata
+        from src.tree.compositional_learning import SHARED_SAMPLED_QUERY_POLICY_NAME
+
         dataset = FeedbackDataset()
         req_counter = 0
 
@@ -718,9 +750,15 @@ class TreeAudit:
                     tree_id=f"{doc_id}_tree",
                     source_doc_id=doc_id,
                     law_type="sufficiency",
-                    doc_propensity=1.0,
-                    node_propensity=node_prop,
-                    sampling_scheme=self.budget.sampling_strategy,
+                    sampling=SamplingMetadata(
+                        document_propensity=1.0,
+                        unit_propensity=float(node_prop),
+                        label_propensity=1.0,
+                        sampling_scheme=self.budget.sampling_strategy,
+                        policy_name=SHARED_SAMPLED_QUERY_POLICY_NAME,
+                        unit_kind=ObservationUnitKind.PAIR,
+                        supports_ipw_estimation=True,
+                    ),
                 )
 
                 for collector in self._feedback_collectors:

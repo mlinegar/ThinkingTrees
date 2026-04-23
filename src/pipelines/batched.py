@@ -53,6 +53,13 @@ from src.core.strategy import (
     BatchedStrategy,
     CallableStrategy,
 )
+from src.core.unified_runtime import (
+    BatchTelemetry,
+    WorkItem,
+    get_named_plan_cache,
+    normalize_runtime_mode,
+    plan_work_batches,
+)
 from src.core.data_models import Node, Tree, leaf, node
 from src.tree.builder import AsyncTreeBuilder, BuildConfig, BuildResult
 from src.core.progress import (
@@ -75,26 +82,43 @@ from src.core.semantic_prompting import semantic_document_memory
 from src.core.prompting import clean_summary_text, is_degenerate_summary_text
 from src.tasks.prompting import PromptBuilders, default_merge_prompt, default_summarize_prompt
 from src.preprocessing.chunker import chunk_for_ops
+from unified_g_v1.core.specs import (
+    UnifiedFGSpec,
+    build_ctreepo_program_spec,
+    build_llm_text_program_spec,
+    build_mergeable_sketch_program_spec,
+    build_semantic_embedding_program_spec,
+    resolve_program_spec_alias,
+)
 
 logger = logging.getLogger(__name__)
 
+_LLM_TEXT_PROGRAM_SPEC = build_llm_text_program_spec(tokenizer_or_adapter_id="cl100k_base")
+_SEMANTIC_EMBEDDING_PROGRAM_SPEC = build_semantic_embedding_program_spec()
+_CTREEPO_PROGRAM_SPEC = build_ctreepo_program_spec()
+_MERGEABLE_SKETCH_PROGRAM_SPEC = build_mergeable_sketch_program_spec()
+
 _BASE_REPRESENTATION_BACKENDS: Tuple[str, ...] = (
-    "llm",
-    "embedding",
-    "ctreepo",
-    "mergeable_sketch",
+    str(_LLM_TEXT_PROGRAM_SPEC.program_family),
+    str(_SEMANTIC_EMBEDDING_PROGRAM_SPEC.program_family),
+    str(_CTREEPO_PROGRAM_SPEC.program_family),
+    str(_MERGEABLE_SKETCH_PROGRAM_SPEC.program_family),
 )
 _ALL_REPRESENTATION_BACKENDS: Tuple[str, ...] = _BASE_REPRESENTATION_BACKENDS + ("ensemble",)
 _REPRESENTATION_BACKEND_ALIASES: Dict[str, str] = {
-    "oracle": "llm",
-    "scorer": "llm",
-    "score": "llm",
-    "neural_operator": "ctreepo",
-    "neural-operator": "ctreepo",
-    "operator": "ctreepo",
-    "sketch": "mergeable_sketch",
-    "mergeable": "mergeable_sketch",
-    "mergeable_embedding_sketch": "mergeable_sketch",
+    "llm": str(_LLM_TEXT_PROGRAM_SPEC.program_family),
+    "oracle": str(_LLM_TEXT_PROGRAM_SPEC.program_family),
+    "scorer": str(_LLM_TEXT_PROGRAM_SPEC.program_family),
+    "score": str(_LLM_TEXT_PROGRAM_SPEC.program_family),
+    "embedding": str(_SEMANTIC_EMBEDDING_PROGRAM_SPEC.program_family),
+    "ctreepo": str(_CTREEPO_PROGRAM_SPEC.program_family),
+    "neural_operator": str(_CTREEPO_PROGRAM_SPEC.program_family),
+    "neural-operator": str(_CTREEPO_PROGRAM_SPEC.program_family),
+    "operator": str(_CTREEPO_PROGRAM_SPEC.program_family),
+    "mergeable_sketch": str(_MERGEABLE_SKETCH_PROGRAM_SPEC.program_family),
+    "sketch": str(_MERGEABLE_SKETCH_PROGRAM_SPEC.program_family),
+    "mergeable": str(_MERGEABLE_SKETCH_PROGRAM_SPEC.program_family),
+    "mergeable_embedding_sketch": str(_MERGEABLE_SKETCH_PROGRAM_SPEC.program_family),
 }
 
 
@@ -296,6 +320,8 @@ class BatchedPipelineConfig:
     # Tree building
     # Increased from 2000 to 4000 to reduce chunk count and tree depth
     max_chunk_chars: int = 4000
+    max_chunk_tokens: Optional[int] = None
+    chunk_token_encoding: str = "cl100k_base"
     max_tokens_summary: int = 500
     max_tokens_score: int = 200
     # Degenerate-summary safeguards for manual/guarded runs.
@@ -308,6 +334,7 @@ class BatchedPipelineConfig:
 
     # Processing options
     run_baseline: bool = True
+    runtime_mode: str = "legacy"
 
     # Progress reporting
     show_progress: bool = True
@@ -330,8 +357,13 @@ class BatchedPipelineConfig:
     # Optional strictly-mergeable embedding sketch model (MergeableEmbeddingSketch checkpoint).
     mergeable_sketch_model_path: Optional[str] = None
 
-    # Representation backend routing for score selection.
-    # Supports: llm, embedding, ctreepo, mergeable_sketch, ensemble.
+    # Canonical program-family routing for score selection.
+    # Legacy representation_backends flags are accepted only as parser aliases.
+    program_families: Optional[List[str]] = None
+    primary_program_family: str = "auto"
+    program_weights: Optional[Dict[str, float]] = None
+
+    # Legacy aliases preserved at the config boundary only.
     representation_backends: Optional[List[str]] = None
     primary_representation_backend: str = "auto"
     representation_weights: Optional[Dict[str, float]] = None
@@ -367,6 +399,7 @@ class BatchedPipelineConfig:
 
     def __post_init__(self):
         self.routing_policy = parse_routing_policy(self.routing_policy).value
+        self.runtime_mode = normalize_runtime_mode(self.runtime_mode)
         if self.metrics_poll_seconds is None:
             try:
                 from src.config.settings import load_settings, get_inference_backend_config
@@ -560,17 +593,17 @@ class BatchedPipelineConfig:
                     self.mergeable_sketch_model_path = str(sketch_cfg.get("model_path"))
             rep_cfg = settings.get("representation_pipeline", {}) if isinstance(settings, dict) else {}
             if isinstance(rep_cfg, dict):
-                if self.representation_backends is None:
+                if self.program_families is None and self.representation_backends is None:
                     parsed = _parse_representation_backend_list(rep_cfg.get("backends"))
                     if parsed:
-                        self.representation_backends = parsed
+                        self.program_families = parsed
                 if (
-                    str(self.primary_representation_backend or "").strip().lower() in {"", "auto"}
+                    str(self.primary_program_family or self.primary_representation_backend or "").strip().lower() in {"", "auto"}
                     and rep_cfg.get("primary_backend") is not None
                 ):
-                    self.primary_representation_backend = str(rep_cfg.get("primary_backend") or "auto")
-                if self.representation_weights is None and isinstance(rep_cfg.get("weights"), dict):
-                    self.representation_weights = dict(rep_cfg.get("weights"))
+                    self.primary_program_family = str(rep_cfg.get("primary_backend") or "auto")
+                if self.program_weights is None and self.representation_weights is None and isinstance(rep_cfg.get("weights"), dict):
+                    self.program_weights = dict(rep_cfg.get("weights"))
                 if rep_cfg.get("fallback_to_available_backend") is not None:
                     self.fallback_to_available_backend = bool(rep_cfg.get("fallback_to_available_backend"))
                 if (
@@ -610,15 +643,27 @@ class BatchedPipelineConfig:
         except Exception:
             pass
 
-        parsed_backends = _parse_representation_backend_list(self.representation_backends)
+        parsed_backends = _parse_representation_backend_list(
+            self.program_families if self.program_families is not None else self.representation_backends
+        )
         if not parsed_backends:
-            parsed_backends = ["llm"]
+            parsed_backends = [str(_LLM_TEXT_PROGRAM_SPEC.program_family)]
+        self.program_families = parsed_backends
         self.representation_backends = parsed_backends
 
-        primary_backend = _normalize_representation_backend(self.primary_representation_backend)
-        self.primary_representation_backend = primary_backend or "auto"
+        primary_backend = _normalize_representation_backend(
+            self.primary_program_family
+            if str(self.primary_program_family or "").strip()
+            else self.primary_representation_backend
+        )
+        self.primary_program_family = primary_backend or "auto"
+        self.primary_representation_backend = self.primary_program_family
 
-        self.representation_weights = _normalize_representation_weights(self.representation_weights)
+        normalized_weights = _normalize_representation_weights(
+            self.program_weights if self.program_weights is not None else self.representation_weights
+        )
+        self.program_weights = normalized_weights
+        self.representation_weights = normalized_weights
         self.fallback_to_available_backend = bool(self.fallback_to_available_backend)
         self.hybrid_oracle_seeded_ensemble = bool(self.hybrid_oracle_seeded_ensemble)
         self.hybrid_seed_llm_min_weight = _clip01(self.hybrid_seed_llm_min_weight) or 0.20
@@ -998,8 +1043,7 @@ class BatchedDocPipeline:
             return sketch, rile
 
         if not hasattr(self, "_ctreepo_model"):
-            import torch
-            from src.tree.ctreepo_model import CTreePOConfig, CTreePOModel
+            from src.tree.ctreepo_model import load_ctreepo_model_checkpoint
             from src.config.settings import load_settings, get_embedding_url, get_embedding_model
             from src.training.embedding_proxy import VLLMEmbeddingClient
 
@@ -1010,15 +1054,11 @@ class BatchedDocPipeline:
                 self._ctreepo_model = None
                 return None, 0.0
 
-            config = CTreePOConfig(
-                sketch_dim=ctreepo_cfg.get("sketch_dim", 32),
-                hidden_dim=ctreepo_cfg.get("hidden_dim", 256),
-                merge_type=ctreepo_cfg.get("merge_type", "gated"),
-                head_names=tuple(ctreepo_cfg.get("head_names", ["rile"])),
+            model, _config = load_ctreepo_model_checkpoint(
+                model_path,
+                config_overrides=ctreepo_cfg,
+                map_location="cpu",
             )
-            model = CTreePOModel(config)
-            model.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
-            model.eval()
             self._ctreepo_model = model
 
             api_base = get_embedding_url(settings).rstrip("/")
@@ -1232,9 +1272,21 @@ class BatchedDocPipeline:
     def _build_local_text_strategy(self) -> CallableStrategy:
         """Deterministic summarize/merge fallback when LLM text path is disabled."""
         max_chars = max(256, min(int(self.config.max_chunk_chars), 4000))
+        max_tokens = max(0, int(getattr(self.config, "max_chunk_tokens", 0) or 0))
 
         def _clip_text(text: str) -> str:
             collapsed = " ".join(str(text or "").split())
+            if max_tokens > 0:
+                from src.preprocessing.tokenizer import TokenCounter
+
+                counter = TokenCounter(
+                    model=None,
+                    encoding=str(getattr(self.config, "chunk_token_encoding", "cl100k_base") or "cl100k_base"),
+                )
+                first, rest = counter.split_at_token_boundary(collapsed, max_tokens=max_tokens)
+                if not rest:
+                    return collapsed
+                return first.rstrip() + "..."
             if len(collapsed) <= max_chars:
                 return collapsed
             return collapsed[: max_chars - 3].rstrip() + "..."
@@ -1250,22 +1302,22 @@ class BatchedDocPipeline:
 
     def _is_representation_backend_configured(self, backend: str) -> bool:
         name = _normalize_representation_backend(backend)
-        if name == "llm":
+        if name == str(_LLM_TEXT_PROGRAM_SPEC.program_family):
             return True
-        if name == "embedding":
+        if name == str(_SEMANTIC_EMBEDDING_PROGRAM_SPEC.program_family):
             return bool(getattr(self.config.semantic_memory, "enabled", False))
-        if name == "ctreepo":
+        if name == str(_CTREEPO_PROGRAM_SPEC.program_family):
             return bool(self.config.ctreepo_model_path) or bool(self.config.unified_tree)
-        if name == "mergeable_sketch":
+        if name == str(_MERGEABLE_SKETCH_PROGRAM_SPEC.program_family):
             return bool(self.config.mergeable_sketch_model_path)
         if name == "ensemble":
             return True
         return False
 
     def _resolve_representation_backends(self) -> List[str]:
-        requested = _parse_representation_backend_list(self.config.representation_backends)
+        requested = _parse_representation_backend_list(self.config.program_families)
         if not requested:
-            requested = ["llm"]
+            requested = [str(_LLM_TEXT_PROGRAM_SPEC.program_family)]
 
         resolved: List[str] = []
         for backend in requested:
@@ -1273,19 +1325,23 @@ class BatchedDocPipeline:
                 if backend not in resolved:
                     resolved.append(backend)
                 continue
-            auto_backends = ["llm"]
-            for candidate in ("embedding", "ctreepo", "mergeable_sketch"):
+            auto_backends = [str(_LLM_TEXT_PROGRAM_SPEC.program_family)]
+            for candidate in (
+                str(_SEMANTIC_EMBEDDING_PROGRAM_SPEC.program_family),
+                str(_CTREEPO_PROGRAM_SPEC.program_family),
+                str(_MERGEABLE_SKETCH_PROGRAM_SPEC.program_family),
+            ):
                 if self._is_representation_backend_configured(candidate):
                     auto_backends.append(candidate)
             for candidate in auto_backends:
                 if candidate not in resolved:
                     resolved.append(candidate)
         if not resolved:
-            resolved = ["llm"]
+            resolved = [str(_LLM_TEXT_PROGRAM_SPEC.program_family)]
         return resolved
 
     def _resolve_primary_representation_backend(self) -> str:
-        primary = _normalize_representation_backend(self.config.primary_representation_backend)
+        primary = _normalize_representation_backend(self.config.primary_program_family)
         return primary or "auto"
 
     def _resolve_backend_request_set(self, requested_backends: List[str], primary_backend: str) -> set[str]:
@@ -1379,7 +1435,7 @@ class BatchedDocPipeline:
         if not candidates:
             return {}, {"mode": "empty"}
 
-        raw_weights = self.config.representation_weights or {}
+        raw_weights = self.config.program_weights or {}
         weights: Dict[str, float] = {}
         for backend in candidates:
             fallback = 1.0
@@ -1405,10 +1461,14 @@ class BatchedDocPipeline:
 
         # Hybrid mode: use LLM as seed/oracle anchor while boosting embedding/operator
         # corrections when they are available and sufficiently supported.
-        non_llm_candidates = [b for b in candidates.keys() if b != "llm"]
+        llm_family = str(_LLM_TEXT_PROGRAM_SPEC.program_family)
+        embedding_family = str(_SEMANTIC_EMBEDDING_PROGRAM_SPEC.program_family)
+        ctreepo_family = str(_CTREEPO_PROGRAM_SPEC.program_family)
+        mergeable_family = str(_MERGEABLE_SKETCH_PROGRAM_SPEC.program_family)
+        non_llm_candidates = [b for b in candidates.keys() if b != llm_family]
         if (
             not self.config.hybrid_oracle_seeded_ensemble
-            or "llm" not in candidates
+            or llm_family not in candidates
             or not non_llm_candidates
         ):
             return normalized, diagnostics
@@ -1416,26 +1476,26 @@ class BatchedDocPipeline:
         metadata = metadata or {}
         confidence: Dict[str, float] = {backend: 1.0 for backend in candidates}
 
-        if "embedding" in candidates:
-            support = _safe_float(metadata.get("embedding_neighbor_support"))
-            source = str(metadata.get("embedding_score_source", "") or "").strip().lower()
+        if embedding_family in candidates:
+            support = _safe_float(metadata.get("semantic_program_support"))
+            source = str(metadata.get("semantic_program_source", "") or "").strip().lower()
             top_k = max(1, int(getattr(self.config.semantic_memory, "top_k", 5) or 5))
             if support is not None:
-                confidence["embedding"] = max(0.2, min(1.0, float(support) / float(top_k)))
+                confidence[embedding_family] = max(0.2, min(1.0, float(support) / float(top_k)))
             elif source.startswith("metadata:"):
-                confidence["embedding"] = 0.55
+                confidence[embedding_family] = 0.55
             else:
-                confidence["embedding"] = 0.35
+                confidence[embedding_family] = 0.35
 
-        if "ctreepo" in candidates:
-            confidence["ctreepo"] = _clip01(metadata.get("ctreepo_confidence")) or 0.70
+        if ctreepo_family in candidates:
+            confidence[ctreepo_family] = _clip01(metadata.get("ctreepo_confidence")) or 0.70
 
-        if "mergeable_sketch" in candidates:
+        if mergeable_family in candidates:
             window_count = _safe_float(metadata.get("mergeable_sketch_window_count"))
             if window_count is None:
-                confidence["mergeable_sketch"] = 0.60
+                confidence[mergeable_family] = 0.60
             else:
-                confidence["mergeable_sketch"] = max(0.3, min(1.0, float(window_count) / 8.0))
+                confidence[mergeable_family] = max(0.3, min(1.0, float(window_count) / 8.0))
 
         hybrid_weights = dict(weights)
         operator_boost = max(0.0, float(self.config.hybrid_operator_boost))
@@ -1443,7 +1503,7 @@ class BatchedDocPipeline:
             hybrid_weights[backend] = float(hybrid_weights[backend]) * max(0.05, float(confidence.get(backend, 1.0))) * operator_boost
 
         hybrid_norm = _normalize(hybrid_weights)
-        llm_weight = float(hybrid_norm.get("llm", 0.0))
+        llm_weight = float(hybrid_norm.get(llm_family, 0.0))
         min_llm = float(self.config.hybrid_seed_llm_min_weight)
         max_llm = float(self.config.hybrid_seed_llm_max_weight)
         llm_target = max(min_llm, min(max_llm, llm_weight))
@@ -1455,9 +1515,9 @@ class BatchedDocPipeline:
             scale = remaining / non_llm_sum
             for backend in non_llm_candidates:
                 adjusted[backend] = float(adjusted.get(backend, 0.0)) * scale
-            adjusted["llm"] = llm_target
+            adjusted[llm_family] = llm_target
         else:
-            adjusted = {"llm": 1.0}
+            adjusted = {llm_family: 1.0}
             for backend in non_llm_candidates:
                 adjusted[backend] = 0.0
 
@@ -1555,6 +1615,80 @@ class BatchedDocPipeline:
         )
         return float(default_score), True
 
+    def _program_spec_for_family(self, program_family: str) -> Optional[UnifiedFGSpec]:
+        family = str(program_family or "").strip()
+        if not family or family in {"auto", "ensemble"}:
+            return None
+        if family == str(_LLM_TEXT_PROGRAM_SPEC.program_family):
+            return build_llm_text_program_spec(
+                tokenizer_or_adapter_id=str(self.config.chunk_token_encoding or "cl100k_base")
+            )
+        if family == str(_SEMANTIC_EMBEDDING_PROGRAM_SPEC.program_family):
+            feature_dim = int(_safe_float(getattr(self.config.semantic_memory, "top_k", 0)) or 0)
+            return build_semantic_embedding_program_spec(
+                feature_dim=feature_dim,
+                tokenizer_or_adapter_id="semantic_memory",
+            )
+        if family == str(_CTREEPO_PROGRAM_SPEC.program_family):
+            return build_ctreepo_program_spec(
+                feature_dim=0,
+                tokenizer_or_adapter_id="embedding_tree",
+            )
+        if family == str(_MERGEABLE_SKETCH_PROGRAM_SPEC.program_family):
+            return build_mergeable_sketch_program_spec(
+                feature_dim=0,
+                tokenizer_or_adapter_id="mergeable_sketch",
+            )
+        resolved = resolve_program_spec_alias(family)
+        return resolved
+
+    def _write_program_routing_metadata(
+        self,
+        *,
+        metadata: Dict[str, Any],
+        requested_backends: List[str],
+        primary_backend: str,
+        backend_scores: Dict[str, float],
+        selected_backend: Optional[str],
+        selected_score: Optional[float],
+        effective_selected_score: Optional[float] = None,
+        fallback_used: bool,
+        ensemble_diag: Optional[Dict[str, Any]] = None,
+        ensemble_weights: Optional[Dict[str, float]] = None,
+    ) -> None:
+        metadata["program_families_requested"] = list(requested_backends)
+        metadata["primary_program_family"] = str(primary_backend)
+        metadata["program_family_scores"] = {
+            backend: float(score) for backend, score in backend_scores.items()
+        }
+        metadata["selected_program_family"] = selected_backend
+        metadata["selected_program_score_raw"] = (
+            None if selected_score is None else float(selected_score)
+        )
+        metadata["selected_program_score"] = (
+            None if effective_selected_score is None else float(effective_selected_score)
+        )
+        metadata["program_fallback_used"] = bool(fallback_used)
+        selected_spec = self._program_spec_for_family(str(selected_backend or ""))
+        if selected_spec is not None:
+            metadata["selected_program_spec"] = selected_spec.to_dict()
+            metadata["space_kind"] = selected_spec.space.space_kind
+            metadata["g_learner_kind"] = selected_spec.g_learner.learner_kind
+            metadata["f_learner_kind"] = selected_spec.f_learner.learner_kind
+            metadata["program_family"] = selected_spec.program_family
+            metadata["feature_dim"] = int(selected_spec.feature_dim)
+            metadata["operator_width"] = (
+                None if selected_spec.operator_width is None else int(selected_spec.operator_width)
+            )
+            metadata["tokenizer_or_adapter_id"] = selected_spec.space.tokenizer_or_adapter_id
+        if ensemble_weights:
+            metadata["program_ensemble_weights"] = {
+                backend: float(weight) for backend, weight in ensemble_weights.items()
+            }
+        if ensemble_diag:
+            metadata["program_ensemble_mode"] = str(ensemble_diag.get("mode", "static"))
+            metadata["program_ensemble_diagnostics"] = dict(ensemble_diag)
+
     @property
     def last_stats(self) -> Optional[BatchStats]:
         """Latest BatchStats snapshot from the most recent run (best-effort)."""
@@ -1599,15 +1733,13 @@ class BatchedDocPipeline:
             ctreepo_cfg.get("model_path") if isinstance(ctreepo_cfg, dict) else None
         )
         if model_path:
-            cfg = CTreePOConfig(
-                sketch_dim=ctreepo_cfg.get("sketch_dim", 32),
-                hidden_dim=ctreepo_cfg.get("hidden_dim", 256),
-                merge_type=ctreepo_cfg.get("merge_type", "gated"),
-                head_names=tuple(ctreepo_cfg.get("head_names", ["rile"])),
+            from src.tree.ctreepo_model import load_ctreepo_model_checkpoint
+
+            model, cfg = load_ctreepo_model_checkpoint(
+                model_path,
+                config_overrides=ctreepo_cfg,
+                map_location="cpu",
             )
-            model = CTreePOModel(cfg)
-            model.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
-            model.eval()
             self._unified_ctreepo_model = model
             self._unified_ctreepo_config = cfg
         else:
@@ -1682,17 +1814,33 @@ class BatchedDocPipeline:
         if self._unified_ctreepo_model is None:
             return
 
-        from src.tree.embedding_tree import forward_ctreepo
+        from src.tree.embedding_tree import forward_ctreepo_batch
 
+        # Collect valid trees for batched forward pass.
+        valid_entries: list[tuple[int, list[Any]]] = []
         for idx, nodes in unified_trees.items():
             if idx >= len(build_results):
                 continue
-            build_result = build_results[idx]
-            if build_result.errors:
+            if build_results[idx].errors:
                 continue
+            valid_entries.append((idx, nodes))
+
+        # Batched forward pass across all valid trees at once.
+        if valid_entries:
+            try:
+                forward_ctreepo_batch(
+                    self._unified_ctreepo_model,
+                    [nodes for _, nodes in valid_entries],
+                )
+            except Exception as e:
+                logger.debug("Batched CTreePO forward failed: %s", e)
+                return
+
+        for idx, nodes in valid_entries:
+            build_result = build_results[idx]
 
             try:
-                forward_ctreepo(self._unified_ctreepo_model, nodes)
+                pass  # Forward pass already done above in batch
 
                 # Populate sketch scores and confidence
                 try:
@@ -1839,7 +1987,7 @@ class BatchedDocPipeline:
         Returns:
             DocumentResult with unified metadata.
         """
-        from src.tree.embedding_tree import build_unified_tree, forward_ctreepo
+        from src.tree.embedding_tree import build_unified_tree, forward_ctreepo  # noqa: F811
         from src.tree.builder import TreeBuilder, BuildConfig
 
         doc_id = sample.doc_id
@@ -1895,9 +2043,13 @@ class BatchedDocPipeline:
             # --- 4. LLM summarisation on shared topology ---
             build_config = BuildConfig(
                 max_chunk_chars=self.config.max_chunk_chars,
+                max_chunk_tokens=self.config.max_chunk_tokens,
+                chunk_token_encoding=self.config.chunk_token_encoding,
                 fail_on_degenerate_summary=self.config.fail_on_degenerate_summary,
                 max_degenerate_leaf_fallbacks=self.config.max_degenerate_leaf_fallbacks,
                 max_degenerate_merge_fallbacks=self.config.max_degenerate_merge_fallbacks,
+                runtime_mode=self.config.runtime_mode,
+                batch_plan_cache_name="batched_pipeline_unified_tree",
             )
             builder = TreeBuilder(strategy=strategy, config=build_config)
             await builder.summarize_unified_nodes(nodes, rubric=self.config.rubric)
@@ -1981,12 +2133,16 @@ class BatchedDocPipeline:
                 requested_backends=requested_backends,
                 primary_backend=primary_backend,
             )
+            llm_family = str(_LLM_TEXT_PROGRAM_SPEC.program_family)
+            embedding_family = str(_SEMANTIC_EMBEDDING_PROGRAM_SPEC.program_family)
+            ctreepo_family = str(_CTREEPO_PROGRAM_SPEC.program_family)
+            mergeable_family = str(_MERGEABLE_SKETCH_PROGRAM_SPEC.program_family)
             backend_scores: Dict[str, float] = {}
             llm_score = _safe_float(result.estimated_score)
             if llm_score is not None:
-                backend_scores["llm"] = float(llm_score)
+                backend_scores[llm_family] = float(llm_score)
 
-            if "ctreepo" in requested_backend_set:
+            if ctreepo_family in requested_backend_set:
                 ctreepo_rile = _safe_float(result.metadata.get("ctreepo_rile"))
                 if (
                     ctreepo_rile is None
@@ -2000,11 +2156,11 @@ class BatchedDocPipeline:
                         result.metadata["ctreepo_error"] = str(exc)
                         logger.debug("CTreePO prediction failed for %s: %s", doc_id, exc)
                 if ctreepo_rile is not None:
-                    backend_scores["ctreepo"] = float(ctreepo_rile)
+                    backend_scores[ctreepo_family] = float(ctreepo_rile)
                     result.metadata["ctreepo_rile"] = round(float(ctreepo_rile), 4)
 
             if (
-                "mergeable_sketch" in requested_backend_set
+                mergeable_family in requested_backend_set
                 and self._is_representation_backend_configured("mergeable_sketch")
             ):
                 try:
@@ -2020,38 +2176,35 @@ class BatchedDocPipeline:
                         result.metadata["mergeable_sketch_window_count"] = int(window_count)
                     pred_rile_f = _safe_float(pred_rile)
                     if pred_rile_f is not None:
-                        backend_scores["mergeable_sketch"] = float(pred_rile_f)
+                        backend_scores[mergeable_family] = float(pred_rile_f)
                         result.metadata["mergeable_sketch_rile"] = round(float(pred_rile_f), 4)
                 except Exception as exc:
                     result.metadata["mergeable_sketch_error"] = str(exc)
                     logger.debug("Mergeable sketch prediction failed for %s: %s", doc_id, exc)
 
-            if "embedding" in requested_backend_set:
+            if embedding_family in requested_backend_set:
                 embedding_score, embedding_support, embedding_source = self._score_from_embedding_sources(
                     payload=semantic_payload,
                     metadata=result.metadata,
                 )
-                result.metadata["embedding_neighbor_support"] = int(embedding_support)
-                result.metadata["embedding_score_source"] = str(embedding_source)
+                result.metadata["semantic_program_support"] = int(embedding_support)
+                result.metadata["semantic_program_source"] = str(embedding_source)
                 if embedding_score is not None:
-                    backend_scores["embedding"] = float(embedding_score)
+                    backend_scores[embedding_family] = float(embedding_score)
                     result.metadata["embedding_retrieval_score"] = round(float(embedding_score), 4)
 
+            ensemble_diag: Dict[str, Any] | None = None
+            ensemble_weights: Dict[str, float] | None = None
             if "ensemble" in requested_backend_set:
-                weights, ensemble_diag = self._resolve_ensemble_weights(
+                ensemble_weights, ensemble_diag = self._resolve_ensemble_weights(
                     backend_scores,
                     metadata=result.metadata,
                 )
-                if weights:
+                if ensemble_weights:
                     ensemble_score = 0.0
-                    for backend, weight in weights.items():
+                    for backend, weight in ensemble_weights.items():
                         ensemble_score += float(weight) * float(backend_scores[backend])
                     backend_scores["ensemble"] = float(ensemble_score)
-                    result.metadata["representation_ensemble_weights"] = {
-                        backend: float(weight) for backend, weight in weights.items()
-                    }
-                    result.metadata["representation_ensemble_mode"] = str(ensemble_diag.get("mode", "static"))
-                    result.metadata["representation_ensemble_diagnostics"] = ensemble_diag
 
             selected_backend, selected_score, fallback_used = self._select_representation_score(
                 backend_scores=backend_scores,
@@ -2062,21 +2215,20 @@ class BatchedDocPipeline:
                 selected_score=selected_score,
                 metadata=result.metadata,
             )
-            result.metadata["representation_requested_backends"] = list(requested_backends)
-            result.metadata["representation_primary_backend"] = str(primary_backend)
-            result.metadata["representation_backend_scores"] = {
-                backend: float(score) for backend, score in backend_scores.items()
-            }
-            result.metadata["representation_selected_backend"] = selected_backend
-            result.metadata["representation_selected_score_raw"] = (
-                None if selected_score is None else float(selected_score)
+            self._write_program_routing_metadata(
+                metadata=result.metadata,
+                requested_backends=requested_backends,
+                primary_backend=primary_backend,
+                backend_scores=backend_scores,
+                selected_backend=selected_backend,
+                selected_score=selected_score,
+                effective_selected_score=effective_selected_score,
+                fallback_used=fallback_used,
+                ensemble_diag=ensemble_diag,
+                ensemble_weights=ensemble_weights,
             )
-            result.metadata["representation_selected_score"] = (
-                None if effective_selected_score is None else float(effective_selected_score)
-            )
-            result.metadata["representation_fallback_used"] = bool(fallback_used)
             if default_score_applied and selected_backend is None:
-                result.metadata["representation_selected_backend"] = "missing_score_default"
+                result.metadata["selected_program_family"] = "missing_score_default"
             result.estimated_score = effective_selected_score
 
         except Exception as e:
@@ -2216,9 +2368,9 @@ class BatchedDocPipeline:
             requested_backends=requested_backends,
             primary_backend=primary_backend,
         )
-        llm_score_requested = "llm" in requested_backend_set
+        llm_score_requested = str(_LLM_TEXT_PROGRAM_SPEC.program_family) in requested_backend_set
         logger.info(
-            "Representation routing: backends=%s primary=%s fallback=%s llm_text_path_enabled=%s",
+            "Program routing: families=%s primary=%s fallback=%s llm_text_path_enabled=%s",
             ",".join(requested_backends),
             primary_backend,
             bool(self.config.fallback_to_available_backend),
@@ -2418,12 +2570,16 @@ class BatchedDocPipeline:
                 )
             config = BuildConfig(
                 max_chunk_chars=self.config.max_chunk_chars,
+                max_chunk_tokens=self.config.max_chunk_tokens,
+                chunk_token_encoding=self.config.chunk_token_encoding,
                 max_concurrent_requests=self.config.max_concurrent_requests,
                 task_cancel_timeout=self.config.concurrency.task_cancel_timeout,
                 document_retry_delay=self.config.concurrency.document_retry_delay,
                 fail_on_degenerate_summary=self.config.fail_on_degenerate_summary,
                 max_degenerate_leaf_fallbacks=self.config.max_degenerate_leaf_fallbacks,
                 max_degenerate_merge_fallbacks=self.config.max_degenerate_merge_fallbacks,
+                runtime_mode=self.config.runtime_mode,
+                batch_plan_cache_name="batched_pipeline_global",
             )
             orchestrator = BatchTreeOrchestrator(strategy=strategy, config=config)
 
@@ -2461,6 +2617,8 @@ class BatchedDocPipeline:
             score_response_errors: Dict[int, str] = {}
             score_parse_failures: Dict[int, str] = {}
             active_llm_score_client = client if client is not None else llm_scoring_client
+            score_runtime_telemetry = BatchTelemetry(runtime_mode=self.config.runtime_mode)
+            score_plan_cache = get_named_plan_cache("batched_pipeline_scores")
 
             if llm_score_requested and active_llm_score_client is None:
                 logger.info(
@@ -2476,7 +2634,7 @@ class BatchedDocPipeline:
             ):
                 # Phase 2: Score ALL documents' summaries together
                 logger.info(f"Phase 4: Scoring {len(build_results)} documents...")
-                score_requests = []  # [(result_idx, request)]
+                score_requests = []  # [(result_idx, request, summary_text)]
                 score_skips: List[Dict[str, str]] = []
 
                 for result_idx, build_result in enumerate(build_results):
@@ -2526,10 +2684,9 @@ class BatchedDocPipeline:
                         document_id=doc_id,
                         request_type="score",
                     )
-                    score_requests.append((result_idx, request))
-                    await active_llm_score_client.submit(request)
+                    score_requests.append((result_idx, request, summary_text))
 
-                logger.info(f"  Submitted {len(score_requests)} score requests...")
+                logger.info(f"  Prepared {len(score_requests)} score requests...")
                 if score_skips:
                     reason_counts = dict(Counter(item["reason"] for item in score_skips))
                     preview = ", ".join(
@@ -2584,11 +2741,68 @@ class BatchedDocPipeline:
                         score_parse_failures[result_idx] = str(last_parse_preview)
                     return None
 
+                async def _execute_score_requests_unified() -> None:
+                    work_items: List[WorkItem] = []
+                    request_lookup: Dict[str, Tuple[int, BatchRequest]] = {}
+                    for result_idx, request, summary_text in score_requests:
+                        item_id = f"score:{result_idx}"
+                        request_lookup[item_id] = (result_idx, request)
+                        estimated_tokens = max(1, len(str(summary_text or "")) // 4)
+                        work_items.append(
+                            WorkItem(
+                                item_id=item_id,
+                                backend_family="judge_score",
+                                op_kind="score",
+                                topology_signature="llm_score",
+                                supervision_mask="score",
+                                doc_id=str(request.document_id or ""),
+                                payload=result_idx,
+                                estimated_tokens=estimated_tokens,
+                                estimated_nodes=1,
+                                estimated_merge_ops=0,
+                                padding_multiple=1,
+                                padding_length=estimated_tokens,
+                            )
+                        )
+                    batches = plan_work_batches(
+                        work_items,
+                        max_docs=max(1, int(self.config.max_concurrent_requests)),
+                        max_total_tokens=0,
+                        max_total_nodes=0,
+                        max_total_merge_ops=0,
+                        plan_cache=score_plan_cache,
+                    )
+                    for batch in batches:
+                        batch_records = [request_lookup[item.item_id] for item in batch.items]
+                        for _result_idx, request in batch_records:
+                            await active_llm_score_client.submit(request)
+                        parsed_scores = await asyncio.gather(
+                            *(
+                                _await_score_with_retries(result_idx, request)
+                                for result_idx, request in batch_records
+                            )
+                        )
+                        for (result_idx, _request), parsed in zip(batch_records, parsed_scores):
+                            if parsed is not None:
+                                scores[result_idx] = parsed
+                        score_runtime_telemetry.add_batch(
+                            batch,
+                            token_budget=0,
+                            node_budget=0,
+                            max_docs_budget=max(1, int(self.config.max_concurrent_requests)),
+                            fallback_reason="llm_score_batch",
+                        )
+
                 # Await all scores
-                for result_idx, request in score_requests:
-                    parsed = await _await_score_with_retries(result_idx, request)
-                    if parsed is not None:
-                        scores[result_idx] = parsed
+                if self.config.runtime_mode == "unified_v2":
+                    await _execute_score_requests_unified()
+                else:
+                    for result_idx, request, _summary_text in score_requests:
+                        await active_llm_score_client.submit(request)
+                    for result_idx, request, _summary_text in score_requests:
+                        parsed = await _await_score_with_retries(result_idx, request)
+                        if parsed is not None:
+                            scores[result_idx] = parsed
 
                 if score_response_errors or score_parse_failures:
                     logger.warning(
@@ -2706,12 +2920,16 @@ class BatchedDocPipeline:
                     metadata["semantic_memory_neighbor_count"] = int(sem_prompt.get("neighbor_count", 0) or 0)
                     metadata["semantic_memory_retrieval_ms"] = float(sem_prompt.get("retrieval_ms", 0.0) or 0.0)
 
+                llm_family = str(_LLM_TEXT_PROGRAM_SPEC.program_family)
+                embedding_family = str(_SEMANTIC_EMBEDDING_PROGRAM_SPEC.program_family)
+                ctreepo_family = str(_CTREEPO_PROGRAM_SPEC.program_family)
+                mergeable_family = str(_MERGEABLE_SKETCH_PROGRAM_SPEC.program_family)
                 backend_scores: Dict[str, float] = {}
                 llm_score = _safe_float(scores.get(result_idx))
                 if llm_score is not None:
-                    backend_scores["llm"] = float(llm_score)
+                    backend_scores[llm_family] = float(llm_score)
 
-                if "ctreepo" in requested_backend_set:
+                if ctreepo_family in requested_backend_set:
                     ctreepo_rile = _safe_float(metadata.get("ctreepo_rile"))
                     if (
                         ctreepo_rile is None
@@ -2726,11 +2944,11 @@ class BatchedDocPipeline:
                             metadata["ctreepo_error"] = str(exc)
                             logger.debug("CTreePO prediction failed for %s: %s", doc_id, exc)
                     if ctreepo_rile is not None:
-                        backend_scores["ctreepo"] = float(ctreepo_rile)
+                        backend_scores[ctreepo_family] = float(ctreepo_rile)
                         metadata["ctreepo_rile"] = round(float(ctreepo_rile), 4)
 
                 if (
-                    "mergeable_sketch" in requested_backend_set
+                    mergeable_family in requested_backend_set
                     and sample is not None
                     and self._is_representation_backend_configured("mergeable_sketch")
                 ):
@@ -2747,13 +2965,13 @@ class BatchedDocPipeline:
                             metadata["mergeable_sketch_window_count"] = int(window_count)
                         pred_rile_f = _safe_float(pred_rile)
                         if pred_rile_f is not None:
-                            backend_scores["mergeable_sketch"] = float(pred_rile_f)
+                            backend_scores[mergeable_family] = float(pred_rile_f)
                             metadata["mergeable_sketch_rile"] = round(float(pred_rile_f), 4)
                     except Exception as exc:
                         metadata["mergeable_sketch_error"] = str(exc)
                         logger.debug("Mergeable sketch prediction failed for %s: %s", doc_id, exc)
 
-                if "embedding" in requested_backend_set:
+                if embedding_family in requested_backend_set:
                     sem_payload = self._semantic_payload_by_doc_id.get(doc_id)
                     if (
                         sem_payload is None
@@ -2773,27 +2991,24 @@ class BatchedDocPipeline:
                         payload=sem_payload,
                         metadata=metadata,
                     )
-                    metadata["embedding_neighbor_support"] = int(embedding_support)
-                    metadata["embedding_score_source"] = str(embedding_source)
+                    metadata["semantic_program_support"] = int(embedding_support)
+                    metadata["semantic_program_source"] = str(embedding_source)
                     if embedding_score is not None:
-                        backend_scores["embedding"] = float(embedding_score)
+                        backend_scores[embedding_family] = float(embedding_score)
                         metadata["embedding_retrieval_score"] = round(float(embedding_score), 4)
 
+                ensemble_diag: Dict[str, Any] | None = None
+                ensemble_weights: Dict[str, float] | None = None
                 if "ensemble" in requested_backend_set:
-                    weights, ensemble_diag = self._resolve_ensemble_weights(
+                    ensemble_weights, ensemble_diag = self._resolve_ensemble_weights(
                         backend_scores,
                         metadata=metadata,
                     )
-                    if weights:
+                    if ensemble_weights:
                         ensemble_score = 0.0
-                        for backend, weight in weights.items():
+                        for backend, weight in ensemble_weights.items():
                             ensemble_score += float(weight) * float(backend_scores[backend])
                         backend_scores["ensemble"] = float(ensemble_score)
-                        metadata["representation_ensemble_weights"] = {
-                            backend: float(weight) for backend, weight in weights.items()
-                        }
-                        metadata["representation_ensemble_mode"] = str(ensemble_diag.get("mode", "static"))
-                        metadata["representation_ensemble_diagnostics"] = ensemble_diag
 
                 score_response_error = score_response_errors.get(result_idx)
                 if score_response_error:
@@ -2812,24 +3027,23 @@ class BatchedDocPipeline:
                     selected_score=selected_score,
                     metadata=metadata,
                 )
-                metadata["representation_requested_backends"] = list(requested_backends)
-                metadata["representation_primary_backend"] = str(primary_backend)
-                metadata["representation_backend_scores"] = {
-                    backend: float(score) for backend, score in backend_scores.items()
-                }
-                metadata["representation_selected_backend"] = selected_backend
-                metadata["representation_selected_score_raw"] = (
-                    None if selected_score is None else float(selected_score)
+                self._write_program_routing_metadata(
+                    metadata=metadata,
+                    requested_backends=requested_backends,
+                    primary_backend=primary_backend,
+                    backend_scores=backend_scores,
+                    selected_backend=selected_backend,
+                    selected_score=selected_score,
+                    effective_selected_score=effective_selected_score,
+                    fallback_used=fallback_used,
+                    ensemble_diag=ensemble_diag,
+                    ensemble_weights=ensemble_weights,
                 )
-                metadata["representation_selected_score"] = (
-                    None if effective_selected_score is None else float(effective_selected_score)
-                )
-                metadata["representation_fallback_used"] = bool(fallback_used)
                 score_skip_reason = score_request_skip_reasons.get(result_idx)
                 if score_skip_reason:
                     metadata["llm_score_skipped_reason"] = str(score_skip_reason)
                 if default_score_applied and selected_backend is None:
-                    metadata["representation_selected_backend"] = "missing_score_default"
+                    metadata["selected_program_family"] = "missing_score_default"
 
                 result_error = build_result.errors[0] if build_result.errors else None
                 if (
@@ -2877,6 +3091,13 @@ class BatchedDocPipeline:
                     logger.info(f"LLM stats: {client.stats}")
                 self._last_stats = client.stats
                 self._last_diagnostics = getattr(client, "diagnostics", None)
+            if self._last_diagnostics is None or not isinstance(self._last_diagnostics, dict):
+                self._last_diagnostics = {}
+            self._last_diagnostics["runtime_mode"] = str(self.config.runtime_mode)
+            self._last_diagnostics["tree_build"] = dict(
+                getattr(orchestrator, "_build_stats", {}) or {}
+            )
+            self._last_diagnostics["score_runtime"] = score_runtime_telemetry.as_dict()
 
             self._results.extend(results)
             if bool(getattr(self.config.semantic_memory, "enabled", False)):

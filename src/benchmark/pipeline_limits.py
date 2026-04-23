@@ -32,8 +32,8 @@ import aiohttp
 from src.core.batch_processor import AsyncBatchLLMClient, BatchRequest, MultiServerBatchClient
 from src.core.model_detection import detect_model_async
 from src.core.prompting import parse_numeric_score
-from src.training.preference.genrm import is_genrm_error
-from src.training.preference.genrm_batch import AsyncBatchGenRMClient, GenRMComparisonRequest
+from src.training.judges.genrm import is_genrm_error
+from src.training.judges.genrm_batch import AsyncBatchGenRMClient, GenRMComparisonRequest
 
 logger = logging.getLogger(__name__)
 

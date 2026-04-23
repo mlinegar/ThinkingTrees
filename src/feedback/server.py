@@ -9,6 +9,8 @@ Endpoints:
     GET  /feedback/{request_id}     -- single request with context
     POST /feedback/{request_id}     -- submit feedback response
     POST /feedback/batch            -- submit multiple responses
+    GET  /feedback/export/supervision       -- completed items as canonical supervision
+    GET  /feedback/export/binary_projection -- completed items as binary optimizer view
     GET  /feedback/stats            -- queue statistics
     GET  /health                    -- health check
 
@@ -213,6 +215,28 @@ def create_app(store: Optional[Any] = None):
         """Get feedback queue statistics."""
         store = get_store()
         return StatsResponse(**store.get_statistics())
+
+    @app.get("/feedback/export/supervision")
+    async def export_supervision():
+        """Export completed feedback as canonical supervision records."""
+        store = get_store()
+        dataset = store.to_supervision_dataset()
+        return {
+            "summary": dataset.summary(),
+            "response_judgments": [
+                judgment.to_dict() for judgment in dataset.response_judgments
+            ],
+            "comparative_judgments": [
+                record.to_dict() for record in dataset.comparative_judgments
+            ],
+        }
+
+    @app.get("/feedback/export/binary_projection")
+    async def export_binary_projection(projection: str = "adjacent"):
+        """Export completed feedback as the binary optimizer projection."""
+        store = get_store()
+        dataset = store.to_binary_projection_dataset(projection=projection)
+        return dataset.to_dict()
 
     return app
 

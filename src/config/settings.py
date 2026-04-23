@@ -8,6 +8,8 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+from src.core.engines import normalize_engine_name, normalize_fallback_engine_name
+
 
 # Default server URLs
 DEFAULT_TASK_MODEL_URL = "http://localhost:8000/v1"
@@ -22,6 +24,7 @@ DEFAULT_INFERENCE_BACKEND: Dict[str, Any] = {
     "routing_policy": "affinity_load_aware",
     "metrics_poll_seconds": 2.0,
     "sglang_venv_path": "/home/mlinegar/sglang-env",
+    "vllm_venv_path": "/home/mlinegar/vllm-env",
 }
 
 
@@ -184,23 +187,6 @@ def get_server_urls(settings: Optional[Dict[str, Any]] = None) -> Dict[str, str]
         "embedding_model": get_embedding_model(settings),
     }
 
-
-def _normalize_backend_name(raw: Any, *, default: str = "vllm") -> str:
-    rendered = str(raw or "").strip().lower()
-    if rendered in {"vllm", "sglang"}:
-        return rendered
-    return default
-
-
-def _normalize_fallback_backend_name(raw: Any, *, default: str = "vllm") -> str:
-    rendered = str(raw or "").strip().lower()
-    if rendered in {"none", "off", "disabled"}:
-        return "none"
-    if rendered in {"vllm", "sglang"}:
-        return rendered
-    return default
-
-
 def get_inference_backend_config(settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Return normalized inference backend settings.
 
@@ -225,6 +211,7 @@ def get_inference_backend_config(settings: Optional[Dict[str, Any]] = None) -> D
     env_routing_policy = os.environ.get("TT_ROUTING_POLICY")
     env_metrics_poll = os.environ.get("TT_METRICS_POLL_SECONDS")
     env_sglang_venv = os.environ.get("TT_SGLANG_VENV_PATH")
+    env_vllm_venv = os.environ.get("TT_VLLM_VENV_PATH")
 
     if env_task_backend:
         backend_cfg["task_backend"] = env_task_backend
@@ -238,6 +225,8 @@ def get_inference_backend_config(settings: Optional[Dict[str, Any]] = None) -> D
         backend_cfg["metrics_poll_seconds"] = env_metrics_poll
     if env_sglang_venv:
         backend_cfg["sglang_venv_path"] = env_sglang_venv
+    if env_vllm_venv:
+        backend_cfg["vllm_venv_path"] = env_vllm_venv
 
     routing_policy = str(backend_cfg.get("routing_policy", "affinity_load_aware") or "").strip().lower()
     if routing_policy not in {"round_robin", "document_affinity", "affinity_load_aware"}:
@@ -250,15 +239,16 @@ def get_inference_backend_config(settings: Optional[Dict[str, Any]] = None) -> D
     metrics_poll_seconds = max(0.25, metrics_poll_seconds)
 
     return {
-        "task_backend": _normalize_backend_name(backend_cfg.get("task_backend"), default="vllm"),
-        "genrm_backend": _normalize_backend_name(backend_cfg.get("genrm_backend"), default="vllm"),
-        "fallback_backend": _normalize_fallback_backend_name(
+        "task_backend": normalize_engine_name(backend_cfg.get("task_backend"), default="vllm"),
+        "genrm_backend": normalize_engine_name(backend_cfg.get("genrm_backend"), default="vllm"),
+        "fallback_backend": normalize_fallback_engine_name(
             backend_cfg.get("fallback_backend"),
             default="vllm",
         ),
         "routing_policy": routing_policy,
         "metrics_poll_seconds": metrics_poll_seconds,
         "sglang_venv_path": str(backend_cfg.get("sglang_venv_path") or DEFAULT_INFERENCE_BACKEND["sglang_venv_path"]),
+        "vllm_venv_path": str(backend_cfg.get("vllm_venv_path") or DEFAULT_INFERENCE_BACKEND["vllm_venv_path"]),
     }
 
 

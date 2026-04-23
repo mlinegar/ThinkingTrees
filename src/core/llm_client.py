@@ -10,6 +10,8 @@ Provides a unified OpenAI-compatible client that works with:
 Designed for simplicity - just point at a server and go.
 """
 
+from __future__ import annotations
+
 import os
 import time
 import random
@@ -22,15 +24,49 @@ from dataclasses import dataclass, field
 from typing import Optional, Callable, Dict, List, Any
 from enum import Enum
 
+from src.core.engines import (
+    EngineRegistry,
+    EngineSurface,
+    EngineType,
+    resolve_engine_base_url,
+    resolve_engine_for_usage,
+)
+
 logger = logging.getLogger(__name__)
 
 
 class ServerType(Enum):
-    """Server type hints for common configurations."""
-    VLLM = "vllm"
-    SGLANG = "sglang"
-    OPENAI = "openai"
-    CUSTOM = "custom"
+    """Backward-compatible server naming wrapper around `EngineType`."""
+
+    VLLM = EngineType.VLLM.value
+    SGLANG = EngineType.SGLANG.value
+    OPENAI = EngineType.OPENAI.value
+    CUSTOM = EngineType.CUSTOM_HTTP.value
+
+    @classmethod
+    def from_engine_type(cls, engine_type: EngineType) -> "ServerType":
+        mapping = {
+            EngineType.VLLM: cls.VLLM,
+            EngineType.SGLANG: cls.SGLANG,
+            EngineType.OPENAI: cls.OPENAI,
+            EngineType.CUSTOM_HTTP: cls.CUSTOM,
+        }
+        if engine_type not in mapping:
+            raise ValueError(f"Engine '{engine_type.value}' does not have a ServerType compatibility alias.")
+        return mapping[engine_type]
+
+    @classmethod
+    def normalize(cls, value: str | EngineType | "ServerType") -> "ServerType":
+        if isinstance(value, cls):
+            return value
+        return cls.from_engine_type(EngineType.normalize(value))
+
+    def to_engine_type(self) -> EngineType:
+        return EngineType.normalize(self.value)
+
+    @property
+    def default_port(self) -> Optional[int]:
+        return self.to_engine_type().default_port
 
 
 @dataclass
@@ -127,6 +163,59 @@ class LLMConfig:
         model = os.getenv('LLM_MODEL', 'default')
         api_key = os.getenv('LLM_API_KEY') or os.getenv('OPENAI_API_KEY', 'EMPTY')
         return cls(base_url=base_url, model=model, api_key=api_key)
+
+    @classmethod
+    def from_engine(
+        cls,
+        engine: str | EngineType = EngineType.VLLM,
+        *,
+        model: str = "default",
+        host: str = "localhost",
+        port: Optional[int] = None,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        **kwargs
+    ) -> 'LLMConfig':
+        """Create a config from a generic engine selector."""
+        engine_type = EngineType.normalize(engine)
+        if engine_type is EngineType.OPENAI:
+            return cls.openai(model=model, api_key=api_key, **kwargs)
+        if engine_type is EngineType.CUSTOM_HTTP:
+            if not base_url:
+                raise ValueError("LLMConfig.from_engine(..., engine='custom_http') requires base_url.")
+            return cls(
+                base_url=base_url,
+                model=model,
+                api_key=api_key or "EMPTY",
+                server_type=ServerType.CUSTOM,
+                **kwargs,
+            )
+        resolve_engine_for_usage(
+            engine_type,
+            surface=EngineSurface.CHAT_OPENAI,
+            usage="LLMConfig chat endpoint resolution",
+        )
+        resolved_base_url = base_url or resolve_engine_base_url(
+            engine_type,
+            surface=EngineSurface.CHAT_OPENAI,
+            role="task",
+            host=host,
+            port=port,
+        )
+        if not resolved_base_url:
+            raise ValueError(f"Could not resolve chat endpoint for engine '{engine_type.value}'.")
+        return cls(
+            base_url=resolved_base_url,
+            model=model,
+            api_key=api_key or "EMPTY",
+            server_type=ServerType.from_engine_type(engine_type),
+            **kwargs,
+        )
+
+    @property
+    def engine_type(self) -> EngineType:
+        """Primary engine-first accessor retained alongside `server_type`."""
+        return self.server_type.to_engine_type()
 
 
 @dataclass
@@ -497,3 +586,27 @@ def sglang_client(model: str = "default", host: str = "localhost", port: int = 3
 def openai_client(model: str = "gpt-4o", api_key: Optional[str] = None, **kwargs) -> LLMClient:
     """Create client for OpenAI API."""
     return LLMClient(LLMConfig.openai(model=model, api_key=api_key, **kwargs))
+
+
+def engine_client(
+    engine: str | ServerType = ServerType.VLLM,
+    *,
+    model: str = "default",
+    host: str = "localhost",
+    port: Optional[int] = None,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+    **kwargs,
+) -> LLMClient:
+    """Create an LLM client from a generic engine selector."""
+    return LLMClient(
+        LLMConfig.from_engine(
+            engine,
+            model=model,
+            host=host,
+            port=port,
+            base_url=base_url,
+            api_key=api_key,
+            **kwargs,
+        )
+    )

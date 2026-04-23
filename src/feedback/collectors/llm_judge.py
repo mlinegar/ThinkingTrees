@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 
 from src.feedback.collector import register_collector
 from src.feedback.types import FeedbackRequest, FeedbackResponse
+from src.core.async_utils import to_thread
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ class LLMJudgeCollector:
 
     Usage:
         # With PairwiseJudge
-        from src.training.preference.collector import PairwiseJudge
+        from src.training.supervision import PairwiseJudge
         collector = LLMJudgeCollector(judge=PairwiseJudge())
 
         # With GenRM
@@ -65,7 +66,7 @@ class LLMJudgeCollector:
     def _ensure_judge(self) -> Any:
         """Lazily create a PairwiseJudge if no judge was provided."""
         if self.judge is None:
-            from src.training.preference.collector import PairwiseJudge
+            from src.training.supervision import PairwiseJudge
             self.judge = PairwiseJudge(use_cot=self.use_cot)
             self.judge_type = "pairwise"
         return self.judge
@@ -158,6 +159,23 @@ class LLMJudgeCollector:
         if score_b is not None:
             scores["score_b"] = float(score_b)
 
+        extra: Dict[str, Any] = {}
+        if self.judge_type == "genrm":
+            try:
+                extra["comparison_signal_value"] = float(getattr(result, "ranking_score"))
+            except (AttributeError, TypeError, ValueError):
+                pass
+            extra.update({
+                "comparison_signal_name": "genrm_ranking_score",
+                "comparison_signal_min": 1.0,
+                "comparison_signal_max": 6.0,
+                "response_signal_name": "genrm_helpfulness",
+                "response_signal_min": 1.0,
+                "response_signal_max": 5.0,
+            })
+        elif score_a is not None or score_b is not None:
+            extra["response_signal_name"] = "judge_score_estimate"
+
         return FeedbackResponse(
             request_id=request.request_id,
             preferred=preferred,
@@ -167,6 +185,7 @@ class LLMJudgeCollector:
             confidence=confidence,
             score_estimate_a=score_a,
             score_estimate_b=score_b,
+            extra=extra,
             source="llm_judge",
             judge_model=self.model,
             raw_result=raw_result,
@@ -241,7 +260,4 @@ class LLMJudgeCollector:
         request: FeedbackRequest,
         **kwargs: Any,
     ) -> FeedbackResponse:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, lambda: self.collect(request, **kwargs)
-        )
+        return await to_thread(self.collect, request, **kwargs)

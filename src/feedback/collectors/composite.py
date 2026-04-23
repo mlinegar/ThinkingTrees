@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.feedback.collector import FeedbackCollector, register_collector
 from src.feedback.types import FeedbackRequest, FeedbackResponse
+from src.core.async_utils import to_thread
 
 logger = logging.getLogger(__name__)
 
@@ -167,10 +168,7 @@ class CompositeCollector:
                 if hasattr(collector, "collect_async"):
                     resp = await collector.collect_async(request, **kwargs)
                 else:
-                    loop = asyncio.get_event_loop()
-                    resp = await loop.run_in_executor(
-                        None, lambda: collector.collect(request, **kwargs)
-                    )
+                    resp = await to_thread(collector.collect, request, **kwargs)
                 return name, resp
             except Exception as e:
                 logger.warning("Collector '%s' failed (async): %s", name, e)

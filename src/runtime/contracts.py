@@ -5,7 +5,10 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from itertools import product
+from uuid import uuid4
 from typing import Any, Dict, Iterable, List, Mapping, Optional
+
+from src.core.engines import EngineSurface, EngineType
 
 
 def utc_now_iso() -> str:
@@ -82,6 +85,166 @@ class ModelResponse:
         # Avoid serializing large raw objects by default.
         d["raw"] = None
         return d
+
+
+@dataclass(frozen=True)
+class ChatInput:
+    """Typed chat input for the universal inference engine."""
+
+    messages: List[Dict[str, str]]
+    max_tokens: int = 256
+    temperature: float = 0.0
+    stop: List[str] = field(default_factory=list)
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class DiffusionInput:
+    """Typed diffusion input for `/generate`-style engines."""
+
+    texts: List[str]
+    sampling_params: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class SymbolicInput:
+    """Typed symbolic execution input for exact local engines."""
+
+    operation: str
+    inputs: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class TextOutput:
+    """Single text completion."""
+
+    text: str
+    finish_reason: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class TextListOutput:
+    """Ordered batch of generated texts."""
+
+    texts: List[str]
+    finish_reasons: List[Optional[str]] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class StructuredOutput:
+    """Structured symbolic or tool-style output."""
+
+    data: Any
+    schema_name: str = ""
+    artifacts: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "data": self.data,
+            "schema_name": self.schema_name,
+            "artifacts": dict(self.artifacts),
+        }
+
+
+InferenceInput = ChatInput | DiffusionInput | SymbolicInput
+InferenceOutput = TextOutput | TextListOutput | StructuredOutput
+
+
+@dataclass(frozen=True)
+class InferenceRequest:
+    """Universal typed inference request across chat, diffusion, and symbolic surfaces."""
+
+    surface: EngineSurface
+    input: InferenceInput
+    engine_options: Dict[str, Any] = field(default_factory=dict)
+    request_id: str = ""
+    document_id: str = ""
+    routing_key: str = ""
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def resolved_request_id(self) -> str:
+        return self.request_id or uuid4().hex
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "surface": self.surface.value,
+            "input": self.input.to_dict(),
+            "engine_options": dict(self.engine_options),
+            "request_id": self.request_id,
+            "document_id": self.document_id,
+            "routing_key": self.routing_key,
+            "priority": int(self.priority),
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass(frozen=True)
+class InferenceResponse:
+    """Universal inference response envelope."""
+
+    surface: EngineSurface
+    engine: EngineType
+    model_id: str = ""
+    output: Optional[InferenceOutput] = None
+    usage: Dict[str, Any] = field(default_factory=dict)
+    latency_ms: float = 0.0
+    telemetry: Dict[str, Any] = field(default_factory=dict)
+    artifacts: Dict[str, Any] = field(default_factory=dict)
+    raw: Any = None
+    request_id: str = ""
+
+    def to_model_response(self) -> ModelResponse:
+        if isinstance(self.output, TextOutput):
+            text = self.output.text
+        elif isinstance(self.output, TextListOutput):
+            text = self.output.texts[0] if self.output.texts else ""
+        else:
+            raise TypeError(
+                "InferenceResponse.to_model_response() requires a text output. "
+                f"Received {type(self.output).__name__}."
+            )
+        return ModelResponse(
+            text=text,
+            model_id=self.model_id,
+            prompt_tokens=int(self.usage.get("prompt_tokens", 0) or 0),
+            completion_tokens=int(self.usage.get("completion_tokens", 0) or 0),
+            latency_ms=float(self.latency_ms or 0.0),
+            raw=None,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        if hasattr(self.output, "to_dict"):
+            output = self.output.to_dict()
+        else:
+            output = self.output
+        return {
+            "surface": self.surface.value,
+            "engine": self.engine.value,
+            "model_id": self.model_id,
+            "output": output,
+            "usage": dict(self.usage),
+            "latency_ms": float(self.latency_ms),
+            "telemetry": dict(self.telemetry),
+            "artifacts": dict(self.artifacts),
+            "request_id": self.request_id,
+            "raw": None,
+        }
 
 
 @dataclass(frozen=True)

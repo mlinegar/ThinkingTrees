@@ -517,6 +517,9 @@ def chunk_for_ops_token_budget(
 def chunk_for_ops(
     text: str,
     max_chars: int = 2000,
+    max_tokens: Optional[int] = None,
+    token_encoding: str = "cl100k_base",
+    overlap_tokens: int = 0,
     strategy: str = "axis",
     adaptive_config: Optional[AdaptiveChunkingConfig] = None,
     feedback_signals: Optional[Sequence[ChunkFeedbackSignal]] = None,
@@ -529,6 +532,11 @@ def chunk_for_ops(
     Args:
         text: Text to chunk
         max_chars: Maximum characters per chunk
+        max_tokens: Optional maximum tokens per chunk. When provided, token
+            budget takes precedence and leaf boundaries are computed directly
+            from the tokenization in one pass.
+        token_encoding: Encoding used for token-budget chunking.
+        overlap_tokens: Optional overlap for token-budget chunking.
         strategy: Chunking strategy:
             - "axis" (default): fixed-width axis bins without sentence parsing
             - "sentence": sentence boundary segmentation
@@ -541,6 +549,14 @@ def chunk_for_ops(
     """
     if not text or not text.strip():
         return []
+
+    if max_tokens is not None:
+        return chunk_for_ops_token_budget(
+            text,
+            max_tokens=max_tokens,
+            encoding=str(token_encoding or "cl100k_base"),
+            overlap_tokens=overlap_tokens,
+        )
 
     axis_segment_chars = max(128, min(int(max_chars), 1200))
     segments = _segment_intervals(

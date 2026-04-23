@@ -5,6 +5,8 @@ This module provides throughput benchmarking utilities to compare
 generation speed between different vLLM model deployments.
 """
 
+from src.core.engines import build_server_manager
+
 from .throughput import (
     BackendCapabilities,
     ServerManager,
@@ -49,6 +51,7 @@ from .perf_suite import (
 __all__ = [
     "BackendCapabilities",
     "ServerManager",
+    "build_server_manager",
     "ThroughputResult",
     "ComparisonResult",
     "ThroughputBenchmark",

@@ -8,9 +8,12 @@ format which is more robust for parsing than the [[ ## field_name ## ]] format.
 Also provides a unified LM factory for creating vLLM-backed DSPy language models.
 """
 
+import atexit
 import logging
+import os
 import threading
 import time
+from pathlib import Path
 from typing import Optional, Any, Tuple, Sequence
 
 import dspy
@@ -23,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 
 _xml_adapter: Optional[XMLAdapter] = None
+_dspy_cache_runtime_signature: Optional[Tuple[bool, bool, str, int, int]] = None
+_dspy_cache_cleanup_registered = False
 
 
 class LoadBalancedLM(dspy.LM):
@@ -175,6 +180,120 @@ def get_xml_adapter() -> XMLAdapter:
     return _xml_adapter
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _close_cache_instance(cache_obj: Any) -> None:
+    if cache_obj is None:
+        return
+    try:
+        disk_cache = getattr(cache_obj, "disk_cache", None)
+        close_fn = getattr(disk_cache, "close", None)
+        if callable(close_fn):
+            close_fn()
+    except Exception as exc:
+        logger.debug("DSPy cache close failed: %s", exc)
+
+
+def close_dspy_cache(*, reset_memory_cache: bool = False) -> None:
+    """
+    Close any open DSPy cache handles.
+
+    This is intended for end-of-run cleanup in long-lived training processes.
+    A later `configure_dspy(...)` call will recreate the cache if needed.
+    """
+    global _dspy_cache_runtime_signature
+
+    cache_obj = getattr(dspy, "cache", None)
+    if cache_obj is None:
+        _dspy_cache_runtime_signature = None
+        return
+
+    if reset_memory_cache:
+        try:
+            reset_fn = getattr(cache_obj, "reset_memory_cache", None)
+            if callable(reset_fn):
+                reset_fn()
+        except Exception as exc:
+            logger.debug("DSPy memory cache reset failed: %s", exc)
+
+    _close_cache_instance(cache_obj)
+    _dspy_cache_runtime_signature = None
+
+
+def configure_dspy_cache_from_env(*, force: bool = False) -> tuple[bool, bool]:
+    """
+    Reconfigure DSPy's global cache from environment flags.
+
+    Supported env vars:
+    - `TT_DSPY_ENABLE_DISK_CACHE`  (default: enabled)
+    - `TT_DSPY_ENABLE_MEMORY_CACHE` (default: enabled)
+    - `DSPY_CACHEDIR`
+    - `DSPY_CACHE_LIMIT`
+    - `TT_DSPY_MEMORY_CACHE_MAX_ENTRIES`
+    """
+    global _dspy_cache_runtime_signature
+    global _dspy_cache_cleanup_registered
+
+    enable_disk_cache = _env_flag("TT_DSPY_ENABLE_DISK_CACHE", True)
+    enable_memory_cache = _env_flag("TT_DSPY_ENABLE_MEMORY_CACHE", True)
+    disk_cache_dir = str(
+        os.getenv("DSPY_CACHEDIR")
+        or (Path.home() / ".dspy_cache")
+    )
+    try:
+        disk_size_limit_bytes = int(float(os.getenv("DSPY_CACHE_LIMIT", "30000000000")))
+    except (TypeError, ValueError):
+        disk_size_limit_bytes = int(3e10)
+    try:
+        memory_max_entries = int(float(os.getenv("TT_DSPY_MEMORY_CACHE_MAX_ENTRIES", "1000000")))
+    except (TypeError, ValueError):
+        memory_max_entries = 1000000
+
+    signature = (
+        bool(enable_disk_cache),
+        bool(enable_memory_cache),
+        str(disk_cache_dir),
+        int(disk_size_limit_bytes),
+        int(memory_max_entries),
+    )
+    if not force and signature == _dspy_cache_runtime_signature:
+        return enable_disk_cache, enable_memory_cache
+
+    old_cache = getattr(dspy, "cache", None)
+    dspy.configure_cache(
+        enable_disk_cache=enable_disk_cache,
+        enable_memory_cache=enable_memory_cache,
+        disk_cache_dir=disk_cache_dir,
+        disk_size_limit_bytes=disk_size_limit_bytes,
+        memory_max_entries=memory_max_entries,
+    )
+    new_cache = getattr(dspy, "cache", None)
+    if old_cache is not None and old_cache is not new_cache:
+        _close_cache_instance(old_cache)
+
+    _dspy_cache_runtime_signature = signature
+    if not _dspy_cache_cleanup_registered:
+        atexit.register(close_dspy_cache)
+        _dspy_cache_cleanup_registered = True
+
+    logger.info(
+        "DSPy cache config: disk=%s memory=%s dir=%s",
+        str(enable_disk_cache).lower(),
+        str(enable_memory_cache).lower(),
+        disk_cache_dir,
+    )
+    return enable_disk_cache, enable_memory_cache
+
+
 def configure_dspy(
     lm: dspy.LM,
     adapter: Optional[Any] = None,
@@ -198,6 +317,8 @@ def configure_dspy(
         lm = dspy.LM("openai/model", api_base="...", api_key="...")
         configure_dspy(lm=lm)
     """
+    configure_dspy_cache_from_env()
+
     if adapter is None:
         adapter = get_xml_adapter()
 

@@ -5,11 +5,106 @@ This module provides helper functions for async operations, particularly
 around proper task cleanup to prevent orphaned tasks from piling up.
 """
 
+from __future__ import annotations
+
+import atexit
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import contextlib
+import functools
 import logging
-from typing import Any, Iterable, List, Coroutine
+import os
+from typing import Any, Callable, Coroutine, Iterable, List, Optional, ParamSpec, TypeVar
+import weakref
 
 logger = logging.getLogger(__name__)
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+# NOTE: We intentionally avoid asyncio.to_thread() because it uses the event loop's
+# default executor. In this repo's runtime environment, shutting down the default
+# executor during asyncio.run() teardown can hang indefinitely. By routing all
+# thread offloads through a shared global executor, we avoid the default executor
+# lifecycle entirely.
+_GLOBAL_EXECUTOR: Optional[ThreadPoolExecutor] = None
+_LOOP_HEARTBEATS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _LoopHeartbeatState]" = weakref.WeakKeyDictionary()
+_HEARTBEAT_INTERVAL_SECONDS = 0.05
+
+
+class _LoopHeartbeatState:
+    __slots__ = ("pending", "task")
+
+    def __init__(self, pending: int, task: "asyncio.Task[None]") -> None:
+        self.pending = int(pending)
+        self.task = task
+
+
+def _ensure_loop_heartbeat(loop: asyncio.AbstractEventLoop) -> _LoopHeartbeatState:
+    """Ensure the loop wakes periodically while thread futures are pending.
+
+    In this runtime environment, callbacks from threadpool futures can fail to
+    wake the selector loop reliably (i.e., lost `call_soon_threadsafe` wakeups),
+    causing awaits on `run_in_executor` to hang indefinitely when the loop has
+    no scheduled timers. A lightweight heartbeat timer prevents the selector
+    timeout from becoming infinite.
+    """
+    existing = _LOOP_HEARTBEATS.get(loop)
+    if existing is not None and not existing.task.done():
+        return existing
+
+    async def _heartbeat() -> None:
+        while True:
+            state = _LOOP_HEARTBEATS.get(loop)
+            if state is None or state.pending <= 0 or loop.is_closed():
+                break
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_SECONDS)
+        _LOOP_HEARTBEATS.pop(loop, None)
+
+    task = loop.create_task(_heartbeat())
+    state = _LoopHeartbeatState(pending=0, task=task)
+    _LOOP_HEARTBEATS[loop] = state
+    return state
+
+
+def _default_max_workers() -> int:
+    cpu = os.cpu_count() or 1
+    return max(4, min(32, cpu + 4))
+
+
+def get_global_executor() -> ThreadPoolExecutor:
+    global _GLOBAL_EXECUTOR
+    if _GLOBAL_EXECUTOR is None:
+        _GLOBAL_EXECUTOR = ThreadPoolExecutor(
+            max_workers=_default_max_workers(),
+            thread_name_prefix="thinkingtrees_to_thread",
+        )
+
+        def _shutdown() -> None:
+            executor = _GLOBAL_EXECUTOR
+            if executor is None:
+                return
+            executor.shutdown(wait=False)
+
+        atexit.register(_shutdown)
+    return _GLOBAL_EXECUTOR
+
+
+async def to_thread(func: Callable[_P, _R], /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+    """Run a sync callable in the shared global thread pool."""
+    loop = asyncio.get_running_loop()
+    heartbeat = _ensure_loop_heartbeat(loop)
+    heartbeat.pending += 1
+    bound = functools.partial(func, *args, **kwargs)
+    future = loop.run_in_executor(get_global_executor(), bound)
+    try:
+        return await future
+    finally:
+        heartbeat.pending = max(0, int(heartbeat.pending) - 1)
+        if heartbeat.pending <= 0:
+            heartbeat.task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat.task
 
 
 async def gather_with_cleanup(

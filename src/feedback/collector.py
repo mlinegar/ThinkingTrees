@@ -12,7 +12,7 @@ Usage:
     from src.feedback import get_collector, register_collector, FeedbackRequest
 
     # Use an existing PreferenceDeriver through the adapter
-    from src.training.preference.types import get_deriver
+    from src.training.supervision import get_deriver
     deriver = get_deriver("oracle", oracle_predict=my_fn)
     collector = PreferenceDeriverAdapter(deriver)
 
@@ -29,6 +29,7 @@ import logging
 from typing import Any, Dict, List, Optional, Protocol, Type, runtime_checkable
 
 from src.feedback.types import FeedbackRequest, FeedbackResponse
+from src.core.async_utils import to_thread
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,7 @@ class PreferenceDeriverAdapter:
     without modification.
 
     Usage:
-        from src.training.preference.types import get_deriver
+        from src.training.supervision import get_deriver
 
         deriver = get_deriver("oracle", oracle_predict=my_fn)
         collector = PreferenceDeriverAdapter(deriver)
@@ -181,6 +182,15 @@ class PreferenceDeriverAdapter:
             reasoning=result.reasoning,
             score_estimate_a=result.score_estimate_a,
             score_estimate_b=result.score_estimate_b,
+            extra={
+                "comparison_signal_value": getattr(result, "comparison_signal_value", None),
+                "comparison_signal_name": getattr(result, "comparison_signal_name", None),
+                "comparison_signal_min": getattr(result, "comparison_signal_min", None),
+                "comparison_signal_max": getattr(result, "comparison_signal_max", None),
+                "response_signal_name": getattr(result, "response_signal_name", None),
+                "response_signal_min": getattr(result, "response_signal_min", None),
+                "response_signal_max": getattr(result, "response_signal_max", None),
+            },
             source="deriver",
             judge_model=getattr(self.deriver, "judge_model", ""),
             raw_result=result.raw_result if hasattr(result, "raw_result") else result,
@@ -192,7 +202,4 @@ class PreferenceDeriverAdapter:
         **kwargs: Any,
     ) -> FeedbackResponse:
         """Async wrapper around sync collect()."""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, lambda: self.collect(request, **kwargs)
-        )
+        return await to_thread(self.collect, request, **kwargs)

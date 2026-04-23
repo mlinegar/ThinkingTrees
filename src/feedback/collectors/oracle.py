@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional
 
 from src.feedback.collector import register_collector
 from src.feedback.types import FeedbackRequest, FeedbackResponse
+from src.core.async_utils import to_thread
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,4 @@ class OracleCollector:
         request: FeedbackRequest,
         **kwargs: Any,
     ) -> FeedbackResponse:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, lambda: self.collect(request, **kwargs)
-        )
+        return await to_thread(self.collect, request, **kwargs)

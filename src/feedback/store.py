@@ -7,14 +7,21 @@ Provides the state backend for the FastAPI server and the HumanCollector.
 
 import json
 import logging
+import os
 import threading
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from src.feedback.types import FeedbackDataset, FeedbackRequest, FeedbackResponse
 
 logger = logging.getLogger(__name__)
+
+try:  # pragma: no cover - exercised on Linux, fallback kept for portability.
+    import fcntl
+except Exception:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
 
 
 class FeedbackStore:
@@ -42,6 +49,9 @@ class FeedbackStore:
         self,
         review_queue: Optional[Any] = None,
         max_pending: int = 10000,
+        storage_path: Optional[Path] = None,
+        autosave: Optional[bool] = None,
+        load_existing: bool = True,
     ):
         """
         Args:
@@ -50,10 +60,14 @@ class FeedbackStore:
         """
         self.review_queue = review_queue
         self.max_pending = max_pending
+        self.storage_path = Path(storage_path) if storage_path is not None else None
+        self.autosave = bool(self.storage_path is not None) if autosave is None else bool(autosave)
 
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._pending: Dict[str, FeedbackRequest] = {}
         self._completed: Dict[str, Tuple[FeedbackRequest, FeedbackResponse]] = {}
+        if self.storage_path is not None and bool(load_existing) and self.storage_path.exists():
+            self.load(self.storage_path)
 
     # --- Enqueue / Submit ---
 
@@ -64,6 +78,8 @@ class FeedbackStore:
             The request_id.
         """
         with self._lock:
+            if request.request_id in self._pending or request.request_id in self._completed:
+                return request.request_id
             if len(self._pending) >= self.max_pending:
                 self._evict_lowest_priority()
             self._pending[request.request_id] = request
@@ -71,6 +87,8 @@ class FeedbackStore:
             # Also add to ReviewQueue if it's a flagged-item-style request
             if self.review_queue is not None and request.context.get("approx_discrepancy") is not None:
                 self._bridge_to_review_queue(request)
+
+            self._autosave_unlocked()
 
         logger.debug("Enqueued feedback request: %s", request.request_id)
         return request.request_id
@@ -84,6 +102,8 @@ class FeedbackStore:
         with self._lock:
             request = self._pending.pop(request_id, None)
             if request is None:
+                if request_id in self._completed:
+                    return True
                 logger.warning("No pending request with id: %s", request_id)
                 return False
             self._completed[request_id] = (request, response)
@@ -91,6 +111,8 @@ class FeedbackStore:
             # Bridge back to ReviewQueue
             if self.review_queue is not None:
                 self._bridge_response_to_review_queue(request, response)
+
+            self._autosave_unlocked()
 
         logger.debug("Submitted feedback response for: %s", request_id)
         return True
@@ -138,6 +160,20 @@ class FeedbackStore:
             items = list(self._completed.values())
         return FeedbackDataset(items)
 
+    def to_supervision_dataset(self):
+        """Export completed human/LLM/oracle feedback as canonical supervision."""
+        return self.to_feedback_dataset().to_supervision_dataset()
+
+    def to_binary_projection_dataset(
+        self,
+        *,
+        projection: str = "adjacent",
+    ):
+        """Export completed feedback as a canonical binary optimizer projection."""
+        return self.to_feedback_dataset().to_binary_projection_dataset(
+            projection=projection
+        )
+
     def get_statistics(self) -> Dict[str, Any]:
         """Get store statistics."""
         with self._lock:
@@ -155,42 +191,95 @@ class FeedbackStore:
 
     # --- Persistence ---
 
-    def save(self, path: Path) -> None:
+    def save(self, path: Optional[Path] = None) -> None:
         """Save store state to JSON file."""
-        path = Path(path)
+        resolved = path or self.storage_path
+        if resolved is None:
+            raise ValueError("FeedbackStore.save requires a path")
+        path = Path(resolved)
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            data = {
-                "saved_at": datetime.now().isoformat(),
-                "pending": {
-                    rid: req.to_dict() for rid, req in self._pending.items()
-                },
-                "completed": {
-                    rid: {
-                        "request": req.to_dict(),
-                        "response": resp.to_dict(),
-                    }
-                    for rid, (req, resp) in self._completed.items()
-                },
-            }
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+            data = self._snapshot_unlocked()
+            self._write_snapshot_atomic(path, data)
         logger.info("Saved feedback store to %s", path)
 
-    def load(self, path: Path) -> None:
+    def load(self, path: Optional[Path] = None) -> None:
         """Load store state from JSON file (merges with existing)."""
-        with open(path) as f:
-            data = json.load(f)
+        resolved = path or self.storage_path
+        if resolved is None:
+            raise ValueError("FeedbackStore.load requires a path")
+        path = Path(resolved)
+        if not path.exists():
+            return
+        with self._file_lock(path):
+            with open(path) as f:
+                data = json.load(f)
         with self._lock:
             for rid, req_data in data.get("pending", {}).items():
-                if rid not in self._pending:
+                if rid not in self._pending and rid not in self._completed:
                     self._pending[rid] = FeedbackRequest.from_dict(req_data)
             for rid, item_data in data.get("completed", {}).items():
                 if rid not in self._completed:
                     req = FeedbackRequest.from_dict(item_data["request"])
                     resp = FeedbackResponse.from_dict(item_data["response"])
                     self._completed[rid] = (req, resp)
+                self._pending.pop(rid, None)
         logger.info("Loaded feedback store from %s", path)
+
+    def reload(self) -> None:
+        """Reload from the configured storage path if present."""
+        if self.storage_path is not None:
+            self.load(self.storage_path)
+
+    # --- Human-input helpers ---
+
+    def submit_human_pairwise_feedback(
+        self,
+        request_id: str,
+        *,
+        preferred: str,
+        reasoning: str = "",
+        critique: str = "",
+        confidence: float = 1.0,
+        score_estimate_a: Optional[float] = None,
+        score_estimate_b: Optional[float] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Submit a human pairwise response and make it immediately exportable."""
+        response = FeedbackResponse.from_human_pairwise_feedback(
+            request_id=request_id,
+            preferred=preferred,
+            reasoning=reasoning,
+            critique=critique,
+            confidence=confidence,
+            score_estimate_a=score_estimate_a,
+            score_estimate_b=score_estimate_b,
+            extra=extra,
+        )
+        return self.submit(request_id, response)
+
+    def submit_human_scalar_feedback(
+        self,
+        request_id: str,
+        *,
+        score: float,
+        dimension_name: str = "score",
+        reasoning: str = "",
+        critique: str = "",
+        confidence: float = 1.0,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Submit a human scalar score and make it immediately exportable."""
+        response = FeedbackResponse.from_human_scalar_feedback(
+            request_id=request_id,
+            score=score,
+            dimension_name=dimension_name,
+            reasoning=reasoning,
+            critique=critique,
+            confidence=confidence,
+            extra=extra,
+        )
+        return self.submit(request_id, response)
 
     # --- ReviewQueue bridge ---
 
@@ -255,3 +344,84 @@ class FeedbackStore:
         with self._lock:
             self._pending.clear()
             self._completed.clear()
+            self._autosave_replace_unlocked()
+
+    def _snapshot_unlocked(self) -> Dict[str, Any]:
+        return {
+            "saved_at": datetime.now().isoformat(),
+            "pending": {
+                rid: req.to_dict() for rid, req in self._pending.items()
+            },
+            "completed": {
+                rid: {
+                    "request": req.to_dict(),
+                    "response": resp.to_dict(),
+                }
+                for rid, (req, resp) in self._completed.items()
+            },
+        }
+
+    def _autosave_unlocked(self) -> None:
+        if self.autosave and self.storage_path is not None:
+            self._write_snapshot_atomic(self.storage_path, self._snapshot_unlocked())
+
+    def _autosave_replace_unlocked(self) -> None:
+        if self.autosave and self.storage_path is not None:
+            self._write_snapshot_atomic(
+                self.storage_path,
+                self._snapshot_unlocked(),
+                merge_existing=False,
+            )
+
+    def _write_snapshot_atomic(
+        self,
+        path: Path,
+        data: Dict[str, Any],
+        *,
+        merge_existing: bool = True,
+    ) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self._file_lock(path):
+            if merge_existing and path.exists():
+                try:
+                    with path.open() as existing_handle:
+                        existing = json.load(existing_handle)
+                    data = self._merge_snapshots(existing, data)
+                except Exception:
+                    logger.warning("Could not merge existing feedback store snapshot at %s", path)
+            tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+            with tmp_path.open("w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, path)
+
+    @staticmethod
+    def _merge_snapshots(existing: Dict[str, Any], current: Dict[str, Any]) -> Dict[str, Any]:
+        completed: Dict[str, Any] = {}
+        completed.update(dict((existing or {}).get("completed", {}) or {}))
+        completed.update(dict((current or {}).get("completed", {}) or {}))
+
+        pending: Dict[str, Any] = {}
+        pending.update(dict((existing or {}).get("pending", {}) or {}))
+        pending.update(dict((current or {}).get("pending", {}) or {}))
+        for request_id in completed:
+            pending.pop(request_id, None)
+
+        return {
+            "saved_at": datetime.now().isoformat(),
+            "pending": pending,
+            "completed": completed,
+        }
+
+    @contextmanager
+    def _file_lock(self, path: Path) -> Iterator[None]:
+        lock_path = Path(f"{path}.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+") as handle:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

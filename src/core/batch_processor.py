@@ -43,7 +43,7 @@ import aiohttp
 from src.preprocessing.chunker import chunk_for_ops
 from src.core.data_models import Node
 from src.config.constants import LOG_TRUNCATE_LENGTH
-from src.core.async_utils import cancel_tasks
+from src.core.async_utils import cancel_tasks, to_thread
 
 if TYPE_CHECKING:
     from src.core.vllm_metrics import VLLMMetricsCollector
@@ -793,7 +793,7 @@ class AsyncBatchLLMClient:
                 self.base_url,
                 reason,
             )
-            recovered = await asyncio.to_thread(self.recover_base_url_callback, self.base_url)
+            recovered = await to_thread(self.recover_base_url_callback, self.base_url)
         except Exception as exc:
             self._recovery_failures += 1
             logger.warning("Batch-client server recovery callback failed for %s: %s", self.base_url, exc)

@@ -40,18 +40,19 @@ import logging
 import random
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, Protocol, TYPE_CHECKING, Literal, Callable
+from typing import Optional, List, Dict, Any, Protocol, TYPE_CHECKING, Literal, Callable, Mapping, Sequence
 
 if TYPE_CHECKING:
     import dspy
     from src.core.batch_processor import AsyncBatchLLMClient, BatchRequest
     from src.training.judges.base import BaseJudge
-    from src.training.preference import PreferencePair
+    from src.training.supervision import BinaryComparison, ComparativeJudgment
 
 from src.core.prompting import default_merge_prompt, default_summarize_prompt, default_unified_prompt
 from src.core.prompting import clean_summary_text
 from src.core.protocols import format_merge_input
 from src.core.conditional_memory import canonical_hash
+from src.core.async_utils import to_thread
 from src.config.concurrency import get_concurrency_config
 
 logger = logging.getLogger(__name__)
@@ -235,12 +236,48 @@ class BatchedStrategy:
         self, content: str, rubric: str, temperature: float = 0.7
     ) -> str:
         """Summarize content using batched LLM client."""
+        outputs = await self.summarize_many(
+            [
+                {
+                    "content": content,
+                    "rubric": rubric,
+                    "temperature": temperature,
+                    "doc_id": tournament_doc_id.get(),
+                }
+            ]
+        )
+        return outputs[0] if outputs else ""
+
+    async def merge(
+        self, left: str, right: str, rubric: str, temperature: float = 0.7
+    ) -> str:
+        """Merge summaries using batched LLM client."""
+        outputs = await self.merge_many(
+            [
+                {
+                    "left": left,
+                    "right": right,
+                    "rubric": rubric,
+                    "temperature": temperature,
+                    "doc_id": tournament_doc_id.get(),
+                }
+            ]
+        )
+        return outputs[0] if outputs else ""
+
+    def _make_summarize_request(
+        self,
+        *,
+        content: str,
+        rubric: str,
+        temperature: float,
+        doc_id: Optional[Any] = None,
+    ):
         from src.core.batch_processor import BatchRequest
 
         self._counter += 1
-        doc_id = tournament_doc_id.get()
         chat_template_kwargs = {"enable_thinking": False} if self.disable_thinking else None
-        request = BatchRequest(
+        return BatchRequest(
             request_id=f"strategy_summarize_{self._counter}",
             messages=self.summarize_prompt_fn(content, rubric),
             max_tokens=self.max_tokens,
@@ -249,30 +286,28 @@ class BatchedStrategy:
             document_id=str(doc_id) if doc_id is not None else None,
             chat_template_kwargs=chat_template_kwargs,
         )
-        await self.client.submit(request)
-        response = await self._await_response(request.request_id)
-        return clean_summary_text(response.content) if not response.error else ""
 
-    async def merge(
-        self, left: str, right: str, rubric: str, temperature: float = 0.7
-    ) -> str:
-        """Merge summaries using batched LLM client."""
+    def _make_merge_request(
+        self,
+        *,
+        left: str,
+        right: str,
+        rubric: str,
+        temperature: float,
+        doc_id: Optional[Any] = None,
+    ):
         from src.core.batch_processor import BatchRequest
 
         self._counter += 1
-        doc_id = tournament_doc_id.get()
         chat_template_kwargs = {"enable_thinking": False} if self.disable_thinking else None
 
         if self.unified_mode:
-            # Use same prompt as leaf, just format input differently
-            # This is the theory's g(s_L * s_R) where * is format_merge_input
             combined = format_merge_input(left, right)
             messages = self.summarize_prompt_fn(combined, rubric)
         else:
-            # Legacy: use separate merge prompt
             messages = self.merge_prompt_fn(left, right, rubric)
 
-        request = BatchRequest(
+        return BatchRequest(
             request_id=f"strategy_merge_{self._counter}",
             messages=messages,
             max_tokens=self.max_tokens,
@@ -281,9 +316,54 @@ class BatchedStrategy:
             document_id=str(doc_id) if doc_id is not None else None,
             chat_template_kwargs=chat_template_kwargs,
         )
-        await self.client.submit(request)
-        response = await self._await_response(request.request_id)
-        return clean_summary_text(response.content) if not response.error else ""
+
+    async def _run_requests(self, requests: Sequence["BatchRequest"]) -> List[str]:
+        if not requests:
+            return []
+        for request in requests:
+            await self.client.submit(request)
+        responses = await asyncio.gather(
+            *(self._await_response(request.request_id) for request in requests),
+            return_exceptions=True,
+        )
+        outputs: List[str] = []
+        for response in responses:
+            if isinstance(response, Exception):
+                outputs.append("")
+                continue
+            outputs.append(clean_summary_text(response.content) if not response.error else "")
+        return outputs
+
+    async def summarize_many(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> List[str]:
+        requests = [
+            self._make_summarize_request(
+                content=str(item.get("content", "") or ""),
+                rubric=str(item.get("rubric", "") or ""),
+                temperature=float(item.get("temperature", 0.7) or 0.7),
+                doc_id=item.get("doc_id"),
+            )
+            for item in items
+        ]
+        return await self._run_requests(requests)
+
+    async def merge_many(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> List[str]:
+        requests = [
+            self._make_merge_request(
+                left=str(item.get("left", "") or ""),
+                right=str(item.get("right", "") or ""),
+                rubric=str(item.get("rubric", "") or ""),
+                temperature=float(item.get("temperature", 0.7) or 0.7),
+                doc_id=item.get("doc_id"),
+            )
+            for item in items
+        ]
+        return await self._run_requests(requests)
 
     async def _generate_candidates_impl(
         self,
@@ -363,6 +443,85 @@ class BatchedStrategy:
             temperature=temperature,
         )
 
+    async def generate_candidates_many(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> List[List[str]]:
+        from src.core.batch_processor import BatchRequest
+
+        requests: List[BatchRequest] = []
+        item_ranges: List[tuple[int, int]] = []
+        chat_template_kwargs = {"enable_thinking": False} if self.disable_thinking else None
+        for item in items:
+            start = len(requests)
+            messages = self.summarize_prompt_fn(
+                str(item.get("content", "") or ""),
+                str(item.get("rubric", "") or ""),
+            )
+            k = max(1, int(item.get("k", 4) or 4))
+            temperature = float(item.get("temperature", 0.9) or 0.9)
+            doc_id = item.get("doc_id")
+            for _ in range(k):
+                self._counter += 1
+                requests.append(
+                    BatchRequest(
+                        request_id=f"strategy_candidate_{self._counter}",
+                        messages=messages,
+                        max_tokens=self.max_tokens,
+                        request_type="candidate",
+                        temperature=temperature,
+                        document_id=str(doc_id) if doc_id is not None else None,
+                        chat_template_kwargs=chat_template_kwargs,
+                    )
+                )
+            item_ranges.append((start, len(requests)))
+        outputs = await self._run_requests(requests)
+        return [
+            _filter_valid_candidates(outputs[start:end], "Candidate generation", warn_on_empty=False)
+            for start, end in item_ranges
+        ]
+
+    async def generate_merge_candidates_many(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> List[List[str]]:
+        from src.core.batch_processor import BatchRequest
+
+        requests: List[BatchRequest] = []
+        item_ranges: List[tuple[int, int]] = []
+        chat_template_kwargs = {"enable_thinking": False} if self.disable_thinking else None
+        for item in items:
+            left = str(item.get("left", "") or "")
+            right = str(item.get("right", "") or "")
+            rubric = str(item.get("rubric", "") or "")
+            if self.unified_mode:
+                messages = self.summarize_prompt_fn(format_merge_input(left, right), rubric)
+            else:
+                messages = self.merge_prompt_fn(left, right, rubric)
+            start = len(requests)
+            k = max(1, int(item.get("k", 4) or 4))
+            temperature = float(item.get("temperature", 0.9) or 0.9)
+            doc_id = item.get("doc_id")
+            for _ in range(k):
+                self._counter += 1
+                requests.append(
+                    BatchRequest(
+                        request_id=f"strategy_merge_candidate_{self._counter}",
+                        messages=messages,
+                        max_tokens=self.max_tokens,
+                        request_type="merge_candidate",
+                        temperature=temperature,
+                        document_id=str(doc_id) if doc_id is not None else None,
+                        chat_template_kwargs=chat_template_kwargs,
+                    )
+                )
+            item_ranges.append((start, len(requests)))
+        outputs = await self._run_requests(requests)
+        return [
+            _filter_valid_candidates(outputs[start:end], "Merge candidate generation", warn_on_empty=False)
+            for start, end in item_ranges
+        ]
+
 
 # =============================================================================
 # DSPy Strategy (wraps DSPy modules, can use batching internally)
@@ -414,7 +573,7 @@ class DSPyStrategy:
         # configured default in that common case.
         if temperature == 0.7:
             temperature = self.default_temperature
-        return await asyncio.to_thread(
+        return await to_thread(
             self._call_with_temp,
             self.leaf_module,
             temperature,
@@ -432,7 +591,7 @@ class DSPyStrategy:
             # Use same module as leaf, just format input differently
             # This is the theory's g(s_L * s_R) where * is format_merge_input
             combined = format_merge_input(left, right)
-            return await asyncio.to_thread(
+            return await to_thread(
                 self._call_with_temp,
                 self.leaf_module,
                 temperature,
@@ -441,7 +600,7 @@ class DSPyStrategy:
             )
         else:
             # Legacy: use merge module with separate fields
-            return await asyncio.to_thread(
+            return await to_thread(
                 self._call_with_temp,
                 self.merge_module,
                 temperature,
@@ -458,7 +617,7 @@ class DSPyStrategy:
         """
         # Launch k calls in parallel
         tasks = [
-            asyncio.to_thread(
+            to_thread(
                 self._call_with_temp,
                 self.leaf_module,
                 temperature,
@@ -496,7 +655,7 @@ class DSPyStrategy:
             # Use same module as leaf, just format input differently
             combined = format_merge_input(left, right)
             tasks = [
-                asyncio.to_thread(
+                to_thread(
                     self._call_with_temp,
                     self.leaf_module,
                     temperature,
@@ -507,7 +666,7 @@ class DSPyStrategy:
             ]
         else:
             tasks = [
-                asyncio.to_thread(
+                to_thread(
                     self._call_with_temp,
                     self.merge_module,
                     temperature,
@@ -535,6 +694,84 @@ class DSPyStrategy:
 
         _filter_valid_candidates(results, "Merge candidate generation")
         return []
+
+    async def summarize_many(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> List[str]:
+        results = await asyncio.gather(
+            *(
+                self.summarize(
+                    str(item.get("content", "") or ""),
+                    str(item.get("rubric", "") or ""),
+                    temperature=float(
+                        item.get("temperature", self.default_temperature)
+                        or self.default_temperature
+                    ),
+                )
+                for item in items
+            ),
+            return_exceptions=True,
+        )
+        return [result if isinstance(result, str) else "" for result in results]
+
+    async def merge_many(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> List[str]:
+        results = await asyncio.gather(
+            *(
+                self.merge(
+                    str(item.get("left", "") or ""),
+                    str(item.get("right", "") or ""),
+                    str(item.get("rubric", "") or ""),
+                    temperature=float(
+                        item.get("temperature", self.default_temperature)
+                        or self.default_temperature
+                    ),
+                )
+                for item in items
+            ),
+            return_exceptions=True,
+        )
+        return [result if isinstance(result, str) else "" for result in results]
+
+    async def generate_candidates_many(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> List[List[str]]:
+        results = await asyncio.gather(
+            *(
+                self.generate_candidates(
+                    str(item.get("content", "") or ""),
+                    str(item.get("rubric", "") or ""),
+                    k=max(1, int(item.get("k", 4) or 4)),
+                    temperature=float(item.get("temperature", 0.9) or 0.9),
+                )
+                for item in items
+            ),
+            return_exceptions=True,
+        )
+        return [result if isinstance(result, list) else [] for result in results]
+
+    async def generate_merge_candidates_many(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> List[List[str]]:
+        results = await asyncio.gather(
+            *(
+                self.generate_merge_candidates(
+                    str(item.get("left", "") or ""),
+                    str(item.get("right", "") or ""),
+                    str(item.get("rubric", "") or ""),
+                    k=max(1, int(item.get("k", 4) or 4)),
+                    temperature=float(item.get("temperature", 0.9) or 0.9),
+                )
+                for item in items
+            ),
+            return_exceptions=True,
+        )
+        return [result if isinstance(result, list) else [] for result in results]
 
     def _call_with_temp(self, module, temperature: float, **kwargs) -> str:
         """Call DSPy module with specific temperature (sync, runs in thread)."""
@@ -598,7 +835,7 @@ class CallableStrategy:
         self, content: str, rubric: str, temperature: float = 0.7
     ) -> str:
         """Summarize content using the wrapped callable."""
-        return await asyncio.to_thread(
+        return await to_thread(
             self._call_with_temp,
             self.summarizer,
             temperature,
@@ -611,7 +848,7 @@ class CallableStrategy:
     ) -> str:
         """Merge summaries using the wrapped callable."""
         if self.merge_fn is not None:
-            return await asyncio.to_thread(
+            return await to_thread(
                 self._call_with_temp,
                 self.merge_fn,
                 temperature,
@@ -620,8 +857,8 @@ class CallableStrategy:
                 rubric=rubric,
             )
 
-        combined = f"{left}\n\n{right}"
-        return await asyncio.to_thread(
+        combined = format_merge_input(left, right)
+        return await to_thread(
             self._call_with_temp,
             self.summarizer,
             temperature,
@@ -634,7 +871,7 @@ class CallableStrategy:
     ) -> List[str]:
         """Generate k candidates using parallel calls at a fixed temperature."""
         tasks = [
-            asyncio.to_thread(
+            to_thread(
                 self._call_with_temp,
                 self.summarizer,
                 temperature,
@@ -668,7 +905,7 @@ class CallableStrategy:
         """Generate k merge candidates using parallel calls at a fixed temperature."""
         if self.merge_fn is not None:
             tasks = [
-                asyncio.to_thread(
+                to_thread(
                     self._call_with_temp,
                     self.merge_fn,
                     temperature,
@@ -681,7 +918,7 @@ class CallableStrategy:
         else:
             combined = f"{left}\n\n{right}"
             tasks = [
-                asyncio.to_thread(
+                to_thread(
                     self._call_with_temp,
                     self.summarizer,
                     temperature,
@@ -708,6 +945,78 @@ class CallableStrategy:
 
         _filter_valid_candidates(results, "Merge candidate generation")
         return []
+
+    async def summarize_many(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> List[str]:
+        results = await asyncio.gather(
+            *(
+                self.summarize(
+                    str(item.get("content", "") or ""),
+                    str(item.get("rubric", "") or ""),
+                    temperature=float(item.get("temperature", 0.7) or 0.7),
+                )
+                for item in items
+            ),
+            return_exceptions=True,
+        )
+        return [result if isinstance(result, str) else "" for result in results]
+
+    async def merge_many(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> List[str]:
+        results = await asyncio.gather(
+            *(
+                self.merge(
+                    str(item.get("left", "") or ""),
+                    str(item.get("right", "") or ""),
+                    str(item.get("rubric", "") or ""),
+                    temperature=float(item.get("temperature", 0.7) or 0.7),
+                )
+                for item in items
+            ),
+            return_exceptions=True,
+        )
+        return [result if isinstance(result, str) else "" for result in results]
+
+    async def generate_candidates_many(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> List[List[str]]:
+        results = await asyncio.gather(
+            *(
+                self.generate_candidates(
+                    str(item.get("content", "") or ""),
+                    str(item.get("rubric", "") or ""),
+                    k=max(1, int(item.get("k", 4) or 4)),
+                    temperature=float(item.get("temperature", 0.9) or 0.9),
+                )
+                for item in items
+            ),
+            return_exceptions=True,
+        )
+        return [result if isinstance(result, list) else [] for result in results]
+
+    async def generate_merge_candidates_many(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> List[List[str]]:
+        results = await asyncio.gather(
+            *(
+                self.generate_merge_candidates(
+                    str(item.get("left", "") or ""),
+                    str(item.get("right", "") or ""),
+                    str(item.get("rubric", "") or ""),
+                    k=max(1, int(item.get("k", 4) or 4)),
+                    temperature=float(item.get("temperature", 0.9) or 0.9),
+                )
+                for item in items
+            ),
+            return_exceptions=True,
+        )
+        return [result if isinstance(result, list) else [] for result in results]
 
     def _call_with_temp(self, fn, temperature: float, **kwargs) -> str:
         """Call wrapped function with DSPy temperature context when available."""
@@ -746,8 +1055,10 @@ class TournamentStrategy:
     Wraps any SummarizationStrategy with tournament selection.
 
     This strategy generates multiple candidate summaries using the base strategy's
-    generate_candidates() method and uses a pairwise judge to select the best one
-    via pairwise tournament. Preference pairs are collected as a FREE byproduct.
+    generate_candidates() method and uses either listwise or pairwise judging to
+    select the best one. Pairwise preferences remain available as an optimizer-
+    facing projection, while richer comparative judgments are collected when the
+    judge can rank the full candidate set jointly.
 
     Usage:
         # Wrap any base strategy
@@ -776,8 +1087,9 @@ class TournamentStrategy:
 
         Args:
             base: Base summarization strategy to wrap
-            judge: Pairwise comparison judge with either `.compare(...)` or
-                DSPy-style `.forward(...)` interface.
+            judge: Comparison judge with either pairwise `.compare(...)` /
+                DSPy-style `.forward(...)` or listwise `.rank_candidates(...)`
+                support.
             config: Tournament configuration (k candidates, temperature)
             feedback_collector: Optional FeedbackCollector for enriched feedback.
                 When set, tournament matches also produce FeedbackResponse objects
@@ -786,7 +1098,8 @@ class TournamentStrategy:
         self.base = base
         self.judge = judge
         self.config = config or TournamentConfig()
-        self._preferences: List["PreferencePair"] = []
+        self._preferences: List["BinaryComparison"] = []
+        self._comparative_judgments: List["ComparativeJudgment"] = []
         self._feedback_responses: List[Any] = []
         self._segment_counter = 0
         self._feedback_collector = feedback_collector
@@ -862,6 +1175,20 @@ class TournamentStrategy:
             return f"{rendered}\n\n{metadata_block}"
         return metadata_block
 
+    def _supports_listwise_judging(self) -> bool:
+        """Whether the configured judge can rank all candidates in one call."""
+        from src.training.supervision.judge_capabilities import (
+            supports_direct_comparative_judging,
+        )
+
+        return supports_direct_comparative_judging(self.judge)
+
+    def _judge_model_name(self) -> str:
+        """Render a stable judge backend label for saved supervision records."""
+        from src.training.supervision.judge_capabilities import judge_backend_name
+
+        return judge_backend_name(self.judge)
+
     async def summarize(
         self, content: str, rubric: str, temperature: float = 0.7
     ) -> str:
@@ -875,22 +1202,17 @@ class TournamentStrategy:
         """
         self._segment_counter += 1
         segment_id = f"leaf_{self._segment_counter}"
-
-        # Generate k candidates using base strategy
         candidates = await self.base.generate_candidates(
             content, rubric, k=self.config.k, temperature=self.config.temperature
         )
-
-        if len(candidates) < 2:
-            return candidates[0] if candidates else ""
-
-        # Run tournament and collect preferences
-        winner, prefs = await self._run_tournament_pipelined(
-            candidates, content, rubric, segment_id, law_type="sufficiency"
+        return await self._select_from_candidates(
+            candidates=candidates,
+            original_text=content,
+            rubric=rubric,
+            segment_id=segment_id,
+            law_type="sufficiency",
+            doc_id=tournament_doc_id.get(),
         )
-        self._preferences.extend(prefs)
-
-        return winner
 
     async def merge(
         self, left: str, right: str, rubric: str, temperature: float = 0.7
@@ -903,25 +1225,17 @@ class TournamentStrategy:
         """
         self._segment_counter += 1
         segment_id = f"merge_{self._segment_counter}"
-
-        # Generate k candidates using base strategy
         candidates = await self.base.generate_merge_candidates(
             left, right, rubric, k=self.config.k, temperature=self.config.temperature
         )
-
-        if len(candidates) < 2:
-            return candidates[0] if candidates else ""
-
-        # For merge operations, the "original" is the concatenated child summaries
-        original_text = format_merge_input(left, right)
-
-        # Run tournament and collect preferences
-        winner, prefs = await self._run_tournament_pipelined(
-            candidates, original_text, rubric, segment_id, law_type="merge"
+        return await self._select_from_candidates(
+            candidates=candidates,
+            original_text=format_merge_input(left, right),
+            rubric=rubric,
+            segment_id=segment_id,
+            law_type="merge",
+            doc_id=tournament_doc_id.get(),
         )
-        self._preferences.extend(prefs)
-
-        return winner
 
     async def generate_candidates(
         self, content: str, rubric: str, k: int = 4, temperature: float = 0.9
@@ -935,6 +1249,136 @@ class TournamentStrategy:
         """Delegate to base strategy."""
         return await self.base.generate_merge_candidates(left, right, rubric, k, temperature)
 
+    async def summarize_many(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> List[str]:
+        base_items = [
+            {
+                "content": str(item.get("content", "") or ""),
+                "rubric": str(item.get("rubric", "") or ""),
+                "k": max(1, int(item.get("k", self.config.k) or self.config.k)),
+                "temperature": float(
+                    item.get("temperature", self.config.temperature)
+                    or self.config.temperature
+                ),
+                "doc_id": item.get("doc_id"),
+            }
+            for item in items
+        ]
+        if hasattr(self.base, "generate_candidates_many"):
+            candidate_sets = await self.base.generate_candidates_many(base_items)
+        else:
+            results = await asyncio.gather(
+                *(
+                    self.base.generate_candidates(
+                        item["content"],
+                        item["rubric"],
+                        k=int(item["k"]),
+                        temperature=float(item["temperature"]),
+                    )
+                    for item in base_items
+                ),
+                return_exceptions=True,
+            )
+            candidate_sets = [result if isinstance(result, list) else [] for result in results]
+
+        tasks = []
+        for item, candidates in zip(base_items, candidate_sets):
+            self._segment_counter += 1
+            tasks.append(
+                self._select_from_candidates(
+                    candidates=candidates,
+                    original_text=item["content"],
+                    rubric=item["rubric"],
+                    segment_id=f"leaf_{self._segment_counter}",
+                    law_type="sufficiency",
+                    doc_id=item.get("doc_id"),
+                )
+            )
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return [result if isinstance(result, str) else "" for result in results]
+
+    async def merge_many(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> List[str]:
+        base_items = [
+            {
+                "left": str(item.get("left", "") or ""),
+                "right": str(item.get("right", "") or ""),
+                "rubric": str(item.get("rubric", "") or ""),
+                "k": max(1, int(item.get("k", self.config.k) or self.config.k)),
+                "temperature": float(
+                    item.get("temperature", self.config.temperature)
+                    or self.config.temperature
+                ),
+                "doc_id": item.get("doc_id"),
+            }
+            for item in items
+        ]
+        if hasattr(self.base, "generate_merge_candidates_many"):
+            candidate_sets = await self.base.generate_merge_candidates_many(base_items)
+        else:
+            results = await asyncio.gather(
+                *(
+                    self.base.generate_merge_candidates(
+                        item["left"],
+                        item["right"],
+                        item["rubric"],
+                        k=int(item["k"]),
+                        temperature=float(item["temperature"]),
+                    )
+                    for item in base_items
+                ),
+                return_exceptions=True,
+            )
+            candidate_sets = [result if isinstance(result, list) else [] for result in results]
+
+        tasks = []
+        for item, candidates in zip(base_items, candidate_sets):
+            self._segment_counter += 1
+            tasks.append(
+                self._select_from_candidates(
+                    candidates=candidates,
+                    original_text=format_merge_input(item["left"], item["right"]),
+                    rubric=item["rubric"],
+                    segment_id=f"merge_{self._segment_counter}",
+                    law_type="merge",
+                    doc_id=item.get("doc_id"),
+                )
+            )
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return [result if isinstance(result, str) else "" for result in results]
+
+    async def _select_from_candidates(
+        self,
+        *,
+        candidates: List[str],
+        original_text: str,
+        rubric: str,
+        segment_id: str,
+        law_type: str,
+        doc_id: Optional[Any],
+    ) -> str:
+        token = tournament_doc_id.set(str(doc_id)) if doc_id is not None else None
+        try:
+            if len(candidates) < 2:
+                return candidates[0] if candidates else ""
+            winner, prefs, comparative_records = await self._run_tournament_pipelined(
+                candidates,
+                original_text,
+                rubric,
+                segment_id,
+                law_type=law_type,
+            )
+            self._preferences.extend(prefs)
+            self._comparative_judgments.extend(comparative_records)
+            return winner
+        finally:
+            if token is not None:
+                tournament_doc_id.reset(token)
+
     async def _run_tournament_pipelined(
         self,
         candidates: List[str],
@@ -942,7 +1386,7 @@ class TournamentStrategy:
         rubric: str,
         segment_id: str,
         law_type: str = "sufficiency",
-    ) -> tuple[str, List["PreferencePair"]]:
+    ) -> tuple[str, List["BinaryComparison"], List["ComparativeJudgment"]]:
         """
         Run elimination tournament with pipelined execution.
 
@@ -960,12 +1404,28 @@ class TournamentStrategy:
                    Match5 starts when Match2 AND Match3 complete
         - Round 3: Match6 starts when Match4 AND Match5 complete
         """
-        from src.training.preference import PreferencePair
+        from src.training.supervision import BinaryComparison
 
         if len(candidates) == 0:
             raise ValueError("No candidates provided")
         if len(candidates) == 1:
-            return candidates[0], []
+            return candidates[0], [], []
+
+        if self._supports_listwise_judging():
+            try:
+                return await self._run_listwise_selection(
+                    candidates=candidates,
+                    original_text=original_text,
+                    rubric=rubric,
+                    segment_id=segment_id,
+                    law_type=law_type,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Listwise tournament judging failed for %s (%s); falling back to pairwise bracket.",
+                    segment_id,
+                    exc,
+                )
 
         # Build match structure upfront
         @dataclass
@@ -1033,29 +1493,25 @@ class TournamentStrategy:
             prev_round_matches = round_matches
 
         # Track which matches are ready and completed
-        preferences: List[PreferencePair] = []
+        preferences: List[BinaryComparison] = []
         completed: Dict[int, str] = {}  # match_id -> winner
         pending: Dict[int, asyncio.Task] = {}  # match_id -> task
 
         doc_id = tournament_doc_id.get()
         segment_tag = f"{doc_id}:{segment_id}" if doc_id is not None else segment_id
 
-        # Determine judge type
-        is_dspy_module = hasattr(self.judge, 'forward') and hasattr(self.judge, 'use_dspy_predictor')
-        if is_dspy_module:
-            if getattr(self.judge, 'use_dspy_prompt', False):
-                judge_model = "dspy-prompt-tuned"
-            elif self.judge.use_dspy_predictor:
-                judge_model = "dspy-optimizable"
-            else:
-                judge_model = "dspy-via-wrapper"
-        elif getattr(self.judge, "judge_backend", None):
-            judge_model = str(getattr(self.judge, "judge_backend"))
-        else:
-            judge_model = type(self.judge).__name__
+        judge_model = self._judge_model_name()
 
-        async def execute_match(m: Match) -> tuple[int, str, Any]:
-            """Execute a single match and return (match_id, winner, result)."""
+        async def execute_match(
+            m: Match,
+        ) -> tuple[int, str, "BinaryComparison"]:
+            """Execute a single match and return normalized tournament artifacts."""
+            from src.core.supervision_metadata import judgment_supervision_metadata
+            from src.training.supervision import BinaryComparison
+            from src.training.supervision.judge_capabilities import (
+                invoke_pairwise_judgment_async,
+            )
+
             # Get summaries for this match
             if m.left_is_match:
                 summary_a = completed[m.left_idx]
@@ -1068,60 +1524,24 @@ class TournamentStrategy:
                 summary_b = candidates[m.right_idx]
             judge_context = self._augment_context_with_doc_metadata(rubric)
 
-            def _is_error_result(result: Any) -> bool:
-                if result is None:
-                    return True
-                error_msg = getattr(result, "error_message", None)
-                if error_msg:
-                    return True
-                # Some judge wrappers expose error_type without a valid preference.
-                if getattr(result, "error_type", None) and getattr(result, "preferred", None) is None:
-                    return True
-                if is_dspy_module:
-                    preferred = getattr(result, "preference", getattr(result, "preferred", None))
-                    return preferred is None
-                preferred = getattr(result, "preferred", None)
-                return preferred is None
-
-            async def _call_judge_once() -> Any:
-                if is_dspy_module:
-                    return await asyncio.to_thread(
-                        self.judge.forward,
-                        context=judge_context,
-                        original_text=original_text,
-                        summary_a=summary_a,
-                        summary_b=summary_b,
-                        law_type=law_type,
-                    )
-                if hasattr(self.judge, 'compare_async'):
-                    return await self.judge.compare_async(
-                        context=judge_context,
-                        original_text=original_text,
-                        summary_a=summary_a,
-                        summary_b=summary_b,
-                        law_type=law_type,
-                    )
-                return await asyncio.to_thread(
-                    self.judge.compare,
-                    context=judge_context,
-                    original_text=original_text,
-                    summary_a=summary_a,
-                    summary_b=summary_b,
-                    law_type=law_type,
-                )
-
             max_attempts = 1 + max(0, int(getattr(self.config, "judge_retry_attempts", 0)))
             retry_delay = max(0.0, float(getattr(self.config, "judge_retry_delay_seconds", 0.0)))
             result: Any = None
             match_label = f"{segment_tag}_m{m.id}"
             for attempt in range(1, max_attempts + 1):
                 try:
-                    result = await _call_judge_once()
-                    if not _is_error_result(result):
+                    result = await invoke_pairwise_judgment_async(
+                        self.judge,
+                        context=judge_context,
+                        original_text=original_text,
+                        summary_a=summary_a,
+                        summary_b=summary_b,
+                        law_type=law_type,
+                    )
+                    if result.error_message is None:
                         break
-                    error_message = (
-                        getattr(result, "error_message", None)
-                        or f"missing/invalid preference in result type {type(result).__name__}"
+                    error_message = result.error_message or (
+                        f"missing/invalid preference in result type {type(result).__name__}"
                     )
                     if attempt < max_attempts:
                         logger.warning(
@@ -1155,12 +1575,11 @@ class TournamentStrategy:
                         continue
                     raise
 
-            # Determine winner
-            preferred, reasoning, confidence, score_a, score_b = self._extract_preference_fields(
-                result,
-                is_dspy_module,
-                match_label=match_label,
-            )
+            preferred = result.preferred
+            reasoning = result.reasoning
+            confidence = result.confidence
+            score_a = result.score_estimate_a
+            score_b = result.score_estimate_b
 
             if preferred == "A":
                 winner = summary_a
@@ -1169,7 +1588,35 @@ class TournamentStrategy:
             else:
                 winner = summary_a if random.random() < 0.5 else summary_b
 
-            return m.id, winner, result, summary_a, summary_b, preferred, reasoning, confidence, score_a, score_b
+            pair = BinaryComparison(
+                pair_id=f"tournament_{segment_tag}_m{m.id}",
+                source_example_id=segment_tag,
+                original_text=original_text,
+                rubric=rubric,
+                reference_score=0.0,
+                summary_a=summary_a,
+                summary_b=summary_b,
+                preferred=preferred,
+                reasoning=reasoning,
+                confidence=confidence,
+                law_type=law_type,
+                preference_supervision=judgment_supervision_metadata(
+                    application_name="tournament_preference_collection",
+                    law_type=law_type,
+                    comparison_signal_name=result.comparison_signal_name,
+                    comparison_signal_min=result.comparison_signal_min,
+                    comparison_signal_max=result.comparison_signal_max,
+                    response_signal_name=result.response_signal_name,
+                    response_signal_min=result.response_signal_min,
+                    response_signal_max=result.response_signal_max,
+                ),
+                score_estimate_a=score_a,
+                score_estimate_b=score_b,
+                comparison_signal_value=result.comparison_signal_value,
+                judge_model=judge_model,
+            )
+
+            return (m.id, winner, pair)
 
         def is_ready(m: Match) -> bool:
             """Check if a match's prerequisites are satisfied."""
@@ -1194,7 +1641,7 @@ class TournamentStrategy:
 
                 for task in done:
                     try:
-                        match_id, winner, result, summary_a, summary_b, preferred, reasoning, confidence, score_a, score_b = await task
+                        match_id, winner, pair = await task
                     except Exception as e:
                         # Find which match failed
                         for mid, t in list(pending.items()):
@@ -1224,24 +1671,6 @@ class TournamentStrategy:
                     completed[match_id] = winner
                     del pending[match_id]
 
-                    # Record preference
-                    m = matches[match_id]
-                    pair = PreferencePair(
-                        pair_id=f"tournament_{segment_tag}_m{match_id}",
-                        source_example_id=segment_tag,
-                        original_text=original_text,
-                        rubric=rubric,
-                        reference_score=None,
-                        summary_a=summary_a,
-                        summary_b=summary_b,
-                        preferred=preferred,
-                        reasoning=reasoning,
-                        confidence=confidence,
-                        law_type=law_type,
-                        score_estimate_a=score_a,
-                        score_estimate_b=score_b,
-                        judge_model=judge_model,
-                    )
                     preferences.append(pair)
 
                     # Collect enriched feedback if collector is configured
@@ -1249,14 +1678,14 @@ class TournamentStrategy:
                         try:
                             from src.feedback.types import FeedbackRequest, FeedbackDimension
 
-                            judge_reasoning = clean_summary_text(reasoning)
+                            judge_reasoning = clean_summary_text(pair.reasoning)
                             if len(judge_reasoning) > 2400:
                                 judge_reasoning = judge_reasoning[:2400].rstrip() + " ... (truncated)"
 
                             fb_request = FeedbackRequest(
                                 request_id=pair.pair_id,
-                                text_a=summary_a,
-                                text_b=summary_b,
+                                text_a=pair.summary_a,
+                                text_b=pair.summary_b,
                                 original_text=original_text,
                                 rubric=rubric,
                                 law_type=law_type,
@@ -1268,16 +1697,16 @@ class TournamentStrategy:
                                 context={
                                     "match_label": f"{segment_tag}_m{match_id}",
                                     "match_id": match_id,
-                                    "round": getattr(m, "round", None),
-                                    "left_idx": getattr(m, "left_idx", None),
-                                    "right_idx": getattr(m, "right_idx", None),
-                                    "left_is_match": getattr(m, "left_is_match", None),
-                                    "right_is_match": getattr(m, "right_is_match", None),
-                                    "judge_preferred": preferred,
-                                    "judge_confidence": confidence,
+                                    "round": getattr(matches[match_id], "round", None),
+                                    "left_idx": getattr(matches[match_id], "left_idx", None),
+                                    "right_idx": getattr(matches[match_id], "right_idx", None),
+                                    "left_is_match": getattr(matches[match_id], "left_is_match", None),
+                                    "right_is_match": getattr(matches[match_id], "right_is_match", None),
+                                    "judge_preferred": pair.preferred,
+                                    "judge_confidence": pair.confidence,
                                     "judge_reasoning": judge_reasoning,
-                                    "judge_score_estimate_a": score_a,
-                                    "judge_score_estimate_b": score_b,
+                                    "judge_score_estimate_a": pair.score_estimate_a,
+                                    "judge_score_estimate_b": pair.score_estimate_b,
                                     "judge_model": judge_model,
                                 },
                             )
@@ -1316,13 +1745,278 @@ class TournamentStrategy:
         # Find final winner
         if completed:
             final_match_id = max(completed.keys())
-            return completed[final_match_id], preferences
+            return completed[final_match_id], preferences, []
         else:
-            return candidates[0], preferences
+            return candidates[0], preferences, []
 
-    def get_preferences(self) -> List["PreferencePair"]:
+    async def _run_listwise_selection(
+        self,
+        *,
+        candidates: List[str],
+        original_text: str,
+        rubric: str,
+        segment_id: str,
+        law_type: str = "sufficiency",
+    ) -> tuple[str, List["BinaryComparison"], List["ComparativeJudgment"]]:
+        """Rank the full candidate set jointly and keep a conservative pairwise projection."""
+        from src.core.logged_supervision import ObservationUnitKind, SamplingMetadata
+        from src.core.supervision_metadata import judgment_supervision_metadata
+        from src.training.supervision import (
+            ComparativeCandidate,
+            ComparativeJudgment,
+            BinaryComparison,
+        )
+
+        if len(candidates) < 2:
+            return candidates[0] if candidates else "", [], []
+        if not self._supports_listwise_judging():
+            raise ValueError("Configured judge does not support listwise ranking")
+
+        doc_id = tournament_doc_id.get()
+        segment_tag = f"{doc_id}:{segment_id}" if doc_id is not None else segment_id
+        judge_context = self._augment_context_with_doc_metadata(rubric)
+        judge_model = self._judge_model_name()
+        match_label = f"{segment_tag}_listwise"
+        max_attempts = 1 + max(0, int(getattr(self.config, "judge_retry_attempts", 0)))
+        retry_delay = max(0.0, float(getattr(self.config, "judge_retry_delay_seconds", 0.0)))
+        result = None
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                from src.training.supervision.judge_capabilities import (
+                    invoke_comparative_judgment_async,
+                )
+
+                candidate_result = await invoke_comparative_judgment_async(
+                    self.judge,
+                    context=judge_context,
+                    original_text=original_text,
+                    candidate_summaries=candidates,
+                    law_type=law_type,
+                )
+                ordered_ids = [str(value).upper() for value in candidate_result.ordered_candidate_ids]
+                if len(ordered_ids) < 2:
+                    raise ValueError("comparative judge returned fewer than two ordered candidates")
+                result = candidate_result
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt < max_attempts:
+                    logger.warning(
+                        "Tournament listwise judgment %s failed on attempt %d/%d: %s. Retrying...",
+                        match_label,
+                        int(attempt),
+                        int(max_attempts),
+                        exc,
+                    )
+                    if retry_delay > 0:
+                        await asyncio.sleep(retry_delay * float(attempt))
+                    continue
+                raise
+
+        if result is None:
+            raise last_error or RuntimeError("Listwise tournament judge returned no result")
+
+        ordered_ids = [str(value).upper() for value in result.ordered_candidate_ids]
+        canonical_ids = [f"C{idx}" for idx in range(1, len(candidates) + 1)]
+        seen_ids = set()
+        normalized_order: List[str] = []
+        for candidate_id in ordered_ids:
+            if candidate_id in canonical_ids and candidate_id not in seen_ids:
+                normalized_order.append(candidate_id)
+                seen_ids.add(candidate_id)
+        for candidate_id in canonical_ids:
+            if candidate_id not in seen_ids:
+                normalized_order.append(candidate_id)
+
+        candidate_scores = {
+            str(candidate_id).upper(): float(score)
+            for candidate_id, score in dict(result.candidate_scores or {}).items()
+        }
+        if candidate_scores:
+            default_positions = {
+                candidate_id: idx
+                for idx, candidate_id in enumerate(normalized_order)
+            }
+            normalized_order = sorted(
+                normalized_order,
+                key=lambda candidate_id: (
+                    -float(candidate_scores.get(candidate_id, float("-inf"))),
+                    default_positions.get(candidate_id, len(default_positions)),
+                ),
+            )
+        if len(normalized_order) < 2:
+            raise ValueError("Listwise tournament ranking did not identify at least two candidates")
+
+        confidence = max(0.0, min(1.0, float(result.confidence or 0.5)))
+        reasoning = str(result.reasoning or "")
+        response_signal_name = str(
+            result.response_signal_name or "listwise_candidate_score"
+        )
+        winner_id = normalized_order[0]
+        runner_up_id = normalized_order[1]
+        winner_index = int(winner_id[1:]) - 1
+        runner_up_index = int(runner_up_id[1:]) - 1
+        winner_summary = candidates[winner_index]
+        runner_up_summary = candidates[runner_up_index]
+        winner_score = candidate_scores.get(winner_id)
+        runner_up_score = candidate_scores.get(runner_up_id)
+
+        comparison_signal_name: Optional[str] = None
+        comparison_signal_value: Optional[float] = None
+        if winner_score is not None and runner_up_score is not None:
+            comparison_signal_name = "listwise_score_margin"
+            comparison_signal_value = float(winner_score) - float(runner_up_score)
+
+        projection_pair = BinaryComparison(
+            pair_id=f"tournament_{segment_tag}_listwise_top2",
+            source_example_id=segment_tag,
+            original_text=original_text,
+            rubric=rubric,
+            reference_score=0.0,
+            summary_a=winner_summary,
+            summary_b=runner_up_summary,
+            preferred="A",
+            reasoning=reasoning,
+            confidence=max(0.5, confidence),
+            law_type=law_type,
+            preference_supervision=judgment_supervision_metadata(
+                application_name="tournament_preference_collection",
+                law_type=law_type,
+                comparison_signal_name=comparison_signal_name,
+                response_signal_name=response_signal_name,
+                metadata={
+                    "collection_mode": "listwise_projection",
+                    "projection": "winner_vs_runner_up",
+                    "source_record_id": f"tournament_{segment_tag}_listwise",
+                    "num_candidates": len(candidates),
+                },
+            ),
+            score_estimate_a=winner_score,
+            score_estimate_b=runner_up_score,
+            comparison_signal_value=comparison_signal_value,
+            judge_model=judge_model,
+        )
+
+        supervision = judgment_supervision_metadata(
+            application_name="tournament_preference_collection",
+            law_type=law_type,
+            comparison_signal_name=result.comparison_signal_name,
+            comparison_signal_min=result.comparison_signal_min,
+            comparison_signal_max=result.comparison_signal_max,
+            response_signal_name=response_signal_name,
+            response_signal_min=result.response_signal_min,
+            response_signal_max=result.response_signal_max,
+            metadata={
+                "collection_mode": "listwise",
+                "selection_strategy": "winner_take_all",
+                "num_candidates": len(candidates),
+            },
+        ).with_updates(preference_family="groupwise")
+        sampling = SamplingMetadata(
+            unit_kind=ObservationUnitKind.PAIR,
+            sampling_scheme="tournament_listwise_selection",
+            policy_name=judge_model,
+            metadata={
+                "segment_id": segment_id,
+                "source_example_id": segment_tag,
+                "num_candidates": len(candidates),
+            },
+        )
+        rank_by_id = {
+            candidate_id: rank
+            for rank, candidate_id in enumerate(normalized_order, start=1)
+        }
+        comparative_candidates: List[ComparativeCandidate] = []
+        for idx, summary in enumerate(candidates, start=1):
+            candidate_id = f"C{idx}"
+            comparative_candidates.append(
+                ComparativeCandidate(
+                    candidate_id=candidate_id,
+                    response=summary,
+                    rank=rank_by_id.get(candidate_id, idx),
+                    response_signal_value=candidate_scores.get(candidate_id),
+                    source_pair_ids=[
+                        projection_pair.pair_id
+                    ] if candidate_id in {winner_id, runner_up_id} else [],
+                    metadata={
+                        "candidate_index": idx - 1,
+                        "selected_winner": candidate_id == winner_id,
+                        "selected_runner_up": candidate_id == runner_up_id,
+                    },
+                )
+            )
+
+        comparative_record = ComparativeJudgment(
+            record_id=f"tournament_{segment_tag}_listwise",
+            source_example_id=segment_tag,
+            original_text=original_text,
+            rubric=rubric,
+            reference_score=0.0,
+            law_type=law_type,
+            candidates=comparative_candidates,
+            sampling=sampling,
+            preference_supervision=supervision,
+            source_pair_ids=[projection_pair.pair_id],
+            aggregate_sample_weight=sampling.ipw_weight(),
+            judge_model=judge_model,
+            comparison_signal_value=result.comparison_signal_value,
+            metadata={
+                "reasoning": reasoning,
+                "confidence": confidence,
+                "judge_payload": dict(result.raw_payload or {}),
+            },
+        )
+
+        if self._feedback_collector is not None:
+            try:
+                from src.feedback.types import FeedbackDimension, FeedbackRequest
+
+                judge_reasoning = clean_summary_text(reasoning)
+                if len(judge_reasoning) > 2400:
+                    judge_reasoning = judge_reasoning[:2400].rstrip() + " ... (truncated)"
+
+                fb_request = FeedbackRequest(
+                    request_id=comparative_record.record_id,
+                    text_a=winner_summary,
+                    text_b=runner_up_summary,
+                    original_text=original_text,
+                    rubric=rubric,
+                    law_type=law_type,
+                    node_id=segment_tag,
+                    dimensions=[
+                        FeedbackDimension(kind="pairwise"),
+                        FeedbackDimension(kind="critique"),
+                    ],
+                    context={
+                        "match_label": match_label,
+                        "judge_preferred": "A",
+                        "judge_confidence": confidence,
+                        "judge_reasoning": judge_reasoning,
+                        "judge_score_estimate_a": winner_score,
+                        "judge_score_estimate_b": runner_up_score,
+                        "judge_model": judge_model,
+                        "listwise": True,
+                        "ordered_candidate_ids": list(normalized_order),
+                        "candidate_scores": dict(candidate_scores),
+                        "num_candidates": len(candidates),
+                    },
+                )
+                fb_response = self._feedback_collector.collect(fb_request)
+                self._feedback_responses.append((fb_request, fb_response))
+            except Exception as exc:
+                logger.debug("Feedback collector failed in listwise tournament: %s", exc)
+
+        return winner_summary, [projection_pair], [comparative_record]
+
+    def get_preferences(self) -> List["BinaryComparison"]:
         """Get all collected preference pairs."""
         return self._preferences
+
+    def get_comparative_judgments(self) -> List["ComparativeJudgment"]:
+        """Get all collected comparative judgments."""
+        return self._comparative_judgments
 
     def get_feedback_responses(self) -> List[Any]:
         """Get all collected feedback request/response pairs.
@@ -1335,11 +2029,16 @@ class TournamentStrategy:
     def reset_preferences(self) -> None:
         """Reset collected preferences (e.g., between documents)."""
         self._preferences = []
+        self._comparative_judgments = []
         self._feedback_responses = []
 
     def get_preference_count(self) -> int:
         """Get number of collected preferences."""
         return len(self._preferences)
+
+    def get_comparative_judgment_count(self) -> int:
+        """Get number of collected comparative judgments."""
+        return len(self._comparative_judgments)
 
 
 # =============================================================================

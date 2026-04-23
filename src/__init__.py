@@ -3,9 +3,26 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 __version__ = "0.1.0"
+
+
+def _ensure_parallel_lane_import_path() -> None:
+    """Expose the parallel unified lane as a normal import target.
+
+    The canonical space/learner program contracts live under
+    ``parallel/unified_g_v1/src``. Mainline ``src.*`` modules consume those
+    contracts directly during local development, so make that lane importable
+    without requiring a separate package install step.
+    """
+
+    repo_root = Path(__file__).resolve().parents[1]
+    lane_src = repo_root / "parallel" / "unified_g_v1" / "src"
+    rendered = str(lane_src)
+    if lane_src.exists() and rendered not in sys.path:
+        sys.path.insert(0, rendered)
 
 
 def _is_writable_dir(path: Path) -> bool:
@@ -38,4 +55,5 @@ def _configure_default_dspy_cache_dir() -> None:
             return
 
 
+_ensure_parallel_lane_import_path()
 _configure_default_dspy_cache_dir()
