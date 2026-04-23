@@ -30,6 +30,7 @@ dependencies = [
 [project.optional-dependencies]
 sklearn = ["scikit-learn>=1.4.2"]
 torch = ["torch>=2.0.0"]
+sketches = ["datasketches>=5.2.0"]
 dev = [
   "pytest>=7.0.0",
   "pytest-cov>=4.0.0",
@@ -39,7 +40,7 @@ dev = [
   "mypy>=1.0.0",
   "ruff>=0.1.0",
 ]
-all = ["treepo[sklearn,torch,dev]"]
+all = ["treepo[sklearn,torch,sketches,dev]"]
 
 [project.scripts]
 treepo-bench = "treepo.bench.cli:main"
@@ -74,4 +75,3 @@ python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
-

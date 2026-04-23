@@ -1,0 +1,51 @@
+[tradeoff_pipeline]
+preset = "standard"
+phases = ["supervision_recovery", "report"]
+device_mode = "cuda"
+train_docs = 10240
+val_docs = 1024
+test_docs = 1024
+supervision_recovery_train_docs = [1024, 4096, 10240]
+supervision_recovery_seeds = [0, 1]
+supervision_recovery_packages = [
+  "full100",
+  "r100_mass_local_eq_5p0",
+  "r100_mass_local_eq_10p0",
+  "r100_mass_local_eq_15p0",
+  "r100_mass_local_eq_20p0",
+]
+supervision_recovery_tree_family = "tree_neural"
+supervision_recovery_structural_cell = "r12_p079"
+supervision_fixed_leaf_tokens = 8
+supervision_min_tokens = 128
+supervision_max_tokens = 128
+supervision_epochs = 40
+exact_metric_final_doc_limit = 128
+tree_posttrain_train_doc_limit = 128
+tree_stage1_artifact_root = "outputs/_stage1_artifacts/markov_supervision_recovery_unified_g_leafgrid_r100"
+
+[tradeoff_pipeline.tree_reference]
+mode = "preset"
+preset = "unified_g_full_local_laws_v1"
+
+[tradeoff_pipeline.structural_tree_reference]
+mode = "preset"
+preset = "unified_g_full_local_laws_v1"
+
+[tradeoff_pipeline.runtime]
+data_mode = "resident"
+bucket_mode = "leaf_count_auto_queue"
+tree_batch_structural_pad_limit = 0.5
+tree_batch_auto_queue_min_docs = 8
+tree_batch_auto_queue_min_fill_ratio = 0.5
+preload_splits = ["train", "val", "test"]
+preload_targets = true
+workers_per_mig = 1
+allow_multi_worker_screen = true
+capacity_workers_per_mig = 2
+
+[tradeoff_pipeline.scheduler]
+mode = "global_per_run"
+default_job_granularity = "family_train_seed"
+cleanup_stale_children = true
+max_gpu_items_per_mig = 1

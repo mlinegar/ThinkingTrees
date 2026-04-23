@@ -1,0 +1,129 @@
+[publication_bundle]
+phases = ["tradeoff", "parity", "tree_fno_pdf", "full_doc_parity_pdf", "bundle"]
+with_preflight = false
+reuse_existing = true
+
+[publication_bundle.tradeoff]
+preset = "standard"
+device_mode = "cuda"
+phases = ["supervision_recovery", "report"]
+train_docs = 4096
+supervision_recovery_train_docs = [1024, 2048, 4096]
+supervision_recovery_seeds = [0, 1]
+supervision_recovery_tree_family = "tree_neural"
+supervision_recovery_structural_cell = "r12_p079"
+
+[publication_bundle.tradeoff.tree_reference]
+mode = "preset"
+capacity_root = ""
+preset = "common_factorized_sketch_v1"
+
+[publication_bundle.tradeoff.structural_tree_reference]
+mode = "preset"
+capacity_root = ""
+preset = "common_factorized_sketch_v1"
+
+[publication_bundle.tradeoff.runtime]
+data_mode = "resident"
+bucket_mode = "leaf_count_auto_queue"
+preload_splits = ["train", "val", "test"]
+preload_targets = true
+workers_per_mig = 1
+allow_multi_worker_screen = true
+capacity_workers_per_mig = 2
+
+[publication_bundle.parity]
+benchmark = "recoverable_v4"
+gate_train_doc_count = 4096
+scale_train_doc_counts = [1024, 2048, 4096]
+seeds = [0, 1, 2, 3, 4]
+tree_families = ["tree_neural_c2", "tree_neural_c2c3", "tree_neural"]
+fno_families = ["official_fno", "official_fno_sumlen"]
+run_aux_upper_bound = true
+upper_bound_aux_fractions = [1.0]
+backfill_on_success = true
+
+[publication_bundle.parity.runtime]
+data_mode = "resident"
+bucket_mode = "exact_then_bucketed"
+preload_splits = ["train", "val", "test"]
+preload_targets = true
+workers_per_mig = 1
+allow_multi_worker_screen = false
+capacity_workers_per_mig = 2
+
+[publication_bundle.render]
+render_full_doc_parity_pdf = true
+
+[tradeoff_pipeline]
+preset = "standard"
+phases = ["supervision_recovery", "report"]
+efficiency_anchor_mode = "both"
+efficiency_train_docs = [2048, 4096]
+efficiency_anchor_train_docs_dense = [256, 512, 768, 1024, 1536, 2048, 3072, 4096]
+efficiency_anchor_seeds = [0, 1, 2]
+efficiency_hardness_grid = "structural_core_v1"
+efficiency_structural_cells = ["r4_p031", "r12_p031", "r4_p079", "r12_p079"]
+device_mode = "cuda"
+train_docs = 4096
+val_docs = 512
+test_docs = 512
+supervision_recovery_train_docs = [1024, 2048, 4096]
+supervision_recovery_seeds = [0, 1]
+supervision_recovery_tree_family = "tree_neural"
+supervision_recovery_structural_cell = "r12_p079"
+medium_batch_sizes = [128, 256, 512]
+medium_seeds = [0, 1, 2]
+docs_epochs_train_docs = [1024, 2048, 4096]
+docs_epochs_epochs = [1, 2, 5, 10]
+learnability_train_docs = [2048, 4096]
+learnability_weights = [0.0, 0.5, 1.0]
+learnability_profiles = ["pure_c2", "equal"]
+weight_ablation_train_docs = [2048, 4096]
+weight_ablation_profiles = ["root_only", "pure_c2", "equal", "c2_dominant"]
+law_package_names = ["tree_root_only", "tree_c2_only", "tree_all_laws"]
+full_doc_anchor_train_docs = [1024, 2048, 4096]
+full_doc_anchor_seeds = [0, 1, 2]
+full_doc_anchor_families = ["official_fno", "official_fno_sumlen"]
+oracle_budget_train_docs = 4096
+oracle_budget_seeds = [0, 1, 2]
+oracle_budget_tree_families = ["tree_neural_c2", "tree_neural"]
+oracle_budget_reference_families = ["official_fno", "official_fno_sumlen"]
+oracle_budget_calls_per_doc = [0.5, 1.0, 2.0]
+oracle_budget_full_doc_shares = [0.0, 0.5, 1.0]
+oracle_budget_doc_consumption_modes = ["root_only", "doc_sequence"]
+oracle_budget_local_split_modes = ["balanced"]
+
+[tradeoff_pipeline.tree_reference]
+mode = "preset"
+capacity_root = ""
+preset = "common_factorized_sketch_v1"
+support_leaf_tokens = [8, 12, 16, 24]
+support_seeds = [0, 1]
+support_modes = ["supported", "unsupported"]
+
+[tradeoff_pipeline.structural_tree_reference]
+mode = "preset"
+capacity_root = ""
+preset = "common_factorized_sketch_v1"
+
+[tradeoff_pipeline.runtime]
+data_mode = "resident"
+bucket_mode = "leaf_count_auto_queue"
+preload_splits = ["train", "val", "test"]
+preload_targets = true
+workers_per_mig = 1
+allow_multi_worker_screen = true
+capacity_workers_per_mig = 2
+
+[publication_bundle.scheduler]
+mode = "global_per_run"
+default_job_granularity = "family_train_seed"
+cleanup_stale_children = true
+max_gpu_items_per_mig = 1
+
+[tradeoff_pipeline.scheduler]
+mode = "global_per_run"
+default_job_granularity = "family_train_seed"
+cleanup_stale_children = true
+max_gpu_items_per_mig = 1

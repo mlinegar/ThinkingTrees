@@ -1,0 +1,56 @@
+# Recoverable profile: canonical nondegenerate benchmark with disjoint palettes.
+# 128-token documents give clean power-of-2 leaf counts at all granularities:
+#   leaf=16 -> 8 leaves, leaf=32 -> 4 leaves, leaf=64 -> 2 leaves, leaf=128 -> 1 leaf.
+#
+# Fields annotated with "(override)" differ from OPSCountConfig class defaults.
+[observed_token_policy]
+profile = "recoverable"
+generator_profile = "piecewise_disjoint_palette"  # (override) class default: "piecewise_palette"
+n_regimes = 4
+vocab_size = 16
+min_tokens = 128  # (override) class default: 96 (in MarkovObservedTokenPolicy)
+max_tokens = 128  # (override) class default: 96
+min_segments = 2
+max_segments = 6
+min_seg_len = 8
+max_seg_len = 24
+fixed_leaf_tokens = 16
+
+# Data split sizes (overridden by corpus preparation when using --corpus-root)
+train_docs = 1024
+val_docs = 128
+test_docs = 256
+
+# Model capacity — larger than smoke/demo defaults
+state_dim = 64    # (override) class default: 16
+hidden_dim = 256  # (override) class default: 64
+n_epochs = 48     # (override) class default: 4
+batch_size = 64   # (override) class default: 8
+lr = 3e-4         # (override) class default: 5e-4
+weight_decay = 0.0
+
+seed = 0
+device = "cpu"
+torch_threads = 1
+
+# Local law weights.
+# C2 (idempotence) is intentionally zeroed out: the C2-only dominance finding
+# (2026-03-09 handoff) showed that C1/C3 inclusion can be catastrophic in the
+# Markov DGP.  These defaults apply when using the parity grid or R10/R20
+# sweeps — the actual effective weights depend on the recipe's leaf_label_rate
+# and internal_label_rate (both 0 in root-only recipes, so weights don't matter).
+local_law_weight = 0.5
+c1_relative_weight = 1.0
+c2_relative_weight = 0.0   # (override) class default: 0.0 in policy, 1.0 in OPSCountConfig
+c3_relative_weight = 1.0
+
+# Non-neural baselines
+rf_n_estimators = 100
+rf_max_depth = 8
+rf_min_samples_leaf = 2
+leaf_knn_neighbors = 32
+doc_level_ridge_alpha = 0.0  # (override) class default: 1.0
+doc_level_ridge_breakdown_orders = [1, 2, 3]
+doc_sequence_objective = "count_ce_only"
+doc_transformer_head_family = "boundary_sum_count_hybrid"
+doc_transformer_layers = 4

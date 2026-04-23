@@ -1,0 +1,74 @@
+[tradeoff_pipeline]
+preset = "standard"
+phases = ["supervision_recovery", "report"]
+device_mode = "cuda"
+train_docs = 10240
+val_docs = 1024
+test_docs = 1024
+supervision_recovery_train_docs = [1024, 2048, 4096]
+supervision_recovery_seeds = [0, 1]
+supervision_recovery_tree_family = "tree_neural"
+supervision_recovery_structural_cell = "r12_p079"
+docs_epochs_train_docs = [5120, 10240]
+docs_epochs_epochs = [1, 2, 5, 10]
+learnability_train_docs = [5120, 10240]
+learnability_weights = [0.0, 0.25, 0.5, 1.0]
+learnability_profiles = ["pure_c2", "equal"]
+weight_ablation_train_docs = [5120, 10240]
+weight_ablation_profiles = ["root_only", "pure_c2", "c2_trace_c1c3", "c2_light_c1c3", "c2_mild_c1c3", "c2_moderate_c1c3", "c2_very_dominant", "c2_dominant", "c2_heavy", "equal", "c1c3_heavy", "c3_dominant", "no_c2"]
+law_package_names = ["tree_root_only", "tree_c2_only", "tree_all_laws"]
+full_doc_anchor_train_docs = [5120, 10240]
+full_doc_anchor_seeds = [0, 1, 2, 3, 4]
+full_doc_anchor_families = ["official_fno", "official_fno_sumlen"]
+efficiency_anchor_mode = "both"
+efficiency_train_docs = [2048, 4096, 5120, 10240]
+efficiency_anchor_train_docs_dense = [256, 512, 768, 1024, 1536, 2048, 3072, 4096, 5120, 10240]
+efficiency_anchor_seeds = [0, 1, 2, 3, 4]
+efficiency_hardness_grid = "structural_core_v1"
+efficiency_structural_cells = ["r4_p031", "r12_p031", "r4_p079", "r12_p079"]
+oracle_budget_train_docs = 10240
+oracle_budget_seeds = [0, 1, 2, 3, 4]
+oracle_budget_tree_families = ["tree_neural_c2", "tree_neural_c2c3", "tree_neural"]
+oracle_budget_reference_families = ["official_fno", "official_fno_sumlen"]
+oracle_budget_calls_per_doc = [0.25, 0.5, 1.0, 2.0]
+oracle_budget_full_doc_shares = [0.0, 0.25, 0.5, 0.75, 1.0]
+oracle_budget_doc_consumption_modes = ["root_only", "doc_sequence"]
+oracle_budget_local_split_modes = ["balanced"]
+supervision_train_docs = [2048, 4096, 5120, 10240]
+supervision_leaf_profiles = ["none", "count_q25", "count_q50", "count_q100", "full_q50", "full_q100"]
+supervision_internal_profiles = ["none", "count_q25", "count_q50", "count_q100", "full_q50", "full_q100"]
+supervision_seeds = [0, 1]
+supervision_min_tokens = 64
+supervision_max_tokens = 64
+supervision_min_segments = 2
+supervision_max_segments = 6
+supervision_fixed_leaf_tokens = 8
+
+[tradeoff_pipeline.tree_reference]
+mode = "preset"
+capacity_root = ""
+preset = "common_factorized_sketch_v1"
+large_batch_batch_sizes = [256, 512, 1024]
+large_batch_fixed_epochs = 5
+large_batch_target_steps = 200
+large_batch_lrs = [0.001, 0.002, 0.004]
+
+[tradeoff_pipeline.structural_tree_reference]
+mode = "preset"
+capacity_root = ""
+preset = "common_factorized_sketch_v1"
+
+[tradeoff_pipeline.runtime]
+data_mode = "resident"
+bucket_mode = "leaf_count_auto_queue"
+preload_splits = ["train", "val", "test"]
+preload_targets = true
+workers_per_mig = 1
+allow_multi_worker_screen = true
+capacity_workers_per_mig = 2
+
+[tradeoff_pipeline.scheduler]
+mode = "global_per_run"
+default_job_granularity = "family_train_seed"
+cleanup_stale_children = true
+max_gpu_items_per_mig = 1

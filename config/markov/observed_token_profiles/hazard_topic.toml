@@ -1,0 +1,46 @@
+# Hazard-topic profile: pure hazard-based topic switching model.
+#
+# At each token position, the current topic switches with probability
+# hazard_rate = 1 / mean_seg_len = 2 / (min_seg_len + max_seg_len).
+# With min_seg_len=8, max_seg_len=24 -> mean_seg_len=16 -> hazard_rate=0.0625.
+# On a 128-token doc this gives ~8 expected switches, so ~8 changepoints on average.
+#
+# Each topic has a disjoint palette emission distribution (same as recoverable).
+# The number of changepoints is stochastic, driven by the hazard rate.
+[observed_token_policy]
+profile = "hazard_topic"
+generator_profile = "hazard_topic"
+n_regimes = 4
+vocab_size = 16
+min_tokens = 128
+max_tokens = 128
+min_segments = 2
+max_segments = 6
+min_seg_len = 8
+max_seg_len = 24
+fixed_leaf_tokens = 16
+train_docs = 1024
+val_docs = 128
+test_docs = 256
+state_dim = 64
+hidden_dim = 256
+n_epochs = 48
+batch_size = 64
+lr = 3e-4
+weight_decay = 0.0
+seed = 0
+device = "cpu"
+torch_threads = 1
+local_law_weight = 0.5
+c1_relative_weight = 1.0
+c2_relative_weight = 0.0
+c3_relative_weight = 1.0
+rf_n_estimators = 100
+rf_max_depth = 8
+rf_min_samples_leaf = 2
+leaf_knn_neighbors = 32
+doc_level_ridge_alpha = 0.0
+doc_level_ridge_breakdown_orders = [1, 2, 3]
+doc_sequence_objective = "count_ce_only"
+doc_transformer_head_family = "boundary_sum_count_hybrid"
+doc_transformer_layers = 4

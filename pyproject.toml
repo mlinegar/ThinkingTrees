@@ -48,6 +48,7 @@ dev = [
 sim = [
     "scikit-learn>=1.4.2",
     "torch>=2.0.0",
+    "neuraloperator>=2.0.0",
 ]
 vllm = [
     "vllm>=0.12.0",

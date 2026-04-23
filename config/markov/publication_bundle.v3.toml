@@ -1,0 +1,121 @@
+[publication_bundle]
+phases = ["tradeoff", "capacity", "parity", "tree_fno_pdf", "full_doc_parity_pdf", "bundle"]
+with_preflight = true
+reuse_existing = true
+
+[publication_bundle.tradeoff]
+preset = "v3"
+device_mode = "cuda"
+phases = ["supervision_recovery", "report"]
+train_docs = 10240
+supervision_recovery_train_docs = [1024, 4096, 10240]
+supervision_recovery_seeds = [0, 1]
+supervision_min_tokens = 128
+supervision_max_tokens = 128
+prepared_data_root = "outputs/_prepared_data/markov_full_doc_anchor_diagnostics_t128_relaunch"
+tree_stage1_artifact_root = "outputs/_stage1_artifacts/markov_comparison_grid_v3"
+
+[publication_bundle.tradeoff.tree_reference]
+preset = "comparison_grid_v3"
+mode = "preset"
+capacity_root = ""
+
+[publication_bundle.tradeoff.structural_tree_reference]
+preset = "comparison_grid_v3"
+mode = "preset"
+capacity_root = ""
+
+[publication_bundle.tradeoff.runtime]
+data_mode = "resident"
+bucket_mode = "leaf_count_auto_queue"
+preload_splits = ["train", "val", "test"]
+preload_targets = true
+workers_per_mig = 1
+allow_multi_worker_screen = true
+capacity_workers_per_mig = 2
+
+[publication_bundle.capacity]
+benchmark = "recoverable_v5_t128"
+train_doc_count = 10240
+screen_seeds = [0, 1, 2]
+locked_seeds = [0, 1, 2, 3, 4]
+top_k = 3
+widths = [64, 128, 256]
+modes = [2, 4, 8]
+layers = [2, 4, 6]
+
+[publication_bundle.capacity.runtime]
+data_mode = "resident"
+bucket_mode = "exact_then_bucketed"
+preload_splits = ["train", "val", "test"]
+preload_targets = true
+workers_per_mig = 1
+allow_multi_worker_screen = true
+capacity_workers_per_mig = 2
+
+[publication_bundle.parity]
+benchmark = "recoverable_v5_t128"
+gate_train_doc_count = 10240
+scale_train_doc_counts = [1024, 2048, 4096, 10240]
+seeds = [0, 1, 2, 3, 4]
+tree_families = ["tree_neural"]
+fno_families = ["official_fno", "official_fno_sumlen"]
+run_aux_upper_bound = true
+upper_bound_aux_fractions = [0.25, 1.0]
+backfill_on_success = true
+
+[publication_bundle.parity.runtime]
+data_mode = "resident"
+bucket_mode = "exact_then_bucketed"
+preload_splits = ["train", "val", "test"]
+preload_targets = true
+workers_per_mig = 1
+allow_multi_worker_screen = false
+capacity_workers_per_mig = 2
+
+[publication_bundle.render]
+render_full_doc_parity_pdf = true
+
+[tradeoff_pipeline]
+preset = "v3"
+phases = ["supervision_recovery", "report"]
+train_docs = 10240
+val_docs = 1024
+test_docs = 1024
+supervision_recovery_train_docs = [1024, 4096, 10240]
+supervision_recovery_seeds = [0, 1]
+supervision_min_tokens = 128
+supervision_max_tokens = 128
+prepared_data_root = "outputs/_prepared_data/markov_full_doc_anchor_diagnostics_t128_relaunch"
+tree_stage1_artifact_root = "outputs/_stage1_artifacts/markov_comparison_grid_v3"
+
+[tradeoff_pipeline.tree_reference]
+mode = "preset"
+capacity_root = ""
+preset = "comparison_grid_v3"
+
+[tradeoff_pipeline.structural_tree_reference]
+mode = "preset"
+capacity_root = ""
+preset = "comparison_grid_v3"
+
+[tradeoff_pipeline.runtime]
+data_mode = "resident"
+bucket_mode = "leaf_count_auto_queue"
+preload_splits = ["train", "val", "test"]
+preload_targets = true
+workers_per_mig = 1
+allow_multi_worker_screen = true
+capacity_workers_per_mig = 2
+
+[publication_bundle.scheduler]
+mode = "global_per_run"
+default_job_granularity = "family_train_seed"
+cleanup_stale_children = true
+max_gpu_items_per_mig = 1
+
+[tradeoff_pipeline.scheduler]
+mode = "global_per_run"
+default_job_granularity = "family_train_seed"
+cleanup_stale_children = true
+max_gpu_items_per_mig = 1
