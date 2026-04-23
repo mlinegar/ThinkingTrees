@@ -1,5 +1,18 @@
 # AGENTS.md - Quick Reference for AI Agents
 
+## Agent Reading Order
+
+- Start here for local setup, server commands, common workflows, and repo-wide
+  working assumptions.
+- Use `docs/ctreepo_python_code_map_for_llms.md` as the detailed Python code
+  map for C-TreePO, Semantic Forests, optimizer behavior, token-budget handling,
+  and flagged audit issues.
+- Treat that code map as source-audit documentation. Do not duplicate or
+  overwrite it without re-running a source inventory, AST parse sweep, and
+  targeted searches over the relevant pipeline/optimizer/token-budget paths.
+
+---
+
 ## Environment Setup
 
 ```bash
@@ -133,6 +146,68 @@ python scripts/generate_manifesto_teacher_traces.py \
   --scorer-model /mnt/data/models/nvidia/Qwen3.5-397B-A17B-NVFP4
 ```
 
+## Common Workflow: Markov Publication Bundle
+
+```bash
+# Preferred current workflow: use a versioned TOML config, inspect the plan,
+# then launch detached so the run survives after the launching shell exits.
+python scripts/run_markov_publication_bundle.py \
+  --config config/markov/publication_bundle.iteration.toml \
+  --plan-only
+
+# Full overnight publication run:
+# This includes the oracle-budget / effective-training-docs frontier in the
+# tradeoff report, alongside the full-doc FNO reference and parity bundle.
+python scripts/run_markov_publication_bundle.py \
+  --config config/markov/publication_bundle.publication.toml \
+  --detach \
+  --output-root outputs/markov_publication_bundle_$(date +%Y%m%d_%H%M%S) \
+  --no-reuse-existing
+
+# To start a custom config from scratch:
+python scripts/run_markov_publication_bundle.py \
+  --write-config-template outputs/markov_publication_bundle.custom.toml
+
+# Check status / tail logs / stop later via the launcher manifest
+python scripts/long_job.py status \
+  --job-root outputs/markov_publication_bundle_YYYYmmdd_HHMMSS/launcher
+
+tail -f outputs/markov_publication_bundle_YYYYmmdd_HHMMSS/launcher/job.log
+
+python scripts/long_job.py stop \
+  --job-root outputs/markov_publication_bundle_YYYYmmdd_HHMMSS/launcher
+```
+
+## Common Workflow: Markov Tradeoff Pipeline
+
+```bash
+python scripts/run_markov_optimization_tradeoff_pipeline.py \
+  --config config/markov/tradeoff_pipeline.iteration.toml \
+  --plan-only
+
+python scripts/run_markov_optimization_tradeoff_pipeline.py \
+  --config config/markov/tradeoff_pipeline.publication.toml \
+  --output-root outputs/markov_tradeoff_$(date +%Y%m%d_%H%M%S)
+```
+
+## Long-Running Jobs
+
+```bash
+# Official rule: for long-running jobs, prefer the built-in detached launcher.
+# Do not rely on ad hoc `nohup ... &` when a script supports --detach.
+
+# Generic detached launch
+python scripts/long_job.py launch \
+  --name my_long_job \
+  --job-root outputs/my_long_job_launcher \
+  --cwd /home/mlinegar/ThinkingTrees \
+  -- ./venv/bin/python some_script.py --arg value
+
+# Inspect / stop by launcher manifest
+python scripts/long_job.py status --job-root outputs/my_long_job_launcher
+python scripts/long_job.py stop --job-root outputs/my_long_job_launcher
+```
+
 ---
 
 ## Key Scripts
@@ -146,6 +221,9 @@ python scripts/generate_manifesto_teacher_traces.py \
 | `run_manifesto_batched_example.py` | Batched manifesto-ID runner for paper examples (chunk stats + predicted RILE) |
 | `run_manifesto_optimized_example.sh` | End-to-end optimized RILE example (train DSPy modules, then evaluate IDs) |
 | `generate_manifesto_teacher_traces.py` | Real-anchor teacher trace generator (score-preserving expansion + 2-hop summaries) |
+| `run_markov_publication_bundle.py` | Full Markov publication bundle; prefer `--config ... --plan-only`, then `--detach` |
+| `run_markov_optimization_tradeoff_pipeline.py` | Optimized Markov tradeoff grid; prefer `--config ... --plan-only` |
+| `long_job.py` | Official detached launcher for long-running jobs (`launch`, `status`, `stop`) |
 | `start_vllm.sh <profile>` | Start single model (reads config/settings.yaml) |
 | `stop_small_servers.sh` | Gracefully stop servers |
 
@@ -273,6 +351,7 @@ Tree builder (`src/tree/builder.py`), data models (`src/core/data_models.py`), s
 
 ## Theory Docs
 
+- `docs/ctreepo_python_code_map_for_llms.md` # Python code map, optimizer/token-budget matrix, and audit findings for LLM handoff
 - `docs/treepo_preference_optimization.md` # TreePO formalization map (DPO/GRPO/PPO, sampling, DSL/IPW links)
 
 ---
