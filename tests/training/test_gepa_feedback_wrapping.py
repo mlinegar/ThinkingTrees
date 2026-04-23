@@ -46,3 +46,47 @@ def test_gepa_wrap_metric_extracts_score_from_dict_without_feedback():
     wrapped = opt._wrap_metric_gepa(metric)
     assert wrapped(None, None, None, None, None) == 0.5
 
+
+def test_gepa_wrap_metric_records_immediate_timing_metadata():
+    from src.training.optimization.gepa import GEPAOptimizer
+
+    opt = GEPAOptimizer()
+
+    def metric(*_args, **_kwargs):
+        return 0.5
+
+    wrapped = opt._wrap_metric_gepa(metric)
+    timing = wrapped.supervision_timing
+
+    assert timing["acquisition_policy"] == "synchronous_optimizer_metric"
+    assert timing["activation_barrier"] == "immediate"
+    assert timing["consumer"] == "gepa_optimizer"
+    assert timing["blocking"] is True
+
+
+def test_gepa_compile_audit_records_supervision_timing(monkeypatch):
+    from src.training.optimization.gepa import GEPAOptimizer
+
+    class FakeGEPA:
+        def __init__(self, **_kwargs):
+            pass
+
+        def compile(self, student=None, trainset=None, valset=None):
+            return student
+
+    monkeypatch.setattr("src.training.optimization.gepa.dspy.GEPA", FakeGEPA)
+    opt = GEPAOptimizer()
+    student = {"module": "student"}
+
+    compiled = opt.compile(
+        student=student,
+        trainset=[],
+        valset=[],
+        metric=lambda *_args, **_kwargs: 1.0,
+    )
+
+    assert compiled is student
+    timing = opt.last_compile_audit["supervision_timing"]
+    assert timing["acquisition_policy"] == "synchronous_optimizer_metric"
+    assert timing["activation_barrier"] == "immediate"
+    assert timing["blocking"] is True

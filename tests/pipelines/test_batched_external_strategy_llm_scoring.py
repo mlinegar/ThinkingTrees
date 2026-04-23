@@ -113,8 +113,8 @@ def test_process_batch_with_external_strategy_still_computes_llm_backend_score(m
 
     config = BatchedPipelineConfig(
         task_model_url="http://localhost:8000/v1",
-        representation_backends=["llm"],
-        primary_representation_backend="llm",
+        program_families=["text__llm__llm"],
+        primary_program_family="text__llm__llm",
         fallback_to_available_backend=True,
         run_baseline=False,
         show_progress=False,
@@ -139,5 +139,5 @@ def test_process_batch_with_external_strategy_still_computes_llm_backend_score(m
     assert len(results) == 1
     result = results[0]
     assert result.estimated_score == 12.5
-    assert result.metadata["representation_selected_backend"] == "llm"
-    assert result.metadata["representation_backend_scores"]["llm"] == 12.5
+    assert result.metadata["selected_program_family"] == "text__llm__llm"
+    assert result.metadata["program_family_scores"]["text__llm__llm"] == 12.5

@@ -72,6 +72,24 @@ def _write_bundle_manifest(path: Path) -> Path:
                 "root": "/tmp/lda_tree_recovery_progress",
                 "bundle_role": "diagnostic",
             },
+            {
+                "name": "markov_observed_token",
+                "status": "completed",
+                "root": "/tmp/markov_observed_token",
+                "bundle_role": "appendix",
+            },
+            {
+                "name": "markov_full_doc_anchor",
+                "status": "completed",
+                "root": "/tmp/markov_full_doc_anchor",
+                "bundle_role": "diagnostic",
+            },
+            {
+                "name": "markov_full_tree_ipw",
+                "status": "completed",
+                "root": "/tmp/markov_full_tree_ipw",
+                "bundle_role": "diagnostic",
+            },
         ],
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,6 +120,14 @@ def test_build_simulation_theory_alignment_report_from_fixture_root(tmp_path: Pa
     assert "Simulation Theory Alignment" in markdown
     assert "markov_path_local_laws_of_encoded_state" in markdown
     assert "sketchReduce_countSketch_eq_bagOfWords" in markdown
+    assert any(
+        suite["name"] == "markov_full_doc_anchor" and suite["status"] == "completed"
+        for suite in report.suites
+    )
+    assert any(
+        suite["name"] == "markov_full_tree_ipw" and suite["status"] == "completed"
+        for suite in report.suites
+    )
 
 
 def test_merge_expectation_reports_deduplicates_findings() -> None:

@@ -1,5 +1,7 @@
 import argparse
 
+import pytest
+
 from src.training.run_pipeline import (
     apply_inference_backend_defaults,
     resolve_inference_backend_config,
@@ -58,3 +60,21 @@ def test_backend_switch_preserves_explicit_ports():
 
     assert args.port == 31000
     assert args.genrm_port == 31001
+
+
+def test_backend_switch_rejects_registered_but_unsupported_engine():
+    settings = {
+        "inference": {"backend": {"task_backend": "openai", "genrm_backend": "sglang"}},
+    }
+    args = _args()
+
+    with pytest.raises(ValueError, match="not supported in training pipeline task backend selection"):
+        resolve_inference_backend_config(args, settings)
+
+
+def test_backend_switch_rejects_unknown_engine() -> None:
+    settings = {"inference": {"backend": {}}}
+    args = _args(task_backend="definitely_not_an_engine")
+
+    with pytest.raises(ValueError, match="Unsupported engine"):
+        resolve_inference_backend_config(args, settings)

@@ -189,7 +189,7 @@ class TestTreeAuditEndToEnd:
 
             # Check files exist
             assert (Path(tmpdir) / "certificate.json").exists()
-            assert (Path(tmpdir) / "preferences.json").exists()
+            assert (Path(tmpdir) / "supervision.json").exists()
             assert (Path(tmpdir) / "trace.jsonl").exists()
             assert (Path(tmpdir) / "audit_reports.json").exists()
             assert (Path(tmpdir) / "trees").is_dir()

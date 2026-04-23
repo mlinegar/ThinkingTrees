@@ -199,6 +199,7 @@ def test_detect_artifacts_reads_ctreepo_local_law_summary(tmp_path: Path) -> Non
     run_dir = tmp_path / "ctreepo"
     run_dir.mkdir()
     (run_dir / "best.pt").write_text("stub", encoding="utf-8")
+    (run_dir / "reproducibility_manifest.json").write_text("{}", encoding="utf-8")
     (run_dir / "training_result.json").write_text(
         json.dumps(
             {
@@ -225,6 +226,7 @@ def test_detect_artifacts_reads_ctreepo_local_law_summary(tmp_path: Path) -> Non
 
     assert artifacts["best_model_path"] == str(run_dir / "best.pt")
     assert artifacts["training_result_path"] == str(run_dir / "training_result.json")
+    assert artifacts["reproducibility_manifest_path"] == str(run_dir / "reproducibility_manifest.json")
     assert artifacts["local_law_summary"] == {
         "node_oracle_predictor_attached": True,
         "node_label_source_kind": "oracle_callback",
@@ -238,3 +240,164 @@ def test_detect_artifacts_reads_ctreepo_local_law_summary(tmp_path: Path) -> Non
         "name": "ctreepo_local_law_training",
         "uses_sampled_substructure_labels": True,
     }
+
+
+def test_train_neural_operators_writes_canonical_control_plane(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    mod = _load_module()
+
+    def _fake_run_command(label: str, cmd: list[str], log_path: Path):
+        run_dir = tmp_path / label
+        run_dir.mkdir(parents=True, exist_ok=True)
+        if label == "ctreepo":
+            (run_dir / "best.pt").write_text("stub", encoding="utf-8")
+            (run_dir / "training_result.json").write_text(
+                json.dumps(
+                    {
+                        "best_epoch": 3,
+                        "best_root_mae": 0.12,
+                        "training_time_seconds": 5.0,
+                        "epochs_completed": 4,
+                        "eval_metrics": [
+                            {
+                                "root_mae": 0.12,
+                                "leaf_oracle_mae": 0.04,
+                                "merge_oracle_mae": 0.06,
+                                "leaf_violation_rate": 0.1,
+                                "merge_violation_rate": 0.2,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+        return {
+            "label": label,
+            "returncode": 0,
+            "log": str(log_path),
+            "started_at": "2026-03-07T00:00:00",
+            "ended_at": "2026-03-07T00:00:01",
+        }
+
+    monkeypatch.setattr(mod, "_run_command", _fake_run_command)
+    monkeypatch.setattr(
+        mod.sys,
+        "argv",
+        [
+            "train_neural_operators.py",
+            "--output-dir",
+            str(tmp_path),
+            "--which",
+            "ctreepo",
+            "--ctreepo-local-law-oracle",
+            "task",
+            "--ctreepo-leaf-audit-weight",
+            "0.3",
+            "--ctreepo-merge-audit-weight",
+            "0.8",
+        ],
+    )
+
+    rc = int(mod.main())
+    assert rc == 0
+    assert (tmp_path / "experiment_manifest.json").exists()
+    assert (tmp_path / "experiment_status.json").exists()
+    assert (tmp_path / "artifacts.json").exists()
+    assert (tmp_path / "reproducibility_manifest.json").exists()
+    assert (tmp_path / "search_spec.json").exists()
+    assert (tmp_path / "search_results.json").exists()
+    assert (tmp_path / "results.jsonl").exists()
+    status = json.loads((tmp_path / "experiment_status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "completed"
+    artifacts = json.loads((tmp_path / "artifacts.json").read_text(encoding="utf-8"))
+    assert "reproducibility_manifest_json" in artifacts["artifacts"]
+    assert "search_spec_json" in artifacts["artifacts"]
+    assert "search_results_json" in artifacts["artifacts"]
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "results.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(row["metric_name"] == "best_root_mae" for row in rows)
+    assert any(row["metric_name"] == "leaf_violation_rate" for row in rows)
+
+
+def test_train_neural_operators_runs_search_trials_and_selects_best(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    mod = _load_module()
+    spec_path = tmp_path / "ctreepo_search.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "mode": "grid",
+                "selection_metric": "validation_mae",
+                "tie_breaker_metric": "training_time_seconds",
+                "dimensions": [
+                    {"flag": "--lr", "values": [0.001, 0.0005]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_run_command(label: str, cmd: list[str], log_path: Path):
+        run_dir = Path(cmd[cmd.index("--output-dir") + 1])
+        run_dir.mkdir(parents=True, exist_ok=True)
+        lr = float(cmd[cmd.index("--lr") + 1]) if "--lr" in cmd else 0.001
+        if label == "ctreepo":
+            (run_dir / "best.pt").write_text("stub", encoding="utf-8")
+            (run_dir / "training_result.json").write_text(
+                json.dumps(
+                    {
+                        "best_epoch": 1,
+                        "best_root_mae": 0.30 if lr >= 0.001 else 0.10,
+                        "training_time_seconds": 9.0 if lr >= 0.001 else 5.0,
+                        "epochs_completed": 2,
+                        "eval_metrics": [
+                            {
+                                "root_mae": 0.30 if lr >= 0.001 else 0.10,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+        return {
+            "label": label,
+            "returncode": 0,
+            "log": str(log_path),
+            "started_at": "2026-03-07T00:00:00",
+            "ended_at": "2026-03-07T00:00:01",
+        }
+
+    monkeypatch.setattr(mod, "_run_command", _fake_run_command)
+    monkeypatch.setattr(
+        mod.sys,
+        "argv",
+        [
+            "train_neural_operators.py",
+            "--output-dir",
+            str(tmp_path),
+            "--which",
+            "ctreepo",
+            "--ctreepo-search-spec",
+            str(spec_path),
+        ],
+    )
+
+    rc = int(mod.main())
+
+    assert rc == 0
+    summary = json.loads((tmp_path / "summary.json").read_text(encoding="utf-8"))
+    ctreepo_search = summary["search"]["methods"]["ctreepo"]
+    assert ctreepo_search["search_enabled"] is True
+    assert ctreepo_search["selected_trial_id"] == "trial_001"
+    assert len(ctreepo_search["trials"]) == 2
+    assert summary["runs"][0]["trial_id"] == "trial_001"
+    assert summary["runs"][0]["run_dir"].endswith("ctreepo/trials/trial_001")
+    search_results = json.loads((tmp_path / "search_results.json").read_text(encoding="utf-8"))
+    assert search_results["methods"]["ctreepo"]["selected_trial_id"] == "trial_001"

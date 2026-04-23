@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+import subprocess
+import sys
+
 from src.runtime.adapters.ruler import _string_match_all, _string_match_part
 from src.runtime.contracts import RunPhaseSpec, RunSpec, expand_units
 from src.runtime.loop import _extract_context_and_question, _run_problem
@@ -127,3 +132,100 @@ def test_runtime_full_uses_leaf_and_merge_budgets_for_max_tokens():
     assert backbone.max_tokens_calls[-1] == runtime.max_output_tokens  # answer step
     assert backbone.max_tokens_calls[: len(chunks)] == [runtime.leaf_memory_tokens] * len(chunks)
     assert backbone.max_tokens_calls[len(chunks) : -1] == [runtime.merge_memory_tokens] * (len(chunks) - 1)
+
+
+def test_runtime_eval_init_and_aggregate_emit_canonical_control_plane(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    config_path = tmp_path / "runtime.yaml"
+    output_root = tmp_path / "outputs"
+    run_id = "runtime_smoke"
+    config_path.write_text(
+        "\n".join(
+            [
+                "benchmark:",
+                "  name: ruler_synthetic",
+                "  family: runtime_benchmark",
+                "model:",
+                "  model: demo-model",
+                "  engine: vllm",
+                "runtime_defaults: {}",
+                "phases:",
+                "  - phase_id: P0",
+                "    tasks: [vt]",
+                "    lengths: [1024]",
+                "    seeds: [0]",
+                "    num_samples: 1",
+                "    split: validation",
+                "    modes: [runtime_full]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    subprocess.check_call(
+        [
+            sys.executable,
+            "scripts/run_runtime_eval.py",
+            "init",
+            "--config",
+            str(config_path),
+            "--output-dir",
+            str(output_root),
+            "--run-id",
+            run_id,
+        ],
+        cwd=repo_root,
+    )
+    run_dir = output_root / run_id
+    assert (run_dir / "experiment_manifest.json").exists()
+    assert (run_dir / "experiment_status.json").exists()
+    unit_dir = run_dir / "units" / "u000001"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    (unit_dir / "metrics_partial.json").write_text(
+        json.dumps({"primary_metric": "score", "mean_score": 0.5}),
+        encoding="utf-8",
+    )
+    (unit_dir / "predictions.jsonl").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "unit_id": "u000001",
+                "phase_id": "P0",
+                "benchmark": "ruler_synthetic",
+                "task_id": "vt",
+                "split": "validation",
+                "max_seq_length": 1024,
+                "seed": 0,
+                "mode": "runtime_full",
+                "primary_metric": "score",
+                "problem_id": "p1",
+                "prediction": "ok",
+                "references": ["ok"],
+                "metrics": {"score": 1.0},
+                "cost": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (unit_dir / "steps.jsonl").write_text(
+        json.dumps({"event": "step"}) + "\n",
+        encoding="utf-8",
+    )
+    subprocess.check_call(
+        [
+            sys.executable,
+            "scripts/run_runtime_eval.py",
+            "aggregate",
+            "--run-dir",
+            str(run_dir),
+        ],
+        cwd=repo_root,
+    )
+    assert (run_dir / "artifacts.json").exists()
+    assert (run_dir / "results.jsonl").exists()
+    status = json.loads((run_dir / "experiment_status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "completed"
+    artifacts = json.loads((run_dir / "artifacts.json").read_text(encoding="utf-8"))
+    assert "metrics_json" in artifacts["artifacts"]
+    results_lines = [line for line in (run_dir / "results.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert results_lines

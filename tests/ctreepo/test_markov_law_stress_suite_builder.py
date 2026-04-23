@@ -1,36 +1,33 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 from pathlib import Path
 
 from src.ctreepo.sim.manifest import read_manifest_jsonl
+from src.ctreepo.sim.suite.law_stress_builders import build_markov_law_stress_suites
 
 
 def test_build_markov_law_stress_sanity_suite_writes_packages_and_exact_families(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[2]
     output_root = tmp_path / "out"
     cmd_dir = tmp_path / "cmds"
 
-    subprocess.check_call(
-        [
-            sys.executable,
-            "scripts/build_markov_law_stress_suite_cmds.py",
-            "--suite",
-            "sanity_suite",
-            "--output-root",
-            str(output_root),
-            "--cmd-dir",
-            str(cmd_dir),
-            "--smoke",
-        ],
-        cwd=repo_root,
+    build_markov_law_stress_suites(
+        suite="sanity_suite",
+        output_root=output_root,
+        cmd_dir=cmd_dir,
+        python_bin="python",
+        device="cpu",
+        cuda_device=None,
+        torch_threads=1,
+        transition_summary=None,
+        smoke=True,
     )
 
     manifest = json.loads((cmd_dir / "markov_law_stress_suite_manifest.json").read_text(encoding="utf-8"))
     runs = read_manifest_jsonl(Path(manifest["runspec_manifest"]))
     assert runs
+    assert manifest["policy"]["smoke"] is True
+    assert manifest["policy"]["sanity"]["train_docs"] == [32]
     learned_cmd = Path(manifest["sanity_suite"]["learned_cmd_file"])
     exact_cmd = Path(manifest["sanity_suite"]["exact_cmd_file"])
     learned_text = learned_cmd.read_text(encoding="utf-8")
@@ -46,7 +43,6 @@ def test_build_markov_law_stress_sanity_suite_writes_packages_and_exact_families
 
 
 def test_build_markov_law_stress_mechanism_suite_reads_transition_summary(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[2]
     output_root = tmp_path / "out"
     cmd_dir = tmp_path / "cmds"
     transition_summary = tmp_path / "transition_summary.json"
@@ -78,26 +74,22 @@ def test_build_markov_law_stress_mechanism_suite_reads_transition_summary(tmp_pa
         encoding="utf-8",
     )
 
-    subprocess.check_call(
-        [
-            sys.executable,
-            "scripts/build_markov_law_stress_suite_cmds.py",
-            "--suite",
-            "mechanism_suite",
-            "--transition-summary",
-            str(transition_summary),
-            "--output-root",
-            str(output_root),
-            "--cmd-dir",
-            str(cmd_dir),
-            "--smoke",
-        ],
-        cwd=repo_root,
+    build_markov_law_stress_suites(
+        suite="mechanism_suite",
+        output_root=output_root,
+        cmd_dir=cmd_dir,
+        python_bin="python",
+        device="cpu",
+        cuda_device=None,
+        torch_threads=1,
+        transition_summary=transition_summary,
+        smoke=True,
     )
 
     manifest = json.loads((cmd_dir / "markov_law_stress_suite_manifest.json").read_text(encoding="utf-8"))
     runs = read_manifest_jsonl(Path(manifest["runspec_manifest"]))
     assert runs
+    assert manifest["policy"]["mechanism"]["selection_limit"] == 1
     cmd_file = Path(manifest["mechanism_suite"]["cmd_file"])
     text = cmd_file.read_text(encoding="utf-8")
     assert "--suite-role relevance_mediation" in text

@@ -42,9 +42,9 @@ def test_audit_problem_manifest_surfaces_channel_and_propensity_state() -> None:
             "uses_online_oracle_queries": True,
             "requires_propensity_logging": True,
             "supports_theorem_backing": True,
-            "supervision_channels": [
+                "supervision_channels": [
                 {
-                    "name": "audit_sampled_nodes",
+                    "name": "sampled_substructure_supervision",
                     "kind": "sampled_substructure",
                     "delivery_mode": "online_oracle_query",
                     "requires_propensity_logging": True,

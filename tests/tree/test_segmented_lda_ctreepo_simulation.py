@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from src.tree.segmented_lda_ctreepo_simulation import (
     SegmentedLDACtreePOConfig,
@@ -262,5 +263,104 @@ def test_leaf_theta_mlp_records_runtime_device_metadata():
     assert out.topic_meta["selection_mode"] == "final_epoch_no_validation"
     assert out.topic_meta["selection_split"] == "config"
     assert out.topic_meta["selection_metric_name"] == "leaf_theta_mlp_train_loss_final"
+    assert out.topic_meta["training_surface"] == "supervision_dataset"
+    assert out.topic_meta["supervision_mode"] == "dense_simplex_regression"
+    assert out.topic_meta["representation_kind"] == "dense_feature_vector"
+    assert out.topic_meta["target_kind"] == "simplex_vector"
+    assert out.topic_meta["optimizer_family"] == "gradient_based_dense_regression"
     assert out.topic_meta["leaf_theta_device_requested"] == "cpu"
     assert out.topic_meta["leaf_theta_device_used"] == "cpu"
+
+
+def test_full_doc_theta_baseline_emits_matched_no_tree_metric() -> None:
+    cfg = SegmentedLDACtreePOConfig(
+        n_topics=3,
+        vocab_size=48,
+        n_books_train=12,
+        n_books_test=6,
+        min_segments=2,
+        max_segments=2,
+        min_seg_tokens=8,
+        max_seg_tokens=8,
+        fixed_leaf_tokens=8,
+        topic_phi_estimator="true",
+        leaf_theta_estimator="mlp",
+        calibration_leaf_query_rate=1.0,
+        include_full_doc_theta_baseline=True,
+        leaf_theta_mlp_hidden_dim=8,
+        leaf_theta_mlp_epochs=2,
+        leaf_theta_mlp_batch_size=8,
+        device="cpu",
+        seed=23,
+    )
+    out = run_segmented_lda_ctreepo_simulation(cfg)
+    assert "full_doc_mlp" in out.metrics
+    assert np.isfinite(float(out.metrics["full_doc_mlp"].root_l1_mean))
+    assert int(out.topic_meta["full_doc_mlp_train_samples"]) == 12
+    assert out.topic_meta["full_doc_mlp_training_surface"] == "supervision_dataset"
+    assert out.topic_meta["full_doc_mlp_supervision_mode"] == "dense_simplex_regression"
+    assert out.topic_meta["full_doc_mlp_representation_kind"] == "dense_feature_vector"
+    assert out.topic_meta["full_doc_mlp_target_kind"] == "simplex_vector"
+    assert out.topic_meta["full_doc_mlp_optimizer_family"] == "gradient_based_dense_regression"
+
+
+def test_leaf_theta_rf_records_supervision_and_calibration_metadata() -> None:
+    pytest.importorskip("sklearn.ensemble")
+    cfg = SegmentedLDACtreePOConfig(
+        n_topics=3,
+        vocab_size=48,
+        n_books_train=12,
+        n_books_test=6,
+        min_segments=2,
+        max_segments=2,
+        min_seg_tokens=8,
+        max_seg_tokens=8,
+        fixed_leaf_tokens=8,
+        topic_phi_estimator="true",
+        leaf_theta_estimator="rf",
+        calibration_leaf_query_rate=1.0,
+        seed=29,
+    )
+    out = run_segmented_lda_ctreepo_simulation(cfg)
+    assert out.topic_meta["training_surface"] == "supervision_dataset"
+    assert out.topic_meta["supervision_mode"] == "dense_simplex_regression"
+    assert out.topic_meta["representation_kind"] == "dense_feature_vector"
+    assert out.topic_meta["target_kind"] == "simplex_vector"
+    assert out.topic_meta["optimizer_family"] == "tree_ensemble_regression"
+    assert out.topic_meta["optimizer_backend"] == "random_forest"
+    assert out.topic_meta["calibration_training_surface"] == "supervision_dataset"
+    assert out.topic_meta["calibration_mode"] == "dense_affine_simplex_calibration"
+    assert out.topic_meta["calibration_representation_kind"] == "simplex_vector"
+    assert out.topic_meta["calibration_target_kind"] == "simplex_vector"
+    assert out.topic_meta["calibration_optimizer_family"] == "affine_vector_calibration"
+    assert out.topic_meta["calibration_uses_sample_weights"] is True
+
+
+def test_full_doc_rf_baseline_emits_matched_no_tree_metric() -> None:
+    pytest.importorskip("sklearn.ensemble")
+    cfg = SegmentedLDACtreePOConfig(
+        n_topics=3,
+        vocab_size=48,
+        n_books_train=12,
+        n_books_test=6,
+        min_segments=2,
+        max_segments=2,
+        min_seg_tokens=8,
+        max_seg_tokens=8,
+        fixed_leaf_tokens=8,
+        topic_phi_estimator="true",
+        leaf_theta_estimator="rf",
+        calibration_leaf_query_rate=1.0,
+        include_full_doc_theta_baseline=True,
+        seed=31,
+    )
+    out = run_segmented_lda_ctreepo_simulation(cfg)
+    assert "full_doc_rf" in out.metrics
+    assert np.isfinite(float(out.metrics["full_doc_rf"].root_l1_mean))
+    assert int(out.topic_meta["full_doc_rf_train_samples"]) == 12
+    assert out.topic_meta["full_doc_rf_training_surface"] == "supervision_dataset"
+    assert out.topic_meta["full_doc_rf_supervision_mode"] == "dense_simplex_regression"
+    assert out.topic_meta["full_doc_rf_representation_kind"] == "dense_feature_vector"
+    assert out.topic_meta["full_doc_rf_target_kind"] == "simplex_vector"
+    assert out.topic_meta["full_doc_rf_optimizer_family"] == "tree_ensemble_regression"
+    assert out.topic_meta["full_doc_rf_optimizer_backend"] == "random_forest"

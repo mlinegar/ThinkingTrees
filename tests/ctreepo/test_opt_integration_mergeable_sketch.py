@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
+from src.core.logged_supervision import ObservationUnitKind, SamplingMetadata
 from src.ctreepo.opt import (
-    IPWMetadata,
     collect_pairwise_preferences,
     collect_proxy_training_data,
     to_training_preference_dataset,
@@ -80,7 +80,10 @@ def test_opt_layer_collects_proxy_training_data_for_sketches() -> None:
         docs,
         compressor=sketch,
         oracle=lambda d: true_spike_count(d.token_scores),
-        ipw_fn=lambda _d: IPWMetadata(doc_propensity=0.5),
+        sampling_fn=lambda _d: SamplingMetadata(
+            document_propensity=0.5,
+            unit_kind=ObservationUnitKind.PAIR,
+        ),
     )
     assert weights is not None
     assert len(xs) == len(ys) == len(weights) == 4

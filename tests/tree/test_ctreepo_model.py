@@ -6,6 +6,7 @@ import pytest
 from src.tree.ctreepo_model import (
     CTreePOConfig,
     CTreePOModel,
+    DEFAULT_CTREEPO_TRAINER_MODEL_VERSION,
     LeafProjector,
     GatedMerge,
     MLPMerge,
@@ -16,6 +17,8 @@ from src.tree.ctreepo_model import (
     associativity_penalty,
     consistency_penalty,
     contrastive_loss,
+    ctreepo_config_from_mapping,
+    load_ctreepo_model_checkpoint,
     normalize_target,
     denormalize_prediction,
 )
@@ -40,6 +43,19 @@ def test_ctreepo_model_creation():
     assert model.config.sketch_dim == 8
 
 
+def test_ctreepo_config_from_mapping_defaults_to_central_v2_surface():
+    config = ctreepo_config_from_mapping(
+        {
+            "embedding_dim": 64,
+            "sketch_dim": 8,
+            "hidden_dim": 16,
+            "merge_type": "gated",
+        }
+    )
+
+    assert config.tree_model_version == DEFAULT_CTREEPO_TRAINER_MODEL_VERSION
+
+
 def test_ctreepo_model_all_merge_types():
     for merge_type in ["gated", "mlp", "avg", "residual_gated", "bilinear"]:
         config = CTreePOConfig(embedding_dim=32, sketch_dim=4, hidden_dim=8, merge_type=merge_type)
@@ -48,6 +64,44 @@ def test_ctreepo_model_all_merge_types():
         right = torch.randn(4)
         merged = model.merge(left, right)
         assert merged.shape == (4,)
+
+
+def test_load_ctreepo_model_checkpoint_infers_legacy_surface(tmp_path):
+    model = CTreePOModel(
+        CTreePOConfig(
+            embedding_dim=8,
+            sketch_dim=4,
+            hidden_dim=8,
+            tree_model_version="legacy",
+        )
+    )
+    checkpoint = tmp_path / "legacy.pt"
+    torch.save(model.state_dict(), checkpoint)
+
+    loaded_model, loaded_config = load_ctreepo_model_checkpoint(checkpoint)
+
+    assert loaded_config.tree_model_version == "legacy"
+    assert loaded_model.uses_tree_model_v2 is False
+    assert loaded_model.has_phi is False
+
+
+def test_load_ctreepo_model_checkpoint_infers_v2_surface(tmp_path):
+    model = CTreePOModel(
+        CTreePOConfig(
+            embedding_dim=8,
+            sketch_dim=4,
+            hidden_dim=8,
+            tree_model_version="v2",
+        )
+    )
+    checkpoint = tmp_path / "v2.pt"
+    torch.save(model.state_dict(), checkpoint)
+
+    loaded_model, loaded_config = load_ctreepo_model_checkpoint(checkpoint)
+
+    assert loaded_config.tree_model_version == "v2"
+    assert loaded_model.uses_tree_model_v2 is True
+    assert loaded_model.has_phi is True
 
 
 # ---------------------------------------------------------------------------

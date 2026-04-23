@@ -6,6 +6,7 @@ import pytest
 import tempfile
 import json
 from pathlib import Path
+from src.core.logged_supervision import SamplingMetadata
 from src.tree import (
     Auditor, AuditConfig, AuditReport, AuditCheckResult,
     AlwaysPassScorer, AlwaysFailScorer, SimpleScorer,
@@ -20,7 +21,6 @@ from src.tree.auditor import (
 from src.tree.neural_operator import make_deterministic_summary_operator
 from src.tree.ipw import (
     NodeType,
-    TreePropensity,
     TreeSample,
     clipped_hajek_diagnostics,
     hajek_estimate,
@@ -823,13 +823,21 @@ class TestTreeIPWExtensions:
             node_id=node_id,
             node_type=NodeType.LEAF,
             violation=violation,
-            propensity=TreePropensity(doc=1.0, node=node_propensity, label=1.0),
+            sampling=SamplingMetadata(
+                document_propensity=1.0,
+                unit_propensity=node_propensity,
+                label_propensity=1.0,
+            ),
         )
 
-    def test_tree_propensity_rejects_values_above_one(self):
-        """Propensity components are bounded by 1."""
+    def test_sampling_metadata_rejects_values_above_one(self):
+        """Sampling propensities are bounded by 1."""
         with pytest.raises(ValueError):
-            TreePropensity(doc=1.01, node=1.0, label=1.0)
+            SamplingMetadata(
+                document_propensity=1.01,
+                unit_propensity=1.0,
+                label_propensity=1.0,
+            )
 
     def test_hajek_vs_ht_comparison_for_violations(self):
         """HT and Hajek comparison exposes expected gap."""

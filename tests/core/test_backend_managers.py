@@ -2,6 +2,7 @@ import pytest
 from pathlib import Path
 from tempfile import gettempdir
 
+from src.core.engines import EngineRegistry, EngineType, build_server_manager
 from src.benchmark.throughput import (
     _configure_nvfp4_runtime_env,
     SGLangServerManager,
@@ -21,6 +22,16 @@ def test_backend_managers_implement_server_manager_protocol():
     assert sglang.capabilities.backend == "sglang"
     assert vllm.capabilities.supports_sleep_mode is True
     assert sglang.capabilities.supports_sleep_mode is False
+
+
+def test_build_server_manager_uses_shared_engine_registry() -> None:
+    vllm = build_server_manager(EngineType.VLLM, profile="nemotron-30b-nvfp4", port=18000)
+    sglang = build_server_manager("sglang", profile="nemotron-30b-nvfp4", port=38000)
+
+    assert isinstance(vllm, VLLMServerManager)
+    assert isinstance(sglang, SGLangServerManager)
+    assert EngineRegistry.resolve("vllm").manager_kind == "vllm"
+    assert EngineRegistry.resolve("sglang").manager_kind == "sglang"
 
 
 @pytest.mark.anyio

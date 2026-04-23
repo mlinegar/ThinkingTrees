@@ -8,6 +8,7 @@ import sys
 import numpy as np
 import pytest
 
+from src.core.logged_supervision import SamplingMetadata
 from src.ctreepo.sim.core.leaf_local_mixture_utility import (
     LeafLocalMixtureUtilityConfig,
     _analysis_target,
@@ -18,7 +19,7 @@ from src.ctreepo.sim.core.leaf_local_mixture_utility import (
     run_leaf_local_mixture_utility_experiment,
     sample_leaf_local_mixture_utility_world,
 )
-from src.tree.ipw import NodeType, TreePropensity, TreeSample, horvitz_thompson_mean
+from src.tree.ipw import NodeType, TreeSample, horvitz_thompson_mean
 
 
 def _stage3_cfg(**overrides) -> LeafLocalMixtureUtilityConfig:
@@ -202,7 +203,7 @@ def test_ht_mean_is_unbiased_under_repeated_doc_bernoulli_sampling():
                     node_type=NodeType.LEAF,
                     violation=0,
                     preference_loss=float(target),
-                    propensity=TreePropensity(doc=p),
+                    sampling=SamplingMetadata(document_propensity=p),
                 )
             )
         estimates.append(horvitz_thompson_mean(samples, lambda s: float(s.preference_loss), float(len(targets))))
@@ -263,7 +264,7 @@ def test_normalized_ci_and_coverage_handles_signed_values_correctly():
             node_type=NodeType.LEAF,
             violation=0,
             preference_loss=value,
-            propensity=TreePropensity(doc=1.0),
+            sampling=SamplingMetadata(document_propensity=1.0),
         )
         for i, value in enumerate(raw_values)
     ]
@@ -323,3 +324,17 @@ def test_stage3_report_smoke_with_minimal_fixture(tmp_path: Path):
     )
     assert (out_dir / "tree_relevant_lda_stage3_report.pdf").exists()
     assert (out_dir / "tree_relevant_lda_stage3_report.md").exists()
+
+
+def test_ridge_methods_report_supervision_surface() -> None:
+    cfg = _stage3_cfg(train_docs=24, test_docs=24, seed=47)
+    summary = run_leaf_local_mixture_utility_experiment(cfg)
+    assert summary.methods["analysis_ridge_full_labels"]["training_surface"] == "supervision_dataset"
+    assert summary.methods["budgeted_leaf_ridge_ipw"]["training_surface"] == "supervision_dataset"
+    assert summary.methods["leaf_ridge_from_u"]["training_surface"] == "supervision_dataset"
+    assert summary.methods["analysis_ridge_full_labels"]["representation_kind"] == "dense_feature_vector"
+    assert summary.methods["analysis_ridge_full_labels"]["target_kind"] == "scalar"
+    assert summary.methods["analysis_ridge_full_labels"]["optimizer_family"] == "closed_form_linear_regression"
+    assert summary.methods["leaf_ridge_from_u"]["representation_kind"] == "dense_feature_vector"
+    assert summary.methods["leaf_ridge_from_u"]["target_kind"] == "scalar"
+    assert summary.methods["leaf_ridge_from_u"]["optimizer_family"] == "closed_form_linear_regression"

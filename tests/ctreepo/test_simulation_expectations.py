@@ -5,6 +5,11 @@ from pathlib import Path
 import subprocess
 import sys
 
+from src.ctreepo.sim.core.full_doc_anchor_diagnostics import _payload_from_saved_runs
+from src.ctreepo.sim.core.markov_changepoint_ops_count import (
+    OPSCountConfig,
+    _build_objective_summary,
+)
 from src.ctreepo.sim.expectations import (
     BudgetTrendExpectation,
     ExpectationConfig,
@@ -24,6 +29,441 @@ def _write_json(path: Path, payload: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return path
+
+
+def _resolved_objective_payload(
+    *,
+    local_law_weight: float,
+    c1_relative_weight: float,
+    c2_relative_weight: float,
+    c3_relative_weight: float,
+) -> dict:
+    summary = _build_objective_summary(
+        OPSCountConfig(
+            local_law_weight=float(local_law_weight),
+            c1_relative_weight=float(c1_relative_weight),
+            c2_relative_weight=float(c2_relative_weight),
+            c3_relative_weight=float(c3_relative_weight),
+            schedule_consistency_weight=0.0,
+        )
+    )
+    return dict(summary)
+
+
+def _full_doc_diagnostics_payload() -> dict:
+    tree_c2_objective = _resolved_objective_payload(
+        local_law_weight=0.3,
+        c1_relative_weight=0.0,
+        c2_relative_weight=1.0,
+        c3_relative_weight=0.0,
+    )
+    tree_all_objective = _resolved_objective_payload(
+        local_law_weight=0.3,
+        c1_relative_weight=1.0,
+        c2_relative_weight=1.0,
+        c3_relative_weight=1.0,
+    )
+    payload = _payload_from_saved_runs(
+        runs=[
+            {
+                "benchmark": "recoverable_v4",
+                "cell_id": "recoverable_v4",
+                "baseline_family": "official_fno",
+                "seed": 0,
+                "train_doc_count": 128,
+                "n_regimes": 4,
+                "segment_density_band": "",
+                "segment_min": 0,
+                "segment_max": 0,
+                "bundle_source": "/tmp/recoverable_bundle.json",
+                "train_corpus_signature": "train-128",
+                "val_corpus_signature": "val-fixed",
+                "test_corpus_signature": "test-fixed",
+                "test_root_mae": 0.10,
+                "test_exact_match_rate": 0.90,
+                "test_c2_idempotence_mae": 0.0,
+            },
+            {
+                "benchmark": "recoverable_v4",
+                "cell_id": "recoverable_v4",
+                "baseline_family": "official_fno",
+                "seed": 1,
+                "train_doc_count": 128,
+                "n_regimes": 4,
+                "segment_density_band": "",
+                "segment_min": 0,
+                "segment_max": 0,
+                "bundle_source": "/tmp/recoverable_bundle.json",
+                "train_corpus_signature": "train-128",
+                "val_corpus_signature": "val-fixed",
+                "test_corpus_signature": "test-fixed",
+                "test_root_mae": 0.08,
+                "test_exact_match_rate": 0.92,
+                "test_c2_idempotence_mae": 0.0,
+            },
+            {
+                "benchmark": "recoverable_v4",
+                "cell_id": "recoverable_v4",
+                "baseline_family": "tree_neural_c2",
+                "seed": 0,
+                "train_doc_count": 128,
+                "n_regimes": 4,
+                "segment_density_band": "",
+                "segment_min": 0,
+                "segment_max": 0,
+                "bundle_source": "/tmp/recoverable_bundle.json",
+                "train_corpus_signature": "train-128",
+                "val_corpus_signature": "val-fixed",
+                "test_corpus_signature": "test-fixed",
+                "test_root_mae": 0.18,
+                "test_exact_match_rate": 0.84,
+                "test_c2_idempotence_mae": 0.03,
+                "config": {
+                    "local_law_weight": 0.3,
+                    "c1_relative_weight": 0.0,
+                    "c2_relative_weight": 1.0,
+                    "c3_relative_weight": 0.0,
+                    "schedule_consistency_weight": 0.0,
+                    "tree_root_supervision_kind": "mse",
+                    "doc_sequence_train_fraction": 0.0,
+                    "tree_leaf_fno_width": 64,
+                    "tree_leaf_fno_n_modes": 8,
+                    "tree_leaf_fno_n_layers": 2,
+                    "fixed_leaf_tokens": 16,
+                    "resolved_objective": tree_c2_objective,
+                },
+                "resolved_objective": tree_c2_objective,
+                "parameterization": str(tree_c2_objective["parameterization"]),
+                "weighting_scheme": str(tree_c2_objective["weighting_scheme"]),
+                "optimization_root_weight": float(tree_c2_objective["optimization_root_weight"]),
+                "local_law_c1_weight": float(tree_c2_objective["local_law_c1_weight"]),
+                "local_law_c2_weight": float(tree_c2_objective["local_law_c2_weight"]),
+                "local_law_c3_weight": float(tree_c2_objective["local_law_c3_weight"]),
+                "task_objective_weight_source": str(tree_c2_objective["task_objective_weight_source"]),
+                "proxy_schedule_consistency_weight": float(
+                    tree_c2_objective["proxy_schedule_consistency_weight"]
+                ),
+                "theorem_terms": list(tree_c2_objective["theorem_terms"]),
+                "proxy_terms": list(tree_c2_objective["proxy_terms"]),
+                "formal_notes": str(tree_c2_objective["formal_notes"]),
+                "objective_weights_active": True,
+                "c2_metric_kind": "score_drift",
+                "semantics_version": "tree_neural_objective_v2",
+            },
+            {
+                "benchmark": "recoverable_v4",
+                "cell_id": "recoverable_v4",
+                "baseline_family": "tree_neural_c2",
+                "seed": 1,
+                "train_doc_count": 128,
+                "n_regimes": 4,
+                "segment_density_band": "",
+                "segment_min": 0,
+                "segment_max": 0,
+                "bundle_source": "/tmp/recoverable_bundle.json",
+                "train_corpus_signature": "train-128",
+                "val_corpus_signature": "val-fixed",
+                "test_corpus_signature": "test-fixed",
+                "test_root_mae": 0.16,
+                "test_exact_match_rate": 0.86,
+                "test_c2_idempotence_mae": 0.02,
+                "config": {
+                    "local_law_weight": 0.3,
+                    "c1_relative_weight": 0.0,
+                    "c2_relative_weight": 1.0,
+                    "c3_relative_weight": 0.0,
+                    "schedule_consistency_weight": 0.0,
+                    "tree_root_supervision_kind": "mse",
+                    "doc_sequence_train_fraction": 0.0,
+                    "tree_leaf_fno_width": 64,
+                    "tree_leaf_fno_n_modes": 8,
+                    "tree_leaf_fno_n_layers": 2,
+                    "fixed_leaf_tokens": 16,
+                    "resolved_objective": tree_c2_objective,
+                },
+                "resolved_objective": tree_c2_objective,
+                "parameterization": str(tree_c2_objective["parameterization"]),
+                "weighting_scheme": str(tree_c2_objective["weighting_scheme"]),
+                "optimization_root_weight": float(tree_c2_objective["optimization_root_weight"]),
+                "local_law_c1_weight": float(tree_c2_objective["local_law_c1_weight"]),
+                "local_law_c2_weight": float(tree_c2_objective["local_law_c2_weight"]),
+                "local_law_c3_weight": float(tree_c2_objective["local_law_c3_weight"]),
+                "task_objective_weight_source": str(tree_c2_objective["task_objective_weight_source"]),
+                "proxy_schedule_consistency_weight": float(
+                    tree_c2_objective["proxy_schedule_consistency_weight"]
+                ),
+                "theorem_terms": list(tree_c2_objective["theorem_terms"]),
+                "proxy_terms": list(tree_c2_objective["proxy_terms"]),
+                "formal_notes": str(tree_c2_objective["formal_notes"]),
+                "objective_weights_active": True,
+                "c2_metric_kind": "score_drift",
+                "semantics_version": "tree_neural_objective_v2",
+            },
+            {
+                "benchmark": "recoverable_v4",
+                "cell_id": "recoverable_v4",
+                "baseline_family": "tree_neural",
+                "seed": 2,
+                "train_doc_count": 128,
+                "n_regimes": 4,
+                "segment_density_band": "",
+                "segment_min": 0,
+                "segment_max": 0,
+                "bundle_source": "/tmp/recoverable_bundle.json",
+                "train_corpus_signature": "train-128",
+                "val_corpus_signature": "val-fixed",
+                "test_corpus_signature": "test-fixed",
+                "test_root_mae": 0.24,
+                "test_exact_match_rate": 0.76,
+                "test_c2_idempotence_mae": 0.05,
+                "config": {
+                    "local_law_weight": 0.3,
+                    "c1_relative_weight": 1.0,
+                    "c2_relative_weight": 1.0,
+                    "c3_relative_weight": 1.0,
+                    "schedule_consistency_weight": 0.0,
+                    "tree_root_supervision_kind": "mse",
+                    "doc_sequence_train_fraction": 0.0,
+                    "tree_leaf_fno_width": 64,
+                    "tree_leaf_fno_n_modes": 8,
+                    "tree_leaf_fno_n_layers": 2,
+                    "fixed_leaf_tokens": 16,
+                    "resolved_objective": tree_all_objective,
+                },
+                "resolved_objective": tree_all_objective,
+                "parameterization": str(tree_all_objective["parameterization"]),
+                "weighting_scheme": str(tree_all_objective["weighting_scheme"]),
+                "optimization_root_weight": float(tree_all_objective["optimization_root_weight"]),
+                "local_law_c1_weight": float(tree_all_objective["local_law_c1_weight"]),
+                "local_law_c2_weight": float(tree_all_objective["local_law_c2_weight"]),
+                "local_law_c3_weight": float(tree_all_objective["local_law_c3_weight"]),
+                "task_objective_weight_source": str(tree_all_objective["task_objective_weight_source"]),
+                "proxy_schedule_consistency_weight": float(
+                    tree_all_objective["proxy_schedule_consistency_weight"]
+                ),
+                "theorem_terms": list(tree_all_objective["theorem_terms"]),
+                "proxy_terms": list(tree_all_objective["proxy_terms"]),
+                "formal_notes": str(tree_all_objective["formal_notes"]),
+                "objective_weights_active": True,
+                "c2_metric_kind": "score_drift",
+                "semantics_version": "tree_neural_objective_v2",
+            },
+        ]
+    )
+    return payload
+
+
+def _full_doc_ladder_payload(*, mismatch: bool = False) -> dict:
+    reference_bundle = "/tmp/recoverable_bundle.json"
+    reproduction_bundle = "/tmp/recoverable_bundle_alt.json" if mismatch else reference_bundle
+    return {
+        "simulation": "markov_full_doc_anchor_ladder",
+        "preset": "fixture",
+        "stages": [
+            {
+                "stage_name": "recoverable_official_fno_reference",
+                "source": "reference_summary",
+                "reference_only": True,
+                "observed_token_profile": "recoverable",
+                "bundle_source": reference_bundle,
+                "summary_json": "/tmp/reference.json",
+                "train_docs": 1024,
+                "val_docs": 128,
+                "test_docs": 256,
+                "state_dim": 256,
+                "hidden_dim": 1024,
+                "n_epochs": 128,
+                "batch_size": 64,
+                "lr": 3e-4,
+                "weight_decay": 0.0,
+                "doc_sequence_test_root_mae": 0.01,
+                "doc_level_ridge_test_root_mae": 0.0,
+                "anchor_gap_to_ridge": 0.01,
+                "doc_sequence_backend_name": "official_neuraloperator_fno",
+                "doc_sequence_backend_package": "neuraloperator",
+                "doc_sequence_backend_version": "2.0.0",
+                "doc_sequence_operator_class": "neuralop.models.FNO",
+                "doc_sequence_operator_evidence_status": "PROXY_ONLY",
+                "doc_sequence_theorem_relevance": False,
+                "doc_sequence_objective_weights_active": False,
+            },
+            {
+                "stage_name": "recoverable_official_fno_reproduction",
+                "source": "fresh_run",
+                "reference_only": False,
+                "observed_token_profile": "recoverable",
+                "bundle_source": reproduction_bundle,
+                "summary_json": "/tmp/reproduction.json",
+                "train_docs": 1024,
+                "val_docs": 128,
+                "test_docs": 256,
+                "state_dim": 256,
+                "hidden_dim": 1024,
+                "n_epochs": 128,
+                "batch_size": 64,
+                "lr": 3e-4,
+                "weight_decay": 0.0,
+                "doc_sequence_test_root_mae": 0.02,
+                "doc_level_ridge_test_root_mae": 0.0,
+                "anchor_gap_to_ridge": 0.02,
+                "doc_sequence_backend_name": "official_neuraloperator_fno",
+                "doc_sequence_backend_package": "neuraloperator",
+                "doc_sequence_backend_version": "2.0.0",
+                "doc_sequence_operator_class": "neuralop.models.FNO",
+                "doc_sequence_operator_evidence_status": "PROXY_ONLY",
+                "doc_sequence_theorem_relevance": False,
+                "doc_sequence_objective_weights_active": False,
+            },
+        ],
+    }
+
+
+def _full_tree_ipw_grid_payload() -> dict:
+    return {
+        "simulation": "markov_full_tree_ipw_grid",
+        "semantics": {
+            "estimand_name": "realized_full_tree_node_mean_loss",
+            "population_kind": "realized_tree_nodes",
+            "sampling_design": "bernoulli_realized_node_sampling",
+            "propensity_field": "unit_propensity",
+            "document_channel": "always_observed_document_top_loss",
+            "node_channel": "sampled_realized_tree_nodes",
+            "estimator_families": ["naive", "ht", "hajek"],
+            "ci_semantics": "point_estimation_only",
+        },
+        "base_config": {
+            "fixed_leaf_tokens": 16,
+            "root_only_train_fraction": 0.0,
+            "doc_sequence_train_fraction": 0.0,
+        },
+        "bundle_metadata": {
+            "train_corpus_signature": "train-fixed",
+            "val_corpus_signature": "val-fixed",
+            "test_corpus_signature": "test-fixed",
+            "train_docs": 128,
+            "val_docs": 32,
+            "test_docs": 64,
+        },
+        "planes": [
+            {
+                "doc_sequence_train_fraction": 0.0,
+                "root_only_train_fraction": 0.0,
+                "cells": [
+                    {
+                        "doc_sequence_train_fraction": 0.0,
+                        "root_only_train_fraction": 0.0,
+                        "p_internal": 0.0,
+                        "p_leaf": 0.0,
+                        "regime": "doc_only",
+                        "summary_json": "/tmp/full_tree_doc_only.json",
+                        "test_metrics": {
+                            "root_mae": 0.18,
+                            "doc_sequence_view_root_mae": 0.18,
+                            "leaf_mae": 0.0,
+                            "merge_mae": 0.0,
+                            "document_top_loss": 0.12,
+                            "document_top_mae": 0.12,
+                            "full_node_exact_mean_loss": 0.22,
+                            "sampled_node_naive_mean_loss": 0.0,
+                            "sampled_node_naive_abs_error": 0.0,
+                            "sampled_node_ht_mean_loss": 0.0,
+                            "sampled_node_ht_abs_error": 0.0,
+                            "sampled_node_hajek_mean_loss": 0.0,
+                            "sampled_node_hajek_abs_error": 0.0,
+                            "effective_sample_size": 0.0,
+                            "max_weight": 0.0,
+                            "sampled_nodes": 0,
+                            "population_size": 16,
+                            "document_vs_root_node_target_gap_mae": 0.01,
+                            "document_vs_root_node_prediction_gap_mae": 0.01,
+                            "doc_sequence_train_docs_used": 0,
+                        },
+                        "root_only_view_test_metrics": {"root_mae": 0.18},
+                        "epochs_completed": 2,
+                        "training_selection_best_epoch": 1,
+                        "training_selection_metric_name": "val_root_mae",
+                        "training_selection_metric_value": 0.18,
+                    },
+                    {
+                        "doc_sequence_train_fraction": 0.0,
+                        "root_only_train_fraction": 0.0,
+                        "p_internal": 1.0,
+                        "p_leaf": 1.0,
+                        "regime": "full_tree",
+                        "summary_json": "/tmp/full_tree_full.json",
+                        "test_metrics": {
+                            "root_mae": 0.10,
+                            "doc_sequence_view_root_mae": 0.10,
+                            "leaf_mae": 0.02,
+                            "merge_mae": 0.01,
+                            "document_top_loss": 0.11,
+                            "document_top_mae": 0.11,
+                            "full_node_exact_mean_loss": 0.22,
+                            "sampled_node_naive_mean_loss": 0.22,
+                            "sampled_node_naive_abs_error": 0.0,
+                            "sampled_node_ht_mean_loss": 0.22,
+                            "sampled_node_ht_abs_error": 0.0,
+                            "sampled_node_hajek_mean_loss": 0.22,
+                            "sampled_node_hajek_abs_error": 0.0,
+                            "effective_sample_size": 16.0,
+                            "max_weight": 1.0,
+                            "sampled_nodes": 16,
+                            "population_size": 16,
+                            "document_vs_root_node_target_gap_mae": 0.01,
+                            "document_vs_root_node_prediction_gap_mae": 0.01,
+                            "doc_sequence_train_docs_used": 0,
+                        },
+                        "root_only_view_test_metrics": {"root_mae": 0.10},
+                        "epochs_completed": 2,
+                        "training_selection_best_epoch": 1,
+                        "training_selection_metric_name": "val_root_mae",
+                        "training_selection_metric_value": 0.10,
+                    },
+                ],
+            },
+            {
+                "doc_sequence_train_fraction": 0.25,
+                "root_only_train_fraction": 0.0,
+                "cells": [
+                    {
+                        "doc_sequence_train_fraction": 0.25,
+                        "root_only_train_fraction": 0.0,
+                        "p_internal": 0.5,
+                        "p_leaf": 0.5,
+                        "regime": "balanced",
+                        "summary_json": "/tmp/full_tree_balanced.json",
+                        "test_metrics": {
+                            "root_mae": 0.12,
+                            "doc_sequence_view_root_mae": 0.11,
+                            "leaf_mae": 0.03,
+                            "merge_mae": 0.02,
+                            "document_top_loss": 0.11,
+                            "document_top_mae": 0.11,
+                            "full_node_exact_mean_loss": 0.22,
+                            "sampled_node_naive_mean_loss": 0.24,
+                            "sampled_node_naive_abs_error": 0.02,
+                            "sampled_node_ht_mean_loss": 0.22,
+                            "sampled_node_ht_abs_error": 0.0,
+                            "sampled_node_hajek_mean_loss": 0.22,
+                            "sampled_node_hajek_abs_error": 0.0,
+                            "effective_sample_size": 8.0,
+                            "max_weight": 2.0,
+                            "sampled_nodes": 8,
+                            "population_size": 16,
+                            "document_vs_root_node_target_gap_mae": 0.01,
+                            "document_vs_root_node_prediction_gap_mae": 0.01,
+                            "doc_sequence_train_docs_used": 32,
+                        },
+                        "root_only_view_test_metrics": {"root_mae": 0.12},
+                        "epochs_completed": 2,
+                        "training_selection_best_epoch": 1,
+                        "training_selection_metric_name": "val_root_mae",
+                        "training_selection_metric_value": 0.12,
+                    }
+                ],
+            },
+        ],
+    }
 
 
 def _trend_rows(values: list[tuple[float, float]], *, test_identity: str | None = "shared") -> list:
@@ -523,6 +963,18 @@ def _build_fixture_tree(tmp_path: Path) -> Path:
     _write_json(root / "mergeable" / "mergeable_chunk_quality.json", _mergeable_chunk_quality_payload())
     _write_json(root / "mergeable" / "mergeable_k_phase.json", _mergeable_k_phase_payload())
     _write_json(root / "mergeable" / "mergeable_complexity.json", _mergeable_complexity_payload())
+    _write_json(
+        root / "markov_full_doc_anchor" / "summary.json",
+        _full_doc_diagnostics_payload(),
+    )
+    _write_json(
+        root / "markov_full_doc_anchor_ladder" / "summary.json",
+        _full_doc_ladder_payload(),
+    )
+    _write_json(
+        root / "markov_full_tree_ipw" / "summary.json",
+        _full_tree_ipw_grid_payload(),
+    )
     return root
 
 
@@ -654,6 +1106,53 @@ def test_markov_adapter_splits_local_law_weights_into_distinct_scenarios(tmp_pat
     assert len(scenarios) == 2
 
 
+def test_markov_adapter_loads_full_doc_anchor_outputs(tmp_path: Path) -> None:
+    root = tmp_path / "outputs"
+    diagnostics_path = _write_json(
+        root / "markov_full_doc_anchor" / "summary.json",
+        _full_doc_diagnostics_payload(),
+    )
+    ladder_path = _write_json(
+        root / "markov_full_doc_anchor_ladder" / "summary.json",
+        _full_doc_ladder_payload(),
+    )
+
+    adapter = MarkovOPSAdapter()
+    diagnostic_rows = adapter.load_rows(diagnostics_path)
+    ladder_rows = adapter.load_rows(ladder_path)
+
+    assert adapter.can_load(diagnostics_path)
+    assert adapter.can_load(ladder_path)
+    assert diagnostic_rows
+    assert ladder_rows
+    assert any(
+        row.metadata.get("surface") == "markov_full_doc_anchor_diagnostics"
+        for row in diagnostic_rows
+    )
+    assert any(
+        row.metadata.get("surface") == "markov_full_doc_anchor_ladder"
+        for row in ladder_rows
+    )
+
+
+def test_markov_adapter_loads_full_tree_ipw_outputs(tmp_path: Path) -> None:
+    root = tmp_path / "outputs"
+    full_tree_path = _write_json(
+        root / "markov_full_tree_ipw" / "summary.json",
+        _full_tree_ipw_grid_payload(),
+    )
+
+    adapter = MarkovOPSAdapter()
+    rows = adapter.load_rows(full_tree_path)
+
+    assert adapter.can_load(full_tree_path)
+    assert rows
+    assert all(
+        row.metadata.get("surface") == "markov_full_tree_ipw_grid"
+        for row in rows
+    )
+
+
 def test_budget_trend_warn_only_downgrades_failures() -> None:
     rows = _trend_rows([(100.0, 1.0), (200.0, 1.5)], test_identity="shared")
     finding = BudgetTrendExpectation(
@@ -765,6 +1264,12 @@ def test_build_expectation_report_output_root_and_manifest(tmp_path: Path) -> No
     assert report.rows_scanned > 0
     titles = {f.title: f.status for f in report.expectations}
     assert titles["Markov high-support anchor: learned root_mae beats undersupported"] == "pass"
+    assert titles[
+        "Full-doc diagnostics fixed-bundle reproducibility stays locked across seeds"
+    ] == "pass"
+    assert titles[
+        "Full-doc ladder reference and reproduction stages stay bundle/config matched"
+    ] == "pass"
     assert titles["Segment-LDA boundary-sensitive regime: undersupported stays separated from exact"] == "pass"
     assert titles["Segmented-LDA decomposition upper bound dominates total error"] == "pass"
     assert any("Mergeable complexity ladder: full model tracks the one-pass oracle" == f.title and f.status == "pass" for f in report.expectations)

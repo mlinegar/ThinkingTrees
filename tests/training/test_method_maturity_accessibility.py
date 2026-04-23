@@ -162,6 +162,42 @@ def test_compare_report_generates_summary_files(tmp_path: Path) -> None:
         },
     }
     (run_dir / "final_stats.json").write_text(json.dumps(final_stats), encoding="utf-8")
+    canonical_rows = [
+        {
+            "experiment_id": "exp_llm",
+            "phase": "eval",
+            "benchmark_ref": {
+                "benchmark_id": "treepo_task::manifesto_rile",
+                "family": "treepo_task",
+                "scope": "manifesto_rile",
+                "name": "manifesto_rile",
+            },
+            "method_ref": {
+                "method_id": "llm_prompt_optimization::training_pipeline",
+                "family": "llm_prompt_optimization",
+                "variant": "training_pipeline",
+                "adapter": "treepo_training",
+            },
+            "split": "test",
+            "train_docs": 30,
+            "supervision_ref": {
+                "topology_scope": "document",
+                "unit_selector": "document",
+                "supervision_kind": "scalar",
+                "label_source": "dataset_labels",
+                "labeler_kind": "gold_score",
+                "doc_sample_probability": 1.0,
+                "coverage_label": "100% labeled docs",
+            },
+            "metric_name": "mae",
+            "metric_value": 11.5,
+            "artifact_refs": [],
+        }
+    ]
+    (run_dir / "results.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in canonical_rows) + "\n",
+        encoding="utf-8",
+    )
 
     manifest = {
         "mode": "fast-smoke",
@@ -190,5 +226,10 @@ def test_compare_report_generates_summary_files(tmp_path: Path) -> None:
         text=True,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert (output_root / "comparison_summary.json").exists()
+    summary_path = output_root / "comparison_summary.json"
+    assert summary_path.exists()
     assert (output_root / "comparison_summary.md").exists()
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["canonical_reporting"]["row_count"] == 1
+    assert summary["canonical_reporting"]["method_families"] == ["llm_prompt_optimization"]
+    assert summary["canonical_reporting"]["main_body_plot_specs"] == []

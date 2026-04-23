@@ -1,20 +1,20 @@
 from src.tree.learned_sketch import (
     DEFAULT_DISTRIBUTION,
+    LearnedSketchDataConfig,
+    LearnedSketchEvaluationConfig,
     LearnedSketchModel,
-    TrainingConfig,
+    LearnedSketchModelConfig,
+    LearnedSketchTrainingConfig,
     evaluate,
     sample_spike_count_mixture_documents,
 )
 
 
 def test_learned_sketch_reports_separate_local_law_metrics():
-    config = TrainingConfig(
-        state_dim=4,
-        target_k=4,
-        chunk_size=4,
-        hidden_dim=8,
-        eval_docs=2,
-        seed=0,
+    config = LearnedSketchTrainingConfig(
+        model=LearnedSketchModelConfig(state_dim=4, target_k=4, hidden_dim=8),
+        data=LearnedSketchDataConfig(chunk_size=4),
+        evaluation=LearnedSketchEvaluationConfig(eval_docs=2),
     )
     docs = sample_spike_count_mixture_documents(
         spec=DEFAULT_DISTRIBUTION,
@@ -22,10 +22,10 @@ def test_learned_sketch_reports_separate_local_law_metrics():
         seed=123,
     )
     model = LearnedSketchModel(
-        n_indicators=config.chunk_size,
-        state_dim=config.state_dim,
-        n_types=config.target_k,
-        hidden_dim=config.hidden_dim,
+        n_indicators=config.data.chunk_size,
+        state_dim=config.model.state_dim,
+        n_types=config.model.target_k,
+        hidden_dim=config.model.hidden_dim,
     )
     metrics = evaluate(model, list(docs), config)
 

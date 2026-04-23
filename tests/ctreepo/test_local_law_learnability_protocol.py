@@ -1103,13 +1103,14 @@ def test_combined_local_law_meta_smoke(tmp_path: Path):
     subprocess.check_call(
         [
             sys.executable,
-            "scripts/report_markov_law_stress.py",
+            "-m",
+            "src.ctreepo.sim.cli.report.law_stress",
+            "--family",
+            "markov",
             "--input-root",
             str(markov_root),
             "--output-dir",
             str(markov_report_dir),
-            "--suite-type",
-            "sanity_suite",
         ],
         cwd=repo_root,
         env=env,
@@ -1139,7 +1140,7 @@ def test_combined_local_law_meta_smoke(tmp_path: Path):
         env=env,
     )
 
-    assert (markov_report_dir / "markov_law_stress_report.pdf").exists()
+    assert (markov_report_dir / "law_stress_report.pdf").exists()
     assert (lda_report_dir / "tree_relevant_lda_local_law_report.pdf").exists()
     assert (meta_report_dir / "local_law_meta_report.md").exists()
     assert (meta_report_dir / "local_law_meta_report_summary.json").exists()

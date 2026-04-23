@@ -1,17 +1,8 @@
-from __future__ import annotations
-
-import importlib.util
-from pathlib import Path
+from src.ctreepo.sim.cli.report import identifiable_zero_publication_clean as publication_clean_report
 
 
 def _load_module():
-    root = Path(__file__).resolve().parents[1]
-    mod_path = root / "scripts" / "report_identifiable_zero_suite_publication_clean.py"
-    spec = importlib.util.spec_from_file_location("report_identifiable_zero_suite_publication_clean", str(mod_path))
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return publication_clean_report
 
 
 def test_apply_exact_fixed_slice():

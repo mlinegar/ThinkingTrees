@@ -2,10 +2,10 @@ import math
 
 import pytest
 
+from src.core.logged_supervision import SamplingMetadata
 from src.tree.ipw import (
     KFoldSplit,
     NodeType,
-    TreePropensity,
     TreeSample,
     effective_sample_size,
     empirical_bernstein_radius,
@@ -53,7 +53,11 @@ def _sample(
         node_type=NodeType.LEAF,
         violation=violation,
         preference_loss=preference_loss,
-        propensity=TreePropensity(doc=1.0, node=node_propensity, label=1.0),
+        sampling=SamplingMetadata(
+            document_propensity=1.0,
+            unit_propensity=node_propensity,
+            label_propensity=1.0,
+        ),
     )
 
 
@@ -287,8 +291,8 @@ def test_draw_logged_tree_samples_wor_respects_fixed_sizes_and_propensities():
     expected_doc_prop = 4.0 / 12.0
     expected_node_prop = 2.0 / 5.0
     for sample in sampled:
-        assert sample.propensity.doc == pytest.approx(expected_doc_prop)
-        assert sample.propensity.node == pytest.approx(expected_node_prop)
+        assert sample.sampling.document_propensity == pytest.approx(expected_doc_prop)
+        assert sample.sampling.unit_propensity == pytest.approx(expected_node_prop)
 
 
 def test_empirical_bernstein_compare_bernoulli_vs_wor_runs():

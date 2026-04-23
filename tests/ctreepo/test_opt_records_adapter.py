@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-from src.ctreepo.opt.records import IPWMetadata, PairwisePreference
+from src.core.logged_supervision import ObservationUnitKind, SamplingMetadata
+from src.ctreepo.opt.records import PairwisePreference
 from src.ctreepo.opt.training_adapter import to_training_preference_dataset
 
 
 def test_pairwise_preference_to_training_pair_roundtrip() -> None:
-    ipw = IPWMetadata(doc_propensity=0.5, node_propensity=0.25, label_propensity=1.0)
+    sampling = SamplingMetadata(
+        document_propensity=0.5,
+        unit_propensity=0.25,
+        label_propensity=1.0,
+        unit_kind=ObservationUnitKind.PAIR,
+    )
     record = PairwisePreference(
         example_id="ex1",
         input="doc",
@@ -18,7 +24,7 @@ def test_pairwise_preference_to_training_pair_roundtrip() -> None:
         reference=3.0,
         score_a=2.9,
         score_b=2.0,
-        ipw=ipw,
+        sampling=sampling,
     )
 
     pair = record.to_training_preference_pair()
@@ -28,7 +34,7 @@ def test_pairwise_preference_to_training_pair_roundtrip() -> None:
     assert pair.summary_a == "A"
     assert pair.summary_b == "B"
     assert abs(pair.ipw_weight() - 8.0) < 1e-12
+    assert pair.preference_supervision.application_name == "ctreepo_opt_record"
 
     dataset = to_training_preference_dataset([record])
     assert len(dataset) == 1
-

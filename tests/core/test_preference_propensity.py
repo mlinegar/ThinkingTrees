@@ -6,13 +6,23 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.core.logged_supervision import ObservationUnitKind, SamplingMetadata
+from src.core.preference_supervision import preference_supervision_metadata
+from src.core.supervision_metadata import judgment_supervision_metadata
 from src.training.preference.types import PreferenceDataset, PreferencePair
+from src.training.supervision import ResponseJudgment, SupervisionDataset
+from src.training.supervision.optimizer_metadata import (
+    resolve_treepo_objective_weight,
+)
 from src.training.trl_training import (
+    TRLPropensityWeightingConfig,
     TRLTrainingConfig,
     _build_processing_class_kwargs,
+    _extract_sample_weight,
     _build_weighted_dpo_trainer,
     _build_weighted_grpo_trainer,
     _build_weighted_reward_trainer,
+    _build_weighted_scalar_reward_trainer,
     _resample_records_by_weight,
 )
 from src.stats.sampling import (
@@ -24,6 +34,13 @@ from src.stats.sampling import (
 
 
 def _make_pair(pair_id: str, preferred: str = "A", **kwargs) -> PreferencePair:
+    sampling = kwargs.pop("sampling", None)
+    joint_propensity = kwargs.pop("joint_propensity", None)
+    if sampling is None:
+        sampling = SamplingMetadata(
+            joint_propensity=joint_propensity,
+            unit_kind=ObservationUnitKind.PAIR,
+        )
     return PreferencePair(
         pair_id=pair_id,
         source_example_id=f"doc_{pair_id}",
@@ -35,15 +52,16 @@ def _make_pair(pair_id: str, preferred: str = "A", **kwargs) -> PreferencePair:
         preferred=preferred,
         reasoning="reason",
         confidence=0.8,
+        sampling=sampling,
         **kwargs,
     )
 
 
 def test_preference_pair_defaults_to_uniform_propensity():
     pair = _make_pair("p1")
-    assert pair.doc_propensity == 1.0
-    assert pair.node_propensity == 1.0
-    assert pair.label_propensity == 1.0
+    assert pair.sampling.document_propensity == 1.0
+    assert pair.sampling.unit_propensity == 1.0
+    assert pair.sampling.label_propensity == 1.0
     assert pair.effective_joint_propensity() == 1.0
     assert pair.ipw_weight() == 1.0
 
@@ -71,11 +89,12 @@ def test_old_dict_load_gets_uniform_defaults():
         "timestamp": "2026-01-01T00:00:00",
     }
     pair = PreferencePair.from_dict(legacy)
-    assert pair.doc_propensity == 1.0
-    assert pair.node_propensity == 1.0
-    assert pair.label_propensity == 1.0
+    assert pair.sampling.document_propensity == 1.0
+    assert pair.sampling.unit_propensity == 1.0
+    assert pair.sampling.label_propensity == 1.0
     assert pair.effective_joint_propensity() == 1.0
     assert pair.ipw_weight() == 1.0
+    assert pair.preference_supervision.law_type == "sufficiency"
     assert pair.truth_label_source == "unknown"
     assert pair.source_doc_id is None
 
@@ -104,6 +123,140 @@ def test_dpo_export_contains_sample_weight():
     exported = dataset.to_preference_format("dpo")
     assert len(exported) == 1
     assert exported[0]["sample_weight"] == 4.0
+    assert exported[0]["metadata"]["preference_supervision"]["law_type"] == "sufficiency"
+    assert exported[0]["metadata"]["treepo"]["sample_weight_source"] == "effective_weight"
+
+
+def test_discounted_dpo_export_includes_treepo_rl_metadata():
+    pair = _make_pair(
+        "p_discounted",
+        joint_propensity=0.25,
+        sampling=SamplingMetadata(
+            joint_propensity=0.25,
+            unit_kind=ObservationUnitKind.PAIR,
+            metadata={"depth": 2, "node_id": "leaf_7"},
+        ),
+    )
+    dataset = PreferenceDataset([pair])
+
+    exported = dataset.to_preference_format(
+        "dpo",
+        tree_objective_weighting_mode="discounted_tree",
+        discount_gamma=0.5,
+    )
+
+    assert len(exported) == 1
+    row = exported[0]
+    treepo = row["metadata"]["treepo"]
+    assert treepo["document_id"] == "doc_p_discounted"
+    assert treepo["node_id"] == "leaf_7"
+    assert treepo["depth"] == 2
+    assert treepo["channel"] == "c1"
+    assert treepo["objective_weight"] == pytest.approx(0.25)
+    assert treepo["ipw_weight"] == pytest.approx(4.0)
+    assert treepo["effective_weight"] == pytest.approx(1.0)
+    assert treepo["sample_weight"] == pytest.approx(1.0)
+    assert treepo["rl_role"] == "dpo_pair"
+    assert row["sample_weight"] == pytest.approx(1.0)
+
+
+def test_extract_sample_weight_uses_zero_effective_weight():
+    record = {
+        "metadata": {
+            "treepo": {
+                "objective_weight": 0.0,
+                "ipw_weight": 4.0,
+                "effective_weight": 0.0,
+            }
+        }
+    }
+    assert _extract_sample_weight(record) == pytest.approx(0.0)
+
+
+def test_resolve_treepo_objective_weight_discounted_root_vs_leaf():
+    assert resolve_treepo_objective_weight(
+        channel="root",
+        depth=0,
+        weighting_mode="discounted_tree",
+        discount_gamma=0.0,
+    ) == pytest.approx(1.0)
+    assert resolve_treepo_objective_weight(
+        channel="c1",
+        depth=3,
+        weighting_mode="discounted_tree",
+        discount_gamma=0.0,
+    ) == pytest.approx(0.0)
+
+
+def test_exports_preserve_comparative_signal_payload():
+    pair = _make_pair(
+        "p_genrm",
+        comparison_signal_value=1.0,
+        score_estimate_a=5.0,
+        score_estimate_b=2.0,
+        preference_supervision=preference_supervision_metadata(
+            law_type="sufficiency",
+            comparison_signal_name="genrm_ranking_score",
+            comparison_signal_min=1.0,
+            comparison_signal_max=6.0,
+            response_signal_name="genrm_helpfulness",
+            response_signal_min=1.0,
+            response_signal_max=5.0,
+        ),
+    )
+    dataset = PreferenceDataset([pair])
+
+    dpo_export = dataset.to_preference_format("dpo")[0]
+    assert dpo_export["metadata"]["comparative_signal"]["comparison_signal_name"] == (
+        "genrm_ranking_score"
+    )
+    assert dpo_export["metadata"]["comparative_signal"]["comparison_signal_value"] == 1.0
+    assert dpo_export["metadata"]["comparative_signal"]["response_signal_a"] == 5.0
+
+    reward_export = dataset.to_reward_model_format()[0]
+    assert reward_export["metadata"]["comparative_signal"]["response_signal_name"] == (
+        "genrm_helpfulness"
+    )
+
+
+def test_scalar_reward_export_uses_effective_treepo_weight():
+    judgment = ResponseJudgment(
+        judgment_id="j_scalar",
+        source_example_id="doc_scalar",
+        original_text="original",
+        rubric="rubric",
+        response="response",
+        response_id="A",
+        reference_score=0.5,
+        law_type="document_level_target",
+        source_doc_id="doc_scalar",
+        sampling=SamplingMetadata(
+            joint_propensity=0.5,
+            unit_kind=ObservationUnitKind.PAIR,
+            metadata={"depth": 1, "node_id": "root_1"},
+        ),
+        supervision_metadata=judgment_supervision_metadata(
+            law_type="document_level_target",
+            supervision_signal_name="document_level_target",
+        ),
+        response_signal_value=0.7,
+    )
+    dataset = SupervisionDataset(response_judgments=[judgment])
+
+    rows = dataset.to_scalar_reward_records(
+        tree_objective_weighting_mode="discounted_tree",
+        discount_gamma=0.5,
+    )
+
+    assert len(rows) == 1
+    treepo = rows[0]["metadata"]["treepo"]
+    assert treepo["channel"] == "root"
+    assert treepo["depth"] == 1
+    assert treepo["objective_weight"] == pytest.approx(0.5)
+    assert treepo["ipw_weight"] == pytest.approx(2.0)
+    assert treepo["effective_weight"] == pytest.approx(1.0)
+    assert treepo["rl_role"] == "scalar_reward"
+    assert rows[0]["sample_weight"] == pytest.approx(1.0)
 
 
 def test_propensity_resampling_biases_toward_high_ipw_weight():
@@ -142,7 +295,7 @@ def test_systematic_pps_indices_have_expected_cardinality():
     assert all(0 <= idx < len(inclusion) for idx in indices)
 
 
-def test_trl_resample_uses_propensity_stratify_by_alias():
+def test_trl_resample_uses_propensity_stratify_key():
     records = [
         {"prompt": "a", "sample_weight": 1.0, "group": "x"},
         {"prompt": "b", "sample_weight": 2.0, "group": "y"},
@@ -150,15 +303,26 @@ def test_trl_resample_uses_propensity_stratify_by_alias():
         {"prompt": "d", "sample_weight": 4.0, "group": "y"},
     ]
     config = TRLTrainingConfig(
-        propensity_sampling_strategy="stratified_multinomial",
-        propensity_stratify_key=None,
-        propensity_stratify_by="group",
-        propensity_random_seed=11,
+        propensity_weighting=TRLPropensityWeightingConfig(
+            propensity_sampling_strategy="stratified_multinomial",
+            propensity_stratify_key="group",
+            propensity_random_seed=11,
+        ),
     )
 
     sampled = _resample_records_by_weight(records, config)
     assert len(sampled) == len(records)
     assert all("prompt" in record for record in sampled)
+
+
+def test_trl_training_config_validates_discount_gamma():
+    with pytest.raises(ValueError):
+        TRLTrainingConfig(
+            propensity_weighting=TRLPropensityWeightingConfig(
+                tree_objective_weighting_mode="discounted_tree",
+                discount_gamma=1.5,
+            ),
+        )
 
 
 def test_weighted_grpo_trainer_scales_advantages_by_sample_weight():
@@ -267,8 +431,51 @@ def test_weighted_reward_trainer_matches_trl_compute_loss_signature_shape():
     assert "num_items_in_batch" in signature.parameters
 
 
+def test_weighted_scalar_reward_trainer_uses_ipw_weighted_regression_loss():
+    import torch
+
+    class DummyScalarTrainer:
+        pass
+
+    class DummyModel:
+        def __call__(self, **kwargs):
+            del kwargs
+            return SimpleNamespace(logits=torch.tensor([[2.0], [5.0]], dtype=torch.float32))
+
+    WeightedScalarTrainer = _build_weighted_scalar_reward_trainer(
+        DummyScalarTrainer,
+        loss_name="mse",
+    )
+    trainer = WeightedScalarTrainer()
+    loss = trainer.compute_loss(
+        DummyModel(),
+        {
+            "input_ids": torch.tensor([[1, 2], [3, 4]]),
+            "attention_mask": torch.tensor([[1, 1], [1, 1]]),
+            "labels": torch.tensor([1.0, 3.0], dtype=torch.float32),
+            "sample_weight": [1.0, 3.0],
+        },
+    )
+
+    expected = ((2.0 - 1.0) ** 2 * 1.0 + (5.0 - 3.0) ** 2 * 3.0) / 4.0
+    assert float(loss.item()) == pytest.approx(expected)
+
+
+def test_weighted_scalar_reward_trainer_matches_trainer_compute_loss_signature_shape():
+    class DummyScalarTrainer:
+        def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+            return 0.0
+
+    WeightedScalarTrainer = _build_weighted_scalar_reward_trainer(DummyScalarTrainer)
+    signature = inspect.signature(WeightedScalarTrainer.compute_loss)
+    assert "num_items_in_batch" in signature.parameters
+
+
 def test_build_processing_class_kwargs_matches_current_trl_api():
-    trl = pytest.importorskip("trl")
+    try:
+        trl = __import__("trl")
+    except Exception as exc:
+        pytest.skip(f"trl import unavailable in test environment: {exc}")
     kwargs_dpo = _build_processing_class_kwargs(trl.DPOTrainer, processing_class="tok")
     kwargs_reward = _build_processing_class_kwargs(trl.RewardTrainer, processing_class="tok")
     assert kwargs_dpo == {"processing_class": "tok"}

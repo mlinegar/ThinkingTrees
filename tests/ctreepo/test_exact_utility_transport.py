@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from pathlib import Path
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from src.ctreepo.sim.core.exact_utility_common import (
     FlatSpanPolicy,
     _balanced_span_leaf_indices,
     _ppo_style_loss,
+    _sample_fractional_indices,
 )
 from src.ctreepo.sim.core.markov_treepo_preference import (
     MarkovExactUtilityConfig,
@@ -37,6 +39,21 @@ def test_markov_exact_utility_alignment() -> None:
     assert dgp.utility(truth, truth) == 1.0
     assert dgp.state_distance(wrong, truth) > 0.0
     assert dgp.utility(wrong, truth) < 1.0
+
+
+def test_sample_fractional_indices_are_nested_and_keep_rng_aligned() -> None:
+    low_rng = random.Random(102)
+    high_rng = random.Random(102)
+
+    low = _sample_fractional_indices(22, 2.0 / 22.0, low_rng)
+    high = _sample_fractional_indices(22, 6.0 / 22.0, high_rng)
+
+    assert set(low).issubset(high)
+
+    followup_low = _sample_fractional_indices(17, 3.0 / 17.0, low_rng)
+    followup_high = _sample_fractional_indices(17, 3.0 / 17.0, high_rng)
+
+    assert followup_low == followup_high
 
 
 def test_nonseparable_exact_utility_alignment() -> None:

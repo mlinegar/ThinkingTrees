@@ -121,6 +121,14 @@ class TestChunkForOps:
         assert chunk_for_ops("") == []
         assert chunk_for_ops("   ") == []
 
+    def test_token_budget_takes_precedence(self):
+        """Token-budget chunking produces bounded leaves from one tokenization pass."""
+        text = ("token budget chunking should respect exact token windows. " * 200).strip()
+        chunks = chunk_for_ops(text, max_chars=8000, max_tokens=64, strategy="axis")
+        assert len(chunks) > 1
+        assert all(chunk.token_count <= 64 for chunk in chunks)
+        assert all(chunk.metadata.get("token_budget") == 64 for chunk in chunks)
+
     def test_adaptive_chunking_metadata(self, long_text):
         """Adaptive chunking annotates chunks with policy metadata."""
         config = AdaptiveChunkingConfig(enabled=True, min_chars=80, max_chars=600)
