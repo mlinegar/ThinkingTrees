@@ -33,6 +33,12 @@ import warnings
 import math
 
 from src.core.data_models import Node, Tree, AuditStatus, AuditResult
+from src.core.logged_supervision import (
+    LoggedLabelObservation,
+    LoggedObservationArtifact,
+    ObservationUnitKind,
+    SamplingMetadata,
+)
 from src.core.scoring import OracleScore, ScoringOracle
 from src.core.ops_checks import CheckType, CheckConfig, aggregate_check_stats, LawKind
 from src.core.provenance import ORACLE_SOURCE
@@ -45,8 +51,10 @@ from src.tree.compositional_operator import OperatorAssumptionBundle
 from src.tree.compositional_learning import (
     CompositionalLearningProblemSpec,
     SupervisionDeliveryMode,
-    oracle_query_policy,
-    sampled_substructure_supervision_channel,
+    shared_logged_substructure_observation,
+    shared_protocol_problem_notes,
+    shared_sampled_substructure_query_policy,
+    shared_sampled_substructure_supervision_channel,
 )
 from src.tree.compositional_operator import make_text_compositional_operator
 from src.tree.theorem_backing import TheoremAssumptionSpec
@@ -379,6 +387,8 @@ class AuditReport:
     sampling_probability: float = 1.0
     operator_capabilities: Dict[str, Any] = field(default_factory=dict)
     compositional_learning_problem: Dict[str, Any] = field(default_factory=dict)
+    logged_observations: List[LoggedLabelObservation[Any]] = field(default_factory=list)
+    logged_observation_artifacts: Dict[str, Any] = field(default_factory=dict)
 
     # Design-time inclusion probabilities for ALL auditable nodes (not just sampled).
     # Populated by CONTENT_WEIGHTED and LEVEL_WEIGHTED strategies for downstream use.
@@ -451,38 +461,80 @@ class AuditReport:
 
         Skipped checks are excluded by construction.
         """
-        from src.tree.ipw import NodeType, TreePropensity, TreeSample
+        from src.tree.ipw import TreeSample
 
-        check_to_type = {
-            "sufficiency": NodeType.LEAF,
-            "merge_consistency": NodeType.MERGE,
-            "idempotence": NodeType.RESUMMARY,
-            "substitution": NodeType.SUBSTITUTION,
-        }
-
+        observations = list(self.logged_observations or [])
+        if not observations:
+            observations = self._build_logged_observations()
+        doc_key = str(self.source_doc_id) if self.source_doc_id else None
         samples: List[TreeSample] = []
+        for observation in observations:
+            sample = TreeSample.from_logged_observation(
+                observation,
+                violation=int(observation.label),
+                preference_loss=float(
+                    max(0.0, min(1.0, observation.context.get("discrepancy_score", 0.0)))
+                ),
+                metadata={"check_type": observation.target_name},
+            )
+            if doc_key is not None:
+                sample.doc_id = doc_key
+            samples.append(sample)
+        return samples
+
+    def _build_logged_observations(self) -> List[LoggedLabelObservation[Any]]:
+        check_to_kind = {
+            "sufficiency": ObservationUnitKind.LEAF,
+            "merge_consistency": ObservationUnitKind.MERGE,
+            "idempotence": ObservationUnitKind.RESUMMARY,
+            "substitution": ObservationUnitKind.SUBSTITUTION,
+        }
+        check_to_law_kind = {
+            "sufficiency": LawKind.L1_LEAF,
+            "merge_consistency": LawKind.L2_MERGE,
+            "idempotence": LawKind.L3_IDEMPOTENCE,
+        }
         doc_key = str(self.source_doc_id) if self.source_doc_id else self.tree_id
+        observations: List[LoggedLabelObservation[Any]] = []
         for check in self.checks:
             if check.skipped:
                 continue
-            node_type = check_to_type.get(check.check_type)
-            if node_type is None:
+            unit_kind = check_to_kind.get(check.check_type)
+            if unit_kind is None:
                 continue
             inclusion_prob = check.inclusion_probability
             if inclusion_prob is None:
                 inclusion_prob = self._inclusion_probability_for_check(check.check_type) or 1.0
-            samples.append(
-                TreeSample(
-                    doc_id=doc_key,
-                    node_id=check.node_id,
-                    node_type=node_type,
-                    violation=0 if check.passed else 1,
-                    preference_loss=max(0.0, min(1.0, check.discrepancy_score)),
-                    propensity=TreePropensity(doc=1.0, node=inclusion_prob, label=1.0),
-                    metadata={"check_type": check.check_type},
+            observations.append(
+                shared_logged_substructure_observation(
+                    document_id=doc_key,
+                    unit_id=check.node_id,
+                    unit_kind=unit_kind,
+                    label=int(not check.passed),
+                    application_name="tree_audit_verification",
+                    supervision_signal_name=check.check_type,
+                    truth_label_source=ORACLE_SOURCE,
+                    law_kind=check_to_law_kind.get(check.check_type),
+                    sampling=SamplingMetadata(
+                        document_propensity=1.0,
+                        unit_propensity=float(inclusion_prob),
+                        label_propensity=1.0,
+                        sampling_scheme=self.sampling_strategy,
+                        policy_name="sampled_substructure_query_policy",
+                        unit_kind=unit_kind,
+                        supports_ipw_estimation=True,
+                    ),
+                    context={
+                        "check_type": check.check_type,
+                        "passed": bool(check.passed),
+                        "discrepancy_score": float(check.discrepancy_score),
+                        "reasoning": check.reasoning,
+                        "input_a": check.input_a,
+                        "input_b": check.input_b,
+                    },
                 )
             )
-        return samples
+        return observations
 
     def ipw_violation_rate(self, node_type: Optional[str] = None) -> float:
         """IPW/Hajek violation rate estimate from audit checks."""
@@ -732,6 +784,18 @@ class AuditReport:
             "sampling_probability": float(self.sampling_probability),
             "operator_capabilities": dict(self.operator_capabilities),
             "compositional_learning_problem": dict(self.compositional_learning_problem),
+            "logged_observations": [
+                {
+                    **observation.to_dict(),
+                    "document_id": (
+                        str(self.source_doc_id)
+                        if self.source_doc_id is not None
+                        else observation.document_id
+                    ),
+                }
+                for observation in self.logged_observations
+            ],
+            "logged_observation_artifacts": dict(self.logged_observation_artifacts),
             "inclusion_probability_map": dict(self.inclusion_probability_map),
         }
 
@@ -1216,9 +1280,7 @@ class Auditor:
             operator_assumptions=operator_assumptions,
             operator_capabilities=capability_report,
             supervision_channels=(
-                sampled_substructure_supervision_channel(
-                    name="audit_sampled_nodes",
-                    target_name="leaf_merge_resummary_checks",
+                shared_sampled_substructure_supervision_channel(
                     active=bool(
                         self.config.audit_leaves
                         or self.config.audit_internal
@@ -1227,9 +1289,7 @@ class Auditor:
                     ),
                     label_source=ORACLE_SOURCE,
                     delivery_mode=SupervisionDeliveryMode.ONLINE_ORACLE_QUERY,
-                    query_policy=oracle_query_policy(
-                        name="audit_sampling_policy",
-                        query_unit_name="tree_nodes",
+                    query_policy=shared_sampled_substructure_query_policy(
                         selection_strategy=str(self.config.sampling_strategy.value),
                         adaptive=bool(
                             self.config.sampling_strategy
@@ -1258,9 +1318,12 @@ class Auditor:
                     ),
                 ),
             ),
-            notes=(
+            notes=shared_protocol_problem_notes(
+                application_name="tree_audit_verification",
+                notes=(
                 "This manifest records the audit problem itself, not only the realized sampled checks.",
                 "When a theorem operator is attached, the capability surface is copied into the problem spec.",
+                ),
             ),
         )
         return problem.to_dict()
@@ -1421,7 +1484,7 @@ class Auditor:
         failed = len(checks) - passed
         failed_ids = [c.node_id for c in checks if not c.passed]
 
-        return AuditReport(
+        report = AuditReport(
             tree_id=tree_id,
             source_doc_id=source_doc_id,
             total_nodes=len(all_nodes),
@@ -1451,8 +1514,12 @@ class Auditor:
                 else {}
             ),
             compositional_learning_problem=self._compositional_learning_problem(),
+            logged_observations=[],
+            logged_observation_artifacts={},
             inclusion_probability_map=dict(self._last_inclusion_prob_map),
         )
+        report.logged_observations = report._build_logged_observations()
+        return report
 
     def _batch_audit_nodes(
         self,

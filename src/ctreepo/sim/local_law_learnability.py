@@ -8,6 +8,8 @@ from typing import Any, Dict, Mapping, Optional, Protocol, Sequence
 
 import numpy as np
 
+from src.ctreepo.sim.util import safe_float
+
 
 class PolicyRole(str, Enum):
     ORACLE_G = "oracle_g"
@@ -240,6 +242,7 @@ class LocalLawRunSummary:
     thresholds: Dict[str, Any]
     suite_role: str = ""
     compositional_learning_problem: Dict[str, Any] = field(default_factory=dict)
+    logged_observation_artifacts: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -260,6 +263,7 @@ class LocalLawRunSummary:
             "compositional_learning_problem": _serialize(
                 self.compositional_learning_problem
             ),
+            "logged_observation_artifacts": _serialize(self.logged_observation_artifacts),
             "metadata": _serialize(self.metadata),
         }
 
@@ -290,6 +294,9 @@ class LocalLawRunSummary:
             compositional_learning_problem=dict(
                 payload.get("compositional_learning_problem", {}) or {}
             ),
+            logged_observation_artifacts=dict(
+                payload.get("logged_observation_artifacts", {}) or {}
+            ),
             metadata=dict(payload.get("metadata", {}) or {}),
         )
 
@@ -313,12 +320,7 @@ def selected_policy_role(summary: LocalLawRunSummary) -> Optional[PolicyRole]:
     return None
 
 
-def _safe_float(value: Any, default: float = float("nan")) -> float:
-    try:
-        out = float(value)
-    except Exception:
-        return float(default)
-    return out
+_safe_float = safe_float
 
 
 def split_metric_views(split_metrics: Mapping[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:

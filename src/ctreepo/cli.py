@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import sys
 from typing import Sequence
+
+from src.ctreepo.sim.suite.registry import suite_module_names, suite_module_spec
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -59,18 +62,13 @@ def _build_parser() -> argparse.ArgumentParser:
     report.add_argument("args", nargs=argparse.REMAINDER)
 
     suite = sim_sub.add_parser("suite", help="Curated multi-family suites.")
-    suite_sub = suite.add_subparsers(dest="suite_name", required=True)
-    iz = suite_sub.add_parser("identifiable-zero", help="Identifiable-Zero suite orchestration.")
-    iz_sub = iz.add_subparsers(dest="suite_cmd", required=True)
-    for cmd in ["build", "run", "plot", "report"]:
-        sp = iz_sub.add_parser(cmd, help=f"{cmd} the identifiable-zero suite.")
-        sp.add_argument("args", nargs=argparse.REMAINDER)
-
-    pub = suite_sub.add_parser("publication-ctreepo", help="Publication C-TreePO benchmark suite.")
-    pub_sub = pub.add_subparsers(dest="suite_cmd", required=True)
-    for cmd in ["build", "run", "progress"]:
-        sp = pub_sub.add_parser(cmd, help=f"{cmd} the publication-ctreepo suite.")
-        sp.add_argument("args", nargs=argparse.REMAINDER)
+    suite.add_argument(
+        "suite_name",
+        choices=suite_module_names(),
+        help="Suite name.",
+    )
+    suite.add_argument("suite_cmd", help="Suite subcommand.")
+    suite.add_argument("args", nargs=argparse.REMAINDER)
 
     return p
 
@@ -159,24 +157,22 @@ def _dispatch_report(name: str, argv: Sequence[str]) -> int:
     raise ValueError(f"Unknown report name: {name}")
 
 
-def _dispatch_suite_identifiable_zero(cmd: str, argv: Sequence[str]) -> int:
-    from src.ctreepo.sim.suite.identifiable_zero import main as _main
-
-    # suite main owns its own subcommand parsing; we forward "<cmd> ..." as argv.
-    return int(_main([cmd, *argv]))
-
-
-def _dispatch_suite_publication_ctreepo(cmd: str, argv: Sequence[str]) -> int:
-    from src.ctreepo.sim.suite.publication_ctreepo import main as _main
-
-    # suite main owns its own subcommand parsing; we forward "<cmd> ..." as argv.
-    return int(_main([cmd, *argv]))
+def _dispatch_suite(suite_name: str, cmd: str, argv: Sequence[str]) -> int:
+    spec = suite_module_spec(str(suite_name))
+    module = importlib.import_module(str(spec.module))
+    main_fn = getattr(module, "main")
+    return int(main_fn([cmd, *argv]))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args_in = list(sys.argv[1:] if argv is None else argv)
     p = _build_parser()
-    ns = p.parse_args(args_in)
+    ns, extras = p.parse_known_args(args_in)
+    if extras:
+        if hasattr(ns, "args"):
+            ns.args = list(getattr(ns, "args", []) or []) + list(extras)
+        else:
+            p.error(f"unrecognized arguments: {' '.join(extras)}")
 
     if ns.cmd == "sim":
         if ns.sim_cmd == "run":
@@ -192,11 +188,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if ns.sim_cmd == "report":
             return _dispatch_report(str(ns.name), list(ns.args))
         if ns.sim_cmd == "suite":
-            if ns.suite_name == "identifiable-zero":
-                return _dispatch_suite_identifiable_zero(str(ns.suite_cmd), list(ns.args))
-            if ns.suite_name == "publication-ctreepo":
-                return _dispatch_suite_publication_ctreepo(str(ns.suite_cmd), list(ns.args))
-            raise ValueError(f"Unknown suite: {ns.suite_name}")
+            return _dispatch_suite(str(ns.suite_name), str(ns.suite_cmd), list(ns.args))
 
     raise ValueError("unreachable")
 

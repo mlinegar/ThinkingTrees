@@ -16,9 +16,8 @@ Requires: torch >= 2.0
 
 from __future__ import annotations
 
-import math
 import random
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -51,6 +50,7 @@ SpikeCountMixtureDistributionSpec = _ma.SpikeCountMixtureDistributionSpec
 ToyTokenDocument = _ma.ToyTokenDocument
 sample_spike_count_mixture_documents = _ma.sample_spike_count_mixture_documents
 true_spike_count = _ma.true_spike_count
+from src.training.config_sections import OptimizerConfig, RunConfig, TrainConfig, ValidationConfig
 
 
 # ---------------------------------------------------------------------------
@@ -70,22 +70,51 @@ DEFAULT_DISTRIBUTION = SpikeCountMixtureDistributionSpec(
 )
 
 
-@dataclass(frozen=True)
-class TrainingConfig:
-    """Configuration for learned sketch training."""
+@dataclass(frozen=True, kw_only=True)
+class LearnedSketchModelConfig:
+    state_dim: int = 4
+    target_k: int = 4
+    hidden_dim: int = 32
 
-    state_dim: int = 4       # m — sketch state dimension
-    target_k: int = 4        # k — number of types (= information dimension)
-    chunk_size: int = 4       # fixed chunk size (should be divisible by target_k)
-    hidden_dim: int = 32      # MLP hidden layer width
-    batch_size: int = 64      # documents per training step
-    n_steps: int = 2000       # total training steps
-    n_audit: int = 7          # nodes sampled per document per step
-    lr: float = 1e-3          # Adam learning rate
-    eval_every: int = 50      # evaluate every N steps
-    eval_docs: int = 256      # documents for evaluation
-    seed: int = 42
-    law_tolerance: float = 0.5  # tolerance for L1/L2/L3 discrepancy summaries
+
+@dataclass(frozen=True, kw_only=True)
+class LearnedSketchDataConfig:
+    chunk_size: int = 4
+
+
+@dataclass(frozen=True, kw_only=True)
+class LearnedSketchObjectiveConfig:
+    n_audit: int = 7
+    law_tolerance: float = 0.5
+
+
+@dataclass(frozen=True, kw_only=True)
+class LearnedSketchEvaluationConfig:
+    eval_docs: int = 256
+
+
+@dataclass(frozen=True, kw_only=True)
+class LearnedSketchTrainingConfig:
+    """Sectioned configuration for learned sketch training."""
+
+    model: LearnedSketchModelConfig = field(default_factory=LearnedSketchModelConfig)
+    data: LearnedSketchDataConfig = field(default_factory=LearnedSketchDataConfig)
+    train: TrainConfig = field(
+        default_factory=lambda: TrainConfig(batch_size=64, steps=2000)
+    )
+    optimizer: OptimizerConfig = field(
+        default_factory=lambda: OptimizerConfig(learning_rate=1e-3)
+    )
+    validation: ValidationConfig = field(
+        default_factory=lambda: ValidationConfig(eval_every=50)
+    )
+    run: RunConfig = field(default_factory=RunConfig)
+    objective: LearnedSketchObjectiveConfig = field(
+        default_factory=LearnedSketchObjectiveConfig
+    )
+    evaluation: LearnedSketchEvaluationConfig = field(
+        default_factory=LearnedSketchEvaluationConfig
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +304,7 @@ def train_step(
     model: LearnedSketchModel,
     optimizer: optim.Optimizer,
     docs: List[ToyTokenDocument],
-    config: TrainingConfig,
+    config: LearnedSketchTrainingConfig,
     rng: random.Random,
 ) -> float:
     """One training step with explicit L1/L2/L3-style decoded-summary losses."""
@@ -286,11 +315,11 @@ def train_step(
     n_samples = 0
 
     for doc in docs:
-        nodes = build_tree_from_doc(doc, config.chunk_size)
-        forward_pass(model, nodes, config.chunk_size)
+        nodes = build_tree_from_doc(doc, config.data.chunk_size)
+        forward_pass(model, nodes, config.data.chunk_size)
 
         # Sample nodes for audit
-        n_to_sample = min(config.n_audit, len(nodes))
+        n_to_sample = min(config.objective.n_audit, len(nodes))
         sampled_indices = rng.sample(range(len(nodes)), k=n_to_sample)
 
         for idx in sampled_indices:
@@ -298,7 +327,7 @@ def train_step(
             assert node.state is not None
             predicted = model.decode_summary(node.state)
             target = type_oracle(
-                node.raw_indicators, node.positions, config.target_k
+                node.raw_indicators, node.positions, config.model.target_k
             )
             target_t = torch.tensor(target, dtype=torch.float32)
             decode_loss = ((predicted - target_t) ** 2).sum()
@@ -338,7 +367,7 @@ class EvalMetrics:
 def evaluate(
     model: LearnedSketchModel,
     docs: List[ToyTokenDocument],
-    config: TrainingConfig,
+    config: LearnedSketchTrainingConfig,
 ) -> EvalMetrics:
     """Evaluate learned sketch with explicit decoded-summary local-law metrics."""
     model.eval()
@@ -351,15 +380,15 @@ def evaluate(
     all_node_errors_sq = []
 
     for doc in docs:
-        nodes = build_tree_from_doc(doc, config.chunk_size)
-        forward_pass(model, nodes, config.chunk_size)
+        nodes = build_tree_from_doc(doc, config.data.chunk_size)
+        forward_pass(model, nodes, config.data.chunk_size)
 
         # Root evaluation
         root = nodes[-1]
         assert root.state is not None
         pred_vec = model.decode_summary(root.state)
         true_vec = type_oracle(
-            root.raw_indicators, root.positions, config.target_k
+            root.raw_indicators, root.positions, config.model.target_k
         )
         true_t = torch.tensor(true_vec, dtype=torch.float32)
 
@@ -375,7 +404,7 @@ def evaluate(
             assert node.state is not None
             pred = model.decode_summary(node.state)
             true_v = type_oracle(
-                node.raw_indicators, node.positions, config.target_k
+                node.raw_indicators, node.positions, config.model.target_k
             )
             true_vt = torch.tensor(true_v, dtype=torch.float32)
             error = ((pred - true_vt) ** 2).sum().item()
@@ -527,49 +556,49 @@ class LearningCurveResult:
 
 
 def run_learning_curve(
-    config: TrainingConfig,
+    config: LearnedSketchTrainingConfig,
     distribution: SpikeCountMixtureDistributionSpec = DEFAULT_DISTRIBUTION,
 ) -> LearningCurveResult:
     """Train a learned sketch and record metrics over training."""
-    rng = random.Random(config.seed)
-    torch.manual_seed(config.seed)
+    rng = random.Random(config.run.seed)
+    torch.manual_seed(config.run.seed)
 
-    n_indicators = config.chunk_size
+    n_indicators = config.data.chunk_size
     model = LearnedSketchModel(
         n_indicators=n_indicators,
-        state_dim=config.state_dim,
-        n_types=config.target_k,
-        hidden_dim=config.hidden_dim,
+        state_dim=config.model.state_dim,
+        n_types=config.model.target_k,
+        hidden_dim=config.model.hidden_dim,
     )
-    optimizer = optim.Adam(model.parameters(), lr=config.lr)
+    optimizer = optim.Adam(model.parameters(), lr=config.optimizer.learning_rate)
 
     # Generate held-out evaluation docs
     eval_docs = sample_spike_count_mixture_documents(
         spec=distribution,
-        n_docs=config.eval_docs,
-        seed=config.seed + 999_999,
+        n_docs=config.evaluation.eval_docs,
+        seed=config.run.seed + 999_999,
     )
 
     # Hand-designed baseline on eval docs
     hd_acc = hand_designed_accuracy(
-        eval_docs, config.target_k, config.state_dim, config.chunk_size
+        eval_docs, config.model.target_k, config.model.state_dim, config.data.chunk_size
     )
 
     all_metrics = []
 
-    for step in range(config.n_steps):
+    for step in range(config.train.steps):
         # Generate fresh training batch
-        batch_seed = config.seed + step * 1000
+        batch_seed = config.run.seed + step * 1000
         train_docs = sample_spike_count_mixture_documents(
             spec=distribution,
-            n_docs=config.batch_size,
+            n_docs=config.train.batch_size,
             seed=batch_seed,
         )
 
         train_step(model, optimizer, train_docs, config, rng)
 
         # Evaluate periodically
-        if step % config.eval_every == 0 or step == config.n_steps - 1:
+        if step % config.validation.eval_every == 0 or step == config.train.steps - 1:
             metrics = evaluate(model, eval_docs, config)
             metrics = EvalMetrics(
                 step=step,
@@ -585,8 +614,8 @@ def run_learning_curve(
     final = all_metrics[-1] if all_metrics else {}
 
     return LearningCurveResult(
-        state_dim=config.state_dim,
-        target_k=config.target_k,
+        state_dim=config.model.state_dim,
+        target_k=config.model.target_k,
         metrics=all_metrics,
         hand_designed_accuracy=hd_acc,
         final_root_oracle_mse=final.get("root_oracle_mse", float("nan")),
@@ -608,11 +637,10 @@ def run_learning_curve_experiment(
     results = []
     for m in state_dims:
         print(f"  Training learned sketch: m={m}, k={target_k}, steps={n_steps}")
-        config = TrainingConfig(
-            state_dim=m,
-            target_k=target_k,
-            n_steps=n_steps,
-            seed=seed + m * 100,
+        config = LearnedSketchTrainingConfig(
+            model=LearnedSketchModelConfig(state_dim=m, target_k=target_k),
+            train=TrainConfig(batch_size=64, steps=n_steps),
+            run=RunConfig(seed=seed + m * 100),
         )
         result = run_learning_curve(config, distribution)
         results.append(asdict(result))
@@ -644,11 +672,10 @@ def run_convergence_comparison(
 ) -> Dict:
     """Experiment 2: compare learned vs hand-designed vs naive at convergence."""
     print(f"  Training learned sketch: m={state_dim}, k={target_k}")
-    config = TrainingConfig(
-        state_dim=state_dim,
-        target_k=target_k,
-        n_steps=n_steps,
-        seed=seed,
+    config = LearnedSketchTrainingConfig(
+        model=LearnedSketchModelConfig(state_dim=state_dim, target_k=target_k),
+        train=TrainConfig(batch_size=64, steps=n_steps),
+        run=RunConfig(seed=seed),
     )
     result = run_learning_curve(config, distribution)
 
@@ -686,11 +713,10 @@ def run_phase_diagram_experiment(
     for k in target_ks:
         for m in state_dims:
             print(f"  Phase diagram: m={m}, k={k}")
-            config = TrainingConfig(
-                state_dim=m,
-                target_k=k,
-                n_steps=n_steps,
-                seed=seed + k * 1000 + m * 100,
+            config = LearnedSketchTrainingConfig(
+                model=LearnedSketchModelConfig(state_dim=m, target_k=k),
+                train=TrainConfig(batch_size=64, steps=n_steps),
+                run=RunConfig(seed=seed + k * 1000 + m * 100),
             )
             result = run_learning_curve(config, distribution)
             rows.append({
@@ -730,12 +756,11 @@ def run_audit_budget_experiment(
     results = []
     for n_audit in audit_budgets:
         print(f"  Audit budget: n_audit={n_audit}, m={state_dim}, k={target_k}")
-        config = TrainingConfig(
-            state_dim=state_dim,
-            target_k=target_k,
-            n_steps=n_steps,
-            n_audit=n_audit,
-            seed=seed + n_audit * 100,
+        config = LearnedSketchTrainingConfig(
+            model=LearnedSketchModelConfig(state_dim=state_dim, target_k=target_k),
+            train=TrainConfig(batch_size=64, steps=n_steps),
+            run=RunConfig(seed=seed + n_audit * 100),
+            objective=LearnedSketchObjectiveConfig(n_audit=n_audit),
         )
         result = run_learning_curve(config, distribution)
         results.append({

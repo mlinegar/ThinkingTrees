@@ -235,24 +235,10 @@ def _l2(u: np.ndarray, v: np.ndarray) -> float:
     return float(np.sqrt(np.sum(d * d)))
 
 
-def _normalize_simplex_vec(x: np.ndarray) -> np.ndarray:
-    y = np.maximum(np.asarray(x, dtype=np.float64), 0.0)
-    s = float(np.sum(y))
-    if not math.isfinite(s) or s <= 0.0:
-        return np.full_like(y, 1.0 / float(y.size), dtype=np.float64)
-    return y / s
+from src.ctreepo.sim.util import normalize_simplex_vec, normalize_simplex_rows
 
-
-def _normalize_simplex_rows(x: np.ndarray) -> np.ndarray:
-    y = np.maximum(np.asarray(x, dtype=np.float64), 0.0)
-    s = np.sum(y, axis=1, keepdims=True)
-    out = np.zeros_like(y, dtype=np.float64)
-    good = (s[:, 0] > 0.0) & np.isfinite(s[:, 0])
-    if np.any(good):
-        out[good] = y[good] / s[good]
-    if np.any(~good):
-        out[~good] = 1.0 / float(y.shape[1])
-    return out
+_normalize_simplex_vec = normalize_simplex_vec
+_normalize_simplex_rows = normalize_simplex_rows
 
 
 def _softmax_rows(logits: np.ndarray) -> np.ndarray:

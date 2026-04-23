@@ -27,7 +27,7 @@ from .preferences import (
     derive_preference_from_scores,
     derive_preference_from_utilities,
 )
-from .records import IPWMetadata, PairwisePreference
+from .records import PairwisePreference, SamplingMetadata
 from .sklearn_proxy import SklearnProxyOracle
 from .torch_proxy import TorchMSEProxyOracle
 from .training_adapter import to_training_preference_dataset
@@ -40,8 +40,8 @@ __all__ = [
     "Policy",
     "collect_pairwise_preferences",
     "collect_proxy_training_data",
-    "IPWMetadata",
     "PairwisePreference",
+    "SamplingMetadata",
     "PreferenceOutcome",
     "derive_preference_from_losses",
     "derive_preference_from_scores",

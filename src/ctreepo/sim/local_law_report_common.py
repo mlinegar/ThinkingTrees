@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
 
+from src.ctreepo.sim.util import safe_float
 from src.ctreepo.sim.local_law_backfill import (
     collect_law_stress_assessments,
     load_or_backfill_local_law_payload,
@@ -31,12 +32,7 @@ class LoadedLocalLawRun:
     payload: Dict[str, Any]
 
 
-def _safe_float(value: object, default: float = float("nan")) -> float:
-    try:
-        out = float(value)  # type: ignore[arg-type]
-    except Exception:
-        return float(default)
-    return out if math.isfinite(out) else float(default)
+_safe_float = safe_float
 
 
 def _safe_mean(values: Iterable[object]) -> float:

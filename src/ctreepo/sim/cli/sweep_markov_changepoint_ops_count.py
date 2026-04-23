@@ -11,7 +11,10 @@ from itertools import product
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
-from src.ctreepo.sim.core.markov_changepoint_ops_count import OPSCountConfig
+from src.ctreepo.sim.core.markov_changepoint_ops_count import (
+    OPSCountConfig,
+    VALID_GENERATOR_PROFILES,
+)
 from src.ctreepo.sim.manifest import RunSpec, write_manifest_jsonl
 from src.ctreepo.sim.runner import run_commands
 
@@ -60,6 +63,7 @@ def _iter_runs(
     python_bin: str,
     n_regimes: int,
     vocab_size: int,
+    generator_profile: str = "piecewise_markov",
     min_tokens: int,
     max_tokens: int,
     min_segments: int,
@@ -85,9 +89,22 @@ def _iter_runs(
     eval_guidance_seed_offset: int,
     eval_guidance_include_root: bool,
     include_rf_root_baseline: bool,
+    include_doc_level_baseline: bool,
+    include_doc_level_ridge_baseline: bool,
+    include_leaf_ridge_tree_baseline: bool,
+    include_leaf_endpoint_table_tree_baseline: bool,
+    include_leaf_dt_tree_baseline: bool,
+    include_leaf_knn_tree_baseline: bool,
+    include_leaf_rf_tree_baseline: bool,
     rf_n_estimators: int,
     rf_max_depth: int,
     rf_min_samples_leaf: int,
+    doc_level_ridge_alpha: float,
+    leaf_knn_neighbors: int,
+    include_sampled_leaf_pool_ridge_baseline: bool,
+    include_sampled_leaf_pool_rf_baseline: bool,
+    sampled_leaf_pool_leaf_counts: Iterable[int],
+    sampled_leaf_pool_seed_offset: int,
     data_seeds: Iterable[int],
     seeds: Iterable[int],
     output_root: Path,
@@ -115,6 +132,11 @@ def _iter_runs(
         raise ValueError("n_regimes must be positive")
     if int(vocab_size) <= 0:
         raise ValueError("vocab_size must be positive")
+    generator_profile_value = str(generator_profile).strip().lower() or "piecewise_markov"
+    if generator_profile_value not in VALID_GENERATOR_PROFILES:
+        raise ValueError(
+            f"generator_profile must be one of {VALID_GENERATOR_PROFILES}, got {generator_profile!r}"
+        )
     if int(min_tokens) <= 0 or int(max_tokens) <= 0:
         raise ValueError("min_tokens/max_tokens must be positive")
     if int(min_segments) <= 0 or int(max_segments) <= 0:
@@ -140,13 +162,22 @@ def _iter_runs(
             raise ValueError("guidance_override_modes must be a subset of {'reset','adjust'}")
     guidance_qs_list = [float(q) for q in eval_guidance_qs]
     guidance_qs_text = ",".join(f"{float(q):.6g}" for q in guidance_qs_list)
+    sampled_leaf_pool_counts = sorted(
+        {
+            int(x)
+            for x in sampled_leaf_pool_leaf_counts
+            if int(x) > 0
+        }
+    )
     data_seed_values_raw = [int(x) for x in data_seeds]
     data_seed_values: List[int | None] = data_seed_values_raw if data_seed_values_raw else [None]
 
     feature_mode_values = [str(x).strip() for x in feature_modes if str(x).strip()] or ["full"]
     for fm in feature_mode_values:
-        if fm not in {"full", "no_endpoints"}:
-            raise ValueError("feature_modes must be a subset of {'full','no_endpoints'}")
+        if fm not in {"full", "no_endpoints", "token_full", "token_bow"}:
+            raise ValueError(
+                "feature_modes must be a subset of {'full','no_endpoints','token_full','token_bow'}"
+            )
 
     state_dim_values = [int(x) for x in state_dims] or [32]
     hidden_dim_values = [int(x) for x in hidden_dims] or [128]
@@ -207,9 +238,34 @@ def _iter_runs(
         if len(guidance_override_values) > 1 or str(gov_mode) != "reset":
             gov_component = f"/gov_{str(gov_mode)}"
         rf_component = "/rfroot_1" if bool(include_rf_root_baseline) else ""
+        doc_component = "/docbase_1" if bool(include_doc_level_baseline) else ""
+        ridge_component = "/ridge_1" if bool(include_doc_level_ridge_baseline) else ""
+        leaf_ridge_component = "/leafridge_1" if bool(include_leaf_ridge_tree_baseline) else ""
+        leaf_endpoint_table_component = (
+            "/leafendtable_1" if bool(include_leaf_endpoint_table_tree_baseline) else ""
+        )
+        leaf_dt_component = "/leafdt_1" if bool(include_leaf_dt_tree_baseline) else ""
+        leaf_knn_component = (
+            f"/leafknn_k{int(leaf_knn_neighbors)}" if bool(include_leaf_knn_tree_baseline) else ""
+        )
+        leaf_rf_component = "/leafrf_1" if bool(include_leaf_rf_tree_baseline) else ""
+        sampled_pool_component = ""
+        if bool(include_sampled_leaf_pool_ridge_baseline) or bool(
+            include_sampled_leaf_pool_rf_baseline
+        ):
+            pool_bits: List[str] = []
+            if bool(include_sampled_leaf_pool_ridge_baseline):
+                pool_bits.append("ridge")
+            if bool(include_sampled_leaf_pool_rf_baseline):
+                pool_bits.append("rf")
+            budget_text = "-".join(str(int(x)) for x in sampled_leaf_pool_counts) or "none"
+            sampled_pool_component = f"/spl_{'-'.join(pool_bits)}_{budget_text}"
         fm_component = ""
         if len(feature_mode_values) > 1 or str(fm) != "full":
             fm_component = f"/fm_{str(fm)}"
+        generator_component = ""
+        if generator_profile_value != "piecewise_markov":
+            generator_component = f"/gp_{generator_profile_value}"
         if int(sd) <= 0:
             raise ValueError("state_dims must be positive")
         hd_candidates = (
@@ -254,7 +310,8 @@ def _iter_runs(
                 f"/rootq_{1 if bool(rootq) else 0}"
                 f"/rw_{_fmt_float(float(rw))}"
                 f"/scw_{_fmt_float(float(scw))}"
-                f"{gov_component}{rf_component}{fm_component}{data_seed_component}"
+                f"{gov_component}{rf_component}{doc_component}{ridge_component}{leaf_ridge_component}{leaf_endpoint_table_component}{leaf_dt_component}{leaf_knn_component}{leaf_rf_component}{sampled_pool_component}{fm_component}{data_seed_component}"
+                f"{generator_component}"
                 f"/sd_{int(sd)}"
                 f"/hd_{int(hd)}"
             )
@@ -269,6 +326,7 @@ def _iter_runs(
                 prefix,
                 f"--n-regimes {int(n_regimes)}",
                 f"--vocab-size {int(vocab_size)}",
+                f"--generator-profile {generator_profile_value}",
                 f"--min-tokens {int(min_tokens)}",
                 f"--max-tokens {int(max_tokens)}",
                 f"--min-segments {int(min_segments)}",
@@ -311,6 +369,34 @@ def _iter_runs(
                 parts.append(f"--rf-n-estimators {int(rf_n_estimators)}")
                 parts.append(f"--rf-max-depth {int(rf_max_depth)}")
                 parts.append(f"--rf-min-samples-leaf {int(rf_min_samples_leaf)}")
+            if bool(include_doc_level_baseline):
+                parts.append("--include-doc-level-baseline")
+            if bool(include_doc_level_ridge_baseline):
+                parts.append("--include-doc-level-ridge-baseline")
+                parts.append(f"--doc-level-ridge-alpha {float(doc_level_ridge_alpha)}")
+            if bool(include_leaf_ridge_tree_baseline):
+                parts.append("--include-leaf-ridge-tree-baseline")
+            if bool(include_leaf_endpoint_table_tree_baseline):
+                parts.append("--include-leaf-endpoint-table-tree-baseline")
+            if bool(include_leaf_dt_tree_baseline):
+                parts.append("--include-leaf-dt-tree-baseline")
+            if bool(include_leaf_knn_tree_baseline):
+                parts.append("--include-leaf-knn-tree-baseline")
+                parts.append(f"--leaf-knn-neighbors {int(leaf_knn_neighbors)}")
+            if bool(include_leaf_rf_tree_baseline):
+                parts.append("--include-leaf-rf-tree-baseline")
+            if bool(include_sampled_leaf_pool_ridge_baseline):
+                parts.append("--include-sampled-leaf-pool-ridge-baseline")
+            if bool(include_sampled_leaf_pool_rf_baseline):
+                parts.append("--include-sampled-leaf-pool-rf-baseline")
+            if sampled_leaf_pool_counts:
+                parts.append(
+                    "--sampled-leaf-pool-leaf-counts "
+                    + ",".join(str(int(x)) for x in sampled_leaf_pool_counts)
+                )
+                parts.append(
+                    f"--sampled-leaf-pool-seed-offset {int(sampled_leaf_pool_seed_offset)}"
+                )
             if gov_component:
                 parts.append(f"--guidance-override-mode {str(gov_mode)}")
             if not bool(rootq):
@@ -343,6 +429,7 @@ def _iter_runs(
             cfg = OPSCountConfig(
                 n_regimes=int(n_regimes),
                 vocab_size=int(vocab_size),
+                generator_profile=str(generator_profile_value),
                 min_tokens=int(min_tokens),
                 max_tokens=int(max_tokens),
                 min_segments=int(min_segments),
@@ -376,9 +463,28 @@ def _iter_runs(
                 eval_guidance_include_root=bool(eval_guidance_include_root),
                 guidance_override_mode=str(gov_mode),
                 include_rf_root_baseline=bool(include_rf_root_baseline),
+                include_doc_level_baseline=bool(include_doc_level_baseline),
+                include_doc_level_ridge_baseline=bool(include_doc_level_ridge_baseline),
+                include_leaf_ridge_tree_baseline=bool(include_leaf_ridge_tree_baseline),
+                include_leaf_endpoint_table_tree_baseline=bool(
+                    include_leaf_endpoint_table_tree_baseline
+                ),
+                include_leaf_dt_tree_baseline=bool(include_leaf_dt_tree_baseline),
+                include_leaf_knn_tree_baseline=bool(include_leaf_knn_tree_baseline),
+                include_leaf_rf_tree_baseline=bool(include_leaf_rf_tree_baseline),
                 rf_n_estimators=int(rf_n_estimators),
                 rf_max_depth=int(rf_max_depth),
                 rf_min_samples_leaf=int(rf_min_samples_leaf),
+                doc_level_ridge_alpha=float(doc_level_ridge_alpha),
+                leaf_knn_neighbors=int(leaf_knn_neighbors),
+                include_sampled_leaf_pool_ridge_baseline=bool(
+                    include_sampled_leaf_pool_ridge_baseline
+                ),
+                include_sampled_leaf_pool_rf_baseline=bool(
+                    include_sampled_leaf_pool_rf_baseline
+                ),
+                sampled_leaf_pool_leaf_counts=tuple(int(x) for x in sampled_leaf_pool_counts),
+                sampled_leaf_pool_seed_offset=int(sampled_leaf_pool_seed_offset),
                 violation_tau=float(violation_tau),
                 suite_role=str(suite_role),
                 artifact_dir=str(artifact_dir),
@@ -419,6 +525,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--n-regimes", type=int, default=4)
     p.add_argument("--vocab-size", type=int, default=96)
+    p.add_argument(
+        "--generator-profile",
+        choices=list(VALID_GENERATOR_PROFILES),
+        default="piecewise_markov",
+        help="Document generator family. Keeps the target fixed as changepoint count.",
+    )
     p.add_argument("--min-tokens", type=int, default=384)
     p.add_argument("--max-tokens", type=int, default=384)
     p.add_argument("--min-segments", type=int, default=12)
@@ -530,11 +642,69 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--include-rf-root-baseline", action=argparse.BooleanOptionalAction, default=False
     )
+    p.add_argument(
+        "--include-doc-level-baseline",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    p.add_argument(
+        "--include-doc-level-ridge-baseline",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    p.add_argument(
+        "--include-leaf-ridge-tree-baseline",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    p.add_argument(
+        "--include-leaf-endpoint-table-tree-baseline",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    p.add_argument(
+        "--include-leaf-dt-tree-baseline",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    p.add_argument(
+        "--include-leaf-knn-tree-baseline",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    p.add_argument(
+        "--include-leaf-rf-tree-baseline",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     p.add_argument("--rf-n-estimators", type=int, default=200)
     p.add_argument("--rf-max-depth", type=int, default=16)
     p.add_argument("--rf-min-samples-leaf", type=int, default=5)
+    p.add_argument("--doc-level-ridge-alpha", type=float, default=1.0)
+    p.add_argument("--leaf-knn-neighbors", type=int, default=32)
+    p.add_argument(
+        "--include-sampled-leaf-pool-ridge-baseline",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    p.add_argument(
+        "--include-sampled-leaf-pool-rf-baseline",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    p.add_argument(
+        "--sampled-leaf-pool-leaf-counts",
+        type=str,
+        default="",
+        help="Optional space/comma list of pooled sampled-leaf budgets per document.",
+    )
+    p.add_argument("--sampled-leaf-pool-seed-offset", type=int, default=200000)
 
-    p.add_argument("--feature-mode", choices=["full", "no_endpoints"], default="full")
+    p.add_argument(
+        "--feature-mode",
+        choices=["full", "no_endpoints", "token_full", "token_bow"],
+        default="full",
+    )
     p.add_argument(
         "--feature-modes",
         type=str,
@@ -606,6 +776,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         python_bin=str(args.python_bin),
         n_regimes=int(args.n_regimes),
         vocab_size=int(args.vocab_size),
+        generator_profile=str(args.generator_profile),
         min_tokens=int(args.min_tokens),
         max_tokens=int(args.max_tokens),
         min_segments=int(args.min_segments),
@@ -636,9 +807,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         eval_guidance_seed_offset=int(args.eval_guidance_seed_offset),
         eval_guidance_include_root=bool(args.eval_guidance_include_root),
         include_rf_root_baseline=bool(args.include_rf_root_baseline),
+        include_doc_level_baseline=bool(args.include_doc_level_baseline),
+        include_doc_level_ridge_baseline=bool(args.include_doc_level_ridge_baseline),
+        include_leaf_ridge_tree_baseline=bool(args.include_leaf_ridge_tree_baseline),
+        include_leaf_endpoint_table_tree_baseline=bool(
+            args.include_leaf_endpoint_table_tree_baseline
+        ),
+        include_leaf_dt_tree_baseline=bool(args.include_leaf_dt_tree_baseline),
+        include_leaf_knn_tree_baseline=bool(args.include_leaf_knn_tree_baseline),
+        include_leaf_rf_tree_baseline=bool(args.include_leaf_rf_tree_baseline),
         rf_n_estimators=int(args.rf_n_estimators),
         rf_max_depth=int(args.rf_max_depth),
         rf_min_samples_leaf=int(args.rf_min_samples_leaf),
+        doc_level_ridge_alpha=float(args.doc_level_ridge_alpha),
+        leaf_knn_neighbors=int(args.leaf_knn_neighbors),
+        include_sampled_leaf_pool_ridge_baseline=bool(
+            args.include_sampled_leaf_pool_ridge_baseline
+        ),
+        include_sampled_leaf_pool_rf_baseline=bool(args.include_sampled_leaf_pool_rf_baseline),
+        sampled_leaf_pool_leaf_counts=_parse_ints(args.sampled_leaf_pool_leaf_counts),
+        sampled_leaf_pool_seed_offset=int(args.sampled_leaf_pool_seed_offset),
         data_seeds=_parse_ints(args.data_seeds),
         seeds=_parse_ints(args.seeds),
         output_root=Path(args.output_root),

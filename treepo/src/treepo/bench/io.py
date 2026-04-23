@@ -232,3 +232,12 @@ def summary_to_csv_rows_hll_merge_learning(summary: Any) -> List[Dict[str, objec
     for row in rows:
         row["experiment"] = "hll_merge_learning"
     return rows
+
+
+def summary_to_csv_rows_classical_sketches(summary: Any) -> List[Dict[str, object]]:
+    from treepo.bench.classical_sketches import experiment_rows
+
+    rows = experiment_rows(summary)
+    for row in rows:
+        row["experiment"] = "classical_sketches"
+    return rows

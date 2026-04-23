@@ -46,7 +46,6 @@ from src.tree.auditor import (
 # Tree IPW utilities
 from src.tree.ipw import (
     NodeType,
-    TreePropensity,
     TreeSample,
     SampleSplit,
     KFoldSplit,
@@ -219,6 +218,27 @@ from src.tree.theorem_backing import (
     neural_codec_approximate_assumptions,
     global_preservation_exact_assumptions,
 )
+from src.tree.contract_runner import (
+    DEFAULT_TREEPO_CONTRACT_ADAPTERS,
+    RESOURCE_EMBEDDING,
+    RESOURCE_GENERATION,
+    RESOURCE_LABELED_TREE_ARTIFACT,
+    RESOURCE_LOCAL_LAW_ORACLE,
+    RESOURCE_SYMBOLIC_REFERENCE,
+    RESOURCE_TRAINER,
+    ResolvedTreePOContractRoute,
+    ResolvedTreePOResources,
+    TextGenerationDistillationAdapter,
+    TreePOContractAdapter,
+    TreePOContractFitContext,
+    TreePOContractFitResult,
+    TreePOResourceSpec,
+    fit_treepo_contract,
+    find_contract_setup_bypasses,
+    resolve_treepo_contract_adapter,
+    resolve_treepo_contract_route,
+    resolve_treepo_resources,
+)
 from src.tree.compositional_learning import (
     LabelAcquisitionMode,
     SupervisionChannelKind,
@@ -229,9 +249,33 @@ from src.tree.compositional_learning import (
     SupervisionChannelSpec,
     CompositionalLearningProblemSpec,
     full_document_supervision_channel,
+    shared_full_document_supervision_channel,
+    shared_logged_document_observation,
+    shared_logged_substructure_observation,
+    shared_protocol_problem_notes,
+    shared_sampled_substructure_query_policy,
+    shared_sampled_substructure_supervision_channel,
+    shared_supervision_context,
     sampled_substructure_supervision_channel,
 )
 from src.core.ops_checks import OracleMeasurementEnvelope
+from src.tree.core_model import (
+    EmbeddingProjectorBackend,
+    PhiProjector,
+    ScoreFiberConfig,
+    TreeNeuralCore,
+    TreeNeuralCoreConfig,
+    TreeStateCore,
+    TreeStateCoreConfig,
+    TokenSequenceEncoderBackend,
+)
+from src.tree.tree_model_v2 import (
+    TREE_MODEL_VERSION_LEGACY,
+    TREE_MODEL_VERSION_V2,
+    TreeModelV2,
+    TreeModelV2View,
+    normalize_tree_model_version,
+)
 from src.tree.neural_operator import (
     CTreePOOperatorAdapter,
     FunctionalSketchLawOperator,
@@ -245,6 +289,50 @@ from src.tree.labeled import (
     LabeledNode,
     LabeledTree,
     LabeledDataset,
+)
+
+# Stateful tree runner + async operator adapters (unified execution)
+from src.tree.async_operator import (
+    AsyncCompositionalOperator,
+    AsyncFromDiffusionBackend,
+    AsyncFromInferenceEngine,
+    AsyncFromSummarizationStrategy,
+    AsyncFromSyncOperator,
+    MarkovToyOperator,
+)
+from src.tree.state_tree import (
+    StateNode,
+    StateTree,
+    state_tree_to_text_tree,
+)
+from src.tree.state_tree_runner import (
+    FixedBinaryStateTreeRunResult,
+    StateTreeOperationTrace,
+    arun_fixed_binary_state_tree,
+    run_fixed_binary_state_tree,
+)
+from src.tree.state_tree_verifiers import (
+    LawVerifier,
+    MarkovExactVerifier,
+    TextAuditorAdapterVerifier,
+)
+from src.tree.treepo_stack import (
+    OracleLaneSpec,
+    SupervisionSourceSpec,
+    TreePOContractSpec,
+    TreePOLocalLawConfig,
+    TreePOModelSpec,
+    TreePOStack,
+    build_treepo_stack,
+)
+from src.tree.treepo_supervision import (
+    TreePOSupervisionSpec,
+    TreePOLabelingPolicySpec,
+    build_supervision_dataset_from_state_tree,
+    label_supervision_dataset,
+    label_supervision_dataset_with_policy,
+    persist_supervision_dataset,
+    should_collect_supervision,
 )
 
 __all__ = [
@@ -279,7 +367,6 @@ __all__ = [
     "get_ipw_statistics",
     # IPW
     "NodeType",
-    "TreePropensity",
     "TreeSample",
     "SampleSplit",
     "KFoldSplit",
@@ -436,6 +523,13 @@ __all__ = [
     "SupervisionChannelSpec",
     "CompositionalLearningProblemSpec",
     "full_document_supervision_channel",
+    "shared_full_document_supervision_channel",
+    "shared_logged_document_observation",
+    "shared_logged_substructure_observation",
+    "shared_protocol_problem_notes",
+    "shared_sampled_substructure_query_policy",
+    "shared_sampled_substructure_supervision_channel",
+    "shared_supervision_context",
     "sampled_substructure_supervision_channel",
     "exact_oracle_measurement_assumption",
     "uniform_oracle_measurement_assumption",
@@ -457,4 +551,55 @@ __all__ = [
     "LabeledNode",
     "LabeledTree",
     "LabeledDataset",
+    # Stateful trees
+    "AsyncCompositionalOperator",
+    "AsyncFromDiffusionBackend",
+    "AsyncFromInferenceEngine",
+    "AsyncFromSummarizationStrategy",
+    "AsyncFromSyncOperator",
+    "MarkovToyOperator",
+    "StateNode",
+    "StateTree",
+    "state_tree_to_text_tree",
+    "StateTreeOperationTrace",
+    "FixedBinaryStateTreeRunResult",
+    "arun_fixed_binary_state_tree",
+    "run_fixed_binary_state_tree",
+    "LawVerifier",
+    "MarkovExactVerifier",
+    "TextAuditorAdapterVerifier",
+    # Generate-first TreePO stack builder
+    "TreePOModelSpec",
+    "TreePOContractSpec",
+    "TreePOLocalLawConfig",
+    "SupervisionSourceSpec",
+    "OracleLaneSpec",
+    "TreePOStack",
+    "build_treepo_stack",
+    "DEFAULT_TREEPO_CONTRACT_ADAPTERS",
+    "RESOURCE_EMBEDDING",
+    "RESOURCE_GENERATION",
+    "RESOURCE_LABELED_TREE_ARTIFACT",
+    "RESOURCE_LOCAL_LAW_ORACLE",
+    "RESOURCE_SYMBOLIC_REFERENCE",
+    "RESOURCE_TRAINER",
+    "ResolvedTreePOContractRoute",
+    "ResolvedTreePOResources",
+    "TextGenerationDistillationAdapter",
+    "TreePOContractAdapter",
+    "TreePOContractFitContext",
+    "TreePOContractFitResult",
+    "TreePOResourceSpec",
+    "fit_treepo_contract",
+    "find_contract_setup_bypasses",
+    "resolve_treepo_contract_adapter",
+    "resolve_treepo_contract_route",
+    "resolve_treepo_resources",
+    "TreePOSupervisionSpec",
+    "TreePOLabelingPolicySpec",
+    "build_supervision_dataset_from_state_tree",
+    "label_supervision_dataset",
+    "label_supervision_dataset_with_policy",
+    "persist_supervision_dataset",
+    "should_collect_supervision",
 ]

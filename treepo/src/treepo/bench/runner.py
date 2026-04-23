@@ -1,35 +1,41 @@
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
 import hashlib
 import json
-from pathlib import Path
 import shlex
+import sys
 import traceback
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
+from treepo.bench.cardinality_recovery import (
+    CardinalityRecoveryConfig,
+    run_cardinality_recovery_experiment,
+)
+from treepo.bench.classical_sketches import (
+    ClassicalSketchComparisonConfig,
+    run_classical_sketch_comparison,
+)
 from treepo.bench.env import apply_cpu_thread_limits
+from treepo.bench.hll_merge_learning import (
+    HLLMergeLearningConfig,
+    HLLMergeLearningSummary,
+    run_hll_merge_learning_experiment,
+)
 from treepo.bench.io import (
     add_runtime_meta,
     atomic_write_text,
     dump_json,
-    summary_to_csv_rows_cardinality_recovery,
-    summary_to_csv_rows_hll_merge_learning,
     summary_to_csv_row_learned_ops_g,
     summary_to_csv_row_learned_segmented_theta_g,
     summary_to_csv_row_segmented,
+    summary_to_csv_rows_cardinality_recovery,
+    summary_to_csv_rows_classical_sketches,
+    summary_to_csv_rows_hll_merge_learning,
     summary_to_csv_rows_ops,
     write_csv_rows,
-)
-from treepo.bench.sweep_spec import SweepSpec, load_sweep_spec
-from treepo.bench.lda.segment_lda_ops_weight_recovery import (
-    SegmentLDAOpsWeightRecoveryConfig,
-    run_segment_lda_ops_weight_recovery_experiment,
-)
-from treepo.bench.lda.segmented_lda_ctreepo import (
-    SegmentedLDACtreePOConfig,
-    run_segmented_lda_ctreepo_simulation,
 )
 from treepo.bench.lda.learned_segment_lda_ops_g import (
     LearnedSegmentLDAOpsGConfig,
@@ -39,16 +45,15 @@ from treepo.bench.lda.learned_segmented_lda_theta_g import (
     LearnedSegmentedLDATopicThetaGConfig,
     run_learned_segmented_lda_theta_g_experiment,
 )
-from treepo.bench.cardinality_recovery import (
-    CardinalityRecoveryConfig,
-    run_cardinality_recovery_experiment,
+from treepo.bench.lda.segment_lda_ops_weight_recovery import (
+    SegmentLDAOpsWeightRecoveryConfig,
+    run_segment_lda_ops_weight_recovery_experiment,
 )
-from treepo.bench.hll_merge_learning import (
-    HLLMergeLearningConfig,
-    HLLMergeLearningSummary,
-    run_hll_merge_learning_experiment,
+from treepo.bench.lda.segmented_lda_ctreepo import (
+    SegmentedLDACtreePOConfig,
+    run_segmented_lda_ctreepo_simulation,
 )
-
+from treepo.bench.sweep_spec import SweepSpec, load_sweep_spec
 
 ExperimentName = str
 EXPERIMENT_SEGMENTED = "segmented-lda-ctreepo"
@@ -57,6 +62,7 @@ EXPERIMENT_LEARNED_OPS_G = "learned-segment-lda-ops-g"
 EXPERIMENT_LEARNED_SEGMENTED_THETA_G = "learned-segmented-lda-theta-g"
 EXPERIMENT_CARDINALITY_RECOVERY = "cardinality-recovery"
 EXPERIMENT_HLL_MERGE_LEARNING = "hll-merge-learning"
+EXPERIMENT_CLASSICAL_SKETCHES = "classical-sketches"
 VALID_EXPERIMENTS: Tuple[ExperimentName, ...] = (
     EXPERIMENT_SEGMENTED,
     EXPERIMENT_OPS,
@@ -64,6 +70,7 @@ VALID_EXPERIMENTS: Tuple[ExperimentName, ...] = (
     EXPERIMENT_LEARNED_SEGMENTED_THETA_G,
     EXPERIMENT_CARDINALITY_RECOVERY,
     EXPERIMENT_HLL_MERGE_LEARNING,
+    EXPERIMENT_CLASSICAL_SKETCHES,
 )
 
 
@@ -82,6 +89,8 @@ def allowed_config_keys(experiment: ExperimentName) -> set[str]:
         return {f.name for f in fields(CardinalityRecoveryConfig)}
     if experiment == EXPERIMENT_HLL_MERGE_LEARNING:
         return {f.name for f in fields(HLLMergeLearningConfig)}
+    if experiment == EXPERIMENT_CLASSICAL_SKETCHES:
+        return {f.name for f in fields(ClassicalSketchComparisonConfig)}
     raise ValueError(f"unknown experiment: {experiment!r}")
 
 
@@ -104,6 +113,30 @@ def _run_id(config: Mapping[str, object]) -> str:
 def _fmt_float(x: float) -> str:
     s = f"{float(x):.6g}"
     return s.replace("-", "m").replace(".", "p")
+
+
+def _ensure_unified_g_src_on_path() -> None:
+    """Prefer the local unified_g lane when running from the monorepo."""
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "parallel" / "unified_g_v1" / "src"
+        if candidate.exists():
+            for path in (str(parent), str(candidate)):
+                if path not in sys.path:
+                    sys.path.insert(0, path)
+            return
+
+
+def _run_classical_sketches_via_unified_g(
+    cfg: ClassicalSketchComparisonConfig,
+    *,
+    output_dir: Path,
+):
+    _ensure_unified_g_src_on_path()
+    from unified_g_v1.sketch.classical_sketch_grid import classical_sketch_grid_task
+    from unified_g_v1.training.fit import fit
+
+    trainer_cfg = classical_sketch_grid_task(config=cfg)
+    return fit(trainer_config=trainer_cfg, output_dir=output_dir)
 
 
 @dataclass(frozen=True)
@@ -312,6 +345,36 @@ def _run_one(spec: RunSpec, *, skip_existing: bool) -> Dict[str, object]:
             payload = add_runtime_meta(json.loads(summary.to_json()))
             atomic_write_text(json_out, dump_json(payload))
             rows = summary_to_csv_rows_hll_merge_learning(summary)
+            write_csv_rows(csv_out, rows)
+        elif spec.experiment == EXPERIMENT_CLASSICAL_SKETCHES:
+            cfg = ClassicalSketchComparisonConfig(**dict(spec.config))
+            execution_backend = str(cfg.execution_backend).strip().lower()
+            if execution_backend == "unified_g":
+                fit_result = _run_classical_sketches_via_unified_g(
+                    cfg,
+                    output_dir=json_out.parent / "unified_g_fit",
+                )
+                summary_payload = dict(fit_result.summary["summary"])
+                summary_payload["unified_g"] = {
+                    "backend": str(fit_result.backend),
+                    "status": str(fit_result.status),
+                    "metrics": dict(fit_result.metrics),
+                    "artifacts": dict(fit_result.artifacts),
+                }
+                payload = add_runtime_meta(summary_payload)
+                atomic_write_text(json_out, dump_json(payload))
+                rows = summary_to_csv_rows_classical_sketches(summary_payload["rows"])
+                write_csv_rows(csv_out, rows)
+                return {"status": "ok", "json_out": str(json_out), "csv_out": str(csv_out)}
+            if execution_backend != "treepo":
+                raise ValueError(
+                    "ClassicalSketchComparisonConfig.execution_backend must be "
+                    f"'unified_g' or 'treepo', got {cfg.execution_backend!r}"
+                )
+            summary = run_classical_sketch_comparison(cfg)
+            payload = add_runtime_meta(json.loads(summary.to_json()))
+            atomic_write_text(json_out, dump_json(payload))
+            rows = summary_to_csv_rows_classical_sketches(summary)
             write_csv_rows(csv_out, rows)
         else:
             raise ValueError(f"unknown experiment: {spec.experiment}")

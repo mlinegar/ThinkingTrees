@@ -4,6 +4,7 @@ from dataclasses import replace
 import math
 from typing import Any, Dict, Mapping, Optional, Sequence
 
+from src.ctreepo.sim.util import safe_float
 from src.core.ops_checks import (
     EvidenceStatus,
     LawCapabilityReport,
@@ -11,6 +12,11 @@ from src.core.ops_checks import (
     OperatorCapabilityReport,
 )
 from src.core.provenance import ORACLE_SOURCE
+from src.core.runtime_capabilities import (
+    FamilyRuntimeCapability,
+    default_family_runtime_capability,
+    markov_family_runtime_capability,
+)
 from src.ctreepo.sim.local_law_learnability import (
     LocalLawPolicyEvaluation,
     LocalLawRunSummary,
@@ -20,10 +26,12 @@ from src.ctreepo.sim.local_law_learnability import (
 from src.tree.compositional_learning import (
     CompositionalLearningProblemSpec,
     OracleQueryPolicySpec,
+    SHARED_SAMPLED_SUBSTRUCTURE_CHANNEL_NAME,
     SupervisionDeliveryMode,
-    full_document_supervision_channel,
-    oracle_query_policy,
-    sampled_substructure_supervision_channel,
+    shared_full_document_supervision_channel,
+    shared_protocol_problem_notes,
+    shared_sampled_substructure_query_policy,
+    shared_sampled_substructure_supervision_channel,
 )
 
 
@@ -51,12 +59,7 @@ _MARKOV_EXACT_LAW_AVAILABILITY: Dict[str, Dict[LawKind, bool]] = {
 }
 
 
-def _safe_float(value: object, default: float = 0.0) -> float:
-    try:
-        out = float(value)  # type: ignore[arg-type]
-    except Exception:
-        return float(default)
-    return out if math.isfinite(out) else float(default)
+_safe_float = lambda v, default=0.0: safe_float(v, default=default)
 
 
 def _family_problem_metadata(summary: LocalLawRunSummary) -> Dict[str, str]:
@@ -179,7 +182,24 @@ def _summary_objective_payload(
     return {}
 
 
-def _has_estimator_payload(
+def _has_ipw_logged_observation_artifact(
+    summary: LocalLawRunSummary,
+    *,
+    raw_payload: Optional[Mapping[str, Any]] = None,
+) -> bool:
+    artifacts = dict(summary.logged_observation_artifacts or {})
+    if not artifacts and raw_payload is not None:
+        direct = dict(raw_payload.get("logged_observation_artifacts", {}) or {})
+        if direct:
+            artifacts = direct
+    return any(
+        bool(dict(payload or {}).get("supports_ipw_estimation", False))
+        for payload in artifacts.values()
+        if isinstance(payload, Mapping)
+    )
+
+
+def _has_legacy_estimator_payload(
     summary: LocalLawRunSummary,
     *,
     raw_payload: Optional[Mapping[str, Any]] = None,
@@ -208,6 +228,29 @@ def _has_estimator_payload(
     if dict(stage3.get("ipw_evaluation", {}) or {}):
         return True
     return False
+
+
+def _backfilled_logged_observation_artifacts(
+    summary: LocalLawRunSummary,
+    *,
+    raw_payload: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    artifacts = dict(summary.logged_observation_artifacts or {})
+    if artifacts or not _has_legacy_estimator_payload(summary, raw_payload=raw_payload):
+        return artifacts
+    return {
+        "legacy_ipw_summary": {
+            "artifact_id": "legacy_ipw_summary",
+            "channel_name": SHARED_SAMPLED_SUBSTRUCTURE_CHANNEL_NAME,
+            "format": "legacy_summary",
+            "path": "",
+            "count": 0,
+            "unit_kinds": [],
+            "propensity_fields_logged": ["joint_propensity"],
+            "supports_ipw_estimation": True,
+            "metadata": {"backfilled_from_legacy_ipw_payload": True},
+        }
+    }
 
 
 def _sampled_supervision_active(summary: LocalLawRunSummary) -> bool:
@@ -312,9 +355,7 @@ def _sampled_query_policy(
         notes.append(
             "The run summary does not retain enough realized propensity information to reconstruct IPW risk estimates end-to-end."
         )
-    return oracle_query_policy(
-        name="sampled_local_law_query_policy",
-        query_unit_name="substructure_units",
+    return shared_sampled_substructure_query_policy(
         selection_strategy=_query_strategy(summary, raw_payload=raw_payload),
         adaptive=bool(
             any(
@@ -540,6 +581,50 @@ def _operator_capabilities(
     return None
 
 
+def _runtime_capabilities(
+    summary: LocalLawRunSummary,
+    *,
+    raw_payload: Optional[Mapping[str, Any]] = None,
+) -> FamilyRuntimeCapability:
+    family = str(summary.family)
+    if family == "markov_ops_count":
+        exact_family = _markov_exact_family_name(summary, raw_payload=raw_payload) or None
+        return markov_family_runtime_capability(
+            family_name=family,
+            exact_family=exact_family,
+            notes=(
+                f"study_role={summary.study_role}",
+                "Chat-engine lanes remain empirical even when an exact symbolic Markov family is available.",
+            ),
+        )
+
+    capabilities = _operator_capabilities(summary, raw_payload=raw_payload)
+    theorem_backed_symbolic = bool(
+        capabilities is not None
+        and capabilities.theorem_domain_decode_available
+        and capabilities.theorem_domain_reencode_available
+        and capabilities.exact_reduction_supported
+        and capabilities.evidence_status == EvidenceStatus.THEOREM_BACKED
+    )
+    return default_family_runtime_capability(
+        family_name=family,
+        theorem_backed_symbolic=theorem_backed_symbolic,
+        notes=(
+            f"study_role={summary.study_role}",
+            "Runtime capability metadata is declarative only and does not auto-select a backend in v1.",
+        ),
+    )
+
+
+def build_local_law_runtime_capability(
+    summary: LocalLawRunSummary,
+    *,
+    raw_payload: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build declarative runtime capability metadata for reporting surfaces."""
+    return _runtime_capabilities(summary, raw_payload=raw_payload).to_dict()
+
+
 def build_local_law_learning_problem(
     summary: LocalLawRunSummary,
     *,
@@ -553,7 +638,7 @@ def build_local_law_learning_problem(
         raw_payload=raw_payload,
     )
     supports_unbiased_risk = bool(
-        sampled_active and _has_estimator_payload(summary, raw_payload=raw_payload)
+        sampled_active and _has_ipw_logged_observation_artifact(summary, raw_payload=raw_payload)
     )
     sampled_notes = [
         "Leaf and internal supervision is recorded as a sampled substructure channel so Markov, LDA, and LLM artifacts share one API.",
@@ -576,18 +661,14 @@ def build_local_law_learning_problem(
             raw_payload=raw_payload,
         ),
         supervision_channels=(
-            full_document_supervision_channel(
-                name="full_document_oracle_labels",
-                target_name="document_target",
+            shared_full_document_supervision_channel(
                 active=bool(full_document_active),
                 label_source=ORACLE_SOURCE,
                 notes=(
-                    "Whole-document oracle targets are tracked separately from sampled local-law labels.",
+                    "Whole-document oracle targets instantiate the document-level lane when this application exposes them.",
                 ),
             ),
-            sampled_substructure_supervision_channel(
-                name="sampled_local_law_labels",
-                target_name="sampled_substructure_target",
+            shared_sampled_substructure_supervision_channel(
                 active=bool(sampled_active),
                 label_source=ORACLE_SOURCE,
                 delivery_mode=SupervisionDeliveryMode.ONLINE_ORACLE_QUERY,
@@ -602,10 +683,13 @@ def build_local_law_learning_problem(
                 notes=tuple(sampled_notes),
             ),
         ),
-        notes=(
+        notes=shared_protocol_problem_notes(
+            application_name=str(family_meta["name"]),
+            notes=(
             f"study_role={summary.study_role}",
             f"suite_role={summary.suite_role}",
             "This payload is inferred from LocalLawRunSummary so theorem assumptions stay empty unless another artifact supplied them explicitly.",
+            ),
         ),
     )
     return problem.to_dict()
@@ -617,6 +701,13 @@ def attach_local_law_learning_problem(
     raw_payload: Optional[Mapping[str, Any]] = None,
     overwrite: bool = False,
 ) -> LocalLawRunSummary:
+    summary = replace(
+        summary,
+        logged_observation_artifacts=_backfilled_logged_observation_artifacts(
+            summary,
+            raw_payload=raw_payload,
+        ),
+    )
     if summary.compositional_learning_problem and not overwrite:
         return summary
     return replace(
@@ -631,4 +722,5 @@ def attach_local_law_learning_problem(
 __all__ = [
     "attach_local_law_learning_problem",
     "build_local_law_learning_problem",
+    "build_local_law_runtime_capability",
 ]

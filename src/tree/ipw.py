@@ -19,6 +19,11 @@ import math
 import random
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from src.core.logged_supervision import (
+    LoggedLabelObservation,
+    ObservationUnitKind,
+    SamplingMetadata,
+)
 
 MIN_PROPENSITY = 1e-12
 MAX_PROPENSITY = 1.0
@@ -33,34 +38,28 @@ class NodeType(Enum):
     SUBSTITUTION = "substitution"
 
 
-@dataclass
-class TreePropensity:
-    """
-    Factored sampling propensity.
-
-    The product `doc * node * label` is used as the joint inclusion
-    probability for IPW/Hajek-style estimation.
-    """
-
-    doc: float = 1.0
-    node: float = 1.0
-    label: float = 1.0
-
-    def __post_init__(self) -> None:
-        for name, value in (("doc", self.doc), ("node", self.node), ("label", self.label)):
-            if not math.isfinite(value) or value <= 0 or value > MAX_PROPENSITY:
-                raise ValueError(
-                    f"{name} propensity must be finite and in (0, {MAX_PROPENSITY}] "
-                    f"(got {value!r})"
-                )
-
-    @property
-    def joint(self) -> float:
-        """Joint inclusion probability."""
-        return self.doc * self.node * self.label
+def node_type_to_observation_unit_kind(node_type: NodeType) -> ObservationUnitKind:
+    mapping = {
+        NodeType.LEAF: ObservationUnitKind.LEAF,
+        NodeType.MERGE: ObservationUnitKind.MERGE,
+        NodeType.RESUMMARY: ObservationUnitKind.RESUMMARY,
+        NodeType.SUBSTITUTION: ObservationUnitKind.SUBSTITUTION,
+    }
+    return mapping[node_type]
 
 
-@dataclass
+def observation_unit_kind_to_node_type(unit_kind: ObservationUnitKind) -> NodeType:
+    mapping = {
+        ObservationUnitKind.LEAF: NodeType.LEAF,
+        ObservationUnitKind.INTERNAL: NodeType.MERGE,
+        ObservationUnitKind.MERGE: NodeType.MERGE,
+        ObservationUnitKind.RESUMMARY: NodeType.RESUMMARY,
+        ObservationUnitKind.SUBSTITUTION: NodeType.SUBSTITUTION,
+    }
+    return mapping[unit_kind]
+
+
+@dataclass(init=False)
 class TreeSample:
     """
     Logged tree-level sample for IPW estimation.
@@ -74,8 +73,27 @@ class TreeSample:
     node_type: NodeType
     violation: int
     preference_loss: float = 0.0
-    propensity: TreePropensity = field(default_factory=TreePropensity)
+    sampling: SamplingMetadata = field(default_factory=SamplingMetadata)
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __init__(
+        self,
+        doc_id: str,
+        node_id: str,
+        node_type: NodeType,
+        violation: int,
+        preference_loss: float = 0.0,
+        sampling: Optional[SamplingMetadata] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.doc_id = doc_id
+        self.node_id = node_id
+        self.node_type = node_type
+        self.violation = violation
+        self.preference_loss = preference_loss
+        self.sampling = sampling if sampling is not None else SamplingMetadata()
+        self.metadata = dict(metadata or {})
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         if isinstance(self.violation, bool):
@@ -84,16 +102,45 @@ class TreeSample:
             raise ValueError(f"violation must be 0/1 (got {self.violation!r})")
         if not math.isfinite(self.preference_loss):
             raise ValueError(f"preference_loss must be finite (got {self.preference_loss!r})")
+        if not isinstance(self.node_type, NodeType):
+            self.node_type = NodeType(str(self.node_type))
+        if not isinstance(self.sampling, SamplingMetadata):
+            self.sampling = SamplingMetadata.from_dict(self.sampling)
+        if self.sampling.unit_kind is None:
+            self.sampling = self.sampling.with_updates(
+                unit_kind=node_type_to_observation_unit_kind(self.node_type)
+            )
+        if not isinstance(self.metadata, dict):
+            self.metadata = dict(self.metadata)
 
     @property
     def joint_propensity(self) -> float:
         """Joint inclusion probability."""
-        return self.propensity.joint
+        return self.sampling.effective_joint_propensity(min_propensity=0.0)
 
     @property
     def weight(self) -> float:
         """Inverse-probability weight with floor for numerical stability."""
-        return 1.0 / max(self.joint_propensity, MIN_PROPENSITY)
+        return self.sampling.ipw_weight(min_propensity=MIN_PROPENSITY)
+
+    @classmethod
+    def from_logged_observation(
+        cls,
+        observation: LoggedLabelObservation[Any],
+        *,
+        violation: int,
+        preference_loss: float = 0.0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> "TreeSample":
+        return cls(
+            doc_id=str(observation.document_id),
+            node_id=str(observation.unit_id),
+            node_type=observation_unit_kind_to_node_type(observation.unit_kind),
+            violation=int(violation),
+            preference_loss=float(preference_loss),
+            sampling=observation.sampling,
+            metadata=dict(metadata or observation.context or {}),
+        )
 
 
 @dataclass(frozen=True)
@@ -801,9 +848,104 @@ def analyze_tree_samples(
     )
 
 
+# ---------------------------------------------------------------------------
+# Certificate envelope: three-component gap bound (Lean: treepo_gap_with_
+# calibration_estimation_clipping in DSL/TreeIPW.lean).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CertificateEnvelope:
+    """Three-envelope certificate mirroring Lean's DSLBound structure.
+
+    |G*| <= |gap_clip| + b_cal + b_est + b_clip
+
+    where:
+      b_cal  = judge-vs-oracle calibration mismatch
+      b_est  = sampling uncertainty (empirical-Bernstein radius)
+      b_clip = clipping-induced bias bound
+    """
+
+    gap_clip: float
+    b_cal: float
+    b_est: float
+    b_clip: float
+    lean_theorem: str = "treepo_gap_with_calibration_estimation_clipping"
+
+    @property
+    def total_margin(self) -> float:
+        return abs(self.gap_clip) + self.b_cal + self.b_est + self.b_clip
+
+
+def compute_certificate(
+    samples: Sequence[TreeSample],
+    value_fn: Callable[[TreeSample], float],
+    *,
+    delta: float = 0.05,
+    w_max: float = 20.0,
+    b_cal: float = 0.0,
+    value_min: float = 0.0,
+    value_max: float = 1.0,
+    min_propensity: float = MIN_PROPENSITY,
+) -> CertificateEnvelope:
+    """Assemble a three-envelope certificate from existing IPW primitives.
+
+    Args:
+        samples: Logged tree-level audit samples.
+        value_fn: Extracts the distortion value Y_i from a sample.
+        delta: Confidence level for the EB radius (estimation envelope).
+        w_max: Clipping threshold for inverse-propensity weights.
+        b_cal: Calibration bound (user-supplied; 0 when using exact oracle).
+        value_min / value_max: Bounds on the distortion values |Y_i|.
+        min_propensity: Floor on logged propensities.
+
+    Returns:
+        CertificateEnvelope with all three envelopes and total margin.
+    """
+    filtered = list(samples)
+
+    # G^C: clipped Hajek point estimate of distortion.
+    gap_clip = clipped_hajek_estimate(
+        filtered, value_fn, w_max, min_propensity=min_propensity,
+    )
+
+    # B_est: empirical-Bernstein radius for sampling uncertainty.
+    b_est = empirical_bernstein_radius(
+        filtered, value_fn, delta,
+        value_min=value_min, value_max=value_max,
+    )
+
+    # B_clip: deterministic clipping bias bound.
+    value_bound = max(abs(float(value_min)), abs(float(value_max)))
+    b_clip = clipped_hajek_abs_diff_bound(
+        filtered, w_max, value_bound=value_bound,
+        min_propensity=min_propensity,
+    )
+
+    return CertificateEnvelope(
+        gap_clip=gap_clip,
+        b_cal=float(b_cal),
+        b_est=b_est,
+        b_clip=b_clip,
+    )
+
+
+def compute_calibration_bound(
+    gold_judge_pairs: Sequence[Tuple[float, float]],
+) -> float:
+    """Compute B_cal from held-out gold-vs-judge distortion pairs.
+
+    Returns the mean absolute difference |gold_i - judge_i| as an estimate
+    of the calibration mismatch.  For an exact oracle, this is 0.
+    """
+    if not gold_judge_pairs:
+        return 0.0
+    total = sum(abs(g - j) for g, j in gold_judge_pairs)
+    return total / len(gold_judge_pairs)
+
+
 __all__ = [
     "NodeType",
-    "TreePropensity",
     "TreeSample",
     "SampleSplit",
     "KFoldSplit",
@@ -845,4 +987,7 @@ __all__ = [
     "kfold_ipw_preference_empirical_bernstein_ci",
     "ipw_union_bound",
     "analyze_tree_samples",
+    "CertificateEnvelope",
+    "compute_certificate",
+    "compute_calibration_bound",
 ]

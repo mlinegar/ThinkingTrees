@@ -6,8 +6,8 @@ from .records import PairwisePreference
 
 
 def to_training_preference_dataset(records: Iterable[PairwisePreference]) -> Any:
-    """Convert opt-layer records into the repo's PreferenceDataset (lazy import)."""
-    from src.training.preference.types import PreferenceDataset
+    """Convert opt-layer records into the repo's binary projection dataset."""
+    from src.training.supervision import BinaryProjectionDataset
 
     pairs = [record.to_training_preference_pair() for record in records]
-    return PreferenceDataset(pairs)
+    return BinaryProjectionDataset(comparisons=pairs)

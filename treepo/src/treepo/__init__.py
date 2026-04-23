@@ -24,7 +24,7 @@ from treepo.hll import (
 
 try:
     __version__ = version("treepo")
-except PackageNotFoundError:  # pragma: no cover
+except (PackageNotFoundError, TypeError, KeyError):  # pragma: no cover
     __version__ = "0.1.0"
 
 

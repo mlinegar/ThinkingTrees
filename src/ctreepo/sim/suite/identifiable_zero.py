@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shlex
@@ -10,25 +9,20 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from src.ctreepo.sim.manifest import RunSpec, read_manifest_jsonl, write_manifest_jsonl
 from src.ctreepo.sim.runner import read_cmds_file
-
-
-def _utc_run_id(default: str | None = None) -> str:
-    if default and str(default).strip():
-        return str(default).strip()
-    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-
-
-def _seed_str(n: int) -> str:
-    return " ".join(str(i) for i in range(max(0, int(n))))
+from src.ctreepo.sim.suite.common import (
+    build_suite_meta,
+    read_suite_meta,
+    run_manifest_queue_suite,
+    utc_run_id,
+    write_suite_meta,
+    write_text,
+)
+from src.ctreepo.sim.suite.identifiable_zero_policy import resolve_identifiable_zero_policy
+from src.ctreepo.sim.suite.policy_common import join_items
 
 
 def _q(x: object) -> str:
     return shlex.quote(str(x))
-
-
-def _write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
 
 
 @dataclass(frozen=True)
@@ -64,75 +58,6 @@ def _resolve_paths(*, output_root: Path, figures_root: Path) -> SuitePaths:
     )
 
 
-def _build_grid(profile: str) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str]:
-    """
-    Return:
-      seg_train, seg_audit, seg_lam, seg_seeds,
-      ctree_train, ctree_cal, ctree_leaf, ctree_int, ctree_seeds,
-      markov_train, markov_audit, markov_seeds
-    """
-
-    if profile == "smoke":
-        seg_train = "200 500"
-        seg_audit = "0.1 0.2 0.5 1.0"
-        seg_lam = "0 1.0"
-        seg_seeds = _seed_str(2)
-
-        ctree_train = "128 256"
-        ctree_cal = "0 0.1 1.0"
-        ctree_leaf = "0 1.0"
-        ctree_int = "0 0.5 1.0"
-        ctree_seeds = _seed_str(2)
-
-        markov_train = "200 500"
-        markov_audit = "0.1 0.2 0.5 1.0"
-        markov_seeds = _seed_str(2)
-    elif profile == "paper":
-        seg_train = "100 200 500 1000 2000"
-        seg_audit = "0.02 0.05 0.1 0.2 0.5 1.0"
-        seg_lam = "0 0.25 1.0"
-        seg_seeds = _seed_str(8)
-
-        ctree_train = "64 128 256 512 1024"
-        ctree_cal = "0 0.02 0.05 0.1 0.25 0.5 1.0"
-        ctree_leaf = "0 0.5 1.0"
-        ctree_int = "0 0.05 0.1 0.25 0.5 1.0"
-        ctree_seeds = _seed_str(8)
-
-        markov_train = "100 200 500 1000 2000"
-        markov_audit = "0.02 0.05 0.1 0.2 0.5 1.0"
-        markov_seeds = _seed_str(8)
-    else:  # walk_long
-        seg_train = "100 200 500 1000 2000 4000"
-        seg_audit = "0.01 0.02 0.05 0.1 0.2 0.5 1.0"
-        seg_lam = "0 0.25 1.0"
-        seg_seeds = _seed_str(16)
-
-        ctree_train = "64 128 256 512 1024"
-        ctree_cal = "0 0.02 0.05 0.1 0.25 0.5 1.0"
-        ctree_leaf = "0 0.25 0.5 1.0"
-        ctree_int = "0 0.05 0.1 0.25 0.5 1.0"
-        ctree_seeds = _seed_str(16)
-
-        markov_train = "100 200 500 1000 2000 4000"
-        markov_audit = "0.01 0.02 0.05 0.1 0.2 0.5 1.0"
-        markov_seeds = _seed_str(16)
-    return (
-        seg_train,
-        seg_audit,
-        seg_lam,
-        seg_seeds,
-        ctree_train,
-        ctree_cal,
-        ctree_leaf,
-        ctree_int,
-        ctree_seeds,
-        markov_train,
-        markov_audit,
-        markov_seeds,
-    )
-
-
 def build_suite(
     *,
     run_id: str,
@@ -162,21 +87,20 @@ def build_suite(
     output_root.mkdir(parents=True, exist_ok=True)
     figures_root.mkdir(parents=True, exist_ok=True)
 
-    (
-        seg_train,
-        seg_audit,
-        seg_lam,
-        seg_seeds,
-        ctree_train,
-        ctree_cal,
-        ctree_leaf,
-        ctree_int,
-        ctree_seeds,
-        markov_train,
-        markov_audit,
-        markov_seeds,
-    ) = _build_grid(str(profile))
-    ctree_focus_train = max(int(x) for x in str(ctree_train).split())
+    policy = resolve_identifiable_zero_policy(str(profile))
+    seg_train = join_items(policy.segment_train_docs)
+    seg_audit = join_items(policy.segment_audit_fractions)
+    seg_lam = join_items(policy.segment_lambda_multipliers)
+    seg_seeds = join_items(policy.segment_seeds)
+    ctree_train = join_items(policy.ctree_train_docs)
+    ctree_cal = join_items(policy.ctree_calibration_rates)
+    ctree_leaf = join_items(policy.ctree_eval_leaf_rates)
+    ctree_int = join_items(policy.ctree_eval_internal_rates)
+    ctree_seeds = join_items(policy.ctree_seeds)
+    markov_train = join_items(policy.markov_train_docs)
+    markov_audit = join_items(policy.markov_audit_fractions)
+    markov_seeds = join_items(policy.markov_seeds)
+    ctree_focus_train = max(int(x) for x in policy.ctree_train_docs)
 
     skip_flag = "--skip-existing" if bool(skip_existing) else "--no-skip-existing"
 
@@ -350,7 +274,7 @@ def build_suite(
         if mf_path is not None and mf_path.exists():
             all_runs.extend(read_manifest_jsonl(mf_path))
 
-    _write_text(paths.suite_cmds, "\n".join(all_cmds) + ("\n" if all_cmds else ""))
+    write_text(paths.suite_cmds, "\n".join(all_cmds) + ("\n" if all_cmds else ""))
     write_manifest_jsonl(paths.suite_manifest, all_runs)
 
     # ----------------------------
@@ -582,38 +506,50 @@ def build_suite(
             ]
         )
     )
-    _write_text(paths.suite_plot_cmds, "\n".join(plot_cmds) + ("\n" if plot_cmds else ""))
+    write_text(paths.suite_plot_cmds, "\n".join(plot_cmds) + ("\n" if plot_cmds else ""))
 
-    meta = {
-        "run_id": str(run_id),
-        "profile": str(profile),
-        "python_bin": str(python_bin),
-        "skip_existing": bool(skip_existing),
-        "include_markov": bool(include_markov),
-        "include_embedding_estimator": bool(include_embedding_estimator),
-        "output_root": str(output_root),
-        "figures_root": str(figures_root),
-        "cmds_file": str(paths.suite_cmds),
-        "plot_cmds_file": str(paths.suite_plot_cmds),
-        "suite_manifest_file": str(paths.suite_manifest),
-        "counts_by_family": counts,
-        "n_sim_commands_total": int(len(all_cmds)),
-        "n_plot_commands_total": int(len(plot_cmds)),
-        "builder_cmd_files": {k: str(v) for k, v in cmd_sources.items()},
-        "builder_manifest_files": {k: str(v) for k, v in manifest_sources.items()},
-        "segment_test_docs": int(segment_test_docs),
-        "ctree_test_books": int(ctree_test_books),
-        "markov_test_docs": int(markov_test_docs),
-        "markov_n_epochs": int(markov_n_epochs),
-        "segment_device": str(segment_device),
-        "segment_cuda_device": int(segment_cuda_device) if segment_cuda_device is not None else None,
-        "ctree_device": str(ctree_device),
-        "ctree_cuda_device": int(ctree_cuda_device) if ctree_cuda_device is not None else None,
-        "markov_device": str(markov_device),
-        "markov_cuda_device": int(markov_cuda_device) if markov_cuda_device is not None else None,
-        "torch_threads": int(torch_threads),
-    }
-    _write_text(paths.suite_meta, json.dumps(meta, indent=2, sort_keys=True) + "\n")
+    group_cmd_files = {k: str(v) for k, v in cmd_sources.items()}
+    group_manifest_files = {k: str(v) for k, v in manifest_sources.items()}
+    meta = build_suite_meta(
+        suite_name="identifiable-zero",
+        suite_role="paper",
+        run_id=str(run_id),
+        profile=str(profile),
+        policy=policy.to_dict(),
+        python_bin=str(python_bin),
+        output_root=output_root,
+        cmds_file=paths.suite_cmds,
+        manifest_file=paths.suite_manifest,
+        selected_groups=list(group_manifest_files),
+        group_cmd_files=group_cmd_files,
+        group_manifest_files=group_manifest_files,
+        group_families={k: k for k in group_manifest_files},
+        extra={
+            "skip_existing": bool(skip_existing),
+            "include_markov": bool(include_markov),
+            "include_embedding_estimator": bool(include_embedding_estimator),
+            "figures_root": str(figures_root),
+            "plot_cmds_file": str(paths.suite_plot_cmds),
+            "suite_manifest_file": str(paths.suite_manifest),
+            "counts_by_family": counts,
+            "n_sim_commands_total": int(len(all_cmds)),
+            "n_plot_commands_total": int(len(plot_cmds)),
+            "builder_cmd_files": group_cmd_files,
+            "builder_manifest_files": group_manifest_files,
+            "segment_test_docs": int(segment_test_docs),
+            "ctree_test_books": int(ctree_test_books),
+            "markov_test_docs": int(markov_test_docs),
+            "markov_n_epochs": int(markov_n_epochs),
+            "segment_device": str(segment_device),
+            "segment_cuda_device": int(segment_cuda_device) if segment_cuda_device is not None else None,
+            "ctree_device": str(ctree_device),
+            "ctree_cuda_device": int(ctree_cuda_device) if ctree_cuda_device is not None else None,
+            "markov_device": str(markov_device),
+            "markov_cuda_device": int(markov_cuda_device) if markov_cuda_device is not None else None,
+            "torch_threads": int(torch_threads),
+        },
+    )
+    write_suite_meta(paths.suite_meta, meta)
     return meta
 
 
@@ -664,15 +600,13 @@ def _add_build_args(p: argparse.ArgumentParser, *, require_output_root: bool) ->
 
 
 def _resolve_output_root(*, run_id: str, output_root: str) -> Path:
-    if str(output_root).strip():
-        return Path(output_root)
-    return Path(f"outputs/identifiable_zero_suite_{str(run_id).strip()}")
+    from src.ctreepo.sim.suite.common import resolve_output_root
+    return resolve_output_root(run_id=run_id, output_root=output_root, default_prefix="identifiable_zero_suite")
 
 
 def _resolve_figures_root(*, figures_root: str, output_root: Path) -> Path:
-    if str(figures_root).strip():
-        return Path(figures_root)
-    return output_root / "figures"
+    from src.ctreepo.sim.suite.common import resolve_figures_root
+    return resolve_figures_root(figures_root=figures_root, output_root=output_root)
 
 
 def _resolve_python_bin(python_bin: str) -> str:
@@ -685,12 +619,18 @@ def _resolve_python_bin(python_bin: str) -> str:
 
 
 def _ensure_built(ns: argparse.Namespace) -> Tuple[SuitePaths, dict]:
-    run_id = _utc_run_id(getattr(ns, "run_id", ""))
+    run_id = utc_run_id(getattr(ns, "run_id", ""))
     output_root = _resolve_output_root(run_id=run_id, output_root=getattr(ns, "output_root", ""))
     figures_root = _resolve_figures_root(figures_root=getattr(ns, "figures_root", ""), output_root=output_root)
     paths = _resolve_paths(output_root=output_root, figures_root=figures_root)
     rebuild = bool(getattr(ns, "rebuild", False))
-    if rebuild or not paths.suite_meta.exists() or not paths.suite_cmds.exists() or not paths.suite_plot_cmds.exists():
+    if (
+        rebuild
+        or not paths.suite_meta.exists()
+        or not paths.suite_manifest.exists()
+        or not paths.suite_cmds.exists()
+        or not paths.suite_plot_cmds.exists()
+    ):
         meta = build_suite(
             run_id=run_id,
             profile=str(getattr(ns, "profile", "walk_long")),
@@ -713,8 +653,7 @@ def _ensure_built(ns: argparse.Namespace) -> Tuple[SuitePaths, dict]:
             torch_threads=int(getattr(ns, "torch_threads", 1)),
         )
         return paths, meta
-    meta = json.loads(paths.suite_meta.read_text(encoding="utf-8"))
-    return paths, meta
+    return paths, read_suite_meta(paths.suite_meta)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -728,7 +667,9 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_build_args(r, require_output_root=False)
     r.add_argument("--rebuild", action=argparse.BooleanOptionalAction, default=False)
     r.add_argument("--jobs", type=int, default=1)
+    r.add_argument("--gpu-tokens", type=str, default="auto")
     r.add_argument("--log-dir", type=str, default="")
+    r.add_argument("--set-thread-env", action=argparse.BooleanOptionalAction, default=True)
     r.add_argument("--fail-fast", action=argparse.BooleanOptionalAction, default=False)
 
     pl = sub.add_parser("plot", help="Execute suite plotting command list.")
@@ -751,7 +692,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ns = _build_parser().parse_args(list(argv) if argv is not None else None)
 
     if ns.cmd == "build":
-        run_id = _utc_run_id(ns.run_id)
+        run_id = utc_run_id(ns.run_id)
         output_root = _resolve_output_root(run_id=run_id, output_root=str(ns.output_root or ""))
         figures_root = _resolve_figures_root(figures_root=str(ns.figures_root), output_root=output_root)
         meta = build_suite(
@@ -779,15 +720,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if ns.cmd == "run":
-        paths, _meta = _ensure_built(ns)
-        from src.ctreepo.sim.cli.exec_cmds import main as _exec_main  # noqa: WPS433
-
-        exec_argv: List[str] = ["--cmds", str(paths.suite_cmds), "--jobs", str(int(ns.jobs))]
-        if str(ns.log_dir).strip():
-            exec_argv.extend(["--log-dir", str(ns.log_dir)])
+        paths, meta = _ensure_built(ns)
         if bool(ns.fail_fast):
+            from src.ctreepo.sim.cli.exec_cmds import main as _exec_main  # noqa: WPS433
+
+            exec_argv: List[str] = ["--cmds", str(paths.suite_cmds), "--jobs", str(int(ns.jobs))]
+            if str(ns.log_dir).strip():
+                exec_argv.extend(["--log-dir", str(ns.log_dir)])
             exec_argv.append("--fail-fast")
-        return int(_exec_main(exec_argv))
+            return int(_exec_main(exec_argv))
+
+        log_dir = Path(ns.log_dir).resolve() if str(ns.log_dir).strip() else (paths.output_root / "queue_logs")
+        queue_payload = run_manifest_queue_suite(
+            manifest_paths=[paths.suite_manifest],
+            cpu_workers=int(ns.jobs),
+            gpu_tokens=str(ns.gpu_tokens),
+            log_dir=log_dir,
+            set_thread_env=bool(ns.set_thread_env),
+        )
+        payload = {
+            "output_root": str(paths.output_root),
+            "profile": str(meta.get("profile", "")),
+            **queue_payload,
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if int(queue_payload["summary"].get("n_fail", 0)) == 0 else 1
 
     if ns.cmd == "plot":
         paths, _meta = _ensure_built(ns)

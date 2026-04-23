@@ -3,9 +3,12 @@ from __future__ import annotations
 import random
 from typing import Callable, Iterable, List, Optional, Sequence, TypeVar
 
+from src.core.logged_supervision import ObservationUnitKind, SamplingMetadata
+from src.core.preference_supervision import preference_supervision_metadata
+
 from .preferences import derive_preference_from_utilities
 from .protocols import CandidateGenerator, Compressor
-from .records import IPWMetadata, PairwisePreference
+from .records import PairwisePreference
 
 X = TypeVar("X")
 Z = TypeVar("Z")
@@ -21,7 +24,7 @@ def collect_pairwise_preferences(
     example_id_fn: Optional[Callable[[X, int], str]] = None,
     rubric: str = "",
     tie_margin: float = 0.0,
-    ipw_fn: Optional[Callable[[X], IPWMetadata]] = None,
+    sampling_fn: Optional[Callable[[X], SamplingMetadata]] = None,
     n_pairs_per_example: int = 1,
     seed: int = 0,
 ) -> List[PairwisePreference]:
@@ -38,7 +41,11 @@ def collect_pairwise_preferences(
 
     for idx, example in enumerate(examples):
         example_id = id_fn(example, idx)
-        ipw = ipw_fn(example) if ipw_fn is not None else IPWMetadata()
+        sampling = (
+            sampling_fn(example)
+            if sampling_fn is not None
+            else SamplingMetadata(unit_kind=ObservationUnitKind.PAIR)
+        )
 
         for _ in range(int(n_pairs_per_example)):
             # Derive a deterministic-ish seed per pair so generators can be reproducible.
@@ -69,7 +76,10 @@ def collect_pairwise_preferences(
                     reference=None,
                     score_a=utility_a,
                     score_b=utility_b,
-                    ipw=ipw,
+                    sampling=sampling,
+                    preference_supervision=preference_supervision_metadata(
+                        application_name="ctreepo_opt_collect"
+                    ),
                 )
             )
 
@@ -81,20 +91,19 @@ def collect_proxy_training_data(
     *,
     compressor: Compressor[X, Z],
     oracle: Callable[[X], Y],
-    ipw_fn: Optional[Callable[[X], IPWMetadata]] = None,
+    sampling_fn: Optional[Callable[[X], SamplingMetadata]] = None,
 ) -> tuple[List[Z], List[Y], Optional[List[float]]]:
     """Collect (compressed_input, oracle_target, sample_weight) triples for proxy training."""
     inputs: List[Z] = []
     targets: List[Y] = []
     weights: List[float] = []
-    use_weights = ipw_fn is not None
+    use_weights = sampling_fn is not None
 
     for example in examples:
         inputs.append(compressor.compress(example))
         targets.append(oracle(example))
         if use_weights:
-            ipw = ipw_fn(example)
-            weights.append(ipw.ipw_weight())
+            sampling = sampling_fn(example)
+            weights.append(sampling.ipw_weight())
 
     return inputs, targets, (weights if use_weights else None)
-

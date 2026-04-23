@@ -1,63 +1,22 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Literal, Optional
 
+from src.core.logged_supervision import ObservationUnitKind, SamplingMetadata
+from src.core.preference_supervision import (
+    PreferenceSupervisionMetadata,
+    preference_supervision_metadata,
+)
+
 from .ids import stable_id
 from .serialization import as_compact_str, to_jsonable
-
-MIN_PROPENSITY = 1e-8
-DEFAULT_PROPENSITY = 1.0
-MAX_PROPENSITY = 1.0
-
-
-def _normalize_propensity(value: Optional[float], name: str) -> float:
-    if value is None:
-        return DEFAULT_PROPENSITY
-    parsed = float(value)
-    if not math.isfinite(parsed) or parsed <= 0.0 or parsed > MAX_PROPENSITY:
-        raise ValueError(f"{name} must be finite and in (0, {MAX_PROPENSITY}], got {value!r}")
-    return parsed
-
-
-@dataclass(frozen=True)
-class IPWMetadata:
-    """Design-based sampling metadata for unbiased/consistent risk estimation."""
-
-    doc_propensity: float = DEFAULT_PROPENSITY
-    node_propensity: float = DEFAULT_PROPENSITY
-    label_propensity: float = DEFAULT_PROPENSITY
-    joint_propensity: Optional[float] = None
-    sampling_scheme: Optional[str] = None
-    node_type: Optional[str] = None
-
-    def effective_joint_propensity(self, *, min_propensity: float = MIN_PROPENSITY) -> float:
-        doc_p = _normalize_propensity(self.doc_propensity, "doc_propensity")
-        node_p = _normalize_propensity(self.node_propensity, "node_propensity")
-        label_p = _normalize_propensity(self.label_propensity, "label_propensity")
-        if self.joint_propensity is None:
-            joint = doc_p * node_p * label_p
-        else:
-            joint = _normalize_propensity(self.joint_propensity, "joint_propensity")
-        return max(float(min_propensity), float(joint))
-
-    def ipw_weight(
-        self,
-        *,
-        min_propensity: float = MIN_PROPENSITY,
-        max_weight: Optional[float] = None,
-    ) -> float:
-        weight = 1.0 / self.effective_joint_propensity(min_propensity=min_propensity)
-        if max_weight is not None:
-            weight = min(weight, float(max_weight))
-        return float(weight)
 
 
 @dataclass
 class PairwisePreference:
-    """Backend-agnostic pairwise preference record (convertible to training formats)."""
+    """Backend-agnostic pairwise preference record."""
 
     example_id: str
     candidate_a: Any
@@ -65,15 +24,36 @@ class PairwisePreference:
     preferred: Literal["A", "B", "tie"]
     confidence: float
 
-    # Optional context/diagnostics
     input: Any = ""
     rubric: str = ""
     reference: Optional[float] = None
     score_a: Optional[float] = None
     score_b: Optional[float] = None
     reasoning: str = ""
-    ipw: IPWMetadata = field(default_factory=IPWMetadata)
+    sampling: SamplingMetadata = field(
+        default_factory=lambda: SamplingMetadata(unit_kind=ObservationUnitKind.PAIR)
+    )
+    preference_supervision: PreferenceSupervisionMetadata = field(
+        default_factory=lambda: preference_supervision_metadata(
+            application_name="ctreepo_opt_record"
+        )
+    )
+    source_observation_ids: list[str] = field(default_factory=list)
+    comparison_signal_value: Optional[float] = None
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.sampling, SamplingMetadata):
+            self.sampling = SamplingMetadata.from_dict(self.sampling)
+        if self.sampling.unit_kind is None:
+            self.sampling = self.sampling.with_updates(unit_kind=ObservationUnitKind.PAIR)
+        if not isinstance(self.preference_supervision, PreferenceSupervisionMetadata):
+            self.preference_supervision = PreferenceSupervisionMetadata.from_dict(
+                self.preference_supervision
+            )
+        self.source_observation_ids = [str(value) for value in self.source_observation_ids]
+        if self.comparison_signal_value is not None:
+            self.comparison_signal_value = float(self.comparison_signal_value)
 
     def pair_id(self, *, n_chars: int = 16) -> str:
         payload = {
@@ -100,22 +80,20 @@ class PairwisePreference:
             "reference": self.reference,
             "score_a": self.score_a,
             "score_b": self.score_b,
-            "doc_propensity": self.ipw.doc_propensity,
-            "node_propensity": self.ipw.node_propensity,
-            "label_propensity": self.ipw.label_propensity,
-            "joint_propensity": self.ipw.joint_propensity,
-            "sampling_scheme": self.ipw.sampling_scheme,
-            "node_type": self.ipw.node_type,
-            "sample_weight": self.ipw.ipw_weight(),
+            "sampling": self.sampling.to_dict(),
+            "preference_supervision": self.preference_supervision.to_dict(),
+            "source_observation_ids": list(self.source_observation_ids),
+            "comparison_signal_value": self.comparison_signal_value,
+            "sample_weight": self.sampling.ipw_weight(),
             "timestamp": self.timestamp,
         }
 
     def to_training_preference_pair(self) -> Any:
-        """Convert to the repo's canonical PreferencePair type (lazy import)."""
-        from src.training.preference.types import PreferencePair
+        """Convert to the repo's canonical binary comparison type (lazy import)."""
+        from src.training.supervision import BinaryComparison
 
         reference_score = float(self.reference) if self.reference is not None else 0.0
-        return PreferencePair(
+        return BinaryComparison(
             pair_id=self.pair_id(),
             source_example_id=str(self.example_id),
             original_text=as_compact_str(self.input),
@@ -126,12 +104,13 @@ class PairwisePreference:
             preferred=self.preferred,
             reasoning=str(self.reasoning or ""),
             confidence=float(self.confidence),
-            doc_propensity=float(self.ipw.doc_propensity),
-            node_propensity=float(self.ipw.node_propensity),
-            label_propensity=float(self.ipw.label_propensity),
-            joint_propensity=self.ipw.joint_propensity,
-            sampling_scheme=self.ipw.sampling_scheme,
-            node_type=self.ipw.node_type,
+            sampling=self.sampling,
+            preference_supervision=self.preference_supervision,
+            source_observation_ids=list(self.source_observation_ids),
+            comparison_signal_value=self.comparison_signal_value,
             score_estimate_a=self.score_a,
             score_estimate_b=self.score_b,
         )
+
+
+__all__ = ["PairwisePreference", "SamplingMetadata"]

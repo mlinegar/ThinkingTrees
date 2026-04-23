@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from src.ctreepo.sim.expectations import ExpectationFinding, ExpectationReport, build_expectation_report
+from src.ctreepo.sim.suite.registry import iter_canonical_suite_targets
 
 
 @dataclass(frozen=True)
@@ -148,21 +149,26 @@ def _family_specs() -> Dict[str, FamilyTheorySpec]:
             simulation_claim=(
                 "Exact Markov sketches give a zero-distortion theorem-backed ceiling, "
                 "while count-only and flip controls isolate missing state and missing L3/idempotence. "
-                "Learned neural lanes are approximate local-law experiments rather than exact guarantees."
+                "Learned neural lanes are approximate local-law experiments rather than exact guarantees, "
+                "and the paper-facing full-doc anchor lane should be read as an audited publication surface rather than "
+                "a direct theorem witness."
             ),
             why_it_demonstrates_the_method=(
                 "This is the clearest exact-vs-learned-vs-wrong-baseline demonstration of local-law structure: "
                 "the exact lane should sit at zero, the count-only baseline should remain separated, and the learned "
-                "lane should only be expected to improve where the approximate local laws are actually learned."
+                "lane should only be expected to improve where the approximate local laws are actually learned. "
+                "The full-doc anchor diagnostics extend that story to the public paper lane by checking provenance, "
+                "semantic labeling, and matched fixed-bundle comparisons."
             ),
             key_assumptions=[
                 "Exact encoded-feature controls satisfy the theorem-domain local laws exactly.",
                 "Learned lanes are only approximate/audited unless they are backed by an explicit theorem witness.",
                 "Flip controls are deliberate violations of on-range stability or schedule stability.",
+                "Full-doc official FNO and tree-neural baselines are publication-facing proxy/approximate lanes, not exact Lean-backed operators.",
             ],
             exact_lanes=["exact", "oracle_tree", "one_pass_reference"],
-            approx_lanes=["learned"],
-            proxy_lanes=["undersupported", "flip_R1", "flip_R2"],
+            approx_lanes=["learned", "tree_neural_* full-doc lane"],
+            proxy_lanes=["undersupported", "flip_R1", "flip_R2", "official_fno full-doc lane"],
             lean_refs=[
                 LeanRef(
                     label="Markov path local laws",
@@ -195,10 +201,20 @@ def _family_specs() -> Dict[str, FamilyTheorySpec]:
                     note="A flip-style control can preserve other structure while failing on-range stability.",
                 ),
             ],
-            canonical_suites=["cpu_megasweep", "publication_clean", "learnability", "simulation_buildout"],
+            canonical_suites=[
+                "cpu_megasweep",
+                "publication_clean",
+                "learnability",
+                "simulation_buildout",
+                "markov_observed_token",
+                "markov_full_doc_anchor",
+                "markov_full_tree_ipw",
+            ],
             caveats=[
                 "Learned Markov operators remain approximate/audited rather than theorem-backed unless an explicit theorem-domain witness is attached.",
                 "The strongest paper-facing cross-family slice is only as clean as the matched baseline coverage in the rerun root.",
+                "Full-doc anchor diagnostics should not silently mix legacy tree-neural semantics with current score-drift semantics.",
+                "The full-tree IPW grid is a point-estimation diagnostic surface unless an explicit honest/CI wrapper is attached.",
             ],
         ),
         "segment_lda_ops_weight_recovery": FamilyTheorySpec(
@@ -378,7 +394,7 @@ def _family_specs() -> Dict[str, FamilyTheorySpec]:
                     note="Held-out law estimates and calibration events can feed a valid DSL certificate.",
                 ),
             ],
-            canonical_suites=["learnability", "simulation_buildout"],
+            canonical_suites=["learnability", "simulation_buildout", "markov_observed_token"],
             caveats=[
                 "Learnability reports are evidence about optimization and generalization, not by themselves proofs of theorem-backedness for a learned operator.",
             ],
@@ -388,69 +404,14 @@ def _family_specs() -> Dict[str, FamilyTheorySpec]:
 
 def _suite_specs() -> Dict[str, SuiteTheorySpec]:
     return {
-        "cpu_megasweep": SuiteTheorySpec(
-            name="cpu_megasweep",
-            title="CPU Megasweep",
-            families=["markov_ops_count", "segment_lda_ops_weight_recovery", "segmented_lda_ctreepo"],
-            role="Baseline anchor",
-            demonstrates="Exact ceilings, wrong-state controls, and core budget trends across the main simulation families.",
-        ),
-        "simulation_buildout": SuiteTheorySpec(
-            name="simulation_buildout",
-            title="Simulation Buildout",
-            families=["markov_ops_count", "segment_lda_ops_weight_recovery", "segmented_lda_ctreepo", "mergeable_ablation", "local_law_learnability"],
-            role="Stress / mechanism layer",
-            demonstrates="Why the method works, where it fails, and how estimator stress and control baselines map to the theory.",
-        ),
-        "publication_clean": SuiteTheorySpec(
-            name="publication_clean",
-            title="Identifiable-Zero Publication Clean",
-            families=["markov_ops_count", "segment_lda_ops_weight_recovery", "segmented_lda_ctreepo"],
-            role="Main paper slice",
-            demonstrates="Compact cross-family publication figures for the clean exact-plus-approx story.",
-        ),
-        "publication_ctreepo_progress": SuiteTheorySpec(
-            name="publication_ctreepo_progress",
-            title="Publication C-TreePO Progress",
-            families=["segmented_lda_ctreepo"],
-            role="Approximate-tree progress slice",
-            demonstrates="The calibrated/budgeted approximate local-law story while the richer C-TreePO sweep is in flight.",
-        ),
-        "learnability": SuiteTheorySpec(
-            name="learnability",
-            title="Identifiable-Zero Learnability",
-            families=["markov_ops_count", "segmented_lda_ctreepo", "local_law_learnability"],
-            role="Appendix learnability slice",
-            demonstrates="Whether held-out local-law supervision actually translates into downstream gains.",
-        ),
-        "neural_operator_overnight": SuiteTheorySpec(
-            name="neural_operator_overnight",
-            title="Identifiable-Zero Neural Operator Overnight",
-            families=["segmented_lda_ctreepo", "local_law_learnability"],
-            role="Operator-capacity robustness",
-            demonstrates="Robustness of the approximate/audited operator story under neural-operator capacity changes.",
-        ),
-        "lda_leafnoise": SuiteTheorySpec(
-            name="lda_leafnoise",
-            title="Identifiable-Zero LDA Leafnoise",
-            families=["segment_lda_ops_weight_recovery", "segmented_lda_ctreepo"],
-            role="Appendix robustness slice",
-            demonstrates="How the theorem-friendly LDA story degrades under leaf noise.",
-        ),
-        "dtm_lda": SuiteTheorySpec(
-            name="dtm_lda",
-            title="Identifiable-Zero DTM-LDA",
-            families=["segmented_lda_ctreepo"],
-            role="Appendix robustness slice",
-            demonstrates="A broader topic-model robustness pass for the approximate/audited tree stack.",
-        ),
-        "lda_tree_recovery_progress": SuiteTheorySpec(
-            name="lda_tree_recovery_progress",
-            title="Diagnostic: LDA Tree Recovery Progress",
-            families=["segment_lda_ops_weight_recovery"],
-            role="Diagnostic exact-control slice",
-            demonstrates="The exact-vs-learned tree recovery ladder for the LDA mergeable baseline family.",
-        ),
+        target.theory_alignment_key: SuiteTheorySpec(
+            name=target.theory_alignment_key,
+            title=target.theory_title,
+            families=list(target.theory_families),
+            role=target.theory_role,
+            demonstrates=target.theory_demonstrates,
+        )
+        for target in iter_canonical_suite_targets(bundle_roles=("paper", "appendix", "diagnostic"))
     }
 
 

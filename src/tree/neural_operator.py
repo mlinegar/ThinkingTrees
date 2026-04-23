@@ -107,6 +107,40 @@ class CTreePOOperatorAdapter:
             aux={"head": self.head, "evidence_status": self.evidence_status.value},
         )
 
+    @torch.no_grad()
+    def predict_from_state_batch(
+        self,
+        states: torch.Tensor,
+    ) -> list[OperatorPrediction]:
+        """Batched prediction from a stack of sketch states.
+
+        Args:
+            states: ``(N, sketch_dim)`` tensor of node sketches.
+
+        Returns:
+            List of N ``OperatorPrediction`` objects.
+        """
+        # predict_interval already handles batched input via nn.Linear broadcasting
+        means, lowers, uppers, stds = self.model.predict_interval(
+            states, head=self.head, z_score=self.z_score, min_std=self.min_std,
+        )
+        norms = self.model.predict_normalized_batch(states, head=self.head)
+        confs = self.model.predict_confidence_batch(states, head=self.head)
+
+        results: list[OperatorPrediction] = []
+        for i in range(states.shape[0]):
+            results.append(OperatorPrediction(
+                mean=float(means[i].item()),
+                lower=float(lowers[i].item()),
+                upper=float(uppers[i].item()),
+                std=float(stds[i].item()),
+                normalized_mean=float(norms[i].item()),
+                confidence=float(confs[i].item()),
+                evidence_status=self.evidence_status,
+                aux={"head": self.head, "evidence_status": self.evidence_status.value},
+            ))
+        return results
+
 
 class MergeableSketchOperatorAdapter:
     """Proxy-only adapter exposing MergeableEmbeddingSketch scalar readout."""

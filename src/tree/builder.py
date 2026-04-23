@@ -13,14 +13,13 @@ The builder is async-first with a sync wrapper for compatibility.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Callable, Any, Dict, Tuple, TYPE_CHECKING
+from typing import List, Optional, Callable, Any, Dict, Tuple
 from pathlib import Path
 import logging
 import asyncio
 import os
 
-if TYPE_CHECKING:
-    from src.training.preference.types import PreferencePair
+from src.training.supervision import SupervisionDataset
 
 from src.core.data_models import (
     Node, Tree, leaf, node
@@ -32,9 +31,13 @@ from src.preprocessing.chunker import (
     TextChunk,
     chunk_for_ops as chunk,
 )
-from src.core.strategy import SummarizationStrategy, TournamentStrategy
+from src.core.strategy import SummarizationStrategy, TournamentStrategy, tournament_doc_id
 from src.core.protocols import format_merge_input, Summarizer
 from src.core.async_utils import gather_with_cleanup
+from src.core.unified_runtime import RUNTIME_MODE_UNIFIED_V2, resolve_runtime_mode
+from src.tree.async_operator import AsyncFromSummarizationStrategy
+from src.tree.state_tree import state_tree_to_text_tree
+from src.tree.state_tree_runner import arun_fixed_binary_state_tree
 
 
 logger = logging.getLogger(__name__)
@@ -149,6 +152,9 @@ class BuildConfig:
 
     # Chunking settings
     max_chunk_chars: int = 2000
+    max_chunk_tokens: Optional[int] = None
+    chunk_token_encoding: str = "cl100k_base"
+    chunk_overlap_tokens: int = 0
     min_chunk_chars: int = 100
     chunk_strategy: str = "axis"  # "axis" (default), "sentence", or "paragraph"
     adaptive_chunking: Optional[AdaptiveChunkingConfig] = None
@@ -164,6 +170,8 @@ class BuildConfig:
     max_concurrent_requests: int = 200
     task_cancel_timeout: float = 30.0
     document_retry_delay: float = 1.0
+    runtime_mode: str = "legacy"
+    batch_plan_cache_name: str = "tree_builder"
 
     # Degenerate-summary safeguards (manual validation / fail-fast mode)
     fail_on_degenerate_summary: bool = False
@@ -182,7 +190,7 @@ class BuildResult:
     nodes_created: int
     levels_created: int
     errors: List[str] = field(default_factory=list)
-    preferences: List['PreferencePair'] = field(default_factory=list)
+    supervision: SupervisionDataset = field(default_factory=SupervisionDataset)
     content_weights: Optional[Dict[str, float]] = None  # per-leaf info scores for audit sampling
 
 
@@ -255,6 +263,9 @@ class TreeBuilder:
         chunks = chunk(
             text,
             max_chars=self.config.max_chunk_chars,
+            max_tokens=self.config.max_chunk_tokens,
+            token_encoding=self.config.chunk_token_encoding,
+            overlap_tokens=self.config.chunk_overlap_tokens,
             strategy=self.config.chunk_strategy,
             adaptive_config=self.config.adaptive_chunking,
             feedback_signals=self.config.chunk_feedback_signals,
@@ -290,16 +301,44 @@ class TreeBuilder:
         if not chunks:
             raise ValueError("Cannot build tree from empty chunks list")
 
-        errors = []
+        errors: List[str] = []
 
-        # Create leaf nodes with summaries (all in parallel)
-        leaves = await self._build_leaves(chunks, rubric, errors)
+        # Canonical fixed-binary execution now lives in the `StateTree` runner.
+        # We run a text-only operator lifted from the provided strategy, then
+        # convert to the legacy `Tree` data model for downstream consumers.
+        leaf_spans = [str(chunk_obj.text or "") for chunk_obj in chunks]
+        operator = AsyncFromSummarizationStrategy(
+            strategy=self.strategy,
+            name=str(getattr(self.strategy, "name", "summarization_strategy")),
+            max_concurrent=int(self.config.max_concurrent_requests),
+        )
+        state_result = await arun_fixed_binary_state_tree(
+            operator,
+            leaf_spans,
+            rubric=str(rubric or ""),
+            refine_rounds=0,
+            max_concurrent=int(self.config.max_concurrent_requests),
+        )
+        tree = state_tree_to_text_tree(
+            state_result.tree,
+            rubric=str(rubric or ""),
+            metadata={"state_tree_metadata": dict(state_result.tree.metadata or {})},
+        )
 
-        if not leaves:
-            raise ValueError("No leaf nodes created")
-
-        # Build tree bottom-up with pipelined execution
-        tree = await self._build_tree_pipelined(leaves, rubric, errors)
+        # Best-effort stats (kept for compatibility with existing diagnostics).
+        try:
+            all_nodes = list(tree.traverse_preorder())
+            leaves = [n for n in all_nodes if n.is_leaf]
+            internal = [n for n in all_nodes if not n.is_leaf]
+            self._build_stats["summarizer_calls"] += len(all_nodes)
+            self._build_stats["total_input_chars"] += sum(len(n.raw_text_span or "") for n in leaves)
+            self._build_stats["total_input_chars"] += sum(
+                len((n.left_child.summary if n.left_child else "")) + len((n.right_child.summary if n.right_child else ""))
+                for n in internal
+            )
+            self._build_stats["total_output_chars"] += sum(len(n.summary or "") for n in all_nodes)
+        except Exception:
+            pass
 
         # Preserve explicit chunk-to-leaf lineage for downstream audit/training.
         tree.metadata.setdefault(
@@ -334,10 +373,26 @@ class TreeBuilder:
         except Exception:
             logger.debug("Failed to attach chunk support spans to tree nodes", exc_info=True)
 
-        # Collect preferences if strategy supports it (e.g., TournamentStrategy)
-        preferences = []
+        # Collect supervision if strategy supports it (e.g., TournamentStrategy)
+        binary_projection = []
         if hasattr(self.strategy, 'get_preferences'):
-            preferences = self.strategy.get_preferences()
+            binary_projection = self.strategy.get_preferences()
+        comparative_judgments = []
+        if hasattr(self.strategy, 'get_comparative_judgments'):
+            comparative_judgments = self.strategy.get_comparative_judgments()
+
+        current_doc_id = str(tournament_doc_id.get() or "").strip()
+        if current_doc_id:
+            binary_projection = [
+                pair
+                for pair in binary_projection
+                if str(getattr(pair, "source_example_id", "")).startswith(f"{current_doc_id}:")
+            ]
+            comparative_judgments = [
+                record
+                for record in comparative_judgments
+                if str(getattr(record, "source_example_id", "")).startswith(f"{current_doc_id}:")
+            ]
 
         return BuildResult(
             tree=tree,
@@ -345,7 +400,13 @@ class TreeBuilder:
             nodes_created=tree.node_count,
             levels_created=tree.height + 1,
             errors=errors,
-            preferences=preferences,
+            supervision=SupervisionDataset(
+                comparative_judgments=(
+                    list(comparative_judgments)
+                    if comparative_judgments
+                    else [pair.to_comparative_judgment() for pair in binary_projection]
+                )
+            ),
         )
 
     async def build_from_file(self, filepath: Path, rubric: str = "") -> BuildResult:
@@ -391,6 +452,43 @@ class TreeBuilder:
         errors: List[str],
     ) -> List[Node]:
         """Build leaf nodes with summaries in parallel."""
+        runtime_mode = resolve_runtime_mode(getattr(self.config, "runtime_mode", None))
+        bulk_summarize = getattr(self.strategy, "summarize_many", None)
+
+        if runtime_mode == RUNTIME_MODE_UNIFIED_V2 and callable(bulk_summarize):
+            doc_id = tournament_doc_id.get()
+            try:
+                summaries = list(
+                    await bulk_summarize(
+                        [
+                            {
+                                "content": chunk_obj.text,
+                                "rubric": rubric,
+                                "temperature": 0.7,
+                                "doc_id": doc_id,
+                            }
+                            for chunk_obj in chunks
+                        ]
+                    )
+                )
+            except Exception as exc:
+                errors.append(f"Bulk leaf summarization failed: {exc}")
+                summaries = []
+
+            if summaries:
+                if len(summaries) < len(chunks):
+                    summaries.extend([""] * (len(chunks) - len(summaries)))
+                leaves: List[Node] = []
+                for idx, (chunk_obj, summary) in enumerate(zip(chunks, summaries)):
+                    rendered = str(summary or "")
+                    self._build_stats['summarizer_calls'] += 1
+                    self._build_stats['total_input_chars'] += len(chunk_obj.text)
+                    self._build_stats['total_output_chars'] += len(rendered)
+                    if rendered:
+                        leaves.append(leaf(chunk_obj.text, summary=rendered, node_id=f"leaf_{idx}"))
+                    else:
+                        leaves.append(leaf(chunk_obj.text, node_id=f"leaf_{idx}"))
+                return leaves
 
         async def summarize_leaf(idx: int, text: str) -> tuple[int, Node]:
             try:
@@ -544,6 +642,60 @@ class TreeBuilder:
                 return False
             return True
 
+        runtime_mode = resolve_runtime_mode(getattr(self.config, "runtime_mode", None))
+        bulk_merge = getattr(self.strategy, "merge_many", None)
+        if runtime_mode == RUNTIME_MODE_UNIFIED_V2 and callable(bulk_merge):
+            while len(completed) < len(merges):
+                ready = [
+                    m
+                    for m in merges.values()
+                    if is_ready(m) and m.id not in completed
+                ]
+                if not ready:
+                    break
+
+                payloads = []
+                contexts: List[Tuple[MergeTask, Node, Node]] = []
+                for m in ready:
+                    left_node = completed[m.left_idx] if m.left_is_merge else leaves[m.left_idx]
+                    right_node = completed[m.right_idx] if m.right_is_merge else leaves[m.right_idx]
+                    contexts.append((m, left_node, right_node))
+                    payloads.append(
+                        {
+                            "left": left_node.summary,
+                            "right": right_node.summary,
+                            "rubric": rubric,
+                            "temperature": 0.7,
+                            "doc_id": tournament_doc_id.get(),
+                        }
+                    )
+
+                try:
+                    merged_summaries = list(await bulk_merge(payloads))
+                except Exception as exc:
+                    errors.append(f"Bulk merge execution failed: {exc}")
+                    merged_summaries = []
+
+                if len(merged_summaries) < len(contexts):
+                    merged_summaries.extend([""] * (len(contexts) - len(merged_summaries)))
+
+                for (m, left_node, right_node), merged_summary in zip(contexts, merged_summaries):
+                    rendered = str(merged_summary or "")
+                    self._build_stats['summarizer_calls'] += 1
+                    self._build_stats['total_input_chars'] += len(left_node.summary) + len(right_node.summary)
+                    self._build_stats['total_output_chars'] += len(rendered)
+                    completed[m.id] = node(
+                        left=left_node,
+                        right=right_node,
+                        summary=rendered,
+                        node_id=f"L{m.level}_{m.id}",
+                    )
+
+            if completed:
+                final_id = max(completed.keys())
+                return Tree(root=completed[final_id], rubric=rubric)
+            return Tree(root=leaves[0], rubric=rubric)
+
         # Submit all initially ready merges (level 1 - leaf pairs)
         for m in merges.values():
             if is_ready(m) and m.id not in pending:
@@ -642,59 +794,141 @@ class TreeBuilder:
             rubric: Information-preservation rubric for the LLM.
         """
         from src.core.async_utils import gather_with_cleanup
+        runtime_mode = resolve_runtime_mode(getattr(self.config, "runtime_mode", None))
 
         # --- Phase 1: Summarise all leaves in parallel ---
         leaf_indices = [i for i, n in enumerate(nodes) if n.is_leaf]
 
-        async def _summarize_leaf(idx: int) -> Tuple[int, str]:
-            node = nodes[idx]
-            text = node.text_span if node.text_span else ""
+        bulk_summarize = getattr(self.strategy, "summarize_many", None)
+        if runtime_mode == RUNTIME_MODE_UNIFIED_V2 and callable(bulk_summarize) and leaf_indices:
             try:
-                summary = await self.strategy.summarize(text, rubric)
+                leaf_summaries = list(
+                    await bulk_summarize(
+                        [
+                            {
+                                "content": nodes[idx].text_span if nodes[idx].text_span else "",
+                                "rubric": rubric,
+                                "temperature": 0.7,
+                                "doc_id": tournament_doc_id.get(),
+                            }
+                            for idx in leaf_indices
+                        ]
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Unified bulk leaf summarization failed: %s", exc)
+                leaf_summaries = []
+
+            if len(leaf_summaries) < len(leaf_indices):
+                leaf_summaries.extend([""] * (len(leaf_indices) - len(leaf_summaries)))
+            for idx, summary in zip(leaf_indices, leaf_summaries):
+                nodes[idx].summary = str(summary or "")
                 self._build_stats['summarizer_calls'] += 1
-                return idx, summary
-            except Exception as e:
-                logger.warning("Leaf summarization failed for node %d: %s", idx, e)
-                return idx, text  # fall back to raw text
+        else:
+            async def _summarize_leaf(idx: int) -> Tuple[int, str]:
+                node = nodes[idx]
+                text = node.text_span if node.text_span else ""
+                try:
+                    summary = await self.strategy.summarize(text, rubric)
+                    self._build_stats['summarizer_calls'] += 1
+                    return idx, summary
+                except Exception as e:
+                    logger.warning("Leaf summarization failed for node %d: %s", idx, e)
+                    return idx, text  # fall back to raw text
 
-        leaf_tasks = [_summarize_leaf(i) for i in leaf_indices]
-        leaf_results = await gather_with_cleanup(leaf_tasks, return_exceptions=True)
+            leaf_tasks = [_summarize_leaf(i) for i in leaf_indices]
+            leaf_results = await gather_with_cleanup(leaf_tasks, return_exceptions=True)
 
-        for item in leaf_results:
-            if isinstance(item, Exception):
-                logger.warning("Leaf summarization task failed: %s", item)
-                continue
-            idx, summary = item
-            nodes[idx].summary = summary
+            for item in leaf_results:
+                if isinstance(item, Exception):
+                    logger.warning("Leaf summarization task failed: %s", item)
+                    continue
+                idx, summary = item
+                nodes[idx].summary = summary
 
         # --- Phase 2: Merge internal nodes level-by-level ---
-        # Nodes are bottom-up, so processing in order guarantees children
-        # are summarised before parents.
-        for i, node in enumerate(nodes):
-            if node.is_leaf:
-                continue
-            if node.children is None:
-                continue
+        pending_internal = {
+            idx
+            for idx, tree_node in enumerate(nodes)
+            if (not tree_node.is_leaf) and tree_node.children is not None
+        }
+        bulk_merge = getattr(self.strategy, "merge_many", None)
+        if runtime_mode == RUNTIME_MODE_UNIFIED_V2 and callable(bulk_merge):
+            while pending_internal:
+                ready_indices: List[int] = []
+                payloads: List[Dict[str, Any]] = []
+                for idx in list(pending_internal):
+                    tree_node = nodes[idx]
+                    left_idx, right_idx = tree_node.children
+                    left_summary = nodes[left_idx].summary or nodes[left_idx].text_span
+                    right_summary = nodes[right_idx].summary or nodes[right_idx].text_span
+                    if not left_summary or not right_summary:
+                        continue
+                    ready_indices.append(idx)
+                    payloads.append(
+                        {
+                            "left": left_summary,
+                            "right": right_summary,
+                            "rubric": rubric,
+                            "temperature": 0.7,
+                            "doc_id": tournament_doc_id.get(),
+                        }
+                    )
 
-            left_idx, right_idx = node.children
-            left_summary = nodes[left_idx].summary or nodes[left_idx].text_span
-            right_summary = nodes[right_idx].summary or nodes[right_idx].text_span
+                if not ready_indices:
+                    break
 
-            if left_idx == right_idx:
-                # Promoted odd node — just copy child summary
-                node.summary = left_summary
-                continue
+                try:
+                    merged_summaries = list(await bulk_merge(payloads))
+                except Exception as exc:
+                    logger.warning("Unified bulk merge failed: %s", exc)
+                    merged_summaries = []
 
-            try:
-                merged_summary = await self.strategy.merge(
-                    left_summary, right_summary, rubric
-                )
-                self._build_stats['summarizer_calls'] += 1
-                node.summary = merged_summary
-            except Exception as e:
-                logger.warning("Merge failed for node %d: %s", i, e)
-                # Fallback: concatenate truncated children
-                node.summary = left_summary[:500] + "\n---\n" + right_summary[:500]
+                if len(merged_summaries) < len(ready_indices):
+                    merged_summaries.extend([""] * (len(ready_indices) - len(merged_summaries)))
+
+                for idx, merged_summary in zip(ready_indices, merged_summaries):
+                    tree_node = nodes[idx]
+                    left_idx, right_idx = tree_node.children
+                    left_summary = nodes[left_idx].summary or nodes[left_idx].text_span or ""
+                    right_summary = nodes[right_idx].summary or nodes[right_idx].text_span or ""
+                    if left_idx == right_idx:
+                        tree_node.summary = left_summary
+                    else:
+                        rendered = str(merged_summary or "")
+                        if not rendered:
+                            rendered = left_summary[:500] + "\n---\n" + right_summary[:500]
+                        tree_node.summary = rendered
+                        self._build_stats['summarizer_calls'] += 1
+                    pending_internal.discard(idx)
+        else:
+            # Nodes are bottom-up, so processing in order guarantees children
+            # are summarised before parents.
+            for i, tree_node in enumerate(nodes):
+                if tree_node.is_leaf:
+                    continue
+                if tree_node.children is None:
+                    continue
+
+                left_idx, right_idx = tree_node.children
+                left_summary = nodes[left_idx].summary or nodes[left_idx].text_span
+                right_summary = nodes[right_idx].summary or nodes[right_idx].text_span
+
+                if left_idx == right_idx:
+                    # Promoted odd node — just copy child summary
+                    tree_node.summary = left_summary
+                    continue
+
+                try:
+                    merged_summary = await self.strategy.merge(
+                        left_summary, right_summary, rubric
+                    )
+                    self._build_stats['summarizer_calls'] += 1
+                    tree_node.summary = merged_summary
+                except Exception as e:
+                    logger.warning("Merge failed for node %d: %s", i, e)
+                    # Fallback: concatenate truncated children
+                    tree_node.summary = left_summary[:500] + "\n---\n" + right_summary[:500]
 
 
 # =============================================================================

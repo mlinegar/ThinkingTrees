@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 import math
 from typing import Any, Dict, Optional
@@ -24,10 +25,15 @@ class TrainingSelectionMetadata:
 
 
 def clone_module_state(module: Any) -> Dict[str, Any]:
-    return {
-        str(name): value.detach().cpu().clone()
-        for name, value in dict(module.state_dict()).items()
-    }
+    cloned: Dict[str, Any] = {}
+    for name, value in dict(module.state_dict()).items():
+        if str(name).startswith("_"):
+            continue
+        if hasattr(value, "detach"):
+            cloned[str(name)] = value.detach().cpu().clone()
+        else:
+            cloned[str(name)] = copy.deepcopy(value)
+    return cloned
 
 
 def restore_module_state(module: Any, state: Optional[Dict[str, Any]]) -> None:

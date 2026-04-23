@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from src.core.logged_supervision import ObservationUnitKind, SamplingMetadata
 from src.tree.learned_sketch_simulation import (
     HLLConfig,
     HyperLogLogSketch,
@@ -30,7 +31,6 @@ from src.tree.learned_sketch_simulation import (
 )
 from src.tree.ipw import (
     NodeType,
-    TreePropensity,
     TreeSample,
     effective_sample_size,
     ipw_preference_empirical_bernstein_ci,
@@ -631,10 +631,11 @@ def _run_ipw_audit(
                     node_type=NodeType.MERGE,
                     violation=int(violation[idx]),
                     preference_loss=float(pref_loss[idx]),
-                    propensity=TreePropensity(
-                        doc=1.0,
-                        node=float(pi[idx]),
-                        label=1.0,
+                    sampling=SamplingMetadata(
+                        document_propensity=1.0,
+                        unit_propensity=float(pi[idx]),
+                        label_propensity=1.0,
+                        unit_kind=ObservationUnitKind.MERGE,
                     ),
                     metadata={
                         "method": str(method_name),

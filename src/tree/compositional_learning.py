@@ -23,6 +23,11 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import Enum
 from typing import Any, Dict, Generic, Optional, Protocol, Sequence, Tuple, TypeVar
 
+from src.core.logged_supervision import (
+    LoggedLabelObservation,
+    ObservationUnitKind,
+    SamplingMetadata,
+)
 from src.core.ops_checks import LawKind, OperatorCapabilityReport
 from src.core.provenance import (
     ORACLE_SOURCE,
@@ -68,6 +73,14 @@ class SupervisionDeliveryMode(str, Enum):
 
     OFFLINE_LOGGED = "offline_logged"
     ONLINE_ORACLE_QUERY = "online_oracle_query"
+
+
+SHARED_FULL_DOCUMENT_CHANNEL_NAME = "full_document_supervision"
+SHARED_SAMPLED_SUBSTRUCTURE_CHANNEL_NAME = "sampled_substructure_supervision"
+SHARED_DOCUMENT_TARGET_NAME = "document_level_target"
+SHARED_SUBSTRUCTURE_TARGET_NAME = "substructure_level_target"
+SHARED_SAMPLED_QUERY_POLICY_NAME = "sampled_substructure_query_policy"
+SHARED_SAMPLED_QUERY_UNIT_NAME = "summary_substructures"
 
 
 @dataclass(frozen=True)
@@ -136,6 +149,9 @@ class FullDocumentLabelObservation(Generic[LabelT]):
     document_id: str
     label: LabelT
     truth_label_source: TruthLabelSource = ORACLE_SOURCE
+    sampling: SamplingMetadata = field(
+        default_factory=lambda: SamplingMetadata(unit_kind=ObservationUnitKind.DOCUMENT)
+    )
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -144,6 +160,7 @@ class FullDocumentLabelObservation(Generic[LabelT]):
                 "document_id": self.document_id,
                 "label": self.label,
                 "truth_label_source": normalize_truth_label_source(self.truth_label_source),
+                "sampling": self.sampling.to_dict(),
                 "metadata": self.metadata,
             }
         )
@@ -156,13 +173,13 @@ class SampledSubstructureLabelObservation(Generic[UnitT, LabelT]):
     document_id: str
     unit: UnitT
     label: LabelT
-    propensity: Optional[float] = None
+    sampling: SamplingMetadata = field(default_factory=SamplingMetadata)
     truth_label_source: TruthLabelSource = ORACLE_SOURCE
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_propensity_annotated(self) -> bool:
-        return self.propensity is not None
+        return self.sampling is not None
 
     def to_dict(self) -> Dict[str, Any]:
         return _serialize(
@@ -170,7 +187,7 @@ class SampledSubstructureLabelObservation(Generic[UnitT, LabelT]):
                 "document_id": self.document_id,
                 "unit": self.unit,
                 "label": self.label,
-                "propensity": self.propensity,
+                "sampling": self.sampling.to_dict(),
                 "truth_label_source": normalize_truth_label_source(self.truth_label_source),
                 "metadata": self.metadata,
             }
@@ -379,6 +396,50 @@ def full_document_supervision_channel(
     )
 
 
+def _shared_protocol_notes(prefix: str, notes: Sequence[str]) -> Tuple[str, ...]:
+    return (str(prefix),) + tuple(str(note) for note in notes)
+
+
+def shared_protocol_problem_notes(
+    *,
+    application_name: str,
+    notes: Sequence[str] = (),
+) -> Tuple[str, ...]:
+    return (
+        f"application={str(application_name)}",
+        (
+            "This application instantiates the shared compositional supervision "
+            "protocol; only the operator surface, oracle, and query budget differ "
+            "across Markov, LDA, trainer, and auditor artifacts."
+        ),
+    ) + tuple(str(note) for note in notes)
+
+
+def shared_full_document_supervision_channel(
+    *,
+    active: bool = True,
+    label_source: TruthLabelSource = ORACLE_SOURCE,
+    delivery_mode: SupervisionDeliveryMode = SupervisionDeliveryMode.OFFLINE_LOGGED,
+    query_policy: Optional[OracleQueryPolicySpec] = None,
+    notes: Sequence[str] = (),
+) -> SupervisionChannelSpec:
+    return full_document_supervision_channel(
+        name=SHARED_FULL_DOCUMENT_CHANNEL_NAME,
+        target_name=SHARED_DOCUMENT_TARGET_NAME,
+        active=bool(active),
+        label_source=label_source,
+        delivery_mode=delivery_mode,
+        query_policy=query_policy,
+        notes=_shared_protocol_notes(
+            (
+                "This is the document-level lane of the shared compositional "
+                "supervision protocol."
+            ),
+            notes,
+        ),
+    )
+
+
 def sampled_substructure_supervision_channel(
     *,
     name: str = "sampled_substructure_labels",
@@ -408,6 +469,37 @@ def sampled_substructure_supervision_channel(
     )
 
 
+def shared_sampled_substructure_supervision_channel(
+    *,
+    active: bool = True,
+    label_source: TruthLabelSource = ORACLE_SOURCE,
+    delivery_mode: SupervisionDeliveryMode = SupervisionDeliveryMode.OFFLINE_LOGGED,
+    query_policy: Optional[OracleQueryPolicySpec] = None,
+    targeted_laws: Sequence[LawKind] = (),
+    requires_propensity_logging: bool = True,
+    supports_unbiased_risk: bool = True,
+    notes: Sequence[str] = (),
+) -> SupervisionChannelSpec:
+    return sampled_substructure_supervision_channel(
+        name=SHARED_SAMPLED_SUBSTRUCTURE_CHANNEL_NAME,
+        target_name=SHARED_SUBSTRUCTURE_TARGET_NAME,
+        active=bool(active),
+        label_source=label_source,
+        delivery_mode=delivery_mode,
+        query_policy=query_policy,
+        targeted_laws=targeted_laws,
+        requires_propensity_logging=bool(requires_propensity_logging),
+        supports_unbiased_risk=bool(supports_unbiased_risk),
+        notes=_shared_protocol_notes(
+            (
+                "This is the sampled-substructure lane of the shared compositional "
+                "supervision protocol."
+            ),
+            notes,
+        ),
+    )
+
+
 def oracle_query_policy(
     *,
     name: str,
@@ -433,10 +525,147 @@ def oracle_query_policy(
     )
 
 
+def shared_sampled_substructure_query_policy(
+    *,
+    selection_strategy: str,
+    adaptive: bool = False,
+    budget: Optional[Dict[str, Any]] = None,
+    propensity_field_name: str = "propensity",
+    logs_realized_propensities: bool = False,
+    supports_ipw_estimation: bool = False,
+    notes: Sequence[str] = (),
+) -> OracleQueryPolicySpec:
+    return oracle_query_policy(
+        name=SHARED_SAMPLED_QUERY_POLICY_NAME,
+        query_unit_name=SHARED_SAMPLED_QUERY_UNIT_NAME,
+        selection_strategy=str(selection_strategy),
+        adaptive=bool(adaptive),
+        budget=dict(budget or {}),
+        propensity_field_name=str(propensity_field_name),
+        logs_realized_propensities=bool(logs_realized_propensities),
+        supports_ipw_estimation=bool(supports_ipw_estimation),
+        notes=_shared_protocol_notes(
+            (
+                "This query policy is one application of the shared sampled-"
+                "substructure oracle protocol."
+            ),
+            notes,
+        ),
+    )
+
+
+def shared_supervision_context(
+    *,
+    application_name: str,
+    supervision_signal_name: str,
+    channel_name: str,
+    law_kind: Optional[LawKind] = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    merged = {
+        "application_name": str(application_name),
+        "supervision_channel_name": str(channel_name),
+        "supervision_signal_name": str(supervision_signal_name),
+    }
+    if law_kind is not None:
+        merged["law_kind"] = law_kind.value if isinstance(law_kind, LawKind) else str(law_kind)
+    merged.update(dict(context or {}))
+    return merged
+
+
+def shared_logged_document_observation(
+    *,
+    document_id: str,
+    label: Any,
+    sampling: SamplingMetadata,
+    application_name: str,
+    supervision_signal_name: str,
+    truth_label_source: TruthLabelSource = ORACLE_SOURCE,
+    law_kind: Optional[LawKind] = None,
+    context: Optional[Dict[str, Any]] = None,
+    observation_id: Optional[str] = None,
+) -> LoggedLabelObservation[Any]:
+    return LoggedLabelObservation(
+        observation_id=(
+            str(observation_id)
+            if observation_id is not None
+            else (
+                f"{document_id}:{SHARED_DOCUMENT_TARGET_NAME}:"
+                f"{supervision_signal_name}:document"
+            )
+        ),
+        document_id=str(document_id),
+        unit_id=str(document_id),
+        unit_kind=ObservationUnitKind.DOCUMENT,
+        target_name=SHARED_DOCUMENT_TARGET_NAME,
+        label=label,
+        truth_label_source=truth_label_source,
+        sampling=sampling,
+        context=shared_supervision_context(
+            application_name=application_name,
+            supervision_signal_name=supervision_signal_name,
+            channel_name=SHARED_FULL_DOCUMENT_CHANNEL_NAME,
+            law_kind=law_kind,
+            context=context,
+        ),
+    )
+
+
+def shared_logged_substructure_observation(
+    *,
+    document_id: str,
+    unit_id: str,
+    unit_kind: ObservationUnitKind,
+    label: Any,
+    sampling: SamplingMetadata,
+    application_name: str,
+    supervision_signal_name: str,
+    truth_label_source: TruthLabelSource = ORACLE_SOURCE,
+    law_kind: Optional[LawKind] = None,
+    context: Optional[Dict[str, Any]] = None,
+    observation_id: Optional[str] = None,
+) -> LoggedLabelObservation[Any]:
+    resolved_unit_kind = (
+        unit_kind
+        if isinstance(unit_kind, ObservationUnitKind)
+        else ObservationUnitKind(str(unit_kind))
+    )
+    return LoggedLabelObservation(
+        observation_id=(
+            str(observation_id)
+            if observation_id is not None
+            else (
+                f"{document_id}:{SHARED_SUBSTRUCTURE_TARGET_NAME}:"
+                f"{supervision_signal_name}:{unit_id}"
+            )
+        ),
+        document_id=str(document_id),
+        unit_id=str(unit_id),
+        unit_kind=resolved_unit_kind,
+        target_name=SHARED_SUBSTRUCTURE_TARGET_NAME,
+        label=label,
+        truth_label_source=truth_label_source,
+        sampling=sampling,
+        context=shared_supervision_context(
+            application_name=application_name,
+            supervision_signal_name=supervision_signal_name,
+            channel_name=SHARED_SAMPLED_SUBSTRUCTURE_CHANNEL_NAME,
+            law_kind=law_kind,
+            context=context,
+        ),
+    )
+
+
 __all__ = [
     "LabelAcquisitionMode",
     "SupervisionDeliveryMode",
     "SupervisionChannelKind",
+    "SHARED_FULL_DOCUMENT_CHANNEL_NAME",
+    "SHARED_SAMPLED_SUBSTRUCTURE_CHANNEL_NAME",
+    "SHARED_DOCUMENT_TARGET_NAME",
+    "SHARED_SUBSTRUCTURE_TARGET_NAME",
+    "SHARED_SAMPLED_QUERY_POLICY_NAME",
+    "SHARED_SAMPLED_QUERY_UNIT_NAME",
     "OracleQueryPolicySpec",
     "FullDocumentLabelSource",
     "SampledSubstructureLabelSource",
@@ -447,4 +676,11 @@ __all__ = [
     "full_document_supervision_channel",
     "sampled_substructure_supervision_channel",
     "oracle_query_policy",
+    "shared_protocol_problem_notes",
+    "shared_full_document_supervision_channel",
+    "shared_sampled_substructure_supervision_channel",
+    "shared_sampled_substructure_query_policy",
+    "shared_supervision_context",
+    "shared_logged_document_observation",
+    "shared_logged_substructure_observation",
 ]

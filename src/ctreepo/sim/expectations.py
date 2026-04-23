@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Protoc
 
 import numpy as np
 
+from src.ctreepo.sim.core.full_tree_ipw_grid import grid_rows_from_payload
 from src.ctreepo.sim.manifest import read_manifest_jsonl
 from src.ctreepo.sim.local_law_backfill import load_or_backfill_local_law_payload
 from src.ctreepo.sim.local_law_learnability import (
@@ -40,6 +41,10 @@ STATUS_PRIORITY: Dict[str, int] = {
     "pass": 2,
     "not_applicable": 3,
 }
+
+FULL_DOC_MARKOV_DIAGNOSTIC_SIMULATION = "markov_full_doc_anchor_diagnostics"
+FULL_DOC_MARKOV_LADDER_SIMULATION = "markov_full_doc_anchor_ladder"
+FULL_TREE_IPW_MARKOV_SIMULATION = "markov_full_tree_ipw_grid"
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
@@ -183,6 +188,289 @@ def _markov_objective_metadata(payload: Mapping[str, Any]) -> Dict[str, object]:
     if local_law_weight is not None:
         out["objective_local_law_weight"] = float(local_law_weight)
     return out
+
+
+def _full_doc_markov_run_rows(
+    path: Path,
+    payload: Mapping[str, Any],
+) -> List["NormalizedRow"]:
+    rows: List[NormalizedRow] = []
+    for run in list(payload.get("runs") or []):
+        benchmark = str(run.get("benchmark", "")).strip()
+        cell_id = str(run.get("cell_id", "")).strip()
+        baseline_family = str(run.get("baseline_family", "")).strip()
+        scenario = _slug(
+            {
+                "surface": FULL_DOC_MARKOV_DIAGNOSTIC_SIMULATION,
+                "benchmark": benchmark or "unknown",
+                "cell_id": cell_id or benchmark or "default",
+            }
+        )
+        train_docs = _finite(run.get("train_doc_count"))
+        theorem_relevance = bool(run.get("theorem_relevance", False))
+        test_identity = _slug(
+            {
+                "cell_id": cell_id or benchmark or "default",
+                "bundle_source": str(run.get("bundle_source", "")).strip() or "none",
+                "val_corpus_signature": str(run.get("val_corpus_signature", "")).strip()
+                or "none",
+                "test_corpus_signature": str(run.get("test_corpus_signature", "")).strip()
+                or "none",
+            }
+        )
+        metadata: Dict[str, object] = {
+            "surface": FULL_DOC_MARKOV_DIAGNOSTIC_SIMULATION,
+            "benchmark": benchmark,
+            "cell_id": cell_id,
+            "baseline_family": baseline_family,
+            "bundle_source": str(run.get("bundle_source", "")),
+            "train_corpus_signature": str(run.get("train_corpus_signature", "")),
+            "val_corpus_signature": str(run.get("val_corpus_signature", "")),
+            "test_corpus_signature": str(run.get("test_corpus_signature", "")),
+            "parameterization": str(run.get("parameterization", "")),
+            "optimization_root_weight": _finite(run.get("optimization_root_weight")),
+            "local_law_c1_weight": _finite(run.get("local_law_c1_weight")),
+            "local_law_c2_weight": _finite(run.get("local_law_c2_weight")),
+            "local_law_c3_weight": _finite(run.get("local_law_c3_weight")),
+            "task_objective_weight_source": str(
+                run.get("task_objective_weight_source", "")
+            ),
+            "c2_metric_kind": str(run.get("c2_metric_kind", "")),
+            "c2_proxy_metric_kind": str(run.get("c2_proxy_metric_kind", "")),
+            "comparison_semantics": str(run.get("comparison_semantics", "")),
+            "comparison_semantics_label": str(
+                run.get("comparison_semantics_label", "")
+            ),
+            "legacy_semantics": bool(run.get("legacy_semantics", False)),
+            "legacy_semantics_reason": str(run.get("legacy_semantics_reason", "")),
+            "semantics_version": str(run.get("semantics_version", "")),
+            "backend_name": str(run.get("backend_name", "")),
+            "backend_package": str(run.get("backend_package", "")),
+            "backend_version": str(run.get("backend_version", "")),
+            "operator_class": str(run.get("operator_class", "")),
+            "operator_evidence_status": str(run.get("operator_evidence_status", "")),
+            "theorem_relevance": theorem_relevance,
+            "objective_weights_active": bool(
+                run.get("objective_weights_active", False)
+            ),
+            "n_regimes": _finite(run.get("n_regimes")),
+        }
+        rows.append(
+            NormalizedRow(
+                family=FAMILY_MARKOV,
+                scenario=scenario,
+                seed=int(run["seed"]) if run.get("seed") is not None else None,
+                method=baseline_family,
+                x_axis_name="train_docs",
+                x_axis_value=float(train_docs if train_docs is not None else float("nan")),
+                secondary_axis_name=None,
+                secondary_axis_value=None,
+                metric_name="root_mae",
+                metric_value=float(run.get("test_root_mae", float("nan"))),
+                doc_scale_tokens=None,
+                leaf_tokens=None,
+                leaves_per_doc=None,
+                oracle_budget_fraction=None,
+                train_docs=train_docs,
+                evidence_status=str(run.get("operator_evidence_status", "APPROX_AUDITED")),
+                source_path=str(path.resolve()),
+                test_identity=test_identity,
+                metadata=metadata,
+            )
+        )
+    return rows
+
+
+def _full_doc_markov_ladder_rows(
+    path: Path,
+    payload: Mapping[str, Any],
+) -> List["NormalizedRow"]:
+    rows: List[NormalizedRow] = []
+    for stage in list(payload.get("stages") or []):
+        scenario = _slug(
+            {
+                "surface": FULL_DOC_MARKOV_LADDER_SIMULATION,
+                "observed_token_profile": str(
+                    stage.get("observed_token_profile", "unknown")
+                ),
+            }
+        )
+        train_docs = _finite(stage.get("train_docs"))
+        metadata: Dict[str, object] = {
+            "surface": FULL_DOC_MARKOV_LADDER_SIMULATION,
+            "stage_name": str(stage.get("stage_name", "")),
+            "source": str(stage.get("source", "")),
+            "description": str(stage.get("description", "")),
+            "reference_only": bool(stage.get("reference_only", False)),
+            "observed_token_profile": str(stage.get("observed_token_profile", "")),
+            "bundle_source": str(stage.get("bundle_source", "")),
+            "summary_json": str(stage.get("summary_json", "")),
+            "train_docs": _finite(stage.get("train_docs")),
+            "val_docs": _finite(stage.get("val_docs")),
+            "test_docs": _finite(stage.get("test_docs")),
+            "state_dim": _finite(stage.get("state_dim")),
+            "hidden_dim": _finite(stage.get("hidden_dim")),
+            "n_epochs": _finite(stage.get("n_epochs")),
+            "batch_size": _finite(stage.get("batch_size")),
+            "lr": _finite(stage.get("lr")),
+            "weight_decay": _finite(stage.get("weight_decay")),
+            "anchor_gap_to_ridge": _finite(stage.get("anchor_gap_to_ridge")),
+            "backend_name": str(stage.get("doc_sequence_backend_name", "")),
+            "backend_package": str(stage.get("doc_sequence_backend_package", "")),
+            "backend_version": str(stage.get("doc_sequence_backend_version", "")),
+            "operator_class": str(stage.get("doc_sequence_operator_class", "")),
+            "operator_evidence_status": str(
+                stage.get("doc_sequence_operator_evidence_status", "")
+            ),
+            "theorem_relevance": bool(
+                stage.get("doc_sequence_theorem_relevance", False)
+            ),
+            "objective_weights_active": bool(
+                stage.get("doc_sequence_objective_weights_active", False)
+            ),
+        }
+        rows.append(
+            NormalizedRow(
+                family=FAMILY_MARKOV,
+                scenario=scenario,
+                seed=None,
+                method=str(stage.get("stage_name", "")),
+                x_axis_name="train_docs",
+                x_axis_value=float(train_docs if train_docs is not None else float("nan")),
+                secondary_axis_name=None,
+                secondary_axis_value=None,
+                metric_name="doc_sequence_test_root_mae",
+                metric_value=float(stage.get("doc_sequence_test_root_mae", float("nan"))),
+                doc_scale_tokens=None,
+                leaf_tokens=None,
+                leaves_per_doc=None,
+                oracle_budget_fraction=None,
+                train_docs=train_docs,
+                evidence_status=str(
+                    stage.get("doc_sequence_operator_evidence_status", "PROXY_ONLY")
+                ),
+                source_path=str(path.resolve()),
+                test_identity=None,
+                metadata=metadata,
+            )
+        )
+    return rows
+
+
+def _full_tree_ipw_grid_rows(
+    path: Path,
+    payload: Mapping[str, Any],
+) -> List["NormalizedRow"]:
+    rows: List[NormalizedRow] = []
+    base_config = dict(payload.get("base_config") or {})
+    bundle_metadata = dict(payload.get("bundle_metadata") or {})
+    leaf_tokens = _finite(base_config.get("fixed_leaf_tokens"))
+    train_docs = _finite(bundle_metadata.get("train_docs"))
+    for cell in grid_rows_from_payload(payload):
+        doc_sequence_train_fraction = _finite(cell.get("doc_sequence_train_fraction"))
+        root_only_train_fraction = _finite(cell.get("root_only_train_fraction"))
+        scenario = _slug(
+            {
+                "surface": FULL_TREE_IPW_MARKOV_SIMULATION,
+                "doc_sequence_train_fraction": (
+                    doc_sequence_train_fraction
+                    if doc_sequence_train_fraction is not None
+                    else "na"
+                ),
+                "root_only_train_fraction": (
+                    root_only_train_fraction
+                    if root_only_train_fraction is not None
+                    else "na"
+                ),
+            }
+        )
+        metadata = {
+            "surface": FULL_TREE_IPW_MARKOV_SIMULATION,
+            "estimand_name": str(
+                cell.get("estimand_name", "realized_full_tree_node_mean_loss")
+            ),
+            "population_kind": str(
+                cell.get("population_kind", "realized_tree_nodes")
+            ),
+            "sampling_design": str(
+                cell.get("sampling_design", "bernoulli_realized_node_sampling")
+            ),
+            "propensity_field": str(cell.get("propensity_field", "unit_propensity")),
+            "document_channel": str(
+                cell.get("document_channel", "always_observed_document_top_loss")
+            ),
+            "node_channel": str(
+                cell.get("node_channel", "sampled_realized_tree_nodes")
+            ),
+            "estimator_families": list(
+                cell.get("estimator_families") or ["naive", "ht", "hajek"]
+            ),
+            "ci_semantics": str(cell.get("ci_semantics", "point_estimation_only")),
+            **dict(cell),
+        }
+        rows.append(
+            NormalizedRow(
+                family=FAMILY_MARKOV,
+                scenario=scenario,
+                seed=None,
+                method=str(cell.get("regime", "full_tree_ipw_grid")),
+                x_axis_name="p_leaf",
+                x_axis_value=float(cell.get("p_leaf", float("nan"))),
+                secondary_axis_name="p_internal",
+                secondary_axis_value=_finite(cell.get("p_internal")),
+                metric_name="root_mae",
+                metric_value=float(cell.get("test_root_mae", float("nan"))),
+                doc_scale_tokens=None,
+                leaf_tokens=leaf_tokens,
+                leaves_per_doc=None,
+                oracle_budget_fraction=None,
+                train_docs=train_docs,
+                evidence_status="APPROX_AUDITED",
+                source_path=str(path.resolve()),
+                test_identity=_slug(
+                    {
+                        "train_corpus_signature": str(
+                            bundle_metadata.get("train_corpus_signature", "")
+                        ),
+                        "val_corpus_signature": str(
+                            bundle_metadata.get("val_corpus_signature", "")
+                        ),
+                        "test_corpus_signature": str(
+                            bundle_metadata.get("test_corpus_signature", "")
+                        ),
+                    }
+                ),
+                metadata=metadata,
+            )
+        )
+    return rows
+
+
+def _finding(
+    *,
+    kind: str,
+    title: str,
+    status: ExpectationStatus,
+    scenario: str,
+    metric: str,
+    method: str,
+    observed_summary: Dict[str, object],
+    thresholds: Dict[str, object],
+    supporting_rows: Sequence[NormalizedRow],
+) -> "ExpectationFinding":
+    return ExpectationFinding(
+        kind=kind,
+        title=title,
+        status=status,
+        family=FAMILY_MARKOV,
+        scenario=scenario,
+        metric=metric,
+        method=method,
+        direction="flat",
+        observed_summary=observed_summary,
+        thresholds=thresholds,
+        supporting_rows=_supporting_rows(list(supporting_rows)),
+    )
 
 
 @dataclass(frozen=True)
@@ -1043,12 +1331,19 @@ class MarkovOPSAdapter:
     family = FAMILY_MARKOV
 
     def can_load(self, path: Path) -> bool:
-        parts = _path_parts_lower(path)
-        if "markov" not in parts and not _path_contains_any(path, ("markov", "changepoint")):
-            return False
         try:
             payload = _load_json(path)
         except Exception:
+            return False
+        simulation = str(payload.get("simulation", "")).strip()
+        if simulation in {
+            FULL_DOC_MARKOV_DIAGNOSTIC_SIMULATION,
+            FULL_DOC_MARKOV_LADDER_SIMULATION,
+            FULL_TREE_IPW_MARKOV_SIMULATION,
+        }:
+            return True
+        parts = _path_parts_lower(path)
+        if "markov" not in parts and not _path_contains_any(path, ("markov", "changepoint")):
             return False
         metrics = payload.get("metrics", {}) or {}
         return (
@@ -1060,6 +1355,13 @@ class MarkovOPSAdapter:
 
     def load_rows(self, path: Path) -> List[NormalizedRow]:
         payload = _load_json(path)
+        simulation = str(payload.get("simulation", "")).strip()
+        if simulation == FULL_DOC_MARKOV_DIAGNOSTIC_SIMULATION:
+            return _full_doc_markov_run_rows(path, payload)
+        if simulation == FULL_DOC_MARKOV_LADDER_SIMULATION:
+            return _full_doc_markov_ladder_rows(path, payload)
+        if simulation == FULL_TREE_IPW_MARKOV_SIMULATION:
+            return _full_tree_ipw_grid_rows(path, payload)
         cfg = payload.get("config", {}) or {}
         geom = payload.get("training_geometry", {}) or {}
         objective_meta = _objective_metadata(payload)
@@ -1169,8 +1471,53 @@ class MarkovOPSAdapter:
         config: ExpectationConfig,
     ) -> List[ExpectationFinding]:
         findings: List[ExpectationFinding] = []
+        diagnostics_rows = [
+            row
+            for row in rows
+            if str(row.metadata.get("surface", "")) == FULL_DOC_MARKOV_DIAGNOSTIC_SIMULATION
+        ]
+        ladder_rows = [
+            row
+            for row in rows
+            if str(row.metadata.get("surface", "")) == FULL_DOC_MARKOV_LADDER_SIMULATION
+        ]
+        full_tree_rows = [
+            row
+            for row in rows
+            if str(row.metadata.get("surface", "")) == FULL_TREE_IPW_MARKOV_SIMULATION
+        ]
+        legacy_rows = [
+            row
+            for row in rows
+            if str(row.metadata.get("surface", ""))
+            not in {
+                FULL_DOC_MARKOV_DIAGNOSTIC_SIMULATION,
+                FULL_DOC_MARKOV_LADDER_SIMULATION,
+                FULL_TREE_IPW_MARKOV_SIMULATION,
+            }
+        ]
+        if diagnostics_rows:
+            findings.extend(
+                self._build_full_doc_anchor_diagnostic_expectations(
+                    diagnostics_rows, config=config
+                )
+            )
+        if ladder_rows:
+            findings.extend(
+                self._build_full_doc_anchor_ladder_expectations(
+                    ladder_rows, config=config
+                )
+            )
+        if full_tree_rows:
+            findings.extend(
+                self._build_full_tree_ipw_grid_expectations(
+                    full_tree_rows, config=config
+                )
+            )
+        if not legacy_rows:
+            return findings
         by_scenario: Dict[str, List[NormalizedRow]] = {}
-        for row in rows:
+        for row in legacy_rows:
             by_scenario.setdefault(row.scenario, []).append(row)
 
         for scenario, srows in sorted(by_scenario.items()):
@@ -1307,7 +1654,7 @@ class MarkovOPSAdapter:
                 )
 
         by_granularity: Dict[str, List[NormalizedRow]] = {}
-        for row in rows:
+        for row in legacy_rows:
             if row.method == "learned" and row.metric_name == "root_mae":
                 key = str(row.metadata.get("granularity_group", row.scenario))
                 by_granularity.setdefault(key, []).append(row)
@@ -1322,6 +1669,520 @@ class MarkovOPSAdapter:
                     title="Markov granularity sensitivity: low-budget variation and best-envelope improvement",
                 ).evaluate(grows, config=config)
             )
+        return findings
+
+    def _build_full_tree_ipw_grid_expectations(
+        self,
+        rows: Sequence[NormalizedRow],
+        *,
+        config: ExpectationConfig,
+    ) -> List[ExpectationFinding]:
+        del config
+        findings: List[ExpectationFinding] = []
+        scenario = FULL_TREE_IPW_MARKOV_SIMULATION
+
+        semantics_bad = [
+            row
+            for row in rows
+            if str(row.metadata.get("estimand_name", "")) != "realized_full_tree_node_mean_loss"
+            or str(row.metadata.get("population_kind", "")) != "realized_tree_nodes"
+            or str(row.metadata.get("sampling_design", "")) != "bernoulli_realized_node_sampling"
+            or str(row.metadata.get("propensity_field", "")) != "unit_propensity"
+            or str(row.metadata.get("document_channel", "")) != "always_observed_document_top_loss"
+            or str(row.metadata.get("node_channel", "")) != "sampled_realized_tree_nodes"
+            or list(row.metadata.get("estimator_families") or []) != ["naive", "ht", "hajek"]
+        ]
+        findings.append(
+            _finding(
+                kind="full_tree_ipw_semantics",
+                title="Full-tree IPW grid exposes the explicit realized-node estimand semantics",
+                status="fail" if semantics_bad else "pass",
+                scenario=scenario,
+                metric="estimand_semantics",
+                method="all_cells",
+                observed_summary={
+                    "n_rows": int(len(rows)),
+                    "n_bad_rows": int(len(semantics_bad)),
+                    "ci_semantics": sorted(
+                        {
+                            str(row.metadata.get("ci_semantics", ""))
+                            for row in rows
+                        }
+                    ),
+                },
+                thresholds={
+                    "estimand_name": "realized_full_tree_node_mean_loss",
+                    "population_kind": "realized_tree_nodes",
+                    "sampling_design": "bernoulli_realized_node_sampling",
+                },
+                supporting_rows=rows,
+            )
+        )
+
+        full_tree_rows = [
+            row
+            for row in rows
+            if abs(float(row.metadata.get("p_internal", float("nan"))) - 1.0) <= 1e-12
+            and abs(float(row.metadata.get("p_leaf", float("nan"))) - 1.0) <= 1e-12
+        ]
+        endpoint_bad = [
+            row
+            for row in full_tree_rows
+            if not math.isfinite(float(row.metadata.get("test_sampled_node_ht_abs_error", float("nan"))))
+            or not math.isfinite(float(row.metadata.get("test_sampled_node_hajek_abs_error", float("nan"))))
+            or float(row.metadata.get("test_sampled_node_ht_abs_error", float("inf"))) > 1e-6
+            or float(row.metadata.get("test_sampled_node_hajek_abs_error", float("inf"))) > 1e-6
+        ]
+        findings.append(
+            _finding(
+                kind="full_tree_ipw_endpoint",
+                title="Full-tree IPW endpoint (1,1) recovers the realized full-tree node estimand",
+                status=(
+                    "fail"
+                    if full_tree_rows and endpoint_bad
+                    else ("pass" if full_tree_rows else "not_applicable")
+                ),
+                scenario=scenario,
+                metric="ht_hajek_endpoint_recovery",
+                method="full_tree_endpoint",
+                observed_summary={
+                    "n_rows": int(len(full_tree_rows)),
+                    "n_bad_rows": int(len(endpoint_bad)),
+                    "max_ht_abs_error": max(
+                        [
+                            float(row.metadata.get("test_sampled_node_ht_abs_error", float("nan")))
+                            for row in full_tree_rows
+                        ]
+                        or [float("nan")]
+                    ),
+                    "max_hajek_abs_error": max(
+                        [
+                            float(row.metadata.get("test_sampled_node_hajek_abs_error", float("nan")))
+                            for row in full_tree_rows
+                        ]
+                        or [float("nan")]
+                    ),
+                },
+                thresholds={"abs_error_tolerance": 1e-6},
+                supporting_rows=full_tree_rows or rows,
+            )
+        )
+
+        doc_only_rows = [
+            row
+            for row in rows
+            if abs(float(row.metadata.get("p_internal", float("nan"))) - 0.0) <= 1e-12
+            and abs(float(row.metadata.get("p_leaf", float("nan"))) - 0.0) <= 1e-12
+        ]
+        doc_only_bad = [
+            row
+            for row in doc_only_rows
+            if abs(float(row.metadata.get("test_sample_fraction", float("nan")))) > 1e-12
+            or int(row.metadata.get("test_sampled_nodes", 0)) != 0
+        ]
+        findings.append(
+            _finding(
+                kind="full_tree_ipw_endpoint",
+                title="Full-tree IPW endpoint (0,0) remains a document-only reference",
+                status=(
+                    "fail"
+                    if doc_only_rows and doc_only_bad
+                    else ("pass" if doc_only_rows else "not_applicable")
+                ),
+                scenario=scenario,
+                metric="document_only_reference",
+                method="doc_only_endpoint",
+                observed_summary={
+                    "n_rows": int(len(doc_only_rows)),
+                    "n_bad_rows": int(len(doc_only_bad)),
+                },
+                thresholds={"sample_fraction": 0.0, "sampled_nodes": 0},
+                supporting_rows=doc_only_rows or rows,
+            )
+        )
+
+        sampled_rows = [
+            row
+            for row in rows
+            if float(row.metadata.get("test_sample_fraction", float("nan"))) > 0.0
+        ]
+        sampled_bad = [
+            row
+            for row in sampled_rows
+            if not math.isfinite(float(row.metadata.get("test_effective_sample_size", float("nan"))))
+            or not math.isfinite(float(row.metadata.get("test_max_weight", float("nan"))))
+            or float(row.metadata.get("test_effective_sample_size", float("nan"))) <= 0.0
+            or float(row.metadata.get("test_effective_sample_size", float("nan")))
+            > float(row.metadata.get("test_sampled_nodes", float("inf"))) + 1e-9
+            or float(row.metadata.get("test_max_weight", float("nan"))) <= 0.0
+        ]
+        findings.append(
+            _finding(
+                kind="full_tree_ipw_sampling",
+                title="Full-tree IPW sampled cells expose finite, internally consistent ESS and max-weight diagnostics",
+                status=(
+                    "fail"
+                    if sampled_rows and sampled_bad
+                    else ("pass" if sampled_rows else "not_applicable")
+                ),
+                scenario=scenario,
+                metric="sampling_diagnostics",
+                method="sampled_cells",
+                observed_summary={
+                    "n_rows": int(len(sampled_rows)),
+                    "n_bad_rows": int(len(sampled_bad)),
+                },
+                thresholds={"effective_sample_size>0": True, "max_weight>0": True},
+                supporting_rows=sampled_rows or rows,
+            )
+        )
+
+        plane_pairs = {
+            (
+                float(row.metadata.get("doc_sequence_train_fraction", float("nan"))),
+                float(row.metadata.get("root_only_train_fraction", float("nan"))),
+            )
+            for row in rows
+        }
+        findings.append(
+            _finding(
+                kind="full_tree_ipw_planes",
+                title="Full-tree IPW root-only and doc-sequence planes remain explicitly separated",
+                status="pass" if plane_pairs else "not_applicable",
+                scenario=scenario,
+                metric="plane_separation",
+                method="all_cells",
+                observed_summary={
+                    "plane_pairs": [
+                        {
+                            "doc_sequence_train_fraction": float(pair[0]),
+                            "root_only_train_fraction": float(pair[1]),
+                        }
+                        for pair in sorted(plane_pairs)
+                    ],
+                    "n_plane_pairs": int(len(plane_pairs)),
+                },
+                thresholds={"plane_metadata_present": True},
+                supporting_rows=rows,
+            )
+        )
+        return findings
+
+    def _build_full_doc_anchor_diagnostic_expectations(
+        self,
+        rows: Sequence[NormalizedRow],
+        *,
+        config: ExpectationConfig,
+    ) -> List[ExpectationFinding]:
+        del config
+        findings: List[ExpectationFinding] = []
+        scenario = FULL_DOC_MARKOV_DIAGNOSTIC_SIMULATION
+
+        grouped_signatures: Dict[tuple[str, str, float], set[tuple[str, str, str]]] = {}
+        seed_counts: Dict[tuple[str, str, float], set[int | None]] = {}
+        for row in rows:
+            group_key = (
+                str(row.metadata.get("benchmark", "")),
+                str(row.metadata.get("cell_id", "")),
+                float(row.train_docs if row.train_docs is not None else float("nan")),
+            )
+            grouped_signatures.setdefault(group_key, set()).add(
+                (
+                    str(row.metadata.get("bundle_source", "")),
+                    str(row.metadata.get("val_corpus_signature", "")),
+                    str(row.metadata.get("test_corpus_signature", "")),
+                )
+            )
+            seed_counts.setdefault(group_key, set()).add(row.seed)
+        inconsistent_groups = {
+            key: len(value)
+            for key, value in grouped_signatures.items()
+            if len(value) > 1
+        }
+        max_seed_count = max((len(v) for v in seed_counts.values()), default=0)
+        if inconsistent_groups:
+            reproducibility_status: ExpectationStatus = "fail"
+            reproducibility_note = "val/test bundle identity drifted across seeds"
+        elif max_seed_count < 2:
+            reproducibility_status = "warn"
+            reproducibility_note = "only one seed is currently present, so cross-seed reproducibility is not fully exercised"
+        else:
+            reproducibility_status = "pass"
+            reproducibility_note = "all cells reuse the same fixed val/test bundle across seeds"
+        findings.append(
+            _finding(
+                kind="full_doc_reproducibility",
+                title="Full-doc diagnostics fixed-bundle reproducibility stays locked across seeds",
+                status=reproducibility_status,
+                scenario=scenario,
+                metric="bundle_identity",
+                method="all_families",
+                observed_summary={
+                    "n_groups": int(len(grouped_signatures)),
+                    "max_seed_count": int(max_seed_count),
+                    "inconsistent_groups": {
+                        "|".join(
+                            [str(item[0]), str(item[1]), _stringify(item[2])]
+                        ): int(count)
+                        for item, count in inconsistent_groups.items()
+                    },
+                    "note": reproducibility_note,
+                },
+                thresholds={"required_unique_bundle_identities_per_group": 1},
+                supporting_rows=rows,
+            )
+        )
+
+        official_rows = [
+            row
+            for row in rows
+            if row.method in {"official_fno", "official_fno_sumlen"}
+        ]
+        if official_rows:
+            official_bad = [
+                row
+                for row in official_rows
+                if str(row.metadata.get("backend_package", "")) != "neuraloperator"
+                or str(row.metadata.get("operator_class", "")) != "neuralop.models.FNO"
+                or not str(row.metadata.get("backend_version", "")).strip()
+                or str(row.metadata.get("operator_evidence_status", "")) != "PROXY_ONLY"
+            ]
+            findings.append(
+                _finding(
+                    kind="full_doc_provenance",
+                    title="Full-doc official FNO provenance matches the installed official backend",
+                    status="fail" if official_bad else "pass",
+                    scenario=scenario,
+                    metric="backend_provenance",
+                    method="official_fno",
+                    observed_summary={
+                        "n_rows": int(len(official_rows)),
+                        "n_bad_rows": int(len(official_bad)),
+                        "backend_packages": sorted(
+                            {str(row.metadata.get("backend_package", "")) for row in official_rows}
+                        ),
+                        "backend_versions": sorted(
+                            {str(row.metadata.get("backend_version", "")) for row in official_rows}
+                        ),
+                    },
+                    thresholds={"backend_package": "neuraloperator", "operator_class": "neuralop.models.FNO"},
+                    supporting_rows=official_rows,
+                )
+            )
+        else:
+            findings.append(
+                _finding(
+                    kind="full_doc_provenance",
+                    title="Full-doc official FNO provenance matches the installed official backend",
+                    status="not_applicable",
+                    scenario=scenario,
+                    metric="backend_provenance",
+                    method="official_fno",
+                    observed_summary={"note": "no official_fno rows were present"},
+                    thresholds={"backend_package": "neuraloperator", "operator_class": "neuralop.models.FNO"},
+                    supporting_rows=rows,
+                )
+            )
+
+        tree_rows = [
+            row
+            for row in rows
+            if str(row.method).startswith("tree_neural")
+        ]
+        current_tree_rows = [
+            row
+            for row in tree_rows
+            if str(row.metadata.get("comparison_semantics", "")) == "current"
+        ]
+        if current_tree_rows:
+            current_bad = [
+                row
+                for row in current_tree_rows
+                if str(row.metadata.get("c2_metric_kind", "")) != "score_drift"
+                or not str(row.metadata.get("semantics_version", "")).strip()
+                or not str(row.metadata.get("parameterization", "")).strip()
+                or str(row.metadata.get("operator_evidence_status", "")) != "APPROX_AUDITED"
+                or not bool(row.metadata.get("objective_weights_active", False))
+            ]
+            findings.append(
+                _finding(
+                    kind="full_doc_tree_semantics",
+                    title="Full-doc current tree-neural rows expose theorem-facing score-drift semantics",
+                    status="fail" if current_bad else "pass",
+                    scenario=scenario,
+                    metric="tree_neural_semantics",
+                    method="tree_neural",
+                    observed_summary={
+                        "n_current_rows": int(len(current_tree_rows)),
+                        "n_bad_rows": int(len(current_bad)),
+                        "c2_metric_kinds": sorted(
+                            {str(row.metadata.get("c2_metric_kind", "")) for row in current_tree_rows}
+                        ),
+                        "semantics_versions": sorted(
+                            {str(row.metadata.get("semantics_version", "")) for row in current_tree_rows}
+                        ),
+                    },
+                    thresholds={"c2_metric_kind": "score_drift", "operator_evidence_status": "APPROX_AUDITED"},
+                    supporting_rows=current_tree_rows,
+                )
+            )
+        else:
+            findings.append(
+                _finding(
+                    kind="full_doc_tree_semantics",
+                    title="Full-doc current tree-neural rows expose theorem-facing score-drift semantics",
+                    status="not_applicable",
+                    scenario=scenario,
+                    metric="tree_neural_semantics",
+                    method="tree_neural",
+                    observed_summary={"note": "no current tree-neural rows were present"},
+                    thresholds={"c2_metric_kind": "score_drift"},
+                    supporting_rows=rows,
+                )
+            )
+
+        if tree_rows:
+            labels_by_mode: Dict[str, set[str]] = {}
+            separation_bad: List[NormalizedRow] = []
+            for row in tree_rows:
+                mode = str(row.metadata.get("comparison_semantics", ""))
+                label = str(row.metadata.get("comparison_semantics_label", ""))
+                labels_by_mode.setdefault(mode, set()).add(label)
+                if mode == "legacy" and (
+                    not bool(row.metadata.get("legacy_semantics", False))
+                    or not label.strip()
+                    or label == str(row.metadata.get("semantics_version", "")).strip()
+                ):
+                    separation_bad.append(row)
+            shared_labels = sorted(
+                labels_by_mode.get("legacy", set()) & labels_by_mode.get("current", set())
+            )
+            if shared_labels:
+                separation_bad.extend(tree_rows)
+            findings.append(
+                _finding(
+                    kind="full_doc_tree_semantics",
+                    title="Full-doc tree-neural legacy rows stay explicitly separated from current semantics",
+                    status="fail" if separation_bad else "pass",
+                    scenario=scenario,
+                    metric="legacy_current_separation",
+                    method="tree_neural",
+                    observed_summary={
+                        "modes_present": sorted(labels_by_mode.keys()),
+                        "labels_by_mode": {
+                            key: sorted(values) for key, values in labels_by_mode.items()
+                        },
+                        "shared_labels": shared_labels,
+                    },
+                    thresholds={"legacy_labels_must_not_overlap_current": True},
+                    supporting_rows=tree_rows,
+                )
+            )
+        return findings
+
+    def _build_full_doc_anchor_ladder_expectations(
+        self,
+        rows: Sequence[NormalizedRow],
+        *,
+        config: ExpectationConfig,
+    ) -> List[ExpectationFinding]:
+        del config
+        findings: List[ExpectationFinding] = []
+        scenario = FULL_DOC_MARKOV_LADDER_SIMULATION
+
+        provenance_bad = [
+            row
+            for row in rows
+            if str(row.metadata.get("backend_package", "")) != "neuraloperator"
+            or str(row.metadata.get("operator_class", "")) != "neuralop.models.FNO"
+            or not str(row.metadata.get("backend_version", "")).strip()
+        ]
+        findings.append(
+            _finding(
+                kind="full_doc_ladder_provenance",
+                title="Full-doc ladder doc-sequence stages record official neuraloperator provenance",
+                status="fail" if provenance_bad else "pass",
+                scenario=scenario,
+                metric="backend_provenance",
+                method="doc_sequence",
+                observed_summary={
+                    "n_rows": int(len(rows)),
+                    "n_bad_rows": int(len(provenance_bad)),
+                    "backend_versions": sorted(
+                        {str(row.metadata.get("backend_version", "")) for row in rows}
+                    ),
+                },
+                thresholds={"backend_package": "neuraloperator", "operator_class": "neuralop.models.FNO"},
+                supporting_rows=rows,
+            )
+        )
+
+        stage_by_name = {
+            str(row.metadata.get("stage_name", "")): row for row in rows
+        }
+        paired_rows: List[NormalizedRow] = []
+        mismatches: Dict[str, Dict[str, object]] = {}
+        for stage_name, reproduction_row in stage_by_name.items():
+            if not stage_name.endswith("_reproduction"):
+                continue
+            reference_name = stage_name[: -len("_reproduction")] + "_reference"
+            reference_row = stage_by_name.get(reference_name)
+            if reference_row is None:
+                continue
+            paired_rows.extend([reproduction_row, reference_row])
+            compared_fields = (
+                "observed_token_profile",
+                "bundle_source",
+                "train_docs",
+                "val_docs",
+                "test_docs",
+                "state_dim",
+                "hidden_dim",
+                "n_epochs",
+                "batch_size",
+                "lr",
+                "weight_decay",
+                "backend_package",
+                "operator_class",
+            )
+            field_mismatches: Dict[str, object] = {}
+            for field_name in compared_fields:
+                left = reproduction_row.metadata.get(field_name)
+                right = reference_row.metadata.get(field_name)
+                if left != right:
+                    field_mismatches[field_name] = {
+                        "reproduction": left,
+                        "reference": right,
+                    }
+            if field_mismatches:
+                mismatches[stage_name] = field_mismatches
+        if paired_rows:
+            status: ExpectationStatus = "fail" if mismatches else "pass"
+            note = (
+                "reference/reproduction bundle and config semantics match"
+                if not mismatches
+                else "reference/reproduction semantics diverged"
+            )
+        else:
+            status = "not_applicable"
+            note = "no reference/reproduction pair was present"
+        findings.append(
+            _finding(
+                kind="full_doc_ladder_pairing",
+                title="Full-doc ladder reference and reproduction stages stay bundle/config matched",
+                status=status,
+                scenario=scenario,
+                metric="reference_reproduction_match",
+                method="doc_sequence",
+                observed_summary={
+                    "n_pairs": int(len(paired_rows) // 2),
+                    "mismatches": mismatches,
+                    "note": note,
+                },
+                thresholds={"compared_fields": ["bundle_source", "train_docs", "state_dim", "hidden_dim", "n_epochs", "batch_size", "lr", "weight_decay"]},
+                supporting_rows=paired_rows or rows,
+            )
+        )
         return findings
 
 

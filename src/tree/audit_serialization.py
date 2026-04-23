@@ -126,6 +126,15 @@ def audit_report_to_dict(report: Any) -> Dict[str, Any]:
                 _attr(report, "compositional_learning_problem", {}),
             )
         ),
+        "logged_observations": list(
+            payload.get("logged_observations", _attr(report, "logged_observations", [])) or []
+        ),
+        "logged_observation_artifacts": _as_mapping(
+            payload.get(
+                "logged_observation_artifacts",
+                _attr(report, "logged_observation_artifacts", {}),
+            )
+        ),
         "inclusion_probability_map": _as_mapping(
             payload.get("inclusion_probability_map", _attr(report, "inclusion_probability_map", {}))
         ),
@@ -220,6 +229,7 @@ def audit_problem_manifest(report_payload: Mapping[str, Any]) -> Dict[str, Any]:
         "sampling_strategy": str(payload.get("sampling_strategy", "") or ""),
         "sampling_probability": float(payload.get("sampling_probability", 1.0) or 1.0),
         "logged_inclusion_probabilities": bool(payload.get("inclusion_probability_map")),
+        "logged_observation_artifacts": _as_mapping(payload.get("logged_observation_artifacts", {})),
     }
 
 

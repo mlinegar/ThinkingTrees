@@ -41,13 +41,38 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from src.core.logged_supervision import ObservationUnitKind, SamplingMetadata
 from src.ctreepo.sim.device_runtime import (
     VALID_DEVICE_MODES,
     configure_torch_runtime,
     resolve_torch_device,
 )
-from src.ctreepo.sim.core.training_selection import TrainingSelectionMetadata
 from src.ctreepo.sim.objective_semantics import discrepancy_benchmark_objective_semantics
+from src.training.supervision import (
+    AffineSimplexCalibrationConfig,
+    DenseSimplexForestModelConfig,
+    DenseSimplexTrainingConfig,
+    DenseSimplexForestTrainingConfig,
+    DenseSimplexModelConfig,
+    DenseSupervisionExample,
+    OPTIMIZER_FAMILY_AFFINE_VECTOR_CALIBRATION,
+    OPTIMIZER_FAMILY_GRADIENT_DENSE,
+    OPTIMIZER_FAMILY_TREE_ENSEMBLE,
+    REPRESENTATION_DENSE_FEATURE_VECTOR,
+    REPRESENTATION_SIMPLEX_VECTOR,
+    TARGET_SIMPLEX_VECTOR,
+    apply_dense_affine_simplex_calibrator,
+    build_dense_full_document_supervision_dataset,
+    build_dense_sampled_substructure_supervision_dataset,
+    dense_vector_rows_to_numpy,
+    fit_dense_affine_simplex_calibrator,
+    fit_dense_simplex_forest_regressor,
+    fit_dense_simplex_regressor,
+    predict_dense_simplex_forest_regressor,
+    predict_dense_simplex_regressor,
+    supervision_training_contract,
+)
+from src.training.config_sections import OptimizerConfig, RunConfig, RuntimeConfig, TrainConfig
 
 
 from src.ctreepo.sim.core.segment_lda_ops_weight_recovery import (  # noqa: E402
@@ -98,6 +123,7 @@ class SegmentedLDACtreePOConfig:
     leaf_theta_mlp_batch_size: int = 256
     leaf_theta_mlp_lr: float = 1e-3
     leaf_theta_mlp_weight_decay: float = 1e-4
+    include_full_doc_theta_baseline: bool = False
 
     # Topic-word estimation (Tensor-LDA-inspired upstream step).
     topic_phi_estimator: TopicPhiEstimatorName = "noisy_theory"
@@ -300,24 +326,10 @@ def _l2(u: np.ndarray, v: np.ndarray) -> float:
     return float(np.sqrt(np.sum(d * d)))
 
 
-def _normalize_simplex_vec(x: np.ndarray) -> np.ndarray:
-    y = np.maximum(np.asarray(x, dtype=np.float64), 0.0)
-    s = float(np.sum(y))
-    if not math.isfinite(s) or s <= 0.0:
-        return np.full_like(y, 1.0 / float(y.size), dtype=np.float64)
-    return y / s
+from src.ctreepo.sim.util import normalize_simplex_vec, normalize_simplex_rows
 
-
-def _normalize_simplex_rows(x: np.ndarray) -> np.ndarray:
-    y = np.maximum(np.asarray(x, dtype=np.float64), 0.0)
-    s = np.sum(y, axis=1, keepdims=True)
-    out = np.zeros_like(y, dtype=np.float64)
-    good = (s[:, 0] > 0.0) & np.isfinite(s[:, 0])
-    if np.any(good):
-        out[good] = y[good] / s[good]
-    if np.any(~good):
-        out[~good] = 1.0 / float(y.shape[1])
-    return out
+_normalize_simplex_vec = normalize_simplex_vec
+_normalize_simplex_rows = normalize_simplex_rows
 
 
 def _inclusion_probs_from_scores(scores: np.ndarray, *, target_rate: float, pi_min: float) -> np.ndarray:
@@ -1075,42 +1087,6 @@ def _sample_leaf_query_mask(
     return np.asarray(_bernoulli_sample(pi, rng=rng), dtype=bool), np.asarray(pi, dtype=np.float64)
 
 
-def _fit_affine_calibration(
-    proxy_leaf_thetas: np.ndarray,
-    true_leaf_thetas: np.ndarray,
-    queried_mask: np.ndarray,
-    *,
-    ridge: float,
-) -> Tuple[np.ndarray, np.ndarray, int]:
-    x = np.asarray(proxy_leaf_thetas, dtype=np.float64)[queried_mask]
-    y = np.asarray(true_leaf_thetas, dtype=np.float64)[queried_mask]
-    k = int(proxy_leaf_thetas.shape[2])
-    n = int(x.shape[0])
-    if n <= 0:
-        return np.eye(k, dtype=np.float64), np.zeros((k,), dtype=np.float64), 0
-
-    x1 = np.concatenate([x, np.ones((n, 1), dtype=np.float64)], axis=1)
-    gram = x1.T @ x1
-    lam = float(max(0.0, ridge))
-    if lam > 0.0:
-        reg = lam * np.eye(k + 1, dtype=np.float64)
-        reg[-1, -1] = 0.0
-        gram = gram + reg
-    rhs = x1.T @ y
-    coef, *_ = np.linalg.lstsq(gram, rhs, rcond=None)
-    w = np.asarray(coef[:k, :], dtype=np.float64)
-    b = np.asarray(coef[k, :], dtype=np.float64)
-    return w, b, n
-
-
-def _apply_affine_calibration(theta: np.ndarray, *, w: np.ndarray, b: np.ndarray) -> np.ndarray:
-    z = np.asarray(theta, dtype=np.float64)
-    flat = z.reshape(-1, z.shape[2])
-    mapped = flat @ np.asarray(w, dtype=np.float64) + np.asarray(b, dtype=np.float64)
-    mapped = _normalize_simplex_rows(mapped)
-    return mapped.reshape(z.shape)
-
-
 def _counts_to_freq_rows(counts: np.ndarray) -> np.ndarray:
     x = np.asarray(counts, dtype=np.float64)
     if x.ndim != 2:
@@ -1120,160 +1096,254 @@ def _counts_to_freq_rows(counts: np.ndarray) -> np.ndarray:
     return np.asarray(x / s, dtype=np.float64)
 
 
-def _gather_leaf_supervision(
+def _full_doc_theta_supervision_dataset(
+    books: Sequence[SegmentedBook],
+    *,
+    split: str,
+    n_topics: int,
+    vocab_size: int,
+) -> "SupervisionDataset":
+    rows: List[DenseSupervisionExample] = []
+    rubric = (
+        "Predict the full-document topic mixture from a dense document representation."
+    )
+    for idx, book in enumerate(books):
+        doc_id = f"{split}_doc_{idx}"
+        rows.append(
+            DenseSupervisionExample(
+                example_id=doc_id,
+                features=_counts_to_freq_rows(
+                    _span_word_counts(
+                        book.token_words,
+                        start=0,
+                        end=len(book.token_words),
+                        vocab_size=int(vocab_size),
+                    ).reshape(1, -1)
+                )[0].tolist(),
+                vector_target=_aggregate_root_truth(book, n_topics=int(n_topics)).tolist(),
+                original_text=f"segmented_lda_ctreepo::{doc_id}",
+                rubric=rubric,
+                response="single_full_document_candidate",
+                response_id=f"{doc_id}:single_candidate",
+                reference_score=0.0,
+                source_doc_id=doc_id,
+                truth_label_source="oracle",
+                metadata={
+                    "dgp": "segmented_lda_ctreepo",
+                    "input_view": "single_full_document_bow",
+                    "uses_tree_merges": False,
+                    "n_topics": int(n_topics),
+                },
+            )
+        )
+    return build_dense_full_document_supervision_dataset(
+        rows,
+        application_name="segmented_lda_ctreepo",
+        supervision_signal_name="document_level_target",
+        response_signal_name="document_topic_mixture",
+        law_type="document_level_target",
+        split=str(split),
+        response_signal_min=0.0,
+        response_signal_max=1.0,
+        metadata={
+            "dgp": "segmented_lda_ctreepo",
+            "input_view": "single_full_document_bow",
+            "uses_tree_merges": False,
+            "target_structure": "simplex",
+            "n_topics": int(n_topics),
+        },
+    )
+
+
+def _leaf_calibration_supervision_dataset(
+    proxy_leaf_thetas: np.ndarray,
+    true_leaf_thetas: np.ndarray,
+    queried_mask_pad: np.ndarray,
+    *,
+    inclusion_probs_pad: Optional[np.ndarray],
+    split: str,
+    query_policy: str,
+) -> "SupervisionDataset":
+    rows: List[DenseSupervisionExample] = []
+    proxy = _normalize_simplex_rows(np.asarray(proxy_leaf_thetas, dtype=np.float64).reshape(-1, proxy_leaf_thetas.shape[2]))
+    truth = _normalize_simplex_rows(np.asarray(true_leaf_thetas, dtype=np.float64).reshape(-1, true_leaf_thetas.shape[2]))
+    proxy = proxy.reshape(proxy_leaf_thetas.shape)
+    truth = truth.reshape(true_leaf_thetas.shape)
+    mask = np.asarray(queried_mask_pad, dtype=bool)
+    pi = (
+        np.asarray(inclusion_probs_pad, dtype=np.float64)
+        if inclusion_probs_pad is not None
+        else np.ones_like(mask, dtype=np.float64)
+    )
+    if mask.ndim != 2 or pi.ndim != 2:
+        raise ValueError("queried_mask_pad and inclusion_probs_pad must be 2D [books, leaves]")
+    n_topics = int(proxy.shape[2])
+    rubric = "Calibrate sampled proxy leaf topic mixtures to oracle leaf topic mixtures."
+    for i in range(int(proxy.shape[0])):
+        if i >= mask.shape[0]:
+            break
+        p_book = proxy[i]
+        t_book = truth[i]
+        if p_book.shape != t_book.shape:
+            raise ValueError("proxy and truth calibration rows must align")
+        m = mask[i, : p_book.shape[0]]
+        p = np.clip(pi[i, : p_book.shape[0]], 1e-9, 1.0)
+        if not np.any(m):
+            continue
+        for j in np.nonzero(m)[0].tolist():
+            doc_id = f"{split}_book_{i}"
+            leaf_id = f"{doc_id}:leaf_{int(j)}"
+            rows.append(
+                DenseSupervisionExample(
+                    example_id=f"{leaf_id}:affine_calibration",
+                    features=p_book[int(j)].tolist(),
+                    vector_target=t_book[int(j)].tolist(),
+                    original_text=f"segmented_lda_ctreepo::{doc_id}",
+                    rubric=rubric,
+                    response="sampled_proxy_leaf_candidate",
+                    response_id=f"{leaf_id}:proxy",
+                    unit_kind=ObservationUnitKind.LEAF,
+                    reference_score=0.0,
+                    source_doc_id=doc_id,
+                    truth_label_source="oracle",
+                    sampling=SamplingMetadata(
+                        document_propensity=1.0,
+                        unit_propensity=float(p[int(j)]),
+                        label_propensity=1.0,
+                        joint_propensity=float(p[int(j)]),
+                        sampling_scheme="sampled_substructure_supervision",
+                        policy_name=str(query_policy),
+                        unit_kind=ObservationUnitKind.LEAF,
+                        supports_ipw_estimation=True,
+                        metadata={
+                            "split": str(split),
+                            "leaf_index": int(j),
+                            "query_policy": str(query_policy),
+                            "calibration_stage": "affine",
+                        },
+                    ),
+                    metadata={
+                        "dgp": "segmented_lda_ctreepo",
+                        "input_view": "proxy_leaf_topic_mixture",
+                        "uses_tree_merges": False,
+                        "n_topics": n_topics,
+                        "leaf_index": int(j),
+                        "query_policy": str(query_policy),
+                        "calibration_stage": "affine",
+                    },
+                )
+            )
+    return build_dense_sampled_substructure_supervision_dataset(
+        rows,
+        application_name="segmented_lda_ctreepo",
+        supervision_signal_name="substructure_level_target",
+        response_signal_name="leaf_topic_mixture",
+        law_type="sufficiency",
+        split=str(split),
+        response_signal_min=0.0,
+        response_signal_max=1.0,
+        metadata={
+            "dgp": "segmented_lda_ctreepo",
+            "input_view": "proxy_leaf_topic_mixture",
+            "uses_tree_merges": False,
+            "target_structure": "simplex",
+            "n_topics": n_topics,
+            "query_policy": str(query_policy),
+            "calibration_stage": "affine",
+        },
+    )
+
+
+def _leaf_theta_supervision_dataset(
     leaf_counts: Sequence[np.ndarray],
     leaf_truth: Sequence[np.ndarray],
     queried_mask_pad: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray]:
-    x_rows: List[np.ndarray] = []
-    y_rows: List[np.ndarray] = []
+    *,
+    inclusion_probs_pad: Optional[np.ndarray],
+    split: str,
+    n_topics: int,
+    query_policy: str,
+) -> "SupervisionDataset":
+    rows: List[DenseSupervisionExample] = []
     mask = np.asarray(queried_mask_pad, dtype=bool)
-    if mask.ndim != 2:
-        raise ValueError("queried_mask_pad must be 2D [books, leaves]")
+    pi = (
+        np.asarray(inclusion_probs_pad, dtype=np.float64)
+        if inclusion_probs_pad is not None
+        else np.ones_like(mask, dtype=np.float64)
+    )
+    if mask.ndim != 2 or pi.ndim != 2:
+        raise ValueError("queried_mask_pad and inclusion_probs_pad must be 2D [books, leaves]")
+    rubric = "Predict the sampled leaf topic mixture from a dense leaf representation."
     for i, (counts, truth) in enumerate(zip(leaf_counts, leaf_truth)):
-        c = np.asarray(counts, dtype=np.float64)
-        t = np.asarray(truth, dtype=np.float64)
+        c = _counts_to_freq_rows(np.asarray(counts, dtype=np.float64))
+        t = _normalize_simplex_rows(np.asarray(truth, dtype=np.float64))
         if c.shape[0] != t.shape[0]:
             raise ValueError("counts and truth leaf rows must align")
         if i >= mask.shape[0]:
             break
         m = mask[i, : c.shape[0]]
+        p = np.clip(pi[i, : c.shape[0]], 1e-9, 1.0)
         if not np.any(m):
             continue
-        idx = np.nonzero(m)[0].tolist()
-        for j in idx:
-            x_rows.append(c[int(j)].reshape(-1))
-            y_rows.append(t[int(j)].reshape(-1))
-    if not x_rows:
-        return np.zeros((0, 0), dtype=np.float64), np.zeros((0, 0), dtype=np.float64)
-    X = np.stack(x_rows, axis=0).astype(np.float64, copy=False)
-    Y = np.stack(y_rows, axis=0).astype(np.float64, copy=False)
-    return _counts_to_freq_rows(X), _normalize_simplex_rows(Y)
-
-
-def _fit_leaf_theta_rf(
-    X: np.ndarray,
-    Y: np.ndarray,
-    *,
-    seed: int,
-    n_estimators: int,
-    max_depth: int,
-    min_samples_leaf: int,
-) -> Tuple[object, Dict[str, object]]:
-    try:
-        from sklearn.ensemble import RandomForestRegressor  # type: ignore[import-not-found]
-    except Exception as e:  # pragma: no cover
-        raise ImportError(
-            "scikit-learn is required for leaf_theta_estimator='rf'. "
-            "Install with: pip install scikit-learn>=1.4.2"
-        ) from e
-    model = RandomForestRegressor(
-        n_estimators=int(n_estimators),
-        max_depth=int(max_depth),
-        min_samples_leaf=int(min_samples_leaf),
-        random_state=int(seed),
-        n_jobs=1,
-    )
-    model.fit(np.asarray(X, dtype=np.float32), np.asarray(Y, dtype=np.float32))
-    return model, {
-        "leaf_theta_model": "rf",
-        "leaf_theta_rf_n_estimators": int(n_estimators),
-        "leaf_theta_rf_max_depth": int(max_depth),
-        "leaf_theta_rf_min_samples_leaf": int(min_samples_leaf),
-        **TrainingSelectionMetadata(
-            mode="rf_fit_no_validation",
-            split="config",
-            metric_name="rf_training_objective_untracked",
-            metric_value=float("nan"),
-            best_epoch=0,
-        ).to_dict(),
-    }
-
-
-def _fit_leaf_theta_mlp(
-    X: np.ndarray,
-    Y: np.ndarray,
-    *,
-    seed: int,
-    hidden_dim: int,
-    epochs: int,
-    batch_size: int,
-    lr: float,
-    weight_decay: float,
-    device: str,
-    cuda_device: Optional[int],
-    torch_threads: int,
-) -> Tuple[object, Dict[str, object]]:
-    try:
-        import torch
-        import torch.nn as nn
-    except Exception as e:  # pragma: no cover
-        raise ImportError(
-            "PyTorch is required for leaf_theta_estimator='mlp'. Install with: pip install torch>=2.0.0"
-        ) from e
-
-    configure_torch_runtime(torch, torch_threads=int(torch_threads))
-    torch_device, runtime_meta = resolve_torch_device(
-        torch_module=torch,
-        device=str(device),
-        cuda_device=cuda_device,
-    )
-    torch.manual_seed(int(seed))
-    v = int(X.shape[1])
-    k = int(Y.shape[1])
-    h = int(max(8, int(hidden_dim)))
-
-    class _LeafMLP(nn.Module):
-        def __init__(self, v_in: int, h_in: int, k_out: int) -> None:
-            super().__init__()
-            self.net = nn.Sequential(
-                nn.Linear(int(v_in), int(h_in)),
-                nn.ReLU(),
-                nn.Linear(int(h_in), int(k_out)),
+        for j in np.nonzero(m)[0].tolist():
+            doc_id = f"{split}_book_{i}"
+            leaf_id = f"{doc_id}:leaf_{int(j)}"
+            rows.append(
+                DenseSupervisionExample(
+                    example_id=leaf_id,
+                    features=c[int(j)].tolist(),
+                    vector_target=t[int(j)].tolist(),
+                    original_text=f"segmented_lda_ctreepo::{doc_id}",
+                    rubric=rubric,
+                    response="sampled_leaf_candidate",
+                    response_id=leaf_id,
+                    unit_kind=ObservationUnitKind.LEAF,
+                    reference_score=0.0,
+                    source_doc_id=doc_id,
+                    truth_label_source="oracle",
+                    sampling=SamplingMetadata(
+                        document_propensity=1.0,
+                        unit_propensity=float(p[int(j)]),
+                        label_propensity=1.0,
+                        joint_propensity=float(p[int(j)]),
+                        sampling_scheme="sampled_substructure_supervision",
+                        policy_name=str(query_policy),
+                        unit_kind=ObservationUnitKind.LEAF,
+                        supports_ipw_estimation=True,
+                        metadata={
+                            "split": str(split),
+                            "leaf_index": int(j),
+                            "query_policy": str(query_policy),
+                        },
+                    ),
+                    metadata={
+                        "dgp": "segmented_lda_ctreepo",
+                        "input_view": "sampled_leaf_bow",
+                        "uses_tree_merges": False,
+                        "n_topics": int(n_topics),
+                        "leaf_index": int(j),
+                        "query_policy": str(query_policy),
+                    },
+                )
             )
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return torch.softmax(self.net(x), dim=-1)
-
-    model: nn.Module = _LeafMLP(v, h, k).to(torch_device)
-    opt = torch.optim.Adam(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
-
-    x_t = torch.tensor(np.asarray(X, dtype=np.float32), dtype=torch.float32, device=torch_device)
-    y_t = torch.tensor(np.asarray(Y, dtype=np.float32), dtype=torch.float32, device=torch_device)
-    n = int(x_t.shape[0])
-    bsz = int(max(1, batch_size))
-    last_loss = float("nan")
-    eps = 1e-8
-    for _ep in range(int(epochs)):
-        idx = torch.randperm(n)
-        for start in range(0, n, bsz):
-            batch = idx[start : start + bsz]
-            xb = x_t[batch]
-            yb = y_t[batch]
-            pred = model(xb)
-            loss = torch.mean(-torch.sum(yb * torch.log(torch.clamp(pred, min=eps)), dim=1))
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
-            last_loss = float(loss.detach().cpu().item())
-
-    return model, {
-        "leaf_theta_model": "mlp",
-        "leaf_theta_mlp_hidden_dim": int(h),
-        "leaf_theta_mlp_epochs": int(epochs),
-        "leaf_theta_mlp_batch_size": int(bsz),
-        "leaf_theta_mlp_lr": float(lr),
-        "leaf_theta_mlp_weight_decay": float(weight_decay),
-        "leaf_theta_mlp_train_loss_final": float(last_loss),
-        **TrainingSelectionMetadata(
-            mode="final_epoch_no_validation",
-            split="config",
-            metric_name="leaf_theta_mlp_train_loss_final",
-            metric_value=float(last_loss),
-            best_epoch=max(0, int(epochs) - 1),
-        ).to_dict(),
-        **{f"leaf_theta_{k}": v for k, v in runtime_meta.items()},
-    }
+    return build_dense_sampled_substructure_supervision_dataset(
+        rows,
+        application_name="segmented_lda_ctreepo",
+        supervision_signal_name="substructure_level_target",
+        response_signal_name="leaf_topic_mixture",
+        law_type="sufficiency",
+        split=str(split),
+        response_signal_min=0.0,
+        response_signal_max=1.0,
+        metadata={
+            "dgp": "segmented_lda_ctreepo",
+            "input_view": "sampled_leaf_bow",
+            "uses_tree_merges": False,
+            "target_structure": "simplex",
+            "n_topics": int(n_topics),
+            "query_policy": str(query_policy),
+        },
+    )
 
 
 def _predict_leaf_theta_model(model: object, counts: np.ndarray) -> np.ndarray:
@@ -1306,6 +1376,31 @@ def _predict_leaf_theta_model(model: object, counts: np.ndarray) -> np.ndarray:
         return _normalize_simplex_rows(np.maximum(pred, 0.0))
 
     raise TypeError(f"unsupported leaf theta model type: {type(model)!r}")
+
+
+def _eval_full_doc_theta_predictions(
+    pred: np.ndarray,
+    truth: np.ndarray,
+    *,
+    c1_threshold: float,
+    c3_threshold: float,
+) -> PolicyMetrics:
+    p = np.asarray(pred, dtype=np.float64)
+    t = np.asarray(truth, dtype=np.float64)
+    if p.shape != t.shape:
+        raise ValueError("predicted and true full-doc theta arrays must align")
+    root_l1 = [_l1(p[i], t[i]) for i in range(int(p.shape[0]))]
+    root_l2 = [_l2(p[i], t[i]) for i in range(int(p.shape[0]))]
+    return _build_policy_metrics(
+        root_l1=root_l1,
+        root_l2=root_l2,
+        c1_errors=[],
+        c3_errors=[],
+        leaf_queries=[0.0] * int(p.shape[0]),
+        internal_queries=[0.0] * int(p.shape[0]),
+        c1_threshold=float(c1_threshold),
+        c3_threshold=float(c3_threshold),
+    )
 
 
 def _reduce_balanced_tree_with_guidance(
@@ -1725,7 +1820,7 @@ def run_segmented_lda_ctreepo_simulation(
         train_truth_pad[i, :l] = b
         train_mask[i, :l] = True
 
-    query_mask_pad, _pi_train = _sample_leaf_query_mask(
+    query_mask_pad, pi_train = _sample_leaf_query_mask(
         train_proxy_pad,
         rate=float(config.calibration_leaf_query_rate),
         policy=str(config.calibration_policy),
@@ -1741,39 +1836,256 @@ def run_segmented_lda_ctreepo_simulation(
     }
     train_est = list(train_proxy_list)
     test_est = list(test_proxy_list)
+    full_doc_policy_metrics: Dict[str, PolicyMetrics] = {}
+    full_doc_theta_meta: Dict[str, object] = {}
     if leaf_theta_mode in {"rf", "mlp"}:
-        X_sup, Y_sup = _gather_leaf_supervision(train_counts, train_truth, query_mask_pad)
-        leaf_theta_meta["leaf_theta_train_samples"] = int(X_sup.shape[0])
-        if int(X_sup.shape[0]) <= 0:
+        leaf_supervision = _leaf_theta_supervision_dataset(
+            train_counts,
+            train_truth,
+            query_mask_pad,
+            inclusion_probs_pad=pi_train,
+            split="train",
+            n_topics=int(config.n_topics),
+            query_policy=str(config.calibration_policy),
+        )
+        leaf_rows = leaf_supervision.to_dense_vector_training_records(law_type="sufficiency")
+        leaf_theta_meta["leaf_theta_train_samples"] = int(len(leaf_rows))
+        if int(len(leaf_rows)) <= 0:
             leaf_theta_meta["leaf_theta_fallback"] = "lstsq_no_labels"
         else:
             model: object
             if leaf_theta_mode == "rf":
-                model, fit_meta = _fit_leaf_theta_rf(
-                    X_sup,
-                    Y_sup,
-                    seed=int(seed) + 40_000,
-                    n_estimators=int(config.leaf_theta_rf_n_estimators),
-                    max_depth=int(config.leaf_theta_rf_max_depth),
-                    min_samples_leaf=int(config.leaf_theta_rf_min_samples_leaf),
+                model, fit_result = fit_dense_simplex_forest_regressor(
+                    leaf_supervision,
+                    config=DenseSimplexForestTrainingConfig(
+                        model=DenseSimplexForestModelConfig(
+                            n_estimators=int(config.leaf_theta_rf_n_estimators),
+                            max_depth=int(config.leaf_theta_rf_max_depth),
+                            min_samples_leaf=int(config.leaf_theta_rf_min_samples_leaf),
+                        ),
+                        run=RunConfig(seed=int(seed) + 40_000),
+                    ),
                 )
+                fit_meta = {
+                    "leaf_theta_model": "rf",
+                    "leaf_theta_rf_n_estimators": int(config.leaf_theta_rf_n_estimators),
+                    "leaf_theta_rf_max_depth": int(config.leaf_theta_rf_max_depth),
+                    "leaf_theta_rf_min_samples_leaf": int(config.leaf_theta_rf_min_samples_leaf),
+                    "leaf_theta_device_requested": "cpu",
+                    "leaf_theta_device_used": "cpu",
+                    **supervision_training_contract(
+                        representation_kind=REPRESENTATION_DENSE_FEATURE_VECTOR,
+                        target_kind=TARGET_SIMPLEX_VECTOR,
+                        optimizer_family=OPTIMIZER_FAMILY_TREE_ENSEMBLE,
+                        optimizer_backend="random_forest",
+                        selection_mode=str(fit_result.selection_mode),
+                        selection_split=str(fit_result.selection_split),
+                        selection_metric_name=str(fit_result.selection_metric_name),
+                        selection_metric_value=float(fit_result.selection_metric_value),
+                        best_epoch=int(fit_result.best_epoch),
+                        n_train_rows=int(fit_result.n_train_rows),
+                    ),
+                }
             else:
-                model, fit_meta = _fit_leaf_theta_mlp(
-                    X_sup,
-                    Y_sup,
-                    seed=int(seed) + 40_000,
-                    hidden_dim=int(config.leaf_theta_mlp_hidden_dim),
-                    epochs=int(config.leaf_theta_mlp_epochs),
-                batch_size=int(config.leaf_theta_mlp_batch_size),
-                lr=float(config.leaf_theta_mlp_lr),
-                weight_decay=float(config.leaf_theta_mlp_weight_decay),
-                device=str(config.device),
-                cuda_device=config.cuda_device,
-                torch_threads=int(config.torch_threads),
-            )
+                try:
+                    import torch
+                except Exception as e:  # pragma: no cover
+                    raise ImportError(
+                        "PyTorch is required for leaf_theta_estimator='mlp'. "
+                        "Install with: pip install torch>=2.0.0"
+                    ) from e
+                configure_torch_runtime(torch, torch_threads=int(config.torch_threads))
+                leaf_theta_device, leaf_theta_runtime_meta = resolve_torch_device(
+                    torch_module=torch,
+                    device=str(config.device),
+                    cuda_device=config.cuda_device,
+                )
+                model, fit_result = fit_dense_simplex_regressor(
+                    leaf_supervision,
+                    config=DenseSimplexTrainingConfig(
+                        model=DenseSimplexModelConfig(
+                            hidden_dims=(int(config.leaf_theta_mlp_hidden_dim),),
+                        ),
+                        optimizer=OptimizerConfig(
+                            learning_rate=float(config.leaf_theta_mlp_lr),
+                            weight_decay=float(config.leaf_theta_mlp_weight_decay),
+                        ),
+                        train=TrainConfig(
+                            batch_size=int(config.leaf_theta_mlp_batch_size),
+                            epochs=int(config.leaf_theta_mlp_epochs),
+                        ),
+                        runtime=RuntimeConfig(
+                            device=str(leaf_theta_device),
+                            bf16=False,
+                            gradient_checkpointing=False,
+                        ),
+                        run=RunConfig(seed=int(seed) + 40_000),
+                    ),
+                )
+                fit_meta = {
+                    "leaf_theta_model": "mlp",
+                    "leaf_theta_mlp_hidden_dim": int(config.leaf_theta_mlp_hidden_dim),
+                    "leaf_theta_mlp_epochs": int(config.leaf_theta_mlp_epochs),
+                    "leaf_theta_mlp_batch_size": int(config.leaf_theta_mlp_batch_size),
+                    "leaf_theta_mlp_lr": float(config.leaf_theta_mlp_lr),
+                    "leaf_theta_mlp_weight_decay": float(config.leaf_theta_mlp_weight_decay),
+                    "leaf_theta_mlp_train_loss_final": float(fit_result.train_loss_final),
+                    **{f"leaf_theta_{k}": v for k, v in leaf_theta_runtime_meta.items()},
+                    **supervision_training_contract(
+                        representation_kind=REPRESENTATION_DENSE_FEATURE_VECTOR,
+                        target_kind=TARGET_SIMPLEX_VECTOR,
+                        optimizer_family=OPTIMIZER_FAMILY_GRADIENT_DENSE,
+                        optimizer_backend="torch_mlp",
+                        selection_mode=str(fit_result.selection_mode),
+                        selection_split=str(fit_result.selection_split),
+                        selection_metric_name="leaf_theta_mlp_train_loss_final",
+                        selection_metric_value=float(fit_result.train_loss_final),
+                        best_epoch=int(fit_result.best_epoch),
+                        n_train_rows=int(fit_result.n_train_rows),
+                    ),
+                }
             leaf_theta_meta.update({str(k): v for k, v in fit_meta.items()})
             train_est = [_predict_leaf_theta_model(model, c) for c in train_counts]
             test_est = [_predict_leaf_theta_model(model, c) for c in test_counts]
+    if bool(config.include_full_doc_theta_baseline) and leaf_theta_mode in {"rf", "mlp"}:
+        full_doc_train_supervision = _full_doc_theta_supervision_dataset(
+            train.books,
+            split="train",
+            n_topics=int(config.n_topics),
+            vocab_size=int(config.vocab_size),
+        )
+        full_doc_train_rows = full_doc_train_supervision.to_dense_vector_training_records(
+            law_type="document_level_target"
+        )
+        baseline_name = f"full_doc_{leaf_theta_mode}"
+        full_doc_theta_meta[f"{baseline_name}_train_samples"] = int(len(full_doc_train_rows))
+        if int(len(full_doc_train_rows)) <= 0:
+            full_doc_theta_meta[f"{baseline_name}_fallback"] = "no_doc_labels"
+        else:
+            full_doc_test_supervision = _full_doc_theta_supervision_dataset(
+                test.books,
+                split="test",
+                n_topics=int(config.n_topics),
+                vocab_size=int(config.vocab_size),
+            )
+            _x_doc_test, y_doc_test, _w_doc_test = dense_vector_rows_to_numpy(
+                full_doc_test_supervision.to_dense_vector_training_records(
+                    law_type="document_level_target"
+                ),
+                normalize_targets_to_simplex=True,
+            )
+            if leaf_theta_mode == "rf":
+                full_doc_model, full_doc_fit = fit_dense_simplex_forest_regressor(
+                    full_doc_train_supervision,
+                    config=DenseSimplexForestTrainingConfig(
+                        model=DenseSimplexForestModelConfig(
+                            n_estimators=int(config.leaf_theta_rf_n_estimators),
+                            max_depth=int(config.leaf_theta_rf_max_depth),
+                            min_samples_leaf=int(config.leaf_theta_rf_min_samples_leaf),
+                        ),
+                        run=RunConfig(seed=int(seed) + 50_000),
+                    ),
+                )
+                pred_doc = predict_dense_simplex_forest_regressor(
+                    full_doc_model,
+                    _x_doc_test,
+                )
+                full_doc_fit_meta = {
+                    "leaf_theta_model": "rf",
+                    **supervision_training_contract(
+                        representation_kind=REPRESENTATION_DENSE_FEATURE_VECTOR,
+                        target_kind=TARGET_SIMPLEX_VECTOR,
+                        optimizer_family=OPTIMIZER_FAMILY_TREE_ENSEMBLE,
+                        optimizer_backend="random_forest",
+                        selection_mode=str(full_doc_fit.selection_mode),
+                        selection_split=str(full_doc_fit.selection_split),
+                        selection_metric_name=str(full_doc_fit.selection_metric_name),
+                        selection_metric_value=float(full_doc_fit.selection_metric_value),
+                        best_epoch=int(full_doc_fit.best_epoch),
+                        n_train_rows=int(full_doc_fit.n_train_rows),
+                    ),
+                }
+                full_doc_policy_metrics[baseline_name] = _eval_full_doc_theta_predictions(
+                    pred_doc,
+                    y_doc_test,
+                    c1_threshold=float(config.c1_threshold),
+                    c3_threshold=float(config.c3_threshold),
+                )
+            else:
+                try:
+                    import torch
+                except Exception as e:  # pragma: no cover
+                    raise ImportError(
+                        "PyTorch is required for include_full_doc_theta_baseline with "
+                        "leaf_theta_estimator='mlp'. Install with: pip install torch>=2.0.0"
+                    ) from e
+                configure_torch_runtime(torch, torch_threads=int(config.torch_threads))
+                full_doc_device, full_doc_runtime_meta = resolve_torch_device(
+                    torch_module=torch,
+                    device=str(config.device),
+                    cuda_device=config.cuda_device,
+                )
+                full_doc_model, full_doc_fit = fit_dense_simplex_regressor(
+                    full_doc_train_supervision,
+                    config=DenseSimplexTrainingConfig(
+                        model=DenseSimplexModelConfig(
+                            hidden_dims=(int(config.leaf_theta_mlp_hidden_dim),),
+                        ),
+                        optimizer=OptimizerConfig(
+                            learning_rate=float(config.leaf_theta_mlp_lr),
+                            weight_decay=float(config.leaf_theta_mlp_weight_decay),
+                        ),
+                        train=TrainConfig(
+                            batch_size=int(config.leaf_theta_mlp_batch_size),
+                            epochs=int(config.leaf_theta_mlp_epochs),
+                        ),
+                        runtime=RuntimeConfig(
+                            device=str(full_doc_device),
+                            bf16=False,
+                            gradient_checkpointing=False,
+                        ),
+                        run=RunConfig(seed=int(seed) + 50_000),
+                    ),
+                )
+                pred_doc = predict_dense_simplex_regressor(
+                    full_doc_model,
+                    supervision=full_doc_test_supervision,
+                    device=str(full_doc_device),
+                )
+                full_doc_fit_meta = {
+                    "leaf_theta_model": "mlp",
+                    "train_loss_final": float(full_doc_fit.train_loss_final),
+                    "train_loss_curve": [float(x) for x in full_doc_fit.train_loss_curve],
+                    "epochs_completed": int(full_doc_fit.epochs_completed),
+                    "selection_metric_curve": [
+                        float(x) for x in full_doc_fit.selection_metric_curve
+                    ],
+                    **{f"full_doc_{k}": v for k, v in full_doc_runtime_meta.items()},
+                    **supervision_training_contract(
+                        representation_kind=REPRESENTATION_DENSE_FEATURE_VECTOR,
+                        target_kind=TARGET_SIMPLEX_VECTOR,
+                        optimizer_family=OPTIMIZER_FAMILY_GRADIENT_DENSE,
+                        optimizer_backend="torch_mlp",
+                        selection_mode=str(full_doc_fit.selection_mode),
+                        selection_split=str(full_doc_fit.selection_split),
+                        selection_metric_name=str(full_doc_fit.selection_metric_name),
+                        selection_metric_value=float(full_doc_fit.selection_metric_value),
+                        best_epoch=int(full_doc_fit.best_epoch),
+                        n_train_rows=int(full_doc_fit.n_train_rows),
+                    ),
+                }
+                full_doc_policy_metrics[baseline_name] = _eval_full_doc_theta_predictions(
+                    pred_doc,
+                    y_doc_test,
+                    c1_threshold=float(config.c1_threshold),
+                    c3_threshold=float(config.c3_threshold),
+                )
+            full_doc_theta_meta.update(
+                {
+                    f"{baseline_name}_{str(k)}": v
+                    for k, v in dict(full_doc_fit_meta).items()
+                }
+            )
 
     # Report held-out leaf-theta prediction error for the proxy estimator (before affine calibration).
     leaf_l1: List[float] = []
@@ -1786,6 +2098,7 @@ def run_segmented_lda_ctreepo_simulation(
     leaf_theta_meta["leaf_theta_l1_mean"] = _safe_mean(leaf_l1)
     leaf_theta_meta["leaf_theta_l1_p95"] = _p95(leaf_l1)
     topic_meta.update(leaf_theta_meta)
+    topic_meta.update(full_doc_theta_meta)
 
     # Rebuild padded train proxy from the chosen leaf-theta estimator (lstsq/rf/mlp) for calibration.
     train_proxy_pad = np.zeros((len(train_est), max_train_leaves, k), dtype=np.float64)
@@ -1793,12 +2106,56 @@ def run_segmented_lda_ctreepo_simulation(
         l = int(a.shape[0])
         train_proxy_pad[i, :l] = np.asarray(a, dtype=np.float64)
 
-    w_cal, b_cal, n_calib = _fit_affine_calibration(
+    calibration_supervision = _leaf_calibration_supervision_dataset(
         train_proxy_pad,
         train_truth_pad,
         query_mask_pad,
-        ridge=float(config.calibration_ridge),
+        inclusion_probs_pad=pi_train,
+        split="train_calibration",
+        query_policy=str(config.calibration_policy),
     )
+    calibration_rows = calibration_supervision.to_dense_vector_training_records(law_type="sufficiency")
+    if calibration_rows:
+        calibrator, calibration_fit = fit_dense_affine_simplex_calibrator(
+            calibration_supervision,
+            config=AffineSimplexCalibrationConfig(
+                ridge=float(config.calibration_ridge),
+                use_sample_weights=True,
+            ),
+        )
+        n_calib = int(calibration_fit.n_train_rows)
+        calibration_contract = supervision_training_contract(
+            prefix="calibration",
+            representation_kind=REPRESENTATION_SIMPLEX_VECTOR,
+            target_kind=TARGET_SIMPLEX_VECTOR,
+            optimizer_family=OPTIMIZER_FAMILY_AFFINE_VECTOR_CALIBRATION,
+            optimizer_backend="closed_form_affine_ridge",
+            selection_mode=str(calibration_fit.selection_mode),
+            selection_split=str(calibration_fit.selection_split),
+            selection_metric_name=str(calibration_fit.selection_metric_name),
+            selection_metric_value=float(calibration_fit.selection_metric_value),
+            best_epoch=int(calibration_fit.best_epoch),
+            n_train_rows=int(calibration_fit.n_train_rows),
+        )
+        topic_meta.update(calibration_contract)
+        topic_meta["calibration_mode"] = str(calibration_contract["calibration_supervision_mode"])
+        topic_meta["calibration_uses_sample_weights"] = bool(
+            calibration_fit.uses_sample_weights
+        )
+    else:
+        calibrator = None
+        n_calib = 0
+        calibration_contract = supervision_training_contract(
+            prefix="calibration",
+            representation_kind=REPRESENTATION_SIMPLEX_VECTOR,
+            target_kind=TARGET_SIMPLEX_VECTOR,
+            optimizer_family=OPTIMIZER_FAMILY_AFFINE_VECTOR_CALIBRATION,
+            optimizer_backend="closed_form_affine_ridge",
+            n_train_rows=0,
+        )
+        topic_meta.update(calibration_contract)
+        topic_meta["calibration_mode"] = str(calibration_contract["calibration_supervision_mode"])
+        topic_meta["calibration_fallback"] = "identity_no_labels"
 
     # Policy accumulators.
     policy_names = (
@@ -1873,7 +2230,10 @@ def run_segmented_lda_ctreepo_simulation(
         q_internal["estimated_uncalibrated"].append(float(iq_u))
 
         # Policy C: estimated topics + calibration.
-        leaf_cal = _apply_affine_calibration(leaf_est[np.newaxis, :, :], w=w_cal, b=b_cal)[0]
+        if calibrator is None:
+            leaf_cal = np.asarray(leaf_est, dtype=np.float64)
+        else:
+            leaf_cal = apply_dense_affine_simplex_calibrator(calibrator, leaf_est)
         root_est_c, c1_c, c3_c, lq_c, iq_c, pop_e, pop_s = _reduce_balanced_tree_with_guidance(
             leaf_cal,
             leaf_truth,
@@ -1956,6 +2316,7 @@ def run_segmented_lda_ctreepo_simulation(
             c1_threshold=float(config.c1_threshold),
             c3_threshold=float(config.c3_threshold),
         )
+    metrics.update(full_doc_policy_metrics)
 
     decomposition = EndToEndDecompositionMetrics(
         n_books=int(config.n_books_test),

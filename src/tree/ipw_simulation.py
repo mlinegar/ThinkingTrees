@@ -17,9 +17,9 @@ import math
 import random
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from src.core.logged_supervision import ObservationUnitKind, SamplingMetadata
 from src.tree.ipw import (
     NodeType,
-    TreePropensity,
     TreeSample,
     effective_sample_size,
     ipw_preference_loss,
@@ -285,10 +285,11 @@ def _tree_sample_from_chunk(
         node_type=NodeType.LEAF,
         violation=chunk.violation,
         preference_loss=chunk.preference_loss,
-        propensity=TreePropensity(
-            doc=doc_propensity,
-            node=node_propensity,
-            label=1.0,
+        sampling=SamplingMetadata(
+            document_propensity=doc_propensity,
+            unit_propensity=node_propensity,
+            label_propensity=1.0,
+            unit_kind=ObservationUnitKind.LEAF,
         ),
         metadata={
             "scenario": scenario.value,
@@ -316,7 +317,12 @@ def _as_unweighted_samples(samples: Iterable[TreeSample]) -> List[TreeSample]:
                 node_type=sample.node_type,
                 violation=sample.violation,
                 preference_loss=sample.preference_loss,
-                propensity=TreePropensity(doc=1.0, node=1.0, label=1.0),
+                sampling=SamplingMetadata(
+                    document_propensity=1.0,
+                    unit_propensity=1.0,
+                    label_propensity=1.0,
+                    unit_kind=sample.sampling.unit_kind,
+                ),
                 metadata=sample.metadata,
             )
         )

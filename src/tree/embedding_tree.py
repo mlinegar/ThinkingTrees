@@ -68,7 +68,7 @@ class EmbeddingTreeNode:
     text_span: str                                  # text covered by this node
     char_start: int                                 # start offset in original doc
     char_end: int                                   # end offset in original doc
-    embedding: Optional[List[float]] = None         # raw Qwen3 embedding (leaves only)
+    embedding: Optional[torch.Tensor | Sequence[float]] = None  # raw Qwen3 embedding (leaves only)
     sketch: Optional[torch.Tensor] = None           # set during forward pass
     children: Optional[Tuple[int, int]] = None      # indices of children (None for leaves)
     oracle_scores: Dict[str, float] = field(default_factory=dict)
@@ -125,7 +125,7 @@ def _uniform_windows(
 
 def build_embedding_tree(
     text: str,
-    embeddings: List[List[float]],
+    embeddings: Sequence[Sequence[float] | torch.Tensor],
     windows: List[Tuple[int, int]],
 ) -> List[EmbeddingTreeNode]:
     """Build a binary merge tree from pre-computed window embeddings.
@@ -144,6 +144,8 @@ def build_embedding_tree(
         )
 
     # Create leaf nodes
+    from src.tree.packed_execution import canonicalize_leaf_embedding
+
     leaves: List[EmbeddingTreeNode] = []
     for (start, end), emb in zip(windows, embeddings):
         leaves.append(
@@ -152,7 +154,7 @@ def build_embedding_tree(
                 text_span=text[start:end],
                 char_start=start,
                 char_end=end,
-                embedding=emb,
+                embedding=canonicalize_leaf_embedding(emb),
             )
         )
 
@@ -199,33 +201,65 @@ def build_embedding_tree(
     return nodes
 
 
+def _get_model_device(model: CTreePOModel) -> torch.device:
+    """Return the device of the first model parameter, or CPU."""
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
 def forward_ctreepo(
     model: CTreePOModel,
     nodes: List[EmbeddingTreeNode],
 ) -> None:
     """Run CTreePO forward pass, setting sketch on each node.
 
-    Leaves get their sketch from model.encode_leaf(embedding).
-    Internal nodes get their sketch from model.merge(left.sketch, right.sketch).
+    Leaves are encoded in a single batched call.  Internal nodes are merged
+    level-by-level, with all merges at a given level executed in one batched
+    call.  This is semantically identical to the old per-node loop but much
+    faster on GPU (and on CPU for large trees).
     """
-    try:
-        model_device = next(model.parameters()).device
-    except StopIteration:
-        model_device = torch.device("cpu")
+    forward_ctreepo_batch(model, [nodes])
 
-    for node in nodes:
-        if node.is_leaf:
-            if node.embedding is None:
-                raise ValueError("Leaf node missing embedding")
-            emb_tensor = torch.as_tensor(node.embedding, dtype=torch.float32, device=model_device)
-            node.sketch = model.encode_leaf(emb_tensor)
-        else:
-            left_idx, right_idx = node.children
-            left_sketch = nodes[left_idx].sketch
-            right_sketch = nodes[right_idx].sketch
-            if left_sketch is None or right_sketch is None:
-                raise ValueError("Child sketch not set before merge")
-            node.sketch = model.merge(left_sketch, right_sketch)
+
+def forward_ctreepo_batch(
+    model: CTreePOModel,
+    tree_list: List[List[EmbeddingTreeNode]],
+    max_batch_leaves: int = 8192,
+) -> None:
+    """Run CTreePO forward pass over multiple trees simultaneously.
+
+    All leaf encodings across all trees are processed in a single batched
+    call, and all merges at each tree level are batched across all trees.
+    This is the primary entry point for efficient multi-document inference.
+
+    Args:
+        model: CTreePO model.
+        tree_list: List of node lists (each from ``build_embedding_tree``).
+        max_batch_leaves: Memory-safety cap on leaves per encoding batch.
+            If total leaves exceed this, they are processed in sub-batches.
+    """
+    from src.tree.packed_execution import (
+        build_packed_embedding_tree,
+        build_packed_tree_batch,
+        forward_packed_tree_batch,
+    )
+
+    if not tree_list:
+        return
+
+    packed_trees = [build_packed_embedding_tree(nodes) for nodes in tree_list]
+    packed_batch = build_packed_tree_batch(
+        packed_trees,
+        device=_get_model_device(model),
+    )
+    forward_packed_tree_batch(
+        model,
+        packed_batch,
+        max_batch_leaves=max_batch_leaves,
+        materialize_nodes=True,
+    )
 
 
 # ---------------------------------------------------------------------------

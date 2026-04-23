@@ -453,7 +453,9 @@ def _sample_fractional_indices(total: int, rate: float, rng: random.Random) -> L
     if rate_f >= 1.0:
         return list(range(total_i))
     q = max(1, int(math.ceil(rate_f * float(total_i))))
-    return list(sorted(rng.sample(range(total_i), k=min(total_i, q))))
+    ordering = list(range(total_i))
+    rng.shuffle(ordering)
+    return list(sorted(ordering[: min(total_i, q)]))
 
 
 def _use_root_label(rate: float, rng: random.Random) -> bool:

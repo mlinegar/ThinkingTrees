@@ -108,6 +108,8 @@ def _baseline_key(rec: dict, *, baseline_package: str) -> Tuple[object, ...]:
         rec.get("effective_data_seed", rec.get("seed")),
         rec.get("effective_model_seed", rec.get("seed")),
         str(baseline_package),
+        rec.get("fixed_leaf_tokens", 0),
+        rec.get("depth_discount_gamma", 1.0),
     )
 
 
@@ -183,12 +185,24 @@ def _read_markov_learned(path: Path, payload: dict) -> Optional[dict]:
         return float("nan")
 
     test_c1 = _n("test_c1_leaf_mae_n", "test_leaf_mae", "leaf_mae")
-    test_c2 = _n("test_c2_idempotence_mae_n", "test_c2_idempotence_mae", "c2_idempotence_mae")
+    test_c2 = _n(
+        "test_c2_count_drift_r1_mae_n",
+        "test_c2_idempotence_mae_n",
+        "test_c2_count_drift_r1_mae",
+        "test_c2_idempotence_mae",
+        "c2_count_drift_r1_mae",
+        "c2_idempotence_mae",
+    )
     test_c3 = _n("test_c3_merge_mae_n", "test_merge_mae", "merge_mae")
     test_spread = _n("test_schedule_spread_mean_n", "test_schedule_spread_mean", "schedule_spread_mean")
     test_root = _n("test_root_mae_n", "test_root_mae", "root_mae")
     val_c1 = _n("val_c1_leaf_mae_n", "val_leaf_mae")
-    val_c2 = _n("val_c2_idempotence_mae_n", "val_c2_idempotence_mae")
+    val_c2 = _n(
+        "val_c2_count_drift_r1_mae_n",
+        "val_c2_idempotence_mae_n",
+        "val_c2_count_drift_r1_mae",
+        "val_c2_idempotence_mae",
+    )
     val_c3 = _n("val_c3_merge_mae_n", "val_merge_mae")
     val_spread = _n("val_schedule_spread_mean_n", "val_schedule_spread_mean")
     val_root = _n("val_root_mae_n", "val_root_mae")
@@ -213,6 +227,12 @@ def _read_markov_learned(path: Path, payload: dict) -> Optional[dict]:
         "hidden_dim": int(cfg.get("hidden_dim", 0)),
         "n_epochs": int(cfg.get("n_epochs", 0)),
         "feature_mode": str(cfg.get("feature_mode", "")),
+        # Supervision & geometry fields (required for correct baseline matching)
+        "depth_discount_gamma": float(cfg.get("depth_discount_gamma", 1.0)),
+        "package_semantics": str(cfg.get("package_semantics", "")),
+        "leaf_label_rate": float(cfg.get("leaf_label_rate", 0.0)),
+        "mass_target_per_doc": safe_float(cfg.get("mass_target_per_doc")),
+        "budget_total_calls_per_doc": safe_float(cfg.get("budget_total_calls_per_doc")),
         # Test metrics (canonical names)
         "test_c1": float(test_c1),
         "test_c2": float(test_c2),
@@ -260,7 +280,12 @@ def _read_markov_exact_family(path: Path, payload: dict) -> Optional[dict]:
         return float("nan")
 
     test_c1 = _n("test_c1_leaf_mae_n", "leaf_mae")
-    test_c2 = _n("test_c2_idempotence_mae_n", "c2_idempotence_mae")
+    test_c2 = _n(
+        "test_c2_count_drift_r1_mae_n",
+        "test_c2_idempotence_mae_n",
+        "c2_count_drift_r1_mae",
+        "c2_idempotence_mae",
+    )
     test_c3 = _n("test_c3_merge_mae_n", "merge_mae")
     test_spread = _n("test_schedule_spread_mean_n", "schedule_spread_mean")
     test_root = _n("test_root_mae_n", "root_mae")
@@ -284,6 +309,12 @@ def _read_markov_exact_family(path: Path, payload: dict) -> Optional[dict]:
         "hidden_dim": int(cfg.get("hidden_dim", 0)),
         "n_epochs": int(cfg.get("n_epochs", 0)),
         "feature_mode": str(cfg.get("feature_mode", "")),
+        # Supervision & geometry fields (required for correct baseline matching)
+        "depth_discount_gamma": float(cfg.get("depth_discount_gamma", 1.0)),
+        "package_semantics": str(cfg.get("package_semantics", "")),
+        "leaf_label_rate": float(cfg.get("leaf_label_rate", 0.0)),
+        "mass_target_per_doc": safe_float(cfg.get("mass_target_per_doc")),
+        "budget_total_calls_per_doc": safe_float(cfg.get("budget_total_calls_per_doc")),
         "test_c1": float(test_c1),
         "test_c2": float(test_c2),
         "test_c3": float(test_c3),
@@ -635,6 +666,11 @@ def _load_markov_learnability(
             "n_epochs": int(cfg.get("n_epochs", 0)),
             "feature_mode": str(cfg.get("feature_mode", "")),
             "c3_audit_strategy": str(cfg.get("c3_audit_strategy", "")),
+            # Supervision & geometry fields
+            "fixed_leaf_tokens": int(cfg.get("fixed_leaf_tokens", 0)),
+            "depth_discount_gamma": float(cfg.get("depth_discount_gamma", 1.0)),
+            "package_semantics": str(cfg.get("package_semantics", "")),
+            "leaf_label_rate": float(cfg.get("leaf_label_rate", 0.0)),
             "objective_weighting_scheme": str(objective.get("weighting_scheme", "") or ""),
             "objective_task_weight_source": str(objective.get("task_objective_weight_source", "") or ""),
             "task_objective_weight": float(task_objective_weight),

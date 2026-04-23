@@ -5,6 +5,7 @@ import math
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
+from src.ctreepo.sim.util import safe_float
 from src.ctreepo.sim.composite_objective import (
     CompositeObjectiveSpec,
     scalarize_objective_estimates,
@@ -21,12 +22,7 @@ from src.ctreepo.sim.local_law_learnability import (
 )
 
 
-def _safe_float(value: object, default: float = float("nan")) -> float:
-    try:
-        out = float(value)  # type: ignore[arg-type]
-    except Exception:
-        return float(default)
-    return out if math.isfinite(out) else float(default)
+_safe_float = safe_float
 
 
 def _suite_role_from_path(path: str, *, family: str) -> str:

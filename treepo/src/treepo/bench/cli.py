@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
-from typing import Any, Dict, Optional, Sequence
+from pathlib import Path
+from typing import Optional, Sequence
 
 from treepo.bench.io import dump_json, load_yaml_or_json
+from treepo.bench.reports import cardinality as report_cardinality
+from treepo.bench.reports import classical_sketches as report_classical_sketches
+from treepo.bench.reports import lda_leafnoise as report_lda_leafnoise
+from treepo.bench.reports import learned_g_overnight as report_learned_g_overnight
+from treepo.bench.reports import publication_progress as report_publication_progress
 from treepo.bench.runner import (
     VALID_EXPERIMENTS,
     emit_commands,
@@ -14,15 +19,12 @@ from treepo.bench.runner import (
     run_sweep,
 )
 from treepo.bench.suites.cardinality import build_cardinality_paper_suite
+from treepo.bench.suites.classical_sketches import build_classical_sketches_suite
 from treepo.bench.suites.identifiable_zero import (
     build_identifiable_zero_dtm_lda,
     build_identifiable_zero_lda_leafnoise,
     build_identifiable_zero_publication_ctreepo,
 )
-from treepo.bench.reports import cardinality as report_cardinality
-from treepo.bench.reports import lda_leafnoise as report_lda_leafnoise
-from treepo.bench.reports import learned_g_overnight as report_learned_g_overnight
-from treepo.bench.reports import publication_progress as report_publication_progress
 
 
 def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
@@ -62,6 +64,7 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
             "identifiable-zero-lda-leafnoise",
             "identifiable-zero-publication-ctreepo",
             "cardinality-paper",
+            "classical-sketches",
         ],
     )
     p_suite.add_argument("--out-root", type=Path, required=True)
@@ -71,6 +74,20 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     p_suite.add_argument("--commands-only", action=argparse.BooleanOptionalAction, default=False)
     p_suite.add_argument("--seeds", type=str, default=None)
     p_suite.add_argument("--topic-phi-estimators", type=str, default=None)
+    p_suite.add_argument("--leaf-counts", type=str, default=None)
+    p_suite.add_argument("--capacities", type=str, default=None)
+    p_suite.add_argument(
+        "--execution-backend",
+        choices=["unified_g", "treepo"],
+        default="unified_g",
+        help="Execution path for classical-sketches; unified_g routes through fit().",
+    )
+    p_suite.add_argument("--include-learned", action=argparse.BooleanOptionalAction, default=False)
+    p_suite.add_argument("--learned-targets", type=str, default=None)
+    p_suite.add_argument("--learned-variants", type=str, default=None)
+    p_suite.add_argument("--learned-epochs", type=int, default=150)
+    p_suite.add_argument("--learned-n-train", type=int, default=128)
+    p_suite.add_argument("--learned-n-val", type=int, default=48)
 
     # ------------------------------------------------------------
     # report
@@ -98,6 +115,12 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     p_rep_card.add_argument("--output-root", type=Path, required=True)
     p_rep_card.add_argument("--out-dir", type=Path, default=None)
     p_rep_card.add_argument("--emit-pdf", action=argparse.BooleanOptionalAction, default=True)
+
+    p_rep_classical = rep.add_parser("classical-sketches", help="Classical sketch comparison report.")
+    p_rep_classical.add_argument("--output-root", type=Path, required=True)
+    p_rep_classical.add_argument("--out-dir", type=Path, default=None)
+    p_rep_classical.add_argument("--tables-dir", type=Path, default=Path("paper/ctreepo/tables"))
+    p_rep_classical.add_argument("--emit-pdf", action=argparse.BooleanOptionalAction, default=False)
 
     return p.parse_args(list(argv) if argv is not None else None)
 
@@ -151,6 +174,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             specs = build_identifiable_zero_publication_ctreepo(out_root=out_root, skip_existing=skip, seeds=args.seeds)
         elif suite == "cardinality-paper":
             specs = build_cardinality_paper_suite(out_root=out_root, skip_existing=skip, seeds=args.seeds)
+        elif suite == "classical-sketches":
+            specs = build_classical_sketches_suite(
+                out_root=out_root,
+                skip_existing=skip,
+                seeds=args.seeds,
+                leaf_counts=args.leaf_counts,
+                capacities=args.capacities,
+                execution_backend=args.execution_backend,
+                include_learned=bool(args.include_learned),
+                learned_targets=args.learned_targets,
+                learned_variants=args.learned_variants,
+                learned_n_epochs=int(args.learned_epochs),
+                learned_n_train=int(args.learned_n_train),
+                learned_n_val=int(args.learned_n_val),
+            )
         else:  # pragma: no cover
             raise SystemExit(f"unknown suite: {suite}")
 
@@ -191,6 +229,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 argv2 += ["--out-dir", str(Path(args.out_dir))]
             argv2 += ["--emit-pdf" if bool(args.emit_pdf) else "--no-emit-pdf"]
             return int(report_cardinality.main(argv2))
+        if args.report == "classical-sketches":
+            argv2 = ["--output-root", str(Path(args.output_root))]
+            if args.out_dir is not None:
+                argv2 += ["--out-dir", str(Path(args.out_dir))]
+            if args.tables_dir is not None:
+                argv2 += ["--tables-dir", str(Path(args.tables_dir))]
+            argv2 += ["--emit-pdf" if bool(args.emit_pdf) else "--no-emit-pdf"]
+            return int(report_classical_sketches.main(argv2))
         raise SystemExit(f"unknown report: {args.report}")
 
     raise SystemExit(f"unknown command: {args.cmd}")

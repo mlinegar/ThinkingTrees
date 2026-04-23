@@ -34,6 +34,14 @@ from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, 
 
 import numpy as np
 
+from src.core.logged_supervision import (
+    LoggedLabelObservation,
+    ObservationUnitKind,
+    SamplingMetadata,
+    summarize_logged_observations,
+    write_logged_observations_jsonl,
+)
+from src.core.ops_checks import LawKind
 from src.ctreepo.sim.composite_objective import (
     OBJECTIVE_ESTIMATOR_KEYS,
     CompositeObjectiveSpec,
@@ -58,10 +66,10 @@ from src.ctreepo.sim.core.segment_lda_ops_weight_recovery import (
 )
 from src.ctreepo.sim.learning_problem import attach_local_law_learning_problem
 from src.ctreepo.sim.objective_semantics import latent_quadratic_utility_objective_semantics
+from src.tree.compositional_learning import shared_logged_substructure_observation
 from src.tree.ipw import (
     MIN_PROPENSITY,
     NodeType,
-    TreePropensity,
     TreeSample,
     effective_sample_size,
     empirical_bernstein_ci,
@@ -81,6 +89,17 @@ from src.ctreepo.sim.local_law_learnability import (
     SupportBudgetSummary,
     artifact_index,
     write_json_g_artifact,
+)
+from src.training.supervision import (
+    DenseScalarRidgeModelConfig,
+    DenseScalarRidgeTrainingConfig,
+    DenseSupervisionExample,
+    OPTIMIZER_FAMILY_CLOSED_FORM_LINEAR,
+    REPRESENTATION_DENSE_FEATURE_VECTOR,
+    TARGET_SCALAR,
+    build_dense_sampled_substructure_supervision_dataset,
+    fit_dense_scalar_ridge_regressor,
+    supervision_training_contract,
 )
 
 
@@ -193,6 +212,7 @@ class LeafLocalMixtureUtilityConfig:
     law_c2_threshold: float = 0.20
     suite_role: str = ""
     artifact_dir: str = ""
+    save_logged_observations: bool = False
 
     inference_prior_mass: float = 0.25
     inference_max_iter: int = 200
@@ -785,56 +805,72 @@ def _ridge_feature_map(u: np.ndarray, *, n_tokens: float) -> np.ndarray:
     return np.asarray(feats, dtype=np.float64)
 
 
-def _ridge_fit(
-    x: np.ndarray, y: np.ndarray, *, alpha: float, sample_weight: Optional[np.ndarray] = None
-) -> np.ndarray:
-    X = np.asarray(x, dtype=np.float64)
-    Y = np.asarray(y, dtype=np.float64).reshape(-1)
-    if X.ndim != 2:
-        raise ValueError("ridge features must be rank-2")
-    if X.shape[0] == 0:
-        raise ValueError("need at least one training example for ridge")
-    if sample_weight is None:
-        W = np.ones((X.shape[0],), dtype=np.float64)
-    else:
-        W = np.asarray(sample_weight, dtype=np.float64).reshape(-1)
-        if W.size != X.shape[0]:
-            raise ValueError("sample_weight has wrong length")
-    sqrt_w = np.sqrt(np.clip(W, 0.0, None))
-    Xw = X * sqrt_w[:, None]
-    Yw = Y * sqrt_w
-    gram = Xw.T @ Xw
-    reg = float(alpha) * np.eye(int(gram.shape[0]), dtype=np.float64)
-    beta = np.linalg.solve(gram + reg, Xw.T @ Yw)
-    return np.asarray(beta, dtype=np.float64)
+def _analysis_section_supervision_row(
+    *,
+    split: str,
+    doc_id: str,
+    section_id: str,
+    features: np.ndarray,
+    target_density: float,
+    n_tokens: float,
+    sampling: SamplingMetadata,
+    training_variant: str,
+    metadata: Optional[Mapping[str, object]] = None,
+) -> DenseSupervisionExample:
+    row_metadata = {
+        "dgp": "leaf_local_mixture_utility",
+        "input_view": "analysis_section_utility_features",
+        "training_variant": str(training_variant),
+        "n_tokens": float(n_tokens),
+        **dict(metadata or {}),
+    }
+    return DenseSupervisionExample(
+        example_id=f"{doc_id}:{section_id}:{training_variant}",
+        features=[float(value) for value in np.asarray(features, dtype=np.float64).reshape(-1)],
+        scalar_target=float(target_density),
+        original_text=f"leaf_local_mixture_utility::{doc_id}",
+        rubric="Predict scalar analysis-section utility density from dense section features.",
+        response="analysis_section_candidate",
+        response_id=f"{doc_id}:{section_id}",
+        unit_kind=ObservationUnitKind.LEAF,
+        reference_score=0.0,
+        source_doc_id=str(doc_id),
+        truth_label_source="oracle",
+        sampling=sampling,
+        metadata=row_metadata,
+    )
 
 
-def _ridge_predict(beta: np.ndarray, x: np.ndarray) -> np.ndarray:
-    return np.asarray(x, dtype=np.float64) @ np.asarray(beta, dtype=np.float64)
+def _analysis_section_supervision_dataset(
+    rows: Sequence[DenseSupervisionExample],
+    *,
+    split: str,
+    training_variant: str,
+) -> "SupervisionDataset":
+    return build_dense_sampled_substructure_supervision_dataset(
+        rows,
+        application_name="leaf_local_mixture_utility",
+        supervision_signal_name="substructure_level_target",
+        response_signal_name="analysis_section_utility_density",
+        law_type="section_utility_target",
+        split=str(split),
+        metadata={
+            "dgp": "leaf_local_mixture_utility",
+            "input_view": "analysis_section_utility_features",
+            "training_variant": str(training_variant),
+            "target_kind": "scalar",
+        },
+    )
 
 
 def _l1(u: np.ndarray, v: np.ndarray) -> float:
     return float(np.sum(np.abs(np.asarray(u, dtype=np.float64) - np.asarray(v, dtype=np.float64))))
 
 
-def _normalize_simplex_vec(x: np.ndarray) -> np.ndarray:
-    arr = np.maximum(np.asarray(x, dtype=np.float64).reshape(-1), 0.0)
-    total = float(np.sum(arr))
-    if arr.size == 0:
-        return arr.astype(np.float64, copy=False)
-    if not math.isfinite(total) or total <= 0.0:
-        return np.full((arr.size,), 1.0 / float(arr.size), dtype=np.float64)
-    return arr / total
+from src.ctreepo.sim.util import normalize_simplex_vec, normalize_simplex_rows
 
-
-def _normalize_simplex_rows(x: np.ndarray) -> np.ndarray:
-    arr = np.asarray(x, dtype=np.float64)
-    if arr.ndim == 1:
-        return _normalize_simplex_vec(arr)
-    out = np.zeros_like(arr, dtype=np.float64)
-    for idx in range(int(arr.shape[0])):
-        out[idx] = _normalize_simplex_vec(arr[idx])
-    return out
+_normalize_simplex_vec = normalize_simplex_vec
+_normalize_simplex_rows = normalize_simplex_rows
 
 
 def _infer_analysis_section_topics(
@@ -964,6 +1000,38 @@ def _lda_artifact_dir(config: LeafLocalMixtureUtilityConfig) -> Optional[Path]:
     path = Path(text)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _samples_to_logged_observations(
+    samples: Sequence[TreeSample],
+    *,
+    supervision_signal_name: str,
+) -> List[LoggedLabelObservation[float]]:
+    signal_to_law_kind = {
+        "c1": LawKind.L1_LEAF,
+        "c2_proxy": LawKind.L3_IDEMPOTENCE,
+        "c3": LawKind.L2_MERGE,
+    }
+    observations: List[LoggedLabelObservation[float]] = []
+    for sample in samples:
+        observations.append(
+            shared_logged_substructure_observation(
+                document_id=str(sample.doc_id),
+                unit_id=str(sample.node_id),
+                unit_kind=sample.sampling.unit_kind or (
+                    ObservationUnitKind.LEAF
+                    if sample.node_type == NodeType.LEAF
+                    else ObservationUnitKind.MERGE
+                ),
+                label=float(sample.preference_loss),
+                application_name="tree_relevant_lda_local_law",
+                supervision_signal_name=supervision_signal_name,
+                law_kind=signal_to_law_kind.get(supervision_signal_name),
+                sampling=sample.sampling,
+                context=dict(sample.metadata or {}),
+            )
+        )
+    return observations
 
 
 def _lda_split_id(*, split: str, seed: int, n_docs: int) -> str:
@@ -1432,7 +1500,10 @@ def _evaluate_local_law_split(
             ),
         }
 
-    ipw_evaluation = _local_law_ipw_evaluation(law_doc_records, config=config)
+    ipw_evaluation, logged_observations_by_policy = _local_law_ipw_evaluation(
+        law_doc_records,
+        config=config,
+    )
     for name, metrics in list(policy_metrics.items()):
         policy_metrics[str(name)] = _augment_summary_metrics_with_objective_estimators(
             dict(metrics),
@@ -1447,6 +1518,7 @@ def _evaluate_local_law_split(
         "violation_rates": violation_rates,
         "mediation": mediation,
         "ipw_evaluation": ipw_evaluation,
+        "logged_observations_by_policy": logged_observations_by_policy,
         "doc_records": law_doc_records,
         "aux_preds": calibrated_aux_preds,
     }
@@ -2048,17 +2120,11 @@ def _train_budgeted_analysis_ridge(
     config: LeafLocalMixtureUtilityConfig,
     theta_true: np.ndarray,
     W_base: np.ndarray,
-) -> Tuple[Dict[str, np.ndarray], Dict[str, object]]:
-    x_all: List[np.ndarray] = []
-    y_all: List[float] = []
-    naive_x: List[np.ndarray] = []
-    naive_y: List[float] = []
-    ipw_x: List[np.ndarray] = []
-    ipw_y: List[float] = []
-    ipw_w: List[float] = []
-    stab_x: List[np.ndarray] = []
-    stab_y: List[float] = []
-    stab_w: List[float] = []
+) -> Tuple[Dict[str, object], Dict[str, object]]:
+    full_rows: List[DenseSupervisionExample] = []
+    naive_rows: List[DenseSupervisionExample] = []
+    ipw_rows: List[DenseSupervisionExample] = []
+    stabilized_weights: List[float] = []
     queried_per_doc: List[float] = []
     mean_propensity_per_doc: List[float] = []
     max_propensity_per_doc: List[float] = []
@@ -2111,31 +2177,111 @@ def _train_budgeted_analysis_ridge(
                 W_base=W_base,
                 lambda_multiplier=float(config.lambda_multiplier),
             ) / float(max(1.0, n_tok))
-            x_all.append(x)
-            y_all.append(float(y))
+            doc_id = f"train_{doc_idx}"
+            section_id = f"section_{sec_idx}"
+            full_rows.append(
+                _analysis_section_supervision_row(
+                    split="train_full",
+                    doc_id=doc_id,
+                    section_id=section_id,
+                    features=x,
+                    target_density=float(y),
+                    n_tokens=n_tok,
+                    sampling=SamplingMetadata(
+                        document_propensity=1.0,
+                        unit_propensity=1.0,
+                        label_propensity=1.0,
+                        joint_propensity=1.0,
+                        sampling_scheme="sampled_substructure_supervision",
+                        policy_name="all_sections",
+                        unit_kind=ObservationUnitKind.LEAF,
+                        supports_ipw_estimation=False,
+                    ),
+                    training_variant="full_labels",
+                    metadata={
+                        "query_design": "all",
+                        "doc_index": int(doc_idx),
+                        "section_index": int(sec_idx),
+                    },
+                )
+            )
             if not bool(do_keep):
                 continue
-            naive_x.append(x)
-            naive_y.append(float(y))
             joint = max(MIN_PROPENSITY, float(train_doc_rate) * float(max(MIN_PROPENSITY, p_sec)))
             ipw_weight = 1.0 / float(joint)
             stab_weight = min(float(config.ipw_stabilized_clip), ipw_weight)
-            ipw_x.append(x)
-            ipw_y.append(float(y))
-            ipw_w.append(float(ipw_weight))
-            stab_x.append(x)
-            stab_y.append(float(y))
-            stab_w.append(float(stab_weight))
+            naive_rows.append(
+                _analysis_section_supervision_row(
+                    split="train_budgeted",
+                    doc_id=doc_id,
+                    section_id=section_id,
+                    features=x,
+                    target_density=float(y),
+                    n_tokens=n_tok,
+                    sampling=SamplingMetadata(
+                        document_propensity=1.0,
+                        unit_propensity=1.0,
+                        label_propensity=1.0,
+                        joint_propensity=1.0,
+                        sampling_scheme="sampled_substructure_supervision",
+                        policy_name=str(config.query_design),
+                        unit_kind=ObservationUnitKind.LEAF,
+                        supports_ipw_estimation=False,
+                        metadata={
+                            "doc_sample_rate": float(train_doc_rate),
+                            "section_propensity": float(p_sec),
+                        },
+                    ),
+                    training_variant="budgeted_naive",
+                    metadata={
+                        "query_design": str(config.query_design),
+                        "doc_index": int(doc_idx),
+                        "section_index": int(sec_idx),
+                    },
+                )
+            )
+            ipw_rows.append(
+                _analysis_section_supervision_row(
+                    split="train_budgeted",
+                    doc_id=doc_id,
+                    section_id=section_id,
+                    features=x,
+                    target_density=float(y),
+                    n_tokens=n_tok,
+                    sampling=SamplingMetadata(
+                        document_propensity=max(MIN_PROPENSITY, float(train_doc_rate)),
+                        unit_propensity=max(MIN_PROPENSITY, float(p_sec)),
+                        label_propensity=1.0,
+                        joint_propensity=float(joint),
+                        sampling_scheme="sampled_substructure_supervision",
+                        policy_name=str(config.query_design),
+                        unit_kind=ObservationUnitKind.LEAF,
+                        supports_ipw_estimation=True,
+                        metadata={
+                            "doc_sample_rate": float(train_doc_rate),
+                            "section_propensity": float(p_sec),
+                        },
+                    ),
+                    training_variant="budgeted_ipw",
+                    metadata={
+                        "query_design": str(config.query_design),
+                        "doc_index": int(doc_idx),
+                        "section_index": int(sec_idx),
+                    },
+                )
+            )
+            stabilized_weights.append(float(stab_weight))
             train_samples.append(
                 TreeSample(
-                    doc_id=f"train_{doc_idx}",
-                    node_id=f"section_{sec_idx}",
+                    doc_id=doc_id,
+                    node_id=section_id,
                     node_type=NodeType.LEAF,
                     violation=0,
                     preference_loss=float(max(0.0, min(1.0, p_sec))),
-                    propensity=TreePropensity(
-                        doc=max(MIN_PROPENSITY, float(train_doc_rate)),
-                        node=max(MIN_PROPENSITY, float(p_sec)),
+                    sampling=SamplingMetadata(
+                        document_propensity=max(MIN_PROPENSITY, float(train_doc_rate)),
+                        unit_propensity=max(MIN_PROPENSITY, float(p_sec)),
+                        unit_kind=ObservationUnitKind.LEAF,
                     ),
                     metadata={
                         "raw_target_density": float(y),
@@ -2146,42 +2292,90 @@ def _train_budgeted_analysis_ridge(
                 )
             )
 
-    if not x_all:
+    if not full_rows:
         raise ValueError("no analysis-section training examples were constructed")
+    if not naive_rows:
+        first = full_rows[0]
+        fallback_sampling = SamplingMetadata(
+            document_propensity=1.0,
+            unit_propensity=1.0,
+            label_propensity=1.0,
+            joint_propensity=1.0,
+            sampling_scheme="sampled_substructure_supervision",
+            policy_name="fallback_single_row",
+            unit_kind=ObservationUnitKind.LEAF,
+            supports_ipw_estimation=False,
+        )
+        naive_rows = [
+            _analysis_section_supervision_row(
+                split="train_budgeted",
+                doc_id=str(first.source_doc_id or "train_fallback"),
+                section_id=str(first.response_id or "section_0"),
+                features=np.asarray(first.features, dtype=np.float64),
+                target_density=float(first.scalar_target if first.scalar_target is not None else 0.0),
+                n_tokens=float(first.metadata.get("n_tokens", 1.0)),
+                sampling=fallback_sampling,
+                training_variant="budgeted_naive",
+                metadata=dict(first.metadata),
+            )
+        ]
+        ipw_rows = [
+            _analysis_section_supervision_row(
+                split="train_budgeted",
+                doc_id=str(first.source_doc_id or "train_fallback"),
+                section_id=str(first.response_id or "section_0"),
+                features=np.asarray(first.features, dtype=np.float64),
+                target_density=float(first.scalar_target if first.scalar_target is not None else 0.0),
+                n_tokens=float(first.metadata.get("n_tokens", 1.0)),
+                sampling=fallback_sampling,
+                training_variant="budgeted_ipw",
+                metadata=dict(first.metadata),
+            )
+        ]
+        stabilized_weights = [1.0]
 
-    full_beta = _ridge_fit(
-        np.stack(x_all, axis=0),
-        np.asarray(y_all, dtype=np.float64),
-        alpha=float(config.ridge_alpha),
+    full_supervision = _analysis_section_supervision_dataset(
+        full_rows,
+        split="train_full",
+        training_variant="full_labels",
     )
-    if not naive_x:
-        naive_x = [x_all[0]]
-        naive_y = [y_all[0]]
-        ipw_x = [x_all[0]]
-        ipw_y = [y_all[0]]
-        ipw_w = [1.0]
-        stab_x = [x_all[0]]
-        stab_y = [y_all[0]]
-        stab_w = [1.0]
-    naive_beta = _ridge_fit(
-        np.stack(naive_x, axis=0),
-        np.asarray(naive_y, dtype=np.float64),
-        alpha=float(config.ridge_alpha),
+    naive_supervision = _analysis_section_supervision_dataset(
+        naive_rows,
+        split="train_budgeted",
+        training_variant="budgeted_naive",
     )
-    ipw_beta = _ridge_fit(
-        np.stack(ipw_x, axis=0),
-        np.asarray(ipw_y, dtype=np.float64),
-        alpha=float(config.ridge_alpha),
-        sample_weight=np.asarray(ipw_w, dtype=np.float64),
+    ipw_supervision = _analysis_section_supervision_dataset(
+        ipw_rows,
+        split="train_budgeted",
+        training_variant="budgeted_ipw",
     )
-    stab_arr = np.asarray(stab_w, dtype=np.float64)
+    full_model, full_fit = fit_dense_scalar_ridge_regressor(
+        full_supervision,
+        config=DenseScalarRidgeTrainingConfig(
+            model=DenseScalarRidgeModelConfig(ridge_alpha=float(config.ridge_alpha))
+        ),
+    )
+    naive_model, naive_fit = fit_dense_scalar_ridge_regressor(
+        naive_supervision,
+        config=DenseScalarRidgeTrainingConfig(
+            model=DenseScalarRidgeModelConfig(ridge_alpha=float(config.ridge_alpha))
+        ),
+    )
+    ipw_model, ipw_fit = fit_dense_scalar_ridge_regressor(
+        ipw_supervision,
+        config=DenseScalarRidgeTrainingConfig(
+            model=DenseScalarRidgeModelConfig(ridge_alpha=float(config.ridge_alpha))
+        ),
+    )
+    stab_arr = np.asarray(stabilized_weights, dtype=np.float64)
     if stab_arr.size > 0 and float(np.mean(stab_arr)) > 0.0:
         stab_arr = stab_arr / float(np.mean(stab_arr))
-    stab_beta = _ridge_fit(
-        np.stack(stab_x, axis=0),
-        np.asarray(stab_y, dtype=np.float64),
-        alpha=float(config.ridge_alpha),
-        sample_weight=stab_arr,
+    stab_model, stab_fit = fit_dense_scalar_ridge_regressor(
+        ipw_supervision,
+        config=DenseScalarRidgeTrainingConfig(
+            model=DenseScalarRidgeModelConfig(ridge_alpha=float(config.ridge_alpha))
+        ),
+        sample_weights=stab_arr,
     )
     diagnostics = {
         "sampled_doc_rate_train": float(config.doc_sample_rate),
@@ -2197,17 +2391,26 @@ def _train_budgeted_analysis_ridge(
         "train_sample_count": int(len(train_samples)),
         "train_effective_sample_size": float(effective_sample_size(train_samples)),
         "train_max_weight": float(max_weight(train_samples)),
+        "full_labels_rows": int(full_fit.n_train_rows),
+        "budgeted_rows": int(ipw_fit.n_train_rows),
+        **supervision_training_contract(
+            representation_kind=REPRESENTATION_DENSE_FEATURE_VECTOR,
+            target_kind=TARGET_SCALAR,
+            optimizer_family=OPTIMIZER_FAMILY_CLOSED_FORM_LINEAR,
+            optimizer_backend="closed_form_ridge",
+            n_train_rows=int(ipw_fit.n_train_rows),
+        ),
     }
     return {
-        "analysis_ridge_full_labels": full_beta,
-        "budgeted_leaf_ridge_naive": naive_beta,
-        "budgeted_leaf_ridge_ipw": ipw_beta,
-        "budgeted_leaf_ridge_ipw_stabilized": stab_beta,
+        "analysis_ridge_full_labels": full_model,
+        "budgeted_leaf_ridge_naive": naive_model,
+        "budgeted_leaf_ridge_ipw": ipw_model,
+        "budgeted_leaf_ridge_ipw_stabilized": stab_model,
     }, diagnostics
 
 
 def _predict_analysis_ridge(
-    beta: np.ndarray,
+    model: object,
     doc: LeafLocalMixtureDoc,
     view: AnalysisPartitionView,
     *,
@@ -2221,7 +2424,14 @@ def _predict_analysis_ridge(
         )
         u = utility_vector_from_counts(counts, np.asarray(world.utility_matrix, dtype=np.float64))
         n_tok = float(int(span[1]) - int(span[0]))
-        pred_density = float(_ridge_predict(beta, _ridge_feature_map(u, n_tokens=n_tok)))
+        pred_density = float(
+            np.asarray(
+                getattr(model, "predict")(
+                    np.asarray([_ridge_feature_map(u, n_tokens=n_tok)], dtype=np.float64)
+                ),
+                dtype=np.float64,
+            )[0]
+        )
         total += float(n_tok) * pred_density
     return float(total)
 
@@ -2264,7 +2474,7 @@ def _normalized_ci_and_coverage(
             node_type=sample.node_type,
             violation=int(sample.violation),
             preference_loss=float(np.clip((float(sample.preference_loss) - lo) / scale, 0.0, 1.0)),
-            propensity=sample.propensity,
+            sampling=sample.sampling,
             metadata=dict(sample.metadata),
         )
         for sample in samples
@@ -2338,10 +2548,8 @@ def _legacy_ridge_predictions(
         leaf_tokens_from_fraction(int(config.doc_tokens), float(config.leaf_fraction))
     )
 
-    x_train_base: List[np.ndarray] = []
-    y_train_base: List[float] = []
-    x_train_coarse: List[np.ndarray] = []
-    y_train_coarse: List[float] = []
+    base_rows: List[DenseSupervisionExample] = []
+    coarse_rows: List[DenseSupervisionExample] = []
     queried_leaves_base: List[float] = []
     queried_cost_base: List[float] = []
     queried_leaves_coarse: List[float] = []
@@ -2365,11 +2573,33 @@ def _legacy_ridge_predictions(
         )
         queried_leaves_base.append(float(np.sum(mask_base)))
         queried_cost_base.append(float(np.sum(mask_base)))
-        for u_leaf, y_leaf, n_leaf, keep in zip(base_u, base_y, base_n, mask_base):
+        for leaf_idx, (u_leaf, y_leaf, n_leaf, keep) in enumerate(
+            zip(base_u, base_y, base_n, mask_base)
+        ):
             if not bool(keep):
                 continue
-            x_train_base.append(_ridge_feature_map(u_leaf, n_tokens=float(n_leaf)))
-            y_train_base.append(float(y_leaf) / float(max(1.0, n_leaf)))
+            base_rows.append(
+                _analysis_section_supervision_row(
+                    split="train_legacy_base",
+                    doc_id=f"train_{len(queried_leaves_base) - 1}",
+                    section_id=f"leaf_{leaf_idx}",
+                    features=_ridge_feature_map(u_leaf, n_tokens=float(n_leaf)),
+                    target_density=float(y_leaf) / float(max(1.0, n_leaf)),
+                    n_tokens=float(n_leaf),
+                    sampling=SamplingMetadata(
+                        document_propensity=1.0,
+                        unit_propensity=1.0,
+                        label_propensity=1.0,
+                        joint_propensity=1.0,
+                        sampling_scheme="sampled_substructure_supervision",
+                        policy_name="legacy_leaf_partition",
+                        unit_kind=ObservationUnitKind.LEAF,
+                        supports_ipw_estimation=False,
+                    ),
+                    training_variant="legacy_base",
+                    metadata={"partition_kind": "latent_leaf_partition"},
+                )
+            )
 
         coarse_spans = _equal_token_spans(
             doc_tokens=int(config.doc_tokens), span_tokens=int(eval_leaf_tokens)
@@ -2396,32 +2626,104 @@ def _legacy_ridge_predictions(
                 * max(1.0, float(eval_leaf_tokens) / float(max(1, config.latent_leaf_tokens)))
             )
         )
-        for u_leaf, y_leaf, n_leaf, keep in zip(coarse_u, coarse_y, coarse_n, mask_coarse):
+        for leaf_idx, (u_leaf, y_leaf, n_leaf, keep) in enumerate(
+            zip(coarse_u, coarse_y, coarse_n, mask_coarse)
+        ):
             if not bool(keep):
                 continue
-            x_train_coarse.append(_ridge_feature_map(u_leaf, n_tokens=float(n_leaf)))
-            y_train_coarse.append(float(y_leaf) / float(max(1.0, n_leaf)))
+            coarse_rows.append(
+                _analysis_section_supervision_row(
+                    split="train_legacy_coarse",
+                    doc_id=f"train_{len(queried_leaves_coarse) - 1}",
+                    section_id=f"leaf_{leaf_idx}",
+                    features=_ridge_feature_map(u_leaf, n_tokens=float(n_leaf)),
+                    target_density=float(y_leaf) / float(max(1.0, n_leaf)),
+                    n_tokens=float(n_leaf),
+                    sampling=SamplingMetadata(
+                        document_propensity=1.0,
+                        unit_propensity=1.0,
+                        label_propensity=1.0,
+                        joint_propensity=1.0,
+                        sampling_scheme="sampled_substructure_supervision",
+                        policy_name="legacy_coarse_partition",
+                        unit_kind=ObservationUnitKind.LEAF,
+                        supports_ipw_estimation=False,
+                    ),
+                    training_variant="legacy_coarse",
+                    metadata={"partition_kind": "equal_token_partition"},
+                )
+            )
 
-    if not x_train_base:
-        x_train_base = [
-            _ridge_feature_map(np.zeros((utility_matrix.shape[0],), dtype=np.float64), n_tokens=1.0)
+    if not base_rows:
+        base_rows = [
+            _analysis_section_supervision_row(
+                split="train_legacy_base",
+                doc_id="train_fallback",
+                section_id="leaf_0",
+                features=_ridge_feature_map(
+                    np.zeros((utility_matrix.shape[0],), dtype=np.float64),
+                    n_tokens=1.0,
+                ),
+                target_density=0.0,
+                n_tokens=1.0,
+                sampling=SamplingMetadata(
+                    document_propensity=1.0,
+                    unit_propensity=1.0,
+                    label_propensity=1.0,
+                    joint_propensity=1.0,
+                    sampling_scheme="sampled_substructure_supervision",
+                    policy_name="legacy_leaf_partition",
+                    unit_kind=ObservationUnitKind.LEAF,
+                    supports_ipw_estimation=False,
+                ),
+                training_variant="legacy_base",
+            )
         ]
-        y_train_base = [0.0]
-    if not x_train_coarse:
-        x_train_coarse = [
-            _ridge_feature_map(np.zeros((utility_matrix.shape[0],), dtype=np.float64), n_tokens=1.0)
+    if not coarse_rows:
+        coarse_rows = [
+            _analysis_section_supervision_row(
+                split="train_legacy_coarse",
+                doc_id="train_fallback",
+                section_id="leaf_0",
+                features=_ridge_feature_map(
+                    np.zeros((utility_matrix.shape[0],), dtype=np.float64),
+                    n_tokens=1.0,
+                ),
+                target_density=0.0,
+                n_tokens=1.0,
+                sampling=SamplingMetadata(
+                    document_propensity=1.0,
+                    unit_propensity=1.0,
+                    label_propensity=1.0,
+                    joint_propensity=1.0,
+                    sampling_scheme="sampled_substructure_supervision",
+                    policy_name="legacy_coarse_partition",
+                    unit_kind=ObservationUnitKind.LEAF,
+                    supports_ipw_estimation=False,
+                ),
+                training_variant="legacy_coarse",
+            )
         ]
-        y_train_coarse = [0.0]
 
-    beta_base = _ridge_fit(
-        np.stack(x_train_base, axis=0),
-        np.asarray(y_train_base, dtype=np.float64),
-        alpha=float(config.ridge_alpha),
+    base_model, base_fit = fit_dense_scalar_ridge_regressor(
+        _analysis_section_supervision_dataset(
+            base_rows,
+            split="train_legacy_base",
+            training_variant="legacy_base",
+        ),
+        config=DenseScalarRidgeTrainingConfig(
+            model=DenseScalarRidgeModelConfig(ridge_alpha=float(config.ridge_alpha))
+        ),
     )
-    beta_coarse = _ridge_fit(
-        np.stack(x_train_coarse, axis=0),
-        np.asarray(y_train_coarse, dtype=np.float64),
-        alpha=float(config.ridge_alpha),
+    coarse_model, coarse_fit = fit_dense_scalar_ridge_regressor(
+        _analysis_section_supervision_dataset(
+            coarse_rows,
+            split="train_legacy_coarse",
+            training_variant="legacy_coarse",
+        ),
+        config=DenseScalarRidgeTrainingConfig(
+            model=DenseScalarRidgeModelConfig(ridge_alpha=float(config.ridge_alpha))
+        ),
     )
 
     base_preds: List[float] = []
@@ -2438,7 +2740,15 @@ def _legacy_ridge_predictions(
         base_pred = 0.0
         for u_leaf, n_leaf in zip(base_u, base_n):
             base_pred += float(n_leaf) * float(
-                _ridge_predict(beta_base, _ridge_feature_map(u_leaf, n_tokens=float(n_leaf)))
+                np.asarray(
+                    getattr(base_model, "predict")(
+                        np.asarray(
+                            [_ridge_feature_map(u_leaf, n_tokens=float(n_leaf))],
+                            dtype=np.float64,
+                        )
+                    ),
+                    dtype=np.float64,
+                )[0]
             )
         base_preds.append(float(base_pred))
 
@@ -2456,7 +2766,15 @@ def _legacy_ridge_predictions(
         coarse_pred = 0.0
         for u_leaf, n_leaf in zip(coarse_u, coarse_n):
             coarse_pred += float(n_leaf) * float(
-                _ridge_predict(beta_coarse, _ridge_feature_map(u_leaf, n_tokens=float(n_leaf)))
+                np.asarray(
+                    getattr(coarse_model, "predict")(
+                        np.asarray(
+                            [_ridge_feature_map(u_leaf, n_tokens=float(n_leaf))],
+                            dtype=np.float64,
+                        )
+                    ),
+                    dtype=np.float64,
+                )[0]
             )
         coarse_preds.append(float(coarse_pred))
 
@@ -2468,8 +2786,15 @@ def _legacy_ridge_predictions(
             "queried_cost_base": queried_cost_base,
             "queried_leaves_coarse": queried_leaves_coarse,
             "queried_cost_coarse": queried_cost_coarse,
-            "beta_base_dim": int(beta_base.size),
-            "beta_coarse_dim": int(beta_coarse.size),
+            "beta_base_dim": int(base_fit.input_dim),
+            "beta_coarse_dim": int(coarse_fit.input_dim),
+            **supervision_training_contract(
+                representation_kind=REPRESENTATION_DENSE_FEATURE_VECTOR,
+                target_kind=TARGET_SCALAR,
+                optimizer_family=OPTIMIZER_FAMILY_CLOSED_FORM_LINEAR,
+                optimizer_backend="closed_form_ridge",
+                n_train_rows=int(base_fit.n_train_rows),
+            ),
         },
     )
 
@@ -2631,7 +2956,10 @@ def _collect_local_law_training_examples(
                     node_type=NodeType.LEAF,
                     violation=0,
                     preference_loss=float(max(0.0, min(1.0, p_leaf))),
-                    propensity=TreePropensity(node=max(MIN_PROPENSITY, p_leaf)),
+                    sampling=SamplingMetadata(
+                        unit_propensity=max(MIN_PROPENSITY, p_leaf),
+                        unit_kind=ObservationUnitKind.LEAF,
+                    ),
                 )
             )
 
@@ -2658,7 +2986,10 @@ def _collect_local_law_training_examples(
                     node_type=NodeType.MERGE,
                     violation=0,
                     preference_loss=float(max(0.0, min(1.0, p_internal))),
-                    propensity=TreePropensity(node=max(MIN_PROPENSITY, p_internal)),
+                    sampling=SamplingMetadata(
+                        unit_propensity=max(MIN_PROPENSITY, p_internal),
+                        unit_kind=ObservationUnitKind.MERGE,
+                    ),
                 )
             )
 
@@ -2976,9 +3307,9 @@ def _local_law_ipw_evaluation(
     doc_records: Sequence[Dict[str, object]],
     *,
     config: LeafLocalMixtureUtilityConfig,
-) -> Dict[str, object]:
+) -> Tuple[Dict[str, object], Dict[str, List[LoggedLabelObservation[float]]]]:
     if not doc_records:
-        return {}
+        return {}, {}
     eval_rng = np.random.default_rng(int(_splitmix64(int(config.seed) + 23003) & 0xFFFFFFFF))
     policy_names = list(
         dict.fromkeys(str(name) for rec in doc_records for name in rec.get("policies", {}).keys())
@@ -3036,8 +3367,10 @@ def _local_law_ipw_evaluation(
                     node_type=NodeType.LEAF,
                     violation=0,
                     preference_loss=float(max(0.0, min(1.0, p_leaf))),
-                    propensity=TreePropensity(
-                        doc=doc_prop, node=max(MIN_PROPENSITY, float(p_leaf))
+                    sampling=SamplingMetadata(
+                        document_propensity=doc_prop,
+                        unit_propensity=max(MIN_PROPENSITY, float(p_leaf)),
+                        unit_kind=ObservationUnitKind.LEAF,
                     ),
                 )
             )
@@ -3053,8 +3386,10 @@ def _local_law_ipw_evaluation(
                             node_type=NodeType.LEAF,
                             violation=0,
                             preference_loss=float(c1_vals[idx]),
-                            propensity=TreePropensity(
-                                doc=doc_prop, node=max(MIN_PROPENSITY, float(p_leaf))
+                            sampling=SamplingMetadata(
+                                document_propensity=doc_prop,
+                                unit_propensity=max(MIN_PROPENSITY, float(p_leaf)),
+                                unit_kind=ObservationUnitKind.LEAF,
                             ),
                         )
                     )
@@ -3066,8 +3401,10 @@ def _local_law_ipw_evaluation(
                             node_type=NodeType.LEAF,
                             violation=0,
                             preference_loss=float(c2_vals[idx]),
-                            propensity=TreePropensity(
-                                doc=doc_prop, node=max(MIN_PROPENSITY, float(p_leaf))
+                            sampling=SamplingMetadata(
+                                document_propensity=doc_prop,
+                                unit_propensity=max(MIN_PROPENSITY, float(p_leaf)),
+                                unit_kind=ObservationUnitKind.LEAF,
                             ),
                         )
                     )
@@ -3081,8 +3418,10 @@ def _local_law_ipw_evaluation(
                     node_type=NodeType.MERGE,
                     violation=0,
                     preference_loss=float(max(0.0, min(1.0, p_internal))),
-                    propensity=TreePropensity(
-                        doc=doc_prop, node=max(MIN_PROPENSITY, float(p_internal))
+                    sampling=SamplingMetadata(
+                        document_propensity=doc_prop,
+                        unit_propensity=max(MIN_PROPENSITY, float(p_internal)),
+                        unit_kind=ObservationUnitKind.MERGE,
                     ),
                 )
             )
@@ -3097,13 +3436,16 @@ def _local_law_ipw_evaluation(
                             node_type=NodeType.MERGE,
                             violation=0,
                             preference_loss=float(c3_vals[idx]),
-                            propensity=TreePropensity(
-                                doc=doc_prop, node=max(MIN_PROPENSITY, float(p_internal))
+                            sampling=SamplingMetadata(
+                                document_propensity=doc_prop,
+                                unit_propensity=max(MIN_PROPENSITY, float(p_internal)),
+                                unit_kind=ObservationUnitKind.MERGE,
                             ),
                         )
                     )
 
     out: Dict[str, object] = {}
+    logged_by_policy: Dict[str, List[LoggedLabelObservation[float]]] = {}
     for policy_name in policy_names:
         c1_exact = _base._safe_stat(leaf_pop[policy_name]["c1"], kind="mean")
         c2_exact = _base._safe_stat(leaf_pop[policy_name]["c2_proxy"], kind="mean")
@@ -3206,7 +3548,24 @@ def _local_law_ipw_evaluation(
                 "internal_propensity_quantiles": _propensity_quantiles(internal_meta_samples),
             },
         }
-    return out
+        logged_observations = _samples_to_logged_observations(
+            leaf_samples[policy_name]["c1"],
+            supervision_signal_name="c1",
+        )
+        logged_observations.extend(
+            _samples_to_logged_observations(
+                leaf_samples[policy_name]["c2_proxy"],
+                supervision_signal_name="c2_proxy",
+            )
+        )
+        logged_observations.extend(
+            _samples_to_logged_observations(
+                internal_samples[policy_name]["c3"],
+                supervision_signal_name="c3",
+            )
+        )
+        logged_by_policy[str(policy_name)] = logged_observations
+    return out, logged_by_policy
 
 
 def _build_local_law_payload(
@@ -3570,6 +3929,33 @@ def _build_local_law_payload(
                 "selection_tie_breaker": "mean_aux_oracle_target_abs_error",
             },
         )
+    logged_policy_name = str(selected_candidate or "infer_identity")
+    selected_logged_observations = list(
+        dict(test_eval.get("logged_observations_by_policy", {}) or {}).get(
+            logged_policy_name,
+            [],
+        )
+    )
+    logged_observation_artifacts: Dict[str, Any] = {}
+    logged_observations_summary = (
+        summarize_logged_observations(selected_logged_observations)
+        if selected_logged_observations
+        else {
+            "count": 0,
+            "unit_kinds": [],
+            "supports_ipw_estimation": False,
+            "joint_propensity_min": 1.0,
+            "joint_propensity_max": 1.0,
+            "joint_propensity_mean": 1.0,
+        }
+    )
+    if selected_logged_observations and artifact_dir is not None and bool(config.save_logged_observations):
+        artifact = write_logged_observations_jsonl(
+            artifact_dir / "local_law_logged_observations.jsonl",
+            selected_logged_observations,
+            channel_name="sampled_substructure_supervision",
+        )
+        logged_observation_artifacts = {artifact.channel_name: artifact.to_dict()}
 
     learnability_summary = LocalLawRunSummary(
         family="tree_relevant_lda_local_law",
@@ -3629,6 +4015,7 @@ def _build_local_law_payload(
             "c3": float(config.law_c3_threshold),
         },
         suite_role=str(config.suite_role),
+        logged_observation_artifacts=logged_observation_artifacts,
         metadata={
             "analysis_partition_mode": str(config.analysis_partition_mode),
             "quadratic_utility_weight": float(config.lambda_multiplier),
@@ -3641,6 +4028,8 @@ def _build_local_law_payload(
                 for name, value in dict(objective_spec.local_law_weights).items()
             },
             "objective": objective_spec.to_dict(),
+            "logged_observations_policy": logged_policy_name,
+            "logged_observations_summary": logged_observations_summary,
         },
     )
     learnability_summary = attach_local_law_learning_problem(learnability_summary)
@@ -4036,6 +4425,13 @@ def run_leaf_local_mixture_utility_experiment_from_world(
                 "model_kind": "ridge_from_analysis_u",
                 "query_design": "all",
                 "ridge_alpha": float(config.ridge_alpha),
+                **supervision_training_contract(
+                    representation_kind=REPRESENTATION_DENSE_FEATURE_VECTOR,
+                    target_kind=TARGET_SCALAR,
+                    optimizer_family=OPTIMIZER_FAMILY_CLOSED_FORM_LINEAR,
+                    optimizer_backend="closed_form_ridge",
+                    n_train_rows=int(budgeted_training_diag["full_labels_rows"]),
+                ),
             },
         ),
         "budgeted_leaf_ridge_naive": _method_metric_dict(
@@ -4114,6 +4510,12 @@ def run_leaf_local_mixture_utility_experiment_from_world(
                 ),
                 "ridge_feature_dim": int(legacy_diag["beta_base_dim"]),
                 "ridge_alpha": float(config.ridge_alpha),
+                "training_surface": str(legacy_diag["training_surface"]),
+                "supervision_mode": str(legacy_diag["supervision_mode"]),
+                "representation_kind": str(legacy_diag["representation_kind"]),
+                "target_kind": str(legacy_diag["target_kind"]),
+                "optimizer_family": str(legacy_diag["optimizer_family"]),
+                "optimizer_backend": str(legacy_diag["optimizer_backend"]),
             },
         ),
         "coarse_leaf_ridge_from_u": _method_metric_dict(
@@ -4129,6 +4531,12 @@ def run_leaf_local_mixture_utility_experiment_from_world(
                 "leaf_fraction_label": leaf_fraction_label(float(config.leaf_fraction)),
                 "ridge_feature_dim": int(legacy_diag["beta_coarse_dim"]),
                 "ridge_alpha": float(config.ridge_alpha),
+                "training_surface": str(legacy_diag["training_surface"]),
+                "supervision_mode": str(legacy_diag["supervision_mode"]),
+                "representation_kind": str(legacy_diag["representation_kind"]),
+                "target_kind": str(legacy_diag["target_kind"]),
+                "optimizer_family": str(legacy_diag["optimizer_family"]),
+                "optimizer_backend": str(legacy_diag["optimizer_backend"]),
             },
         ),
     }
@@ -4186,9 +4594,10 @@ def run_leaf_local_mixture_utility_experiment_from_world(
                     node_type=NodeType.LEAF,
                     violation=0,
                     preference_loss=float(raw_contrib),
-                    propensity=TreePropensity(
-                        doc=max(MIN_PROPENSITY, float(config.heldout_doc_sample_rate)),
-                        node=max(MIN_PROPENSITY, float(p_sec)),
+                    sampling=SamplingMetadata(
+                        document_propensity=max(MIN_PROPENSITY, float(config.heldout_doc_sample_rate)),
+                        unit_propensity=max(MIN_PROPENSITY, float(p_sec)),
+                        unit_kind=ObservationUnitKind.LEAF,
                     ),
                     metadata={"span_tokens": int(span[1] - span[0])},
                 )
@@ -4204,8 +4613,9 @@ def run_leaf_local_mixture_utility_experiment_from_world(
                 node_type=NodeType.LEAF,
                 violation=0,
                 preference_loss=raw_value,
-                propensity=TreePropensity(
-                    doc=max(MIN_PROPENSITY, float(config.heldout_doc_sample_rate))
+                sampling=SamplingMetadata(
+                    document_propensity=max(MIN_PROPENSITY, float(config.heldout_doc_sample_rate)),
+                    unit_kind=ObservationUnitKind.DOCUMENT,
                 ),
             )
         )
@@ -4235,8 +4645,9 @@ def run_leaf_local_mixture_utility_experiment_from_world(
                     node_type=NodeType.LEAF,
                     violation=0,
                     preference_loss=float(deltas[doc_idx]),
-                    propensity=TreePropensity(
-                        doc=max(MIN_PROPENSITY, float(config.heldout_doc_sample_rate))
+                    sampling=SamplingMetadata(
+                        document_propensity=max(MIN_PROPENSITY, float(config.heldout_doc_sample_rate)),
+                        unit_kind=ObservationUnitKind.DOCUMENT,
                     ),
                 )
             )
@@ -4362,7 +4773,7 @@ def run_leaf_local_mixture_utility_experiment_from_world(
             quadratic_utility_weight=float(config.lambda_multiplier),
             linear_component_name="topic_mixture_linear_term",
             interaction_component_name="local_topic_mixture_quadratic_term",
-            weighting_scheme="linear_plus_quadratic_local_utility",
+            weighting_scheme="linear_plus_lambda_local_quadratic_utility",
             metadata={
                 "family": "leaf_local_mixture_utility",
                 "target_kind": "local_nonlinear_leaf_sum",
