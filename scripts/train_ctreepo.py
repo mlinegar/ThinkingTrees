@@ -27,12 +27,18 @@ import argparse
 import importlib
 import json
 import logging
+import random
 import sys
 from pathlib import Path
 from typing import List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.training.reproducibility import (
+    configure_reproducibility,
+    write_reproducibility_manifest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +94,30 @@ def main() -> int:
         default="manifesto_rile",
         help="Task/plugin name used to resolve task-provided local-law oracles.",
     )
+    data_group.add_argument(
+        "--labeled-tree-artifacts",
+        type=Path,
+        nargs="+",
+        default=None,
+        help=(
+            "Offline labeled-tree JSON/JSONL artifact(s) from Stage 0 teacher tracing. "
+            "When set, manifesto ID selection is skipped and node labels are replayed without live teacher calls."
+        ),
+    )
+    data_group.add_argument(
+        "--labeled-tree-train-splits",
+        type=str,
+        nargs="+",
+        default=["train"],
+        help="Split names from labeled-tree artifacts used for tree-operator training.",
+    )
+    data_group.add_argument(
+        "--labeled-tree-val-splits",
+        type=str,
+        nargs="+",
+        default=["val"],
+        help="Split names from labeled-tree artifacts used for validation.",
+    )
 
     # Model
     model_group = parser.add_argument_group("model")
@@ -99,6 +129,12 @@ def main() -> int:
         "--merge-type",
         choices=["gated", "mlp", "avg", "residual_gated", "bilinear"],
         default="gated",
+    )
+    model_group.add_argument(
+        "--tree-model-version",
+        choices=["legacy", "v2"],
+        default="v2",
+        help="Shared CTreePO trainer surface version to use for new training runs.",
     )
 
     # Training
@@ -123,6 +159,12 @@ def main() -> int:
     train_group.add_argument("--root-weight", type=float, default=1.0)
     train_group.add_argument("--leaf-audit-weight", type=float, default=0.0)
     train_group.add_argument("--merge-audit-weight", type=float, default=0.5)
+    train_group.add_argument(
+        "--idempotence-weight",
+        type=float,
+        default=0.0,
+        help="Latent proxy C2/L3 term: ||g(z,z)-z||^2. This is not theorem-domain resummary supervision.",
+    )
     train_group.add_argument("--local-law-violation-threshold", type=float, default=10.0)
     train_group.add_argument(
         "--require-local-law-supervision",
@@ -188,6 +230,31 @@ def main() -> int:
         dest="allow_model_based_local_law_scoring",
         help="Explicitly opt into model-backed local-law labeling. Without this flag, prefer --local-law-oracle task or an explicit exact callback.",
     )
+    law_group.add_argument(
+        "--online-local-law-supervision",
+        action="store_true",
+        help="Queue sampled node-label requests through FeedbackStore instead of blocking tree preparation.",
+    )
+    law_group.add_argument(
+        "--feedback-store",
+        type=Path,
+        default=None,
+        help="Durable JSON FeedbackStore path for online local-law supervision.",
+    )
+    law_group.add_argument(
+        "--online-teacher-worker",
+        choices=["off", "on"],
+        default="off",
+        help="Run a non-blocking in-process worker that answers pending online requests with the configured node oracle.",
+    )
+    law_group.add_argument(
+        "--online-human-only",
+        action="store_true",
+        help="Alias for online local-law supervision with no teacher worker; humans answer the shared feedback queue.",
+    )
+    law_group.add_argument("--online-leaf-query-budget-per-epoch", type=int, default=16)
+    law_group.add_argument("--online-merge-query-budget-per-epoch", type=int, default=16)
+    law_group.add_argument("--online-worker-concurrency", type=int, default=4)
 
     # Output
     parser.add_argument("--output-dir", type=Path, default=None,
@@ -210,6 +277,21 @@ def main() -> int:
     args.local_law_oracle_spec = normalize_local_law_oracle_spec(
         getattr(args, "local_law_oracle_spec", None)
     )
+    labeled_tree_artifact_paths = [Path(path) for path in (args.labeled_tree_artifacts or [])]
+    if bool(args.online_human_only):
+        args.online_local_law_supervision = True
+        args.online_teacher_worker = "off"
+
+    if labeled_tree_artifact_paths and (
+        args.local_law_oracle_spec
+        or args.local_law_score_port is not None
+        or bool(args.online_local_law_supervision)
+    ):
+        logger.error(
+            "--labeled-tree-artifacts is an offline replay path; do not combine it with "
+            "--local-law-oracle, --local-law-teacher-port, or --online-local-law-supervision."
+        )
+        return 2
 
     if (
         args.local_law_oracle_spec
@@ -298,6 +380,29 @@ def main() -> int:
     else:
         logger.info("Local-law node-span labels disabled; local-law supervision will remain inactive.")
 
+    if bool(args.online_local_law_supervision):
+        if str(args.online_teacher_worker) == "on" and node_oracle_predictor is None:
+            logger.error(
+                "--online-teacher-worker on requires --local-law-oracle or a task/model-backed local-law oracle."
+            )
+            return 2
+        if node_oracle_predictor is None:
+            node_oracle_source_kind = "human"
+            node_oracle_source_spec = "feedback_store"
+        logger.info(
+            "Online local-law supervision enabled: teacher_worker=%s human_only=%s",
+            args.online_teacher_worker,
+            bool(args.online_human_only),
+        )
+
+    if labeled_tree_artifact_paths:
+        node_oracle_source_kind = "labeled_tree"
+        node_oracle_source_spec = ";".join(str(path) for path in labeled_tree_artifact_paths)
+        logger.info(
+            "Offline labeled-tree distillation enabled: %d artifact path(s)",
+            len(labeled_tree_artifact_paths),
+        )
+
     # ------------------------------------------------------------------
     # Resolve output dir
     # ------------------------------------------------------------------
@@ -307,6 +412,32 @@ def main() -> int:
         args.output_dir = PROJECT_ROOT / "outputs" / "ctreepo" / run_id
     args.output_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Output dir: %s", args.output_dir)
+    applied_repro = configure_reproducibility(int(args.seed))
+
+    online_node_oracle_queue = None
+    feedback_store_path = args.feedback_store or (args.output_dir / "online_feedback_store.json")
+    if bool(args.online_local_law_supervision):
+        from src.feedback.store import FeedbackStore
+        from src.training.online_node_oracle import (
+            OnlineNodeOracleQueue,
+            OnlineNodeOracleQueueConfig,
+        )
+
+        feedback_store = FeedbackStore(
+            storage_path=feedback_store_path,
+            autosave=True,
+            load_existing=True,
+        )
+        online_node_oracle_queue = OnlineNodeOracleQueue(
+            store=feedback_store,
+            config=OnlineNodeOracleQueueConfig(
+                leaf_budget_per_epoch=int(args.online_leaf_query_budget_per_epoch),
+                merge_budget_per_epoch=int(args.online_merge_query_budget_per_epoch),
+                source_kind=str(node_oracle_source_kind),
+                source_spec=node_oracle_source_spec,
+            ),
+            rng=random.Random(int(args.seed)),
+        )
 
     # ------------------------------------------------------------------
     # Resolve manifesto IDs
@@ -314,7 +445,9 @@ def main() -> int:
     train_ids: List[str] = []
     val_ids: List[str] = []
 
-    if args.pilot:
+    if labeled_tree_artifact_paths:
+        logger.info("Using labeled-tree artifacts; skipping manifesto ID selection.")
+    elif args.pilot:
         train_ids = list(PILOT_TRAIN_IDS)
         val_ids = list(PILOT_VAL_IDS)
         logger.info("Pilot mode: %d train + %d val", len(train_ids), len(val_ids))
@@ -346,24 +479,29 @@ def main() -> int:
         logger.error("Specify --pilot, --train-ids, or --countries")
         return 2
 
-    if not train_ids:
+    if not train_ids and not labeled_tree_artifact_paths:
         logger.error("No training IDs found")
         return 2
 
     # ------------------------------------------------------------------
     # Load samples
     # ------------------------------------------------------------------
-    from src.tasks.manifesto.data_loader import ManifestoDataset
+    if labeled_tree_artifact_paths:
+        train_samples = []
+        val_samples = []
+        logger.info("Manifesto sample loading skipped for labeled-tree replay.")
+    else:
+        from src.tasks.manifesto.data_loader import ManifestoDataset
 
-    ds = ManifestoDataset()
-    train_samples = [s for mid in train_ids if (s := ds.get_sample(mid)) is not None]
-    val_samples = [s for mid in val_ids if (s := ds.get_sample(mid)) is not None]
+        ds = ManifestoDataset()
+        train_samples = [s for mid in train_ids if (s := ds.get_sample(mid)) is not None]
+        val_samples = [s for mid in val_ids if (s := ds.get_sample(mid)) is not None]
 
-    logger.info("Loaded %d train samples, %d val samples", len(train_samples), len(val_samples))
+        logger.info("Loaded %d train samples, %d val samples", len(train_samples), len(val_samples))
 
-    for s in train_samples + val_samples:
-        logger.info("  %s: %s (%s) RILE=%.1f (%d chars)",
-                     s.manifesto_id, s.party_abbrev, s.country_name, s.rile, len(s.text))
+        for s in train_samples + val_samples:
+            logger.info("  %s: %s (%s) RILE=%.1f (%d chars)",
+                         s.manifesto_id, s.party_abbrev, s.country_name, s.rile, len(s.text))
 
     # ------------------------------------------------------------------
     # Set up embedding client
@@ -408,40 +546,80 @@ def main() -> int:
     # Build config and trainer
     # ------------------------------------------------------------------
     import torch
-    from src.tree.ctreepo_model import CTreePOConfig
-    from src.training.ctreepo_trainer import CTreePOTrainer, CTreePOTrainingConfig
+    from src.tree.ctreepo_model import ctreepo_config_from_mapping
+    from src.training.config_sections import (
+        OptimizerConfig,
+        RunConfig,
+        RuntimeConfig,
+        TrainConfig,
+        ValidationConfig,
+    )
+    from src.training.ctreepo_trainer import (
+        CTreePOTrainer,
+        CTreePOTrainingConfig,
+        LocalLawSupervisionConfig,
+        OnlineLocalLawSupervisionConfig,
+        TreeOperatorDataConfig,
+        TreeOperatorEvaluationConfig,
+        TreeOperatorObjectiveConfig,
+    )
 
-    model_config = CTreePOConfig(
-        embedding_dim=resolved_embedding_dim,
-        sketch_dim=args.sketch_dim,
-        hidden_dim=args.hidden_dim,
-        merge_type=args.merge_type,
-        head_names=("rile",),
+    model_config = ctreepo_config_from_mapping(
+        {
+            "sketch_dim": int(args.sketch_dim),
+            "hidden_dim": int(args.hidden_dim),
+            "merge_type": str(args.merge_type),
+            "head_names": ("rile",),
+            "tree_model_version": str(args.tree_model_version),
+        },
+        embedding_dim=int(resolved_embedding_dim),
     )
     train_config = CTreePOTrainingConfig(
         model=model_config,
-        window_size=args.window_size,
-        window_overlap=args.window_overlap,
-        batch_size=args.batch_size,
-        n_epochs=args.epochs,
-        lr=args.lr,
-        optimizer=args.optimizer,
-        scheduler=args.scheduler,
-        min_lr=args.min_lr,
-        warmup_epochs=args.warmup_epochs,
-        grad_clip_norm=args.grad_clip_norm,
-        early_stopping_patience=args.early_stopping_patience,
-        early_stopping_min_delta=args.early_stopping_min_delta,
-        eval_every=args.eval_every,
-        uncertainty_z_score=args.uncertainty_z_score,
-        min_interval_std=args.min_interval_std,
-        seed=args.seed,
-        device=args.device,
-        root_weight=args.root_weight,
-        leaf_audit_weight=args.leaf_audit_weight,
-        audit_weight=args.merge_audit_weight,
-        local_law_violation_threshold=args.local_law_violation_threshold,
-        require_local_law_supervision=args.require_local_law_supervision,
+        data=TreeOperatorDataConfig(
+            window_size=args.window_size,
+            window_overlap=args.window_overlap,
+        ),
+        run=RunConfig(output_dir=args.output_dir, seed=args.seed),
+        train=TrainConfig(batch_size=args.batch_size, epochs=args.epochs),
+        optimizer=OptimizerConfig(
+            learning_rate=args.lr,
+            optimizer=args.optimizer,
+            scheduler=args.scheduler,
+            min_learning_rate=args.min_lr,
+            warmup_epochs=args.warmup_epochs,
+            grad_clip_norm=args.grad_clip_norm,
+            weight_decay=1e-4,
+        ),
+        validation=ValidationConfig(
+            eval_every=args.eval_every,
+            early_stopping_patience=args.early_stopping_patience,
+            early_stopping_min_delta=args.early_stopping_min_delta,
+        ),
+        runtime=RuntimeConfig(device=args.device),
+        objective=TreeOperatorObjectiveConfig(
+            root_weight=args.root_weight,
+            leaf_audit_weight=args.leaf_audit_weight,
+            merge_audit_weight=args.merge_audit_weight,
+            idempotence_weight=args.idempotence_weight,
+            local_law_violation_threshold=args.local_law_violation_threshold,
+        ),
+        supervision=LocalLawSupervisionConfig(
+            require_local_law_supervision=args.require_local_law_supervision,
+            online=OnlineLocalLawSupervisionConfig(
+                enabled=bool(args.online_local_law_supervision),
+                teacher_worker=(
+                    bool(args.online_local_law_supervision)
+                    and str(args.online_teacher_worker) == "on"
+                    and not bool(args.online_human_only)
+                ),
+                worker_concurrency=int(args.online_worker_concurrency),
+            ),
+        ),
+        evaluation=TreeOperatorEvaluationConfig(
+            uncertainty_z_score=args.uncertainty_z_score,
+            min_interval_std=args.min_interval_std,
+        ),
     )
     trainer = CTreePOTrainer(
         config=train_config,
@@ -449,21 +627,119 @@ def main() -> int:
         node_oracle_predictor=node_oracle_predictor,
         node_oracle_source_kind=node_oracle_source_kind,
         node_oracle_source_spec=node_oracle_source_spec,
+        online_node_oracle_queue=online_node_oracle_queue,
+        online_teacher_worker=(
+            bool(args.online_local_law_supervision)
+            and str(args.online_teacher_worker) == "on"
+            and not bool(args.online_human_only)
+        ),
+        online_worker_concurrency=int(args.online_worker_concurrency),
     )
     logger.info("Training device: %s", trainer.device)
+    repro_manifest_path = write_reproducibility_manifest(
+        args.output_dir,
+        seed=int(args.seed),
+        cli_args=vars(args),
+        config=train_config,
+        applied=applied_repro,
+        extra={
+            "task": str(args.task),
+            "resolved_embedding_model": str(resolved),
+            "embedding_api_base": str(api_base),
+            "embedding_dim": int(resolved_embedding_dim),
+            "train_manifesto_ids": list(train_ids),
+            "val_manifesto_ids": list(val_ids),
+            "labeled_tree_artifacts": [str(path) for path in labeled_tree_artifact_paths],
+            "labeled_tree_train_splits": list(args.labeled_tree_train_splits or []),
+            "labeled_tree_val_splits": list(args.labeled_tree_val_splits or []),
+            "distillation_contract": (
+                {
+                    "train_targets": ["tree_operator"],
+                    "student_model_class": "ctreepo_embedding_tree",
+                    "supervision_source": "labeled_tree_artifact",
+                    "teacher_model_spec": None,
+                }
+                if labeled_tree_artifact_paths
+                else None
+            ),
+            "local_law_label_source": {
+                "kind": str(node_oracle_source_kind),
+                "spec": node_oracle_source_spec,
+            },
+            "online_local_law_supervision": {
+                "enabled": bool(args.online_local_law_supervision),
+                "feedback_store": str(feedback_store_path)
+                if bool(args.online_local_law_supervision)
+                else None,
+                "teacher_worker": str(args.online_teacher_worker),
+                "leaf_budget_per_epoch": int(args.online_leaf_query_budget_per_epoch),
+                "merge_budget_per_epoch": int(args.online_merge_query_budget_per_epoch),
+                "worker_concurrency": int(args.online_worker_concurrency),
+            },
+        },
+    )
+    logger.info("Reproducibility manifest: %s", repro_manifest_path)
 
     # ------------------------------------------------------------------
-    # Prepare trees (embed documents)
+    # Prepare/train trees
     # ------------------------------------------------------------------
-    logger.info("Building embedding trees...")
-    n_train = trainer.prepare_trees_from_samples(train_samples, split="train")
-    n_val = trainer.prepare_trees_from_samples(val_samples, split="val") if val_samples else 0
-    logger.info("Built %d train trees, %d val trees", n_train, n_val)
+    if labeled_tree_artifact_paths:
+        from src.ctreepo.distillation import (
+            DistillationContractConfig,
+            DistillationTrainConfig,
+            fit as fit_distillation_student,
+            load_labeled_trees,
+        )
 
-    # ------------------------------------------------------------------
-    # Train
-    # ------------------------------------------------------------------
-    result = trainer.train(output_dir=args.output_dir)
+        labeled_trees = []
+        for path in labeled_tree_artifact_paths:
+            loaded = load_labeled_trees(path)
+            logger.info("Loaded %d labeled tree(s) from %s", len(loaded), path)
+            labeled_trees.extend(loaded)
+        if not labeled_trees:
+            logger.error("No labeled trees loaded from %s", labeled_tree_artifact_paths)
+            return 2
+        logger.info(
+            "Fitting C-TreePO tree-operator model from %d labeled tree artifact(s)",
+            len(labeled_trees),
+        )
+        fit_result = fit_distillation_student(
+            labeled_trees,
+            DistillationTrainConfig(
+                contract=DistillationContractConfig(
+                    train_targets=("tree_operator",),
+                    student_model_class="ctreepo_embedding_tree",
+                    supervision_source="labeled_tree_artifact",
+                ),
+                run=RunConfig(output_dir=args.output_dir, seed=args.seed),
+                train=TrainConfig(
+                    train_splits=tuple(args.labeled_tree_train_splits or ["train"]),
+                    batch_size=args.batch_size,
+                    epochs=args.epochs,
+                ),
+                validation=ValidationConfig(
+                    val_splits=tuple(args.labeled_tree_val_splits or ["val"]),
+                    eval_every=args.eval_every,
+                ),
+            ),
+            embedding_client=client,
+            trainer=trainer,
+        )
+        result = fit_result.trained_artifact
+        if result is None:
+            logger.error("Distillation fit did not return a trained tree-operator artifact")
+            return 1
+        logger.info(
+            "Tree-operator distillation fit consumed %d train tree(s), %d val tree(s)",
+            fit_result.train_count,
+            fit_result.val_count,
+        )
+    else:
+        logger.info("Building embedding trees...")
+        n_train = trainer.prepare_trees_from_samples(train_samples, split="train")
+        n_val = trainer.prepare_trees_from_samples(val_samples, split="val") if val_samples else 0
+        logger.info("Built %d train trees, %d val trees", n_train, n_val)
+        result = trainer.train(output_dir=args.output_dir)
 
     # ------------------------------------------------------------------
     # Final evaluation on all data (using best checkpoint)

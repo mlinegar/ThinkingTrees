@@ -13,9 +13,17 @@ from statistics import fmean
 import textwrap
 from typing import Dict, Iterable, List, Sequence, Tuple
 
+import sys
+
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.ctreepo.sim.util import safe_float as _safe_float
 
 
 TAU_SUITES = {"tau_crossover_dense", "tau_crossover_proportion_extend"}
@@ -40,13 +48,6 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--snapshot-label", type=str, default="Coarse Leaf-Size Publication Report")
     p.add_argument("--clean-figures-subdir", type=str, default="publication_figures")
     return p.parse_args()
-
-
-def _safe_float(x) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return float("nan")
 
 
 def _safe_mean(xs: Iterable[float]) -> float:

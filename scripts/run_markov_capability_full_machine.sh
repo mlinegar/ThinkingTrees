@@ -90,11 +90,7 @@ report_suite() {
     log "SKIP report for ${suite_name}; missing input root ${input_root}"
     return 0
   fi
-  log "REPORT ${suite_name}"
-  "${PYTHON_BIN}" -u scripts/report_markov_capability_map.py \
-    --input-root "${input_root}" \
-    --output-dir "${report_dir}" \
-    --suite-type "${suite_name}" >>"${phase_log}" 2>&1
+  log "SKIP report for ${suite_name}; capability report is archived (see docs/markov_report_archive.md)"
 }
 
 split_cmd_file() {

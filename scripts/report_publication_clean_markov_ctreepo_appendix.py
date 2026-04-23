@@ -17,19 +17,15 @@ from typing import Dict, Iterable, List, Optional
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, Rectangle
 
-
-REGIME_COLORS = {
-    "A": "#4C78A8",
-    "B": "#F58518",
-    "C": "#54A24B",
-    "D": "#E45756",
-}
-REGIME_VOCAB = {
-    "A": ["mist", "lake", "reed"],
-    "B": ["rust", "ember", "brick"],
-    "C": ["fern", "moss", "leaf"],
-    "D": ["plum", "rose", "wine"],
-}
+from _appendix_markov_toy import (
+    REGIME_COLORS,
+    REGIME_VOCAB,
+    leaf_summaries,
+    lighten_hex,
+    merge_summary,
+    token_regime_sequence,
+    token_words,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -523,7 +519,7 @@ def _build_appendix_tex(
         r"\hypersetup{colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!50!black}",
         r"\setlength{\parindent}{0pt}",
         r"\setlength{\parskip}{0.55em}",
-        r"\title{Appendix Walkthrough: Markov Additive and C-TreePO}",
+        r"\title{Appendix: From Exact Mergeability to Approximate Tree Policies}",
         r"\date{}",
         r"\begin{document}",
         r"\maketitle",
@@ -531,63 +527,39 @@ def _build_appendix_tex(
         rf"\textbf{{Clean publication root:}} \path{{{output_root}}}\\",
         rf"\textbf{{Diagnostics source:}} \path{{{diag_path}}}",
         "",
-        r"\section*{1. Why Start Here}",
-        "This appendix is meant to be read like a lecture, not like a result dump.",
-        "The teaching order is deliberate. We start with the Markov additive family because it is the cleanest theorem-matched example: the oracle target is simple, the exact mergeable statistic is explicit, and the additive learned family is given the correct merge rule. Then we move to C-TreePO, which no longer knows the exact merge rule \\emph{a priori} but can still recover the same qualitative story quickly once it gets a modest amount of supervision.",
-        "The intended message is not that the two raw error scales should be compared directly. They should not. The intended message is:",
+        # ── Section 1: What This Appendix Shows ──────────────────────────
+        r"\section*{1.\quad What This Appendix Shows}",
+        r"This appendix walks through two worked examples of tree-based merging: recovering a document-level prediction by combining small-piece summaries bottom-up through a binary tree.",
+        r"The first example (\textbf{Markov changepoint counting}) is the easy control. We hand the system the correct merge rule and confirm that it works. The second example (\textbf{C-TreePO topic recovery}) is harder: the system must discover an approximate merge strategy from a limited budget of labeled examples.",
+        r"The two examples use different error metrics, so their raw scores should not be compared directly. The point is the qualitative pattern: in both cases, a moderate amount of supervision closes most of the gap between the unsupervised baseline and the oracle ceiling.",
+        "",
+        # ── Section 2: Markov Changepoint Counting ────────────────────────
+        r"\section*{2.\quad Worked Example 1: Counting Changepoints in a Markov Sequence}",
+        "",
+        r"\subsection*{2.1\quad The idea}",
+        r"Imagine a document where the writing style switches between a few hidden modes. Each switch is called a \emph{changepoint}. The goal is to count the total number of switches across the whole document---but we can only look at small pieces (leaves) at a time.",
+        r"The trick: if each piece remembers (a)~how many switches happened inside it, (b)~which mode it started in, and (c)~which mode it ended in, then we can combine any two neighboring pieces exactly. No information is lost, no matter how we partition the document.",
+        "",
+        r"\subsection*{2.2\quad Data-generating process}",
+        r"Each document is a token sequence with a hidden regime path. The regime stays constant for a stretch, then occasionally flips to a different regime. Each regime has its own word vocabulary, so the observed tokens give indirect clues about the hidden path. The oracle target is simply the number of regime flips:",
+        r"\[",
+        r"f^\star(x) \;=\; \sum_{t=1}^{T-1} \mathbf{1}\{z_t \neq z_{t+1}\}.",
+        r"\]",
+        r"Simulation parameters for the plotted slice:",
         "",
     ]
     lines.extend(
-        _tex_enumerate(
-            [
-                "Markov additive is the closest empirical proxy to the exact DGP-plus-correct-merge-rule story.",
-                "C-TreePO is a richer approximate system, but with some labels it closes most of its own gap quickly.",
-                "That makes the Markov example the simplest lecture version, and C-TreePO the next approximation step.",
-            ]
-        )
-    )
-
-    lines.extend(
-        [
-            r"\section*{2. The Markov Example}",
-            r"\subsection*{2.1 Data-generating process}",
-            r"A document is a token sequence $x = (x_1, \ldots, x_T)$ with a latent regime path $z_1, \ldots, z_T \in \{1,\ldots,K\}$. In the fixed publication slice:",
-            "",
-        ]
-    )
-    lines.extend(
         _tex_itemize(
             [
-                rf"number of latent regimes: {_tt(markov_cfg.get('n_regimes'))}",
+                rf"latent regimes: {_tt(markov_cfg.get('n_regimes'))}",
                 rf"vocabulary size: {_tt(markov_cfg.get('vocab_size'))}",
-                rf"token count per document: {_tt(markov_cfg.get('min_tokens'))} to {_tt(markov_cfg.get('max_tokens'))}",
-                rf"realized leaf size: {_tt(markov_cfg.get('fixed_leaf_tokens'))} tokens",
-            ]
-        )
-    )
-    lines.extend(
-        [
-            r"The latent regime is piecewise constant. A changepoint occurs exactly when the regime flips between adjacent tokens. The oracle target is therefore",
-            r"\[",
-            r"f^\star(x) = \sum_{t=1}^{T-1} \mathbf{1}\{z_t \neq z_{t+1}\}.",
-            r"\]",
-            r"In plain language: count the true changepoints.",
-            r"A concrete way to read the DGP is:",
-            "",
-        ]
-    )
-    lines.extend(
-        _tex_enumerate(
-            [
-                r"draw a latent regime path $z_{1:T}$ that stays constant for stretches and occasionally flips,",
-                r"for each token position $t$, emit the observed word $x_t$ from the regime-specific vocabulary attached to $z_t$,",
-                r"cut the document into fixed leaves, and",
-                r"summarize each leaf by the exact sketch $S=(\text{count}, \text{first}, \text{last})$ before merging upward.",
+                rf"tokens per document: {_tt(markov_cfg.get('min_tokens'))} to {_tt(markov_cfg.get('max_tokens'))}",
+                rf"leaf size: {_tt(markov_cfg.get('fixed_leaf_tokens'))} tokens",
             ]
         )
     )
     lines.append(
-        r"A small toy slide helps fix the objects before looking at the large sweep. The first figure below is only about the DGP: what is latent, what is observed, and what the oracle counts."
+        r"The figure below shows a small toy document drawn from this process: the top row is the observed word, the colored strip is the hidden regime, and dashed lines mark the five true changepoints."
     )
     lines.append("")
     lines.extend(
@@ -596,51 +568,35 @@ def _build_appendix_tex(
             "Toy Markov DGP: latent regime path, regime-specific vocabularies, observed words, oracle target, and fixed leaf partition.",
         )
     )
+
+    # ── 2.3 How the tree merges exactly ──────────────────────────────
     lines.extend(
         [
-            r"\subsection*{2.2 Exact mergeable statistic}",
-            r"For any span $u$, the exact sketch keeps three pieces of information:",
+            r"\subsection*{2.3\quad How the tree merges exactly}",
+            r"Each piece (span) of the document stores a three-part summary:",
             r"\[",
-            r"S(u) = (c(u), a(u), b(u)),",
+            r"S(u) \;=\; \bigl(\text{count},\; \text{first regime},\; \text{last regime}\bigr).",
             r"\]",
-            r"where $c(u)$ is the number of changepoints inside the span, $a(u)$ is the first regime in the span, and $b(u)$ is the last regime in the span. If we merge a left child and a right child, the correct merge rule is",
+            r"To merge two neighboring pieces, add their internal counts and check whether the boundary between them is itself a changepoint:",
             r"\[",
-            r"S(u_L) \otimes S(u_R) = \big(c_L + c_R + \mathbf{1}\{b_L \neq a_R\},\; a_L,\; b_R\big).",
+            r"S(u_L) \otimes S(u_R) \;=\; \bigl(c_L + c_R + \mathbf{1}\{b_L \neq a_R\},\;\; a_L,\;\; b_R\bigr).",
             r"\]",
-            r"This is the worked example formalized in \texttt{lean3/FormalProofs/OPT/MarkovCountSketchExample.lean}: the exact theorem-domain state is \texttt{MarkovCountSketch.empty} or \texttt{MarkovCountSketch.nonempty count first last}, the monoid product is the merge law above, and the root oracle reads out the \texttt{count} coordinate.",
-            r"In the simulation code, the helper \texttt{\_ExactState(count, first, last)} uses the same exact semantics, and the additive learned family stores the same three semantics in numeric form as a tensor \texttt{[count\_norm, first\_one\_hot, last\_one\_hot]}. In the plotted publication slice, \texttt{feature\_mode=full}, so the endpoint channels are copied exactly from the leaf features and only the normalized count coordinate is fit from labels. So when this appendix writes $S=(\mathrm{count}, \mathrm{first}, \mathrm{last})$, it is naming the theorem-facing coordinates, not claiming that the implementation literally stores a symbolic tuple at runtime.",
-            r"The second toy slide uses the same four leaves and shows the exact merge arithmetic explicitly.",
+            r"That single boundary correction is the only thing the merge needs. The toy figure below shows this arithmetic on the same four-leaf example: each leaf stores its own summary, and the root recovers the exact changepoint count.",
             "",
         ]
     )
     lines.extend(
         _appendix_tex_figure(
             merge_rel,
-            "Toy exact merge sketch: each leaf stores $S=(\\mathrm{count}, \\mathrm{first}, \\mathrm{last})$, and the root recovers the exact changepoint count.",
+            "Toy exact merge sketch: each leaf stores its count, first regime, and last regime. The root recovers the exact changepoint count by merging bottom-up.",
         )
     )
+
+    # ── 2.4 Training setup and results ───────────────────────────────
     lines.extend(
         [
-            r"\subsection*{2.3 What is fixed, and what is learned}",
-            r"The additive learned family is the closest learned family to that exact construction, but the roles of the model and the tree should be separated carefully.",
-            "",
-        ]
-    )
-    lines.extend(
-        _tex_itemize(
-            [
-                r"\textbf{Fixed before training:} the contiguous leaf partition, the binary tree above those leaves, the oracle target at the root, and the exact upward merge rule $S(u_L)\otimes S(u_R)$.",
-                r"\textbf{Learned during training:} in the plotted additive slice, only the leaf count coordinate is fit. Because \texttt{feature\_mode=full}, the first/last endpoint channels are copied exactly from the realized leaf endpoints rather than relearned.",
-                r"\textbf{Consequence:} this family is not inventing the tree algebra from scratch. It only has to fit the correct leaf summaries well enough that the fixed recursion returns the right root count.",
-            ]
-        )
-    )
-    lines.extend(
-        [
-            r"This is also why the additive lane uses a closed-form label fit for the leaf encoder rather than the weighted neural objective used by the neural family.",
-            r"\subsection*{2.4 Which labels does training actually see?}",
-            "",
-            r"On the plotted training slice, the learner is given the following queried information:",
+            r"\subsection*{2.4\quad Training setup and results}",
+            r"The tree structure and the merge rule are both fixed before training. The only thing the learner fits is the count summary at each leaf. Training configuration:",
             "",
         ]
     )
@@ -650,125 +606,107 @@ def _build_appendix_tex(
                 rf"training documents: {_tt(markov_cfg.get('train_docs'))}",
                 rf"held-out test documents: {_tt(markov_cfg.get('test_docs'))}",
                 rf"leaf-label query rate: {_tt(markov_cfg.get('leaf_query_rate'))}",
-                r"internal-node audit fraction: \texttt{1.0}",
-                rf"optional root query during training: {_tt(markov_cfg.get('include_root_query'))}",
-                rf"main objective weight: {_tt(markov_cfg.get('task_objective_weight'))} on root loss, with local-law weight {_tt(markov_cfg.get('local_law_weight'))}",
+                rf"root query during training: {_tt(markov_cfg.get('include_root_query'))}",
             ]
         )
     )
     lines.extend(
         [
-            r"In plain language: the learner sees the words in each training leaf, together with whatever leaf labels, internal audits, and optional root labels the experiment pays for. In this additive slice the endpoint channels are already exact, so those queried labels are used mainly to fit the leaf count coordinate; the tree above the leaves is not re-learned.",
-            r"The main downstream test is held-out root MAE. That is the number we should treat as the operational score.",
-            rf"The table below is read from the clean publication slice and aggregates over {_tt(markov_meta.get('n_seeds'))} seeds.",
-            r"\subsection*{2.5 What we see}",
+            rf"Results below aggregate over {_tt(markov_meta.get('n_seeds'))} seeds. The column $q_{{\mathrm{{infer}}}}$ controls how much oracle guidance the system receives at decision time (0\,=\,none, 1\,=\,full).",
             r"\begin{center}",
             r"\begin{tabular}{@{}lccc@{}}",
             r"\toprule",
-            r"Markov additive fixed slice & $q_{\mathrm{infer}}=0$ & $q_{\mathrm{infer}}=0.5$ & $q_{\mathrm{infer}}=1.0$ \\",
+            r"Markov additive & $q_{\mathrm{infer}}=0$ & $q_{\mathrm{infer}}=0.5$ & $q_{\mathrm{infer}}=1.0$ \\",
             r"\midrule",
             rf"root MAE & {_fmt(_series_value(markov_series, 0.0, 'root_mae'))} & {_fmt(_series_value(markov_series, 0.5, 'root_mae'))} & {_fmt(_series_value(markov_series, 1.0, 'root_mae'))} \\",
-            rf"share of total gap already closed by $q_{{\mathrm{{infer}}}}=0.5$ &  & {_fmt(gain_share.get('markov_additive'))} &  \\",
+            rf"gap closed at $q_{{\mathrm{{infer}}}}=0.5$ &  & {_fmt(gain_share.get('markov_additive'))} &  \\",
             r"\bottomrule",
             r"\end{tabular}",
             r"\end{center}",
-            r"The lecture reading is straightforward. Markov additive is already extremely close to the exact ceiling at $q_{\mathrm{infer}} = 0$. By $q_{\mathrm{infer}} = 0.5$ it has closed essentially all of the remaining gap, and by $q_{\mathrm{infer}} = 1$ it reaches the observed ceiling exactly. That is exactly what we would hope to see from a theorem-matched family with the correct merge rule.",
-            r"So the clean pedagogical message is: this family is not just doing well; it is the sanity-check control. It is the empirical version of ``the DGP really is mergeable, and we told the learner the right algebra.''",
-            r"\section*{3. The C-TreePO Example}",
-            r"\subsection*{3.1 Data-generating process}",
-            r"Now move one step away from the theorem-matched Markov control. In the segmented-LDA C-TreePO simulation, each book has a global topic mixture, but it is realized through contiguous segments with topic-specific concentrations. In the fixed publication slice:",
+            r"Because the system has the correct merge rule, it is already near the exact ceiling at $q_{\mathrm{infer}}=0$. By $q_{\mathrm{infer}}=0.5$ essentially all remaining error is gone, and at full visibility it matches the ceiling exactly. This is the expected behavior of a correctly specified system---the sanity-check control.",
+            "",
+            # ── Section 3: C-TreePO ──────────────────────────────────────
+            r"\section*{3.\quad Worked Example 2: Recovering Topic Mixtures with C-TreePO}",
+            "",
+            r"\subsection*{3.1\quad The idea}",
+            r"Now imagine a document made of chapters, where each chapter focuses on a different topic. The goal is to recover the overall topic mix of the whole document. Unlike the Markov example, we do not hand the system an exact formula for combining chapter-level estimates. Instead, it must learn an approximate combination strategy from a limited budget of oracle labels.",
+            "",
+            r"\subsection*{3.2\quad Data-generating process}",
+            r"Each book draws a global topic mixture, then realizes it through contiguous segments that each concentrate on one dominant topic. Words within each segment are drawn from that topic's vocabulary. The oracle target is the root topic mixture of the whole book.",
+            r"Simulation parameters for the plotted slice:",
             "",
         ]
     )
     lines.extend(
         _tex_itemize(
             [
-                rf"number of topics: {_tt(ctree_cfg.get('n_topics'))}",
+                rf"topics: {_tt(ctree_cfg.get('n_topics'))}",
                 rf"vocabulary size: {_tt(ctree_cfg.get('vocab_size'))}",
                 rf"training books: {_tt(ctree_cfg.get('n_books_train'))}",
                 rf"held-out test books: {_tt(ctree_cfg.get('n_books_test'))}",
                 rf"segments per book: {_tt(ctree_cfg.get('min_segments'))} to {_tt(ctree_cfg.get('max_segments'))}",
                 rf"segment length: {_tt(ctree_cfg.get('min_seg_tokens'))} to {_tt(ctree_cfg.get('max_seg_tokens'))} tokens",
-                rf"realized leaf size: {_tt(ctree_cfg.get('fixed_leaf_tokens'))} tokens",
+                rf"leaf size: {_tt(ctree_cfg.get('fixed_leaf_tokens'))} tokens",
             ]
         )
     )
+
+    # ── 3.3 What the system must learn ───────────────────────────────
     lines.extend(
         [
-            r"Formally, topic-word distributions satisfy $\phi_k \sim \mathrm{Dirichlet}(\beta)$, each book draws a root mixture $w_b \sim \mathrm{Dirichlet}(\alpha)$, each segment chooses a dominant topic and then draws a concentrated local mixture around it. The target is the root topic mixture of the whole book.",
-            r"\subsection*{3.2 Why this is harder}",
-            r"Here we are no longer handing the learner an exact closed-form merge rule analogous to the changepoint count sketch. Instead, C-TreePO has to:",
+            r"\subsection*{3.3\quad What the system must learn}",
+            r"Unlike the Markov example, there is no known closed-form merge rule. C-TreePO has to:",
             "",
         ]
     )
     lines.extend(
         _tex_enumerate(
             [
-                r"estimate or inherit a topic-word matrix $\hat\phi$,",
-                r"estimate leaf topic mixtures from leaf word counts,",
-                r"calibrate those estimates from queried training leaves, and",
-                r"optionally spend evaluation-time oracle queries on leaves and internal nodes.",
+                r"estimate which words belong to which topics (the topic--word matrix),",
+                r"estimate each leaf's topic mixture from its word counts,",
+                r"calibrate those estimates using a limited training-time oracle budget, and",
+                r"optionally use additional oracle queries at decision time.",
             ]
         )
     )
     lines.extend(
         [
-            r"So this is the right next lecture step: the theorem-matched Markov example is the easy exact control, and C-TreePO is the approximate system that has to recover the same qualitative behavior from partial supervision.",
-            r"\subsection*{3.3 What is being supervised}",
+            r"Key configuration for this slice:",
             "",
         ]
     )
     lines.extend(
         _tex_itemize(
             [
-                rf"topic estimator in the clean publication slice: {_tt(ctree_cfg.get('topic_phi_estimator'))}",
-                rf"leaf-theta estimator: {_tt(ctree_cfg.get('leaf_theta_estimator'))}",
+                rf"topic estimator: {_tt(ctree_cfg.get('topic_phi_estimator'))}",
+                rf"leaf-mixture estimator: {_tt(ctree_cfg.get('leaf_theta_estimator'))}",
                 rf"learn-time calibration rate: {_tt(ctree_cfg.get('calibration_leaf_query_rate'))}",
-                rf"decision-time leaf query rate in the full-guidance anchor: {_tt(ctree_cfg.get('eval_leaf_query_rate'))}",
-                rf"decision-time internal query rate in the full-guidance anchor: {_tt(ctree_cfg.get('eval_internal_query_rate'))}",
-                rf"internal-node query design: {_tt(ctree_cfg.get('eval_internal_query_design'))}",
+                rf"decision-time leaf query rate: {_tt(ctree_cfg.get('eval_leaf_query_rate'))}",
+                rf"decision-time internal query rate: {_tt(ctree_cfg.get('eval_internal_query_rate'))}",
             ]
         )
     )
+
+    # ── 3.4 Results ──────────────────────────────────────────────────
     lines.extend(
         [
-            r"The main downstream test here is held-out root $L^1$ error on the recovered root topic mixture.",
-            rf"The table below is read from the clean publication slice and aggregates over {_tt(ctree_meta.get('n_seeds'))} seeds.",
-            r"\subsection*{3.4 What we see}",
+            r"\subsection*{3.4\quad Results}",
+            rf"Results aggregate over {_tt(ctree_meta.get('n_seeds'))} seeds. The metric is root $L^1$ error on the recovered topic mixture.",
             r"\begin{center}",
             r"\begin{tabular}{@{}lccc@{}}",
             r"\toprule",
-            r"C-TreePO fixed slice & $q_{\mathrm{infer}}=0$ & $q_{\mathrm{infer}}=0.5$ & $q_{\mathrm{infer}}=1.0$ \\",
+            r"C-TreePO & $q_{\mathrm{infer}}=0$ & $q_{\mathrm{infer}}=0.5$ & $q_{\mathrm{infer}}=1.0$ \\",
             r"\midrule",
             rf"root $L^1$ & {_fmt(_series_value(ctree_series, 0.0, 'root_l1_mean'))} & {_fmt(_series_value(ctree_series, 0.5, 'root_l1_mean'))} & {_fmt(_series_value(ctree_series, 1.0, 'root_l1_mean'))} \\",
-            rf"share of total gap already closed by $q_{{\mathrm{{infer}}}}=0.5$ &  & {_fmt(gain_share.get('ctree'))} &  \\",
+            rf"gap closed at $q_{{\mathrm{{infer}}}}=0.5$ &  & {_fmt(gain_share.get('ctree'))} &  \\",
             r"\bottomrule",
             r"\end{tabular}",
             r"\end{center}",
-            r"This is the approximation story we want. C-TreePO does not start at the exact ceiling. But with a modest learn-time calibration rate and moderate decision-time oracle visibility, it closes most of its own remaining gap quickly. In this fixed slice, by $q_{\mathrm{infer}}=0.5$ it has already closed about ninety percent of the total gap to its observed ceiling.",
-            r"That is the appendix-friendly statement: once the model gets at least a few labels, the approximate tree system can move quickly toward the oracle behavior, even though it is solving a richer end-to-end problem than the exact Markov count sketch.",
-            r"\section*{4. How To Compare The Two Stories Carefully}",
-            r"The raw Markov and C-TreePO scores should not be compared numerically. Markov uses root MAE on changepoint count; C-TreePO uses root $L^1$ on topic-mixture recovery. Those are different units.",
-            r"The right comparison is conceptual and step-by-step:",
+            r"C-TreePO does not start at the ceiling---it has real error at $q_{\mathrm{infer}}=0$. But with moderate oracle visibility it closes most of that gap quickly. At $q_{\mathrm{infer}}=0.5$ it has already recovered about ninety percent of the way to the ceiling, matching the same qualitative pattern as the exact Markov control.",
             "",
-        ]
-    )
-    lines.extend(
-        _tex_enumerate(
-            [
-                r"Markov additive is the simplest theorem-facing control because the oracle and merge rule are both explicit.",
-                r"It behaves exactly the way the lecture story says it should behave: near ceiling already, and perfect once decision-time visibility is full.",
-                r"C-TreePO is the next approximation step: it does not know the exact merge rule, but after modest calibration it closes most of its own gap quickly.",
-                r"Therefore the appendix story should read as a progression from exact mergeable control to approximate tree policy, not as a single raw-number horse race.",
-            ]
-        )
-    )
-    lines.extend(
-        [
-            r"\section*{5. Appendix-Ready Summary Paragraph}",
-            r"A simple way to present the clean publication slice is to start from the Markov additive control. In that example the oracle target is just the number of changepoints, and the correct mergeable statistic is explicit: each span needs only its internal changepoint count together with its first and last regimes, so merging two children adds the two counts and a single boundary-correction term. The additive family is therefore the closest learned proxy to the true DGP plus the correct merge rule, and empirically it behaves that way: at learn-time full it is already near the exact ceiling before any decision-time intervention, and moderate decision-time visibility removes almost all remaining error. C-TreePO should then be introduced as the next approximation step rather than as a direct raw-number competitor. In the segmented-LDA benchmark it must estimate leaf topic mixtures, calibrate them from partial labels, and then use a limited evaluation-time oracle budget; nevertheless, with a modest amount of learn-time calibration it closes most of its own remaining gap quickly. The pedagogical lesson is therefore that the theorem-matched Markov example provides the clean control, while C-TreePO shows that a richer approximate tree system can recover the same qualitative oracle-guidance story with only modest supervision.",
-            r"\section*{6. Reference Figure}",
-            r"The paired raw/normalized tradeoff figure from the clean publication slice is reproduced here for reference.",
+            # ── Section 4: Reference Figure ──────────────────────────────
+            r"\section*{4.\quad Reference Figure}",
+            r"The paired raw/normalized tradeoff figure from the clean publication slice is reproduced below for reference.",
             "",
         ]
     )
@@ -800,67 +738,6 @@ def _latex_full_page_image(path: str, caption: str) -> List[str]:
     ]
 
 
-def _lighten_hex(color: str, factor: float = 0.78) -> str:
-    color = color.lstrip("#")
-    r = int(color[0:2], 16)
-    g = int(color[2:4], 16)
-    b = int(color[4:6], 16)
-    rr = int(round(255 - (255 - r) * factor))
-    gg = int(round(255 - (255 - g) * factor))
-    bb = int(round(255 - (255 - b) * factor))
-    return f"#{rr:02x}{gg:02x}{bb:02x}"
-
-
-def _token_regime_sequence() -> List[str]:
-    return ["A", "A", "A", "B", "B", "C", "C", "D", "D", "A", "A", "B"]
-
-
-def _token_words() -> List[str]:
-    return [
-        "mist",
-        "lake",
-        "reed",
-        "rust",
-        "brick",
-        "fern",
-        "moss",
-        "plum",
-        "wine",
-        "lake",
-        "mist",
-        "ember",
-    ]
-
-
-def _leaf_summaries(regimes: List[str], leaf_size: int = 4) -> List[Dict[str, object]]:
-    out: List[Dict[str, object]] = []
-    for i in range(0, len(regimes), leaf_size):
-        span = regimes[i : i + leaf_size]
-        count = sum(1 for a, b in zip(span[:-1], span[1:]) if a != b)
-        out.append(
-            {
-                "label": f"L{1 + i // leaf_size}",
-                "start": i + 1,
-                "end": i + leaf_size,
-                "count": count,
-                "first": span[0],
-                "last": span[-1],
-            }
-        )
-    return out
-
-
-def _merge_summary(left: Dict[str, object], right: Dict[str, object], label: str) -> Dict[str, object]:
-    correction = 0 if str(left["last"]) == str(right["first"]) else 1
-    return {
-        "label": label,
-        "count": int(left["count"]) + int(right["count"]) + correction,
-        "first": str(left["first"]),
-        "last": str(right["last"]),
-        "correction": correction,
-    }
-
-
 def _draw_round_box(
     ax: plt.Axes,
     x: float,
@@ -887,9 +764,9 @@ def _draw_round_box(
 
 
 def _draw_markov_dgp_figure(out_png: Path, out_pdf: Path) -> None:
-    regimes = _token_regime_sequence()
-    words = _token_words()
-    leaves = _leaf_summaries(regimes, leaf_size=3)
+    regimes = token_regime_sequence()
+    words = token_words()
+    leaves = leaf_summaries(regimes, leaf_size=3)
 
     fig, ax = plt.subplots(figsize=(16.2, 8.9))
     ax.set_xlim(0, 1)
@@ -932,7 +809,7 @@ def _draw_markov_dgp_figure(out_png: Path, out_pdf: Path) -> None:
     for idx, regime in enumerate(["A", "B", "C", "D"]):
         x = 0.445 + idx * 0.13
         col = REGIME_COLORS[regime]
-        _draw_round_box(ax, x, legend_y, legend_w, legend_h, face=_lighten_hex(col, 0.75), edge=col, lw=1.5)
+        _draw_round_box(ax, x, legend_y, legend_w, legend_h, face=lighten_hex(col, 0.75), edge=col, lw=1.5)
         ax.text(x + 0.012, legend_y + legend_h - 0.011, f"Regime {regime}", fontsize=10.4, fontweight="bold", ha="left", va="top")
         ax.text(
             x + 0.012,
@@ -1008,11 +885,11 @@ def _draw_markov_dgp_figure(out_png: Path, out_pdf: Path) -> None:
 
 
 def _draw_markov_exact_merge_figure(out_png: Path, out_pdf: Path) -> None:
-    regimes = _token_regime_sequence()
-    leaves = _leaf_summaries(regimes, leaf_size=3)
-    left_parent = _merge_summary(leaves[0], leaves[1], "M12")
-    right_parent = _merge_summary(leaves[2], leaves[3], "M34")
-    root = _merge_summary(left_parent, right_parent, "Root")
+    regimes = token_regime_sequence()
+    leaves = leaf_summaries(regimes, leaf_size=3)
+    left_parent = merge_summary(leaves[0], leaves[1], "M12")
+    right_parent = merge_summary(leaves[2], leaves[3], "M34")
+    root = merge_summary(left_parent, right_parent, "Root")
 
     fig, ax = plt.subplots(figsize=(16.2, 9.4))
     ax.set_xlim(0, 1)
@@ -1171,6 +1048,23 @@ def _draw_markov_exact_merge_figure(out_png: Path, out_pdf: Path) -> None:
 
 
 def main() -> int:
+    try:
+        from scripts._markov_report_archive import archived_report_exit
+    except ModuleNotFoundError:
+        from _markov_report_archive import archived_report_exit
+
+    return archived_report_exit(
+        legacy_script="scripts/report_publication_clean_markov_ctreepo_appendix.py",
+        replacements=(
+            "scripts/report_appendix_walkthrough_narrative_deck.py",
+            "scripts/report_markov_optimization_tradeoffs.py",
+        ),
+        note=(
+            "The publication-clean appendix walkthrough is archived in favor of the newer deck "
+            "and the v3 tradeoff reporting surface."
+        ),
+    )
+
     args = _parse_args()
     output_root = args.output_root.resolve()
     formal_root = output_root.parent

@@ -52,6 +52,7 @@ ROUNDS=${ROUNDS:-3}
 CONCURRENT_DOCS=${CONCURRENT_DOCS:-20}
 CONCURRENT_REQUESTS=${CONCURRENT_REQUESTS:-100}
 MAX_CHUNK_CHARS=${MAX_CHUNK_CHARS:-4000}
+MAX_CHUNK_TOKENS=${MAX_CHUNK_TOKENS:-}
 
 # Optimizer settings
 # Options: auto, gepa, bootstrap, bootstrap_random_search, mipro, labeled_fewshot
@@ -134,6 +135,8 @@ NEURAL_OPERATORS_WHICH=${NEURAL_OPERATORS_WHICH:-}
 NEURAL_OPERATORS_OUTPUT_DIR=${NEURAL_OPERATORS_OUTPUT_DIR:-}
 NEURAL_OPERATORS_CTREEPO_ARGS=${NEURAL_OPERATORS_CTREEPO_ARGS:-}
 NEURAL_OPERATORS_MERGEABLE_ARGS=${NEURAL_OPERATORS_MERGEABLE_ARGS:-}
+NEURAL_OPERATORS_CTREEPO_SEARCH_SPEC=${NEURAL_OPERATORS_CTREEPO_SEARCH_SPEC:-}
+NEURAL_OPERATORS_MERGEABLE_SEARCH_SPEC=${NEURAL_OPERATORS_MERGEABLE_SEARCH_SPEC:-}
 NEURAL_OPERATORS_FAIL_FAST=${NEURAL_OPERATORS_FAIL_FAST:-}
 NEURAL_OPERATORS_FAIL_ON_ERROR=${NEURAL_OPERATORS_FAIL_ON_ERROR:-}
 RERUN_NEURAL_OPERATORS_ON_RESUME=${RERUN_NEURAL_OPERATORS_ON_RESUME:-}
@@ -146,6 +149,7 @@ TRAIN_GENERATOR=${TRAIN_GENERATOR:-}
 GENERATOR_METHOD=${GENERATOR_METHOD:-}
 GENERATOR_MODEL_OVERRIDE=${GENERATOR_MODEL_OVERRIDE:-}
 GENERATOR_OUTPUT_DIR=${GENERATOR_OUTPUT_DIR:-}
+OUTPUT_DIR_OVERRIDE=${OUTPUT_DIR_OVERRIDE:-}
 GENERATOR_USE_LORA=${GENERATOR_USE_LORA:-}
 GENERATOR_LEARNING_RATE=${GENERATOR_LEARNING_RATE:-}
 GENERATOR_EPOCHS=${GENERATOR_EPOCHS:-}
@@ -204,6 +208,7 @@ DATA OPTIONS:
   --task NAME            Task plugin (default: manifesto_rile)
   --dataset NAME         Dataset plugin (default: settings.yaml datasets.default)
   --dataset-path PATH    Dataset path for file-based datasets (e.g., jsonl)
+  --output-dir PATH      Explicit pipeline output directory
   --train-samples N       Number of training samples (default: 30)
   --val-samples N         Number of validation samples (default: 15)
   --test-samples N        Number of test samples (default: 10)
@@ -213,6 +218,7 @@ CONCURRENCY OPTIONS:
   --concurrent-docs N     Docs to process in parallel (default: 20)
   --concurrent-requests N Concurrent LLM requests (default: 100)
   --max-chunk-chars N     Maximum chunk size in characters for tree building (default: 4000)
+  --max-chunk-tokens N    Maximum chunk size in tokens for tree building; takes precedence over char chunking
   --num-threads N         Parallel metric evaluations (default: 16)
 
 OPTIMIZER OPTIONS:
@@ -309,6 +315,8 @@ NEURAL OPERATOR TRAINING (Phase 1.3):
   --neural-operators-output-dir PATH
   --neural-operators-ctreepo-args "..."
   --neural-operators-mergeable-args "..."
+  --neural-operators-ctreepo-search-spec PATH
+  --neural-operators-mergeable-search-spec PATH
   --neural-operators-fail-fast
   --neural-operators-fail-on-error
   --rerun-neural-operators-on-resume
@@ -430,6 +438,10 @@ while [[ $# -gt 0 ]]; do
             DATASET_PATH="$2"
             shift 2
             ;;
+        --output-dir)
+            OUTPUT_DIR_OVERRIDE="$2"
+            shift 2
+            ;;
         --train-samples)
             TRAIN_SAMPLES="$2"
             shift 2
@@ -456,6 +468,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --max-chunk-chars)
             MAX_CHUNK_CHARS="$2"
+            shift 2
+            ;;
+        --max-chunk-tokens)
+            MAX_CHUNK_TOKENS="$2"
             shift 2
             ;;
         --optimizer)
@@ -669,6 +685,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --neural-operators-mergeable-args)
             NEURAL_OPERATORS_MERGEABLE_ARGS="$2"
+            shift 2
+            ;;
+        --neural-operators-ctreepo-search-spec)
+            NEURAL_OPERATORS_CTREEPO_SEARCH_SPEC="$2"
+            shift 2
+            ;;
+        --neural-operators-mergeable-search-spec)
+            NEURAL_OPERATORS_MERGEABLE_SEARCH_SPEC="$2"
             shift 2
             ;;
         --neural-operators-fail-fast)
@@ -1073,9 +1097,13 @@ if [[ "${RESUME}" == "true" ]]; then
         exit 1
     fi
 else
-    # Create new timestamped directory
-    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    OUTPUT_DIR="${OUTPUT_BASE}/run_${TIMESTAMP}"
+    # Create new output directory unless one was explicitly provided.
+    if [[ -n "${OUTPUT_DIR_OVERRIDE}" ]]; then
+        OUTPUT_DIR="${OUTPUT_DIR_OVERRIDE}"
+    else
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        OUTPUT_DIR="${OUTPUT_BASE}/run_${TIMESTAMP}"
+    fi
     mkdir -p "${OUTPUT_DIR}"
 fi
 
@@ -1117,6 +1145,9 @@ echo "    Rounds:          ${ROUNDS}"
 echo "    Concurrent Docs: ${CONCURRENT_DOCS}"
 echo "    Concurrent Reqs: ${CONCURRENT_REQUESTS}"
 echo "    Max Chunk Chars: ${MAX_CHUNK_CHARS}"
+if [[ -n "${MAX_CHUNK_TOKENS}" ]]; then
+echo "    Max Chunk Toks:  ${MAX_CHUNK_TOKENS}"
+fi
 echo ""
 echo "  Optimizer:"
 echo "    Type:            ${OPTIMIZER}"
@@ -1402,6 +1433,10 @@ CMD=(
     --output-dir "${OUTPUT_DIR}"
 )
 
+if [[ -n "${MAX_CHUNK_TOKENS}" ]]; then
+    CMD+=(--max-chunk-tokens ${MAX_CHUNK_TOKENS})
+fi
+
 if [[ "${TASK_BACKEND}" == "sglang" || "${GENRM_BACKEND}" == "sglang" || "${BACKEND_FALLBACK}" == "sglang" ]]; then
     CMD+=(--sglang-venv-path "${SGLANG_VENV_PATH}")
 fi
@@ -1587,6 +1622,12 @@ if [[ -n "${NEURAL_OPERATORS_CTREEPO_ARGS}" ]]; then
 fi
 if [[ -n "${NEURAL_OPERATORS_MERGEABLE_ARGS}" ]]; then
     CMD+=(--neural-operators-mergeable-args "${NEURAL_OPERATORS_MERGEABLE_ARGS}")
+fi
+if [[ -n "${NEURAL_OPERATORS_CTREEPO_SEARCH_SPEC}" ]]; then
+    CMD+=(--neural-operators-ctreepo-search-spec "${NEURAL_OPERATORS_CTREEPO_SEARCH_SPEC}")
+fi
+if [[ -n "${NEURAL_OPERATORS_MERGEABLE_SEARCH_SPEC}" ]]; then
+    CMD+=(--neural-operators-mergeable-search-spec "${NEURAL_OPERATORS_MERGEABLE_SEARCH_SPEC}")
 fi
 if [[ "${NEURAL_OPERATORS_FAIL_FAST}" == "true" ]]; then
     CMD+=(--neural-operators-fail-fast)

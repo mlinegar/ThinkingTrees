@@ -90,9 +90,6 @@ echo "Markov commands: ${MARKOV_CMDS}" | tee -a "${RUN_LOG}"
 echo "=== RUN: Markov local-law grid sweep ===" | tee -a "${RUN_LOG}"
 cat "${MARKOV_CMDS}" | xargs -d $'\n' -P "${JOBS}" -I {} bash -lc "{}" | tee -a "${RUN_LOG}"
 
-echo "=== REPORT: Markov local-law grid ===" | tee -a "${RUN_LOG}"
-venv/bin/python -u scripts/report_markov_changepoint_ops_count_run.py \
-  --input-root "${MARKOV_OUT}" \
-  --output-dir "${MARKOV_OUT}/report" | tee -a "${RUN_LOG}"
+echo "=== REPORT: Markov local-law grid report archived; see docs/markov_report_archive.md ===" | tee -a "${RUN_LOG}"
 
 echo "DONE | OUT_ROOT=${OUT_ROOT}" | tee -a "${RUN_LOG}"

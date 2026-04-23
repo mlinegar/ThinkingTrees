@@ -19,7 +19,36 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
+
+from src.experiments import (
+    ExperimentSpec,
+    ProgressSnapshot,
+    ResultRow,
+    append_result_rows,
+    benchmark_ref_from_parts,
+    canonical_artifact_refs_from_paths,
+    default_phase_specs,
+    merge_artifacts,
+    method_ref_from_parts,
+    result_rows_from_scalar_metrics,
+    supervision_ref_from_treepo_supervision_spec,
+    control_ref_from_ctreepo_local_law_config,
+    write_experiment_manifest,
+    write_experiment_status,
+)
+from src.training.reproducibility import (
+    configure_reproducibility,
+    write_reproducibility_manifest,
+)
+from src.training.search_trace import (
+    SearchSpec,
+    expand_search_trials,
+    fixed_search_spec,
+    load_search_spec,
+    select_best_trial,
+    write_json as write_search_json,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -92,6 +121,7 @@ def _detect_artifacts(label: str, run_dir: Path) -> Dict[str, Any]:
         best_path = run_dir / "best.pt"
         final_path = run_dir / "final.pt"
         training_result = run_dir / "training_result.json"
+        repro_manifest = run_dir / "reproducibility_manifest.json"
         training_payload = _read_json_if_exists(training_result) or {}
         local_law_summary = (
             training_payload.get("local_law_summary")
@@ -113,6 +143,7 @@ def _detect_artifacts(label: str, run_dir: Path) -> Dict[str, Any]:
             "best_model_path": str(best_path) if best_path.exists() else None,
             "final_model_path": str(final_path) if final_path.exists() else None,
             "training_result_path": str(training_result) if training_result.exists() else None,
+            "reproducibility_manifest_path": str(repro_manifest) if repro_manifest.exists() else None,
             "local_law_summary": local_law_summary,
             "compositional_learning_problem": compositional_learning_problem,
         }
@@ -120,11 +151,13 @@ def _detect_artifacts(label: str, run_dir: Path) -> Dict[str, Any]:
         best_path = run_dir / "checkpoint_best.pt"
         metrics_path = run_dir / "metrics.json"
         predictions_path = run_dir / "predictions.csv"
+        repro_manifest = run_dir / "reproducibility_manifest.json"
         return {
             "primary_model_path": str(best_path) if best_path.exists() else None,
             "best_model_path": str(best_path) if best_path.exists() else None,
             "metrics_path": str(metrics_path) if metrics_path.exists() else None,
             "predictions_path": str(predictions_path) if predictions_path.exists() else None,
+            "reproducibility_manifest_path": str(repro_manifest) if repro_manifest.exists() else None,
         }
     return {
         "primary_model_path": None,
@@ -213,6 +246,445 @@ def _apply_ctreepo_local_law_args(cmd: List[str], config: Dict[str, Any]) -> Non
         cmd.append("--allow-model-based-local-law-labeling")
 
 
+def _treepo_experiment_spec(
+    *,
+    output_dir: Path,
+    args: argparse.Namespace,
+    ctreepo_local_law: Mapping[str, Any],
+) -> ExperimentSpec:
+    benchmark_ref = benchmark_ref_from_parts(
+        family="treepo_task",
+        scope=str(args.task),
+        name=str(args.task),
+    )
+    control_ref = control_ref_from_ctreepo_local_law_config(
+        ctreepo_local_law,
+        metadata={"task": str(args.task)},
+    )
+    supervision_ref = supervision_ref_from_treepo_supervision_spec(
+        {
+            "unit_selector": "leaves+internal",
+            "supervision_kind": "scalar",
+            "mode": "label_now" if bool(ctreepo_local_law.get("require_supervision")) else "off",
+            "labeler_kind": str(ctreepo_local_law.get("label_source_kind", "") or ""),
+            "coverage_label": "tree_local_law_labels" if bool(control_ref and control_ref.enabled) else "",
+        },
+        metadata={"task": str(args.task)},
+    )
+    method_refs = []
+    if args.which in {"both", "ctreepo"}:
+        method_refs.append(
+            method_ref_from_parts(
+                family="ctreepo",
+                variant="local_law_training",
+                adapter="treepo_training",
+                supervision=supervision_ref,
+                control_ref=control_ref,
+            )
+        )
+    if args.which in {"both", "mergeable_sketch"}:
+        method_refs.append(
+            method_ref_from_parts(
+                family="mergeable_sketch",
+                variant="embedding_sketch_training",
+                adapter="treepo_training",
+            )
+        )
+    return ExperimentSpec.create(
+        adapter_id="treepo_training",
+        output_root=str(output_dir),
+        title="train_neural_operators",
+        benchmark_refs=(benchmark_ref,),
+        method_refs=tuple(method_refs),
+        phases=default_phase_specs(("train", "aggregate")),
+        report_profiles=("runtime_eval_summary",),
+        launch_command=tuple(sys.argv),
+        resume_command=tuple(sys.argv),
+        metadata={"task": str(args.task), "which": str(args.which)},
+    )
+
+
+def _write_treepo_status(
+    output_dir: Path,
+    spec: ExperimentSpec,
+    *,
+    state: str,
+    completed_items: int,
+    active_items: int,
+    pending_items: int,
+    failed_items: int,
+) -> None:
+    items_total = len(spec.method_refs)
+    finished = int(completed_items) + int(failed_items)
+    percent_complete = 100.0 * float(finished) / float(items_total) if items_total > 0 else 0.0
+    write_experiment_status(
+        output_dir,
+        ProgressSnapshot(
+            experiment_id=str(spec.experiment_id),
+            state=str(state),
+            active_phase="train" if state not in {"completed", "failed"} else "aggregate",
+            items_total=int(items_total),
+            completed_items=int(completed_items),
+            failed_items=int(failed_items),
+            active_items=int(active_items),
+            pending_items=int(pending_items),
+            percent_complete=percent_complete,
+            artifact_targets=(
+                "summary_json",
+                "ctreepo_training_result_json",
+                "mergeable_metrics_json",
+                "search_spec_json",
+                "search_results_json",
+            ),
+            metadata={"adapter": "treepo_training"},
+        ),
+    )
+
+
+def _treepo_artifacts(output_dir: Path, summary: Mapping[str, Any]) -> list[object]:
+    path_map: Dict[str, str] = {
+        "summary_json": str(output_dir / "summary.json"),
+    }
+    top_level_repro = output_dir / "reproducibility_manifest.json"
+    if top_level_repro.exists():
+        path_map["reproducibility_manifest_json"] = str(top_level_repro)
+    for search_name in ("search_spec.json", "search_results.json"):
+        candidate = output_dir / search_name
+        if candidate.exists():
+            path_map[search_name.replace(".", "_")] = str(candidate)
+    for run in list(summary.get("runs") or []):
+        if not isinstance(run, dict):
+            continue
+        label = str(run.get("label", "") or "").strip().lower()
+        artifacts = dict(run.get("artifacts") or {})
+        if label == "ctreepo":
+            for key in (
+                "best_model_path",
+                "final_model_path",
+                "training_result_path",
+                "reproducibility_manifest_path",
+            ):
+                value = str(artifacts.get(key, "") or "").strip()
+                if value:
+                    path_map[f"ctreepo_{key}"] = value
+        elif label == "mergeable_sketch":
+            for key in (
+                "metrics_path",
+                "predictions_path",
+                "best_model_path",
+                "reproducibility_manifest_path",
+            ):
+                value = str(artifacts.get(key, "") or "").strip()
+                if value:
+                    path_map[f"mergeable_{key}"] = value
+    return canonical_artifact_refs_from_paths(path_map, phase_id="aggregate", required=False)
+
+
+def _load_operator_search_spec(
+    raw_path: Optional[str],
+    *,
+    label: str,
+) -> SearchSpec:
+    if raw_path:
+        spec = load_search_spec(str(raw_path))
+        return SearchSpec(
+            mode=spec.mode,
+            max_trials=spec.max_trials,
+            selection_metric=spec.selection_metric,
+            selection_metric_mode=spec.selection_metric_mode,
+            tie_breaker_metric=spec.tie_breaker_metric,
+            tie_breaker_mode=spec.tie_breaker_mode,
+            final_tie_breaker=spec.final_tie_breaker,
+            seed_policy=spec.seed_policy,
+            dimensions=spec.dimensions,
+            metadata={
+                **dict(spec.metadata or {}),
+                "label": str(label),
+            },
+        )
+    return fixed_search_spec(metadata={"label": str(label)})
+
+
+def _extract_trial_selection_metrics(
+    label: str,
+    artifacts: Mapping[str, Any],
+) -> Dict[str, Any]:
+    label = str(label).strip().lower()
+    if label == "ctreepo":
+        training_result_path = str(artifacts.get("training_result_path", "") or "").strip()
+        payload = _read_json_if_exists(Path(training_result_path)) if training_result_path else None
+        payload = payload or {}
+        eval_metrics = list(payload.get("eval_metrics") or [])
+        final_eval = dict(eval_metrics[-1] or {}) if eval_metrics else {}
+        validation_mae = payload.get("best_root_mae")
+        if validation_mae is None:
+            validation_mae = final_eval.get("root_mae")
+        return {
+            "validation_mae": validation_mae,
+            "training_time_seconds": payload.get("training_time_seconds"),
+        }
+    if label == "mergeable_sketch":
+        metrics_path = str(artifacts.get("metrics_path", "") or "").strip()
+        payload = _read_json_if_exists(Path(metrics_path)) if metrics_path else None
+        payload = payload or {}
+        final_payload = dict(payload.get("final", {}) or {})
+        final_val = dict(final_payload.get("val", {}) or {})
+        validation_mae = payload.get("best_val_mae")
+        if validation_mae is None:
+            validation_mae = final_val.get("mae")
+        return {
+            "validation_mae": validation_mae,
+            "training_time_seconds": payload.get("training_time_seconds"),
+        }
+    return {
+        "validation_mae": None,
+        "training_time_seconds": None,
+    }
+
+
+def _base_method_cmd(
+    *,
+    py: str,
+    script_path: str,
+    common_args: Sequence[str],
+    extra_args: Optional[str] = None,
+) -> List[str]:
+    cmd = [str(py), str(script_path), *[str(item) for item in common_args]]
+    if extra_args:
+        cmd.extend(shlex.split(str(extra_args)))
+    return cmd
+
+
+def _run_method_trials(
+    *,
+    label: str,
+    base_cmd: Sequence[str],
+    method_output_dir: Path,
+    logs_dir: Path,
+    base_seed: int,
+    search_spec: SearchSpec,
+    fail_fast: bool,
+) -> tuple[Optional[Dict[str, Any]], Dict[str, Any], bool]:
+    search_enabled = bool(search_spec.mode != "fixed" and search_spec.dimensions)
+    trials = expand_search_trials(search_spec, base_seed=int(base_seed))
+    trial_records: List[Dict[str, Any]] = []
+    aborted = False
+    for trial in trials:
+        trial_id = str(trial.get("trial_id", "trial_000"))
+        run_dir = method_output_dir / "trials" / trial_id if search_enabled else method_output_dir
+        log_name = f"{label}.{trial_id}.log" if search_enabled else f"{label}.log"
+        prefix = [str(item) for item in list(base_cmd[:2])]
+        suffix = [str(item) for item in list(base_cmd[2:])]
+        cmd = [*prefix, "--output-dir", str(run_dir), *suffix]
+        cmd.extend([str(item) for item in list(trial.get("arg_tokens") or ())])
+        seed_tokens = [value for value in cmd if str(value) == "--seed"]
+        trial_seed = int(trial.get("seed", 42) or 42)
+        if search_enabled or not seed_tokens:
+            cmd.extend(["--seed", str(trial_seed)])
+        result = _run_command(label, cmd, logs_dir / log_name)
+        artifacts = _detect_artifacts(label, run_dir)
+        selection_metrics = _extract_trial_selection_metrics(label, artifacts)
+        trial_record = {
+            "trial_id": trial_id,
+            "trial_index": int(trial.get("trial_index", 0) or 0),
+            "seed": trial_seed,
+            "overrides": list(trial.get("overrides") or ()),
+            "arg_tokens": list(trial.get("arg_tokens") or ()),
+            "command": list(cmd),
+            "run_dir": str(run_dir),
+            "log": str(result.get("log", "")),
+            "started_at": result.get("started_at"),
+            "ended_at": result.get("ended_at"),
+            "returncode": int(result.get("returncode", 1)),
+            "success": int(result.get("returncode", 1)) == 0,
+            "artifacts": artifacts,
+            "selection_metrics": selection_metrics,
+            "search_enabled": bool(search_enabled),
+        }
+        trial_records.append(trial_record)
+        if fail_fast and not trial_record["success"]:
+            aborted = True
+            break
+
+    selected = select_best_trial(
+        trial_records,
+        selection_metric=str(search_spec.selection_metric),
+        selection_metric_mode=str(search_spec.selection_metric_mode),
+        tie_breaker_metric=str(search_spec.tie_breaker_metric),
+        tie_breaker_mode=str(search_spec.tie_breaker_mode),
+    )
+    selected_run: Optional[Dict[str, Any]] = None
+    if selected is not None:
+        selected_run = {
+            "label": str(label),
+            "returncode": int(selected.get("returncode", 1)),
+            "log": str(selected.get("log", "")),
+            "started_at": selected.get("started_at"),
+            "ended_at": selected.get("ended_at"),
+            "run_dir": str(selected.get("run_dir", "")),
+            "artifacts": dict(selected.get("artifacts") or {}),
+            "selection_metrics": dict(selected.get("selection_metrics") or {}),
+            "trial_id": str(selected.get("trial_id", "")),
+            "trial_index": int(selected.get("trial_index", 0) or 0),
+            "search_enabled": bool(search_enabled),
+        }
+    payload = {
+        "label": str(label),
+        "search_enabled": bool(search_enabled),
+        "spec": search_spec.to_dict(),
+        "selection_rule": {
+            "selection_metric": str(search_spec.selection_metric),
+            "selection_metric_mode": str(search_spec.selection_metric_mode),
+            "tie_breaker_metric": str(search_spec.tie_breaker_metric),
+            "tie_breaker_mode": str(search_spec.tie_breaker_mode),
+            "final_tie_breaker": str(search_spec.final_tie_breaker),
+            "seed_policy": str(search_spec.seed_policy),
+        },
+        "trials": trial_records,
+        "selected_trial_id": None if selected is None else str(selected.get("trial_id", "")),
+        "selected_run_dir": None if selected_run is None else str(selected_run.get("run_dir", "")),
+        "successful_trials": int(sum(1 for trial in trial_records if bool(trial.get("success", False)))),
+        "failed_trials": int(sum(1 for trial in trial_records if not bool(trial.get("success", False)))),
+    }
+    return selected_run, payload, aborted
+
+
+def _treepo_result_rows(
+    *,
+    spec: ExperimentSpec,
+    summary: Mapping[str, Any],
+) -> list[object]:
+    benchmark_ref = benchmark_ref_from_parts(
+        family="treepo_task",
+        scope=str(summary.get("task", "manifesto_rile") or "manifesto_rile"),
+        name=str(summary.get("task", "manifesto_rile") or "manifesto_rile"),
+    )
+    control_ref = control_ref_from_ctreepo_local_law_config(
+        dict(summary.get("ctreepo_local_law") or {}),
+        metadata={"task": str(summary.get("task", "") or "")},
+    )
+    supervision_ref = supervision_ref_from_treepo_supervision_spec(
+        {
+            "unit_selector": "leaves+internal",
+            "supervision_kind": "scalar",
+            "mode": "label_now" if bool(dict(summary.get("ctreepo_local_law") or {}).get("require_supervision")) else "off",
+            "labeler_kind": str(dict(summary.get("ctreepo_local_law") or {}).get("label_source_kind", "") or ""),
+            "coverage_label": "tree_local_law_labels" if bool(control_ref and control_ref.enabled) else "",
+        }
+    )
+    rows: list[object] = []
+    for run in list(summary.get("runs") or []):
+        if not isinstance(run, dict):
+            continue
+        label = str(run.get("label", "") or "").strip().lower()
+        family = "ctreepo" if label == "ctreepo" else "mergeable_sketch"
+        method_ref = method_ref_from_parts(
+            family=family,
+            variant="local_law_training" if family == "ctreepo" else "embedding_sketch_training",
+            adapter="treepo_training",
+            supervision=supervision_ref if family == "ctreepo" else None,
+            control_ref=control_ref if family == "ctreepo" else None,
+        )
+        rows.append(
+            {
+                "experiment_id": str(spec.experiment_id),
+                "phase": "train",
+                "benchmark_ref": benchmark_ref.to_dict(),
+                "method_ref": method_ref.to_dict(),
+                "metric_name": "returncode",
+                "metric_value": int(run.get("returncode", 1)),
+                "artifact_refs": ("summary_json",),
+                "metadata": {
+                    "label": label,
+                    "trial_id": str(run.get("trial_id", "") or ""),
+                    "search_enabled": bool(run.get("search_enabled", False)),
+                },
+            }
+        )
+        artifacts = dict(run.get("artifacts") or {})
+        if family == "ctreepo":
+            training_result_path = str(artifacts.get("training_result_path", "") or "").strip()
+            if training_result_path and Path(training_result_path).exists():
+                training_payload = _read_json_if_exists(Path(training_result_path)) or {}
+                base_row = ResultRow(
+                    experiment_id=str(spec.experiment_id),
+                    phase="train",
+                    benchmark_ref=benchmark_ref,
+                    method_ref=method_ref,
+                    supervision_ref=supervision_ref,
+                    control_ref=control_ref,
+                    artifact_refs=("ctreepo_training_result_path", "summary_json"),
+                )
+                rows.extend(
+                    result_rows_from_scalar_metrics(
+                        base_row=base_row,
+                        metrics=training_payload,
+                        allowed_keys=("best_epoch", "best_root_mae", "training_time_seconds", "epochs_completed"),
+                        metadata={
+                            "label": label,
+                            "trial_id": str(run.get("trial_id", "") or ""),
+                            "search_enabled": bool(run.get("search_enabled", False)),
+                        },
+                    )
+                )
+                eval_metrics = list(training_payload.get("eval_metrics") or [])
+                if eval_metrics:
+                    final_eval = dict(eval_metrics[-1] or {})
+                    rows.extend(
+                        result_rows_from_scalar_metrics(
+                            base_row=ResultRow(
+                                experiment_id=str(spec.experiment_id),
+                                phase="eval",
+                                benchmark_ref=benchmark_ref,
+                                method_ref=method_ref,
+                                split="validation",
+                                supervision_ref=supervision_ref,
+                                control_ref=control_ref,
+                                artifact_refs=("ctreepo_training_result_path", "summary_json"),
+                            ),
+                            metrics=final_eval,
+                            allowed_keys=(
+                                "root_mae",
+                                "root_mse",
+                                "root_mae_normalized",
+                                "node_oracle_label_rate",
+                                "node_oracle_mae",
+                                "leaf_oracle_mae",
+                                "merge_oracle_mae",
+                                "leaf_violation_rate",
+                                "merge_violation_rate",
+                            ),
+                            metadata={
+                                "label": label,
+                                "trial_id": str(run.get("trial_id", "") or ""),
+                                "search_enabled": bool(run.get("search_enabled", False)),
+                            },
+                        )
+                    )
+        elif family == "mergeable_sketch":
+            metrics_path = str(artifacts.get("metrics_path", "") or "").strip()
+            if metrics_path and Path(metrics_path).exists():
+                metrics_payload = _read_json_if_exists(Path(metrics_path)) or {}
+                rows.extend(
+                    result_rows_from_scalar_metrics(
+                        base_row=ResultRow(
+                            experiment_id=str(spec.experiment_id),
+                            phase="eval",
+                            benchmark_ref=benchmark_ref,
+                            method_ref=method_ref,
+                            artifact_refs=("mergeable_metrics_path", "summary_json"),
+                        ),
+                        metrics=metrics_payload,
+                        metadata={
+                            "label": label,
+                            "trial_id": str(run.get("trial_id", "") or ""),
+                            "search_enabled": bool(run.get("search_enabled", False)),
+                        },
+                    )
+                )
+    return rows
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Train CTreePO and mergeable-sketch operators in one run.",
@@ -296,6 +768,22 @@ def main() -> int:
         default="",
         help="Extra args forwarded to scripts/train_rile_embedding_sketch.py",
     )
+    parser.add_argument(
+        "--ctreepo-search-spec",
+        type=str,
+        default=None,
+        help=(
+            "Optional JSON search spec for CTreePO. When omitted, the run is recorded as a single fixed trial."
+        ),
+    )
+    parser.add_argument(
+        "--mergeable-search-spec",
+        type=str,
+        default=None,
+        help=(
+            "Optional JSON search spec for mergeable sketch training. When omitted, the run is recorded as a single fixed trial."
+        ),
+    )
     parser.add_argument("--fail-fast", action="store_true", help="Stop after first failure.")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -305,6 +793,7 @@ def main() -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
+    applied_repro = configure_reproducibility(int(args.seed))
     output_dir = _resolve_output_dir(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     logs_dir = output_dir / "logs"
@@ -319,6 +808,36 @@ def main() -> int:
             "or --ctreepo-local-law-teacher-port, not both."
         )
     ctreepo_local_law = _build_ctreepo_local_law_config(args)
+    experiment_spec = _treepo_experiment_spec(
+        output_dir=output_dir,
+        args=args,
+        ctreepo_local_law=ctreepo_local_law,
+    )
+    repro_manifest_path = write_reproducibility_manifest(
+        output_dir,
+        seed=int(args.seed),
+        cli_args=vars(args),
+        config={"ctreepo_local_law": ctreepo_local_law},
+        applied=applied_repro,
+        extra={
+            "which": str(args.which),
+            "ctreepo_args": str(args.ctreepo_args),
+            "mergeable_args": str(args.mergeable_args),
+            "ctreepo_search_spec": str(args.ctreepo_search_spec or ""),
+            "mergeable_search_spec": str(args.mergeable_search_spec or ""),
+        },
+    )
+    logger.info("Reproducibility manifest: %s", repro_manifest_path)
+    write_experiment_manifest(output_dir, experiment_spec)
+    _write_treepo_status(
+        output_dir,
+        experiment_spec,
+        state="running",
+        completed_items=0,
+        active_items=1 if args.which else 0,
+        pending_items=len(experiment_spec.method_refs),
+        failed_items=0,
+    )
 
     py = sys.executable
     common: List[str] = []
@@ -332,40 +851,141 @@ def main() -> int:
         common.extend(["--seed", str(int(args.seed))])
 
     runs: List[Dict[str, Any]] = []
+    search_methods: Dict[str, Any] = {}
+    ctreepo_search = _load_operator_search_spec(
+        args.ctreepo_search_spec,
+        label="ctreepo",
+    )
+    mergeable_search = _load_operator_search_spec(
+        args.mergeable_search_spec,
+        label="mergeable_sketch",
+    )
 
     if args.which in {"both", "ctreepo"}:
         ctreepo_out = output_dir / "ctreepo"
-        cmd = [py, "scripts/train_ctreepo.py", "--output-dir", str(ctreepo_out), *common]
-        if args.ctreepo_args:
-            cmd.extend(shlex.split(str(args.ctreepo_args)))
-        _apply_ctreepo_local_law_args(cmd, ctreepo_local_law)
-        result = _run_command("ctreepo", cmd, logs_dir / "ctreepo.log")
-        result["run_dir"] = str(ctreepo_out)
-        result["artifacts"] = _detect_artifacts("ctreepo", ctreepo_out)
-        runs.append(result)
-        if args.fail_fast and int(result["returncode"]) != 0:
-            (output_dir / "summary.json").write_text(json.dumps({"runs": runs}, indent=2), encoding="utf-8")
-            return int(result["returncode"])
+        ctreepo_base_cmd = _base_method_cmd(
+            py=py,
+            script_path="scripts/train_ctreepo.py",
+            common_args=common,
+            extra_args=args.ctreepo_args,
+        )
+        _apply_ctreepo_local_law_args(ctreepo_base_cmd, ctreepo_local_law)
+        selected_run, search_payload, aborted = _run_method_trials(
+            label="ctreepo",
+            base_cmd=ctreepo_base_cmd,
+            method_output_dir=ctreepo_out,
+            logs_dir=logs_dir,
+            base_seed=int(args.seed),
+            search_spec=ctreepo_search,
+            fail_fast=bool(args.fail_fast),
+        )
+        search_methods["ctreepo"] = search_payload
+        if selected_run is not None:
+            runs.append(selected_run)
+        _write_treepo_status(
+            output_dir,
+            experiment_spec,
+            state="running",
+            completed_items=sum(1 for row in runs if int(row.get("returncode", 1)) == 0),
+            active_items=1 if args.which in {"both", "mergeable_sketch"} else 0,
+            pending_items=max(0, len(experiment_spec.method_refs) - len(runs)),
+            failed_items=sum(1 for row in runs if int(row.get("returncode", 1)) != 0),
+        )
+        if aborted:
+            failure_summary = {
+                "runs": runs,
+                "search": {"methods": search_methods},
+            }
+            write_search_json(output_dir / "search_spec.json", {
+                "created_at": datetime.now().isoformat(),
+                "methods": {key: value.get("spec", {}) for key, value in search_methods.items()},
+            })
+            write_search_json(output_dir / "search_results.json", {
+                "created_at": datetime.now().isoformat(),
+                "methods": search_methods,
+            })
+            (output_dir / "summary.json").write_text(json.dumps(failure_summary, indent=2), encoding="utf-8")
+            merge_artifacts(output_dir, _treepo_artifacts(output_dir, failure_summary))
+            _write_treepo_status(
+                output_dir,
+                experiment_spec,
+                state="failed",
+                completed_items=sum(1 for row in runs if int(row.get("returncode", 1)) == 0),
+                active_items=0,
+                pending_items=max(0, len(experiment_spec.method_refs) - len(runs)),
+                failed_items=sum(1 for row in runs if int(row.get("returncode", 1)) != 0),
+            )
+            return 1
 
     if args.which in {"both", "mergeable_sketch"}:
         merge_out = output_dir / "mergeable_sketch"
-        cmd = [
-            py,
-            "scripts/train_rile_embedding_sketch.py",
-            "--output-dir",
-            str(merge_out),
-            *common,
-        ]
-        if args.mergeable_args:
-            cmd.extend(shlex.split(str(args.mergeable_args)))
-        result = _run_command("mergeable_sketch", cmd, logs_dir / "mergeable_sketch.log")
-        result["run_dir"] = str(merge_out)
-        result["artifacts"] = _detect_artifacts("mergeable_sketch", merge_out)
-        runs.append(result)
-        if args.fail_fast and int(result["returncode"]) != 0:
-            (output_dir / "summary.json").write_text(json.dumps({"runs": runs}, indent=2), encoding="utf-8")
-            return int(result["returncode"])
+        mergeable_base_cmd = _base_method_cmd(
+            py=py,
+            script_path="scripts/train_rile_embedding_sketch.py",
+            common_args=common,
+            extra_args=args.mergeable_args,
+        )
+        selected_run, search_payload, aborted = _run_method_trials(
+            label="mergeable_sketch",
+            base_cmd=mergeable_base_cmd,
+            method_output_dir=merge_out,
+            logs_dir=logs_dir,
+            base_seed=int(args.seed),
+            search_spec=mergeable_search,
+            fail_fast=bool(args.fail_fast),
+        )
+        search_methods["mergeable_sketch"] = search_payload
+        if selected_run is not None:
+            runs.append(selected_run)
+        _write_treepo_status(
+            output_dir,
+            experiment_spec,
+            state="running",
+            completed_items=sum(1 for row in runs if int(row.get("returncode", 1)) == 0),
+            active_items=0,
+            pending_items=max(0, len(experiment_spec.method_refs) - len(runs)),
+            failed_items=sum(1 for row in runs if int(row.get("returncode", 1)) != 0),
+        )
+        if aborted:
+            failure_summary = {
+                "runs": runs,
+                "search": {"methods": search_methods},
+            }
+            write_search_json(output_dir / "search_spec.json", {
+                "created_at": datetime.now().isoformat(),
+                "methods": {key: value.get("spec", {}) for key, value in search_methods.items()},
+            })
+            write_search_json(output_dir / "search_results.json", {
+                "created_at": datetime.now().isoformat(),
+                "methods": search_methods,
+            })
+            (output_dir / "summary.json").write_text(json.dumps(failure_summary, indent=2), encoding="utf-8")
+            merge_artifacts(output_dir, _treepo_artifacts(output_dir, failure_summary))
+            _write_treepo_status(
+                output_dir,
+                experiment_spec,
+                state="failed",
+                completed_items=sum(1 for row in runs if int(row.get("returncode", 1)) == 0),
+                active_items=0,
+                pending_items=max(0, len(experiment_spec.method_refs) - len(runs)),
+                failed_items=sum(1 for row in runs if int(row.get("returncode", 1)) != 0),
+            )
+            return 1
 
+    write_search_json(
+        output_dir / "search_spec.json",
+        {
+            "created_at": datetime.now().isoformat(),
+            "methods": {key: value.get("spec", {}) for key, value in search_methods.items()},
+        },
+    )
+    write_search_json(
+        output_dir / "search_results.json",
+        {
+            "created_at": datetime.now().isoformat(),
+            "methods": search_methods,
+        },
+    )
     summary = {
         "created_at": datetime.now().isoformat(),
         "output_dir": str(output_dir),
@@ -373,10 +993,36 @@ def main() -> int:
         "which": args.which,
         "common_args": common,
         "ctreepo_local_law": ctreepo_local_law,
+        "search": {
+            "methods": search_methods,
+        },
         "runs": runs,
-        "all_success": bool(all(int(r.get("returncode", 1)) == 0 for r in runs)),
+        "all_success": bool(
+            all(
+                str(method_ref.family) in search_methods
+                and str(search_methods[str(method_ref.family)].get("selected_trial_id", "") or "").strip()
+                for method_ref in experiment_spec.method_refs
+            )
+        ),
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    merge_artifacts(output_dir, _treepo_artifacts(output_dir, summary))
+    append_result_rows(
+        output_dir,
+        _treepo_result_rows(
+            spec=experiment_spec,
+            summary=summary,
+        ),
+    )
+    _write_treepo_status(
+        output_dir,
+        experiment_spec,
+        state="completed" if bool(summary["all_success"]) else "failed",
+        completed_items=sum(1 for row in runs if int(row.get("returncode", 1)) == 0),
+        active_items=0,
+        pending_items=0,
+        failed_items=sum(1 for row in runs if int(row.get("returncode", 1)) != 0),
+    )
 
     if summary["all_success"]:
         logger.info("All requested operator trainings completed successfully.")

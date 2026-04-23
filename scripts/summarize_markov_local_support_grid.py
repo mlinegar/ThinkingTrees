@@ -8,15 +8,16 @@ import csv
 import json
 import math
 from pathlib import Path
+import sys
 from typing import Iterable, List
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-def _safe_float(value: object) -> float:
-    try:
-        out = float(value)  # type: ignore[arg-type]
-    except Exception:
-        return math.nan
-    return out if math.isfinite(out) else math.nan
+from src.ctreepo.sim.util import safe_float
+
+_safe_float = safe_float
 
 
 def _utility_recovery_fraction(observed: object, exact: object, undersupported: object) -> float:

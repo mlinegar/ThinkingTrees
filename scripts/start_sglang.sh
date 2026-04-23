@@ -16,6 +16,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONFIG_FILE="$PROJECT_ROOT/config/settings.yaml"
 
+if [[ -z "${TT_START_ENGINE_DIRECT:-}" ]]; then
+    exec python3 "$SCRIPT_DIR/start_engine.py" --engine sglang -- "$@"
+fi
+
 # Parse arguments
 PROFILE=""
 PORT_OVERRIDE=""

@@ -2,7 +2,7 @@
 """Capability-first report for the Markov local-law stress suites.
 
 .. deprecated::
-    Use ``scripts/report_law_stress.py --family markov`` instead.
+    Use ``python -m src.ctreepo.cli sim suite law-stress report --family markov --output-root ...`` instead.
 """
 
 from __future__ import annotations
@@ -44,10 +44,11 @@ from src.ctreepo.sim.local_law_report_common import (
     render_local_law_report_markdown,
     write_local_law_report_core_pages,
 )
+from src.ctreepo.sim.util import safe_float as _safe_float_scalar
 
 
 warnings.warn(
-    "Deprecated. Use scripts/report_law_stress.py --family markov",
+    "Deprecated. Use python -m src.ctreepo.cli sim suite law-stress report --family markov --output-root ...",
     DeprecationWarning,
     stacklevel=1,
 )
@@ -123,10 +124,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _safe_float(mapping: dict, key: str, default: float = float("nan")) -> float:
-    try:
-        return float(mapping.get(key, default))
-    except Exception:
-        return float(default)
+    return _safe_float_scalar(mapping.get(key), default=default)
 
 
 def _normalize(value: float, *, scale: float) -> float:
@@ -214,12 +212,46 @@ def _read_learned_row(path: Path, payload: dict) -> Optional[StressRunRow]:
     law_package = _resolve_markov_law_package(payload)
 
     val_c1 = _safe_float(learned, "val_c1_leaf_mae_n", _normalize(_safe_float(learned, "val_leaf_mae"), scale=scale))
-    val_c2 = _safe_float(learned, "val_c2_idempotence_mae_n", _normalize(_safe_float(learned, "val_c2_idempotence_mae"), scale=scale))
+    val_c2 = _safe_float(
+        learned,
+        "val_c2_count_drift_r1_mae_n",
+        _safe_float(
+            learned,
+            "val_c2_idempotence_mae_n",
+            _normalize(
+                _safe_float(
+                    learned,
+                    "val_c2_count_drift_r1_mae",
+                    _safe_float(learned, "val_c2_idempotence_mae"),
+                ),
+                scale=scale,
+            ),
+        ),
+    )
     val_c3 = _safe_float(learned, "val_c3_merge_mae_n", _normalize(_safe_float(learned, "val_merge_mae"), scale=scale))
     val_spread = _safe_float(learned, "val_schedule_spread_mean_n", _normalize(_safe_float(learned, "val_schedule_spread_mean"), scale=scale))
     val_root = _safe_float(learned, "val_root_mae_n", _normalize(_safe_float(learned, "val_root_mae"), scale=scale))
     test_c1 = _safe_float(learned, "test_c1_leaf_mae_n", _normalize(_safe_float(learned, "test_leaf_mae", _safe_float(learned, "leaf_mae")), scale=scale))
-    test_c2 = _safe_float(learned, "test_c2_idempotence_mae_n", _normalize(_safe_float(learned, "test_c2_idempotence_mae", _safe_float(learned, "c2_idempotence_mae")), scale=scale))
+    test_c2 = _safe_float(
+        learned,
+        "test_c2_count_drift_r1_mae_n",
+        _safe_float(
+            learned,
+            "test_c2_idempotence_mae_n",
+            _normalize(
+                _safe_float(
+                    learned,
+                    "test_c2_count_drift_r1_mae",
+                    _safe_float(
+                        learned,
+                        "test_c2_idempotence_mae",
+                        _safe_float(learned, "c2_count_drift_r1_mae", _safe_float(learned, "c2_idempotence_mae")),
+                    ),
+                ),
+                scale=scale,
+            ),
+        ),
+    )
     test_c3 = _safe_float(learned, "test_c3_merge_mae_n", _normalize(_safe_float(learned, "test_merge_mae", _safe_float(learned, "merge_mae")), scale=scale))
     test_spread = _safe_float(learned, "test_schedule_spread_mean_n", _normalize(_safe_float(learned, "test_schedule_spread_mean", _safe_float(learned, "schedule_spread_mean")), scale=scale))
     test_root = _safe_float(learned, "test_root_mae_n", _normalize(_safe_float(learned, "test_root_mae", _safe_float(learned, "root_mae")), scale=scale))
@@ -255,12 +287,12 @@ def _read_learned_row(path: Path, payload: dict) -> Optional[StressRunRow]:
         test_spread_n=float(test_spread),
         test_root_mae_n=float(test_root),
         test_bundle_score_n=float(_safe_float(learned, "test_theorem_bundle_score_n", markov_law_bundle_score(c1=test_c1, c2=test_c2, c3=test_c3))),
-        test_c2_r1_mae_n=float(_safe_float(learned, "test_c2_r1_mae_n", _normalize(_safe_float(learned, "test_c2_r1_mae", _safe_float(learned, "c2_r1_mae")), scale=scale))),
-        test_c2_r2_mae_n=float(_safe_float(learned, "test_c2_r2_mae_n", _normalize(_safe_float(learned, "test_c2_r2_mae", _safe_float(learned, "c2_r2_mae")), scale=scale))),
-        test_c2_r4_mae_n=float(_safe_float(learned, "test_c2_r4_mae_n", _normalize(_safe_float(learned, "test_c2_r4_mae", _safe_float(learned, "c2_r4_mae")), scale=scale))),
-        test_resummary_root_drift_r1_n=float(_safe_float(learned, "test_resummary_root_drift_r1_n", _normalize(_safe_float(learned, "test_resummary_root_drift_r1", _safe_float(learned, "resummary_root_drift_r1")), scale=scale))),
-        test_resummary_root_drift_r2_n=float(_safe_float(learned, "test_resummary_root_drift_r2_n", _normalize(_safe_float(learned, "test_resummary_root_drift_r2", _safe_float(learned, "resummary_root_drift_r2")), scale=scale))),
-        test_resummary_root_drift_r4_n=float(_safe_float(learned, "test_resummary_root_drift_r4_n", _normalize(_safe_float(learned, "test_resummary_root_drift_r4", _safe_float(learned, "resummary_root_drift_r4")), scale=scale))),
+        test_c2_r1_mae_n=float(_safe_float(learned, "test_c2_count_drift_r1_mae_n", _safe_float(learned, "test_c2_r1_mae_n", _normalize(_safe_float(learned, "test_c2_count_drift_r1_mae", _safe_float(learned, "test_c2_r1_mae", _safe_float(learned, "c2_count_drift_r1_mae", _safe_float(learned, "c2_r1_mae")))), scale=scale)))),
+        test_c2_r2_mae_n=float(_safe_float(learned, "test_c2_count_drift_r2_mae_n", _safe_float(learned, "test_c2_r2_mae_n", _normalize(_safe_float(learned, "test_c2_count_drift_r2_mae", _safe_float(learned, "test_c2_r2_mae", _safe_float(learned, "c2_count_drift_r2_mae", _safe_float(learned, "c2_r2_mae")))), scale=scale)))),
+        test_c2_r4_mae_n=float(_safe_float(learned, "test_c2_count_drift_r4_mae_n", _safe_float(learned, "test_c2_r4_mae_n", _normalize(_safe_float(learned, "test_c2_count_drift_r4_mae", _safe_float(learned, "test_c2_r4_mae", _safe_float(learned, "c2_count_drift_r4_mae", _safe_float(learned, "c2_r4_mae")))), scale=scale)))),
+        test_resummary_root_drift_r1_n=float(_safe_float(learned, "test_c2_root_count_drift_r1_mae_n", _safe_float(learned, "test_resummary_root_drift_r1_n", _normalize(_safe_float(learned, "test_c2_root_count_drift_r1_mae", _safe_float(learned, "test_resummary_root_drift_r1", _safe_float(learned, "resummary_root_drift_r1"))), scale=scale)))),
+        test_resummary_root_drift_r2_n=float(_safe_float(learned, "test_c2_root_count_drift_r2_mae_n", _safe_float(learned, "test_resummary_root_drift_r2_n", _normalize(_safe_float(learned, "test_c2_root_count_drift_r2_mae", _safe_float(learned, "test_resummary_root_drift_r2", _safe_float(learned, "resummary_root_drift_r2"))), scale=scale)))),
+        test_resummary_root_drift_r4_n=float(_safe_float(learned, "test_c2_root_count_drift_r4_mae_n", _safe_float(learned, "test_resummary_root_drift_r4_n", _normalize(_safe_float(learned, "test_c2_root_count_drift_r4_mae", _safe_float(learned, "test_resummary_root_drift_r4", _safe_float(learned, "resummary_root_drift_r4"))), scale=scale)))),
     )
 
 
@@ -272,7 +304,22 @@ def _read_exact_family_row(path: Path, payload: dict) -> Optional[StressRunRow]:
     scale = float(max(1, int(cfg.get("max_segments", 1)) - 1))
     fam = str(stress.get("stress_family_name", cfg.get("exact_family", "")))
     test_c1 = _safe_float(stress, "test_c1_leaf_mae_n", _normalize(_safe_float(stress, "leaf_mae"), scale=scale))
-    test_c2 = _safe_float(stress, "test_c2_idempotence_mae_n", _normalize(_safe_float(stress, "c2_idempotence_mae"), scale=scale))
+    test_c2 = _safe_float(
+        stress,
+        "test_c2_count_drift_r1_mae_n",
+        _safe_float(
+            stress,
+            "test_c2_idempotence_mae_n",
+            _normalize(
+                _safe_float(
+                    stress,
+                    "c2_count_drift_r1_mae",
+                    _safe_float(stress, "c2_idempotence_mae"),
+                ),
+                scale=scale,
+            ),
+        ),
+    )
     test_c3 = _safe_float(stress, "test_c3_merge_mae_n", _normalize(_safe_float(stress, "merge_mae"), scale=scale))
     test_spread = _safe_float(stress, "test_schedule_spread_mean_n", _normalize(_safe_float(stress, "schedule_spread_mean"), scale=scale))
     test_root = _safe_float(stress, "test_root_mae_n", _normalize(_safe_float(stress, "root_mae"), scale=scale))
@@ -307,12 +354,12 @@ def _read_exact_family_row(path: Path, payload: dict) -> Optional[StressRunRow]:
         test_spread_n=float(test_spread),
         test_root_mae_n=float(test_root),
         test_bundle_score_n=float(_safe_float(stress, "test_theorem_bundle_score_n", markov_law_bundle_score(c1=test_c1, c2=test_c2, c3=test_c3))),
-        test_c2_r1_mae_n=float(_safe_float(stress, "test_c2_r1_mae_n", _normalize(_safe_float(stress, "c2_r1_mae"), scale=scale))),
-        test_c2_r2_mae_n=float(_safe_float(stress, "test_c2_r2_mae_n", _normalize(_safe_float(stress, "c2_r2_mae"), scale=scale))),
-        test_c2_r4_mae_n=float(_safe_float(stress, "test_c2_r4_mae_n", _normalize(_safe_float(stress, "c2_r4_mae"), scale=scale))),
-        test_resummary_root_drift_r1_n=float(_safe_float(stress, "test_resummary_root_drift_r1_n", _normalize(_safe_float(stress, "resummary_root_drift_r1"), scale=scale))),
-        test_resummary_root_drift_r2_n=float(_safe_float(stress, "test_resummary_root_drift_r2_n", _normalize(_safe_float(stress, "resummary_root_drift_r2"), scale=scale))),
-        test_resummary_root_drift_r4_n=float(_safe_float(stress, "test_resummary_root_drift_r4_n", _normalize(_safe_float(stress, "resummary_root_drift_r4"), scale=scale))),
+        test_c2_r1_mae_n=float(_safe_float(stress, "test_c2_count_drift_r1_mae_n", _safe_float(stress, "test_c2_r1_mae_n", _normalize(_safe_float(stress, "c2_count_drift_r1_mae", _safe_float(stress, "c2_r1_mae")), scale=scale)))),
+        test_c2_r2_mae_n=float(_safe_float(stress, "test_c2_count_drift_r2_mae_n", _safe_float(stress, "test_c2_r2_mae_n", _normalize(_safe_float(stress, "c2_count_drift_r2_mae", _safe_float(stress, "c2_r2_mae")), scale=scale)))),
+        test_c2_r4_mae_n=float(_safe_float(stress, "test_c2_count_drift_r4_mae_n", _safe_float(stress, "test_c2_r4_mae_n", _normalize(_safe_float(stress, "c2_count_drift_r4_mae", _safe_float(stress, "c2_r4_mae")), scale=scale)))),
+        test_resummary_root_drift_r1_n=float(_safe_float(stress, "test_c2_root_count_drift_r1_mae_n", _safe_float(stress, "test_resummary_root_drift_r1_n", _normalize(_safe_float(stress, "c2_root_count_drift_r1_mae", _safe_float(stress, "resummary_root_drift_r1")), scale=scale)))),
+        test_resummary_root_drift_r2_n=float(_safe_float(stress, "test_c2_root_count_drift_r2_mae_n", _safe_float(stress, "test_resummary_root_drift_r2_n", _normalize(_safe_float(stress, "c2_root_count_drift_r2_mae", _safe_float(stress, "resummary_root_drift_r2")), scale=scale)))),
+        test_resummary_root_drift_r4_n=float(_safe_float(stress, "test_c2_root_count_drift_r4_mae_n", _safe_float(stress, "test_resummary_root_drift_r4_n", _normalize(_safe_float(stress, "c2_root_count_drift_r4_mae", _safe_float(stress, "resummary_root_drift_r4")), scale=scale)))),
     )
 
 
@@ -822,6 +869,23 @@ def _write_image_page(pdf: PdfPages, *, image_path: Path, title: str) -> None:
 
 
 def main() -> int:
+    try:
+        from scripts._markov_report_archive import archived_report_exit
+    except ModuleNotFoundError:
+        from _markov_report_archive import archived_report_exit
+
+    return archived_report_exit(
+        legacy_script="scripts/report_markov_law_stress.py",
+        replacements=(
+            "python -m src.ctreepo.cli sim suite law-stress report --family markov --input-root <root>",
+            "scripts/report_markov_optimization_tradeoffs.py",
+        ),
+        note=(
+            "The family-specific Markov wrapper is archived; use the current unified law-stress "
+            "CLI where you still need that legacy suite."
+        ),
+    )
+
     args = _parse_args()
     input_root = Path(args.input_root)
     output_dir = Path(args.output_dir) if args.output_dir else (input_root / "law_stress_report")

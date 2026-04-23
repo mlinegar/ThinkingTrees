@@ -10,7 +10,14 @@ import json
 import math
 import os
 from pathlib import Path
+import sys
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.ctreepo.sim.util import safe_float
 
 
 DEFAULT_ARTIFACTS: Tuple[str, ...] = (
@@ -27,11 +34,7 @@ DEFAULT_ARTIFACTS: Tuple[str, ...] = (
 VALID_MODES = ("doc", "leaf", "token")
 
 
-def _safe_float(x: object) -> float:
-    try:
-        return float(x)  # type: ignore[arg-type]
-    except Exception:
-        return float("nan")
+_safe_float = safe_float
 
 
 def _is_finite(x: float) -> bool:

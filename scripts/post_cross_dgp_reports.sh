@@ -34,7 +34,8 @@ echo "MIG queue done. Total JSON outputs: $TOTAL"
 # --- Step 1: Generate Markov law-stress report ---
 echo ""
 echo "=== Step 1: Markov law-stress report ==="
-python scripts/report_markov_law_stress.py \
+python -m src.ctreepo.sim.cli.report.law_stress \
+    --family markov \
     --input-root "$MARKOV_OUTPUT" \
     --output-dir "$MARKOV_OUTPUT/report" \
     2>&1

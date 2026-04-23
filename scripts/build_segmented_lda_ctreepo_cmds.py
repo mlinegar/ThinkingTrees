@@ -98,6 +98,7 @@ def _iter_commands(
     leaf_theta_mlp_batch_size: int,
     leaf_theta_mlp_lr: float,
     leaf_theta_mlp_weight_decay: float,
+    include_full_doc_theta_baseline: bool,
     device: str,
     cuda_device: int | None,
     torch_threads: int,
@@ -139,6 +140,7 @@ def _iter_commands(
             theta_prefix = ""
             if len(theta_values) > 1 or str(theta) != "lstsq":
                 theta_prefix = f"theta_{str(theta)}/"
+            baseline_prefix = "full_doc_1/" if bool(include_full_doc_theta_baseline) else ""
             for est in estimator_values:
                 est_norm = str(est).strip().lower()
                 is_neural = bool(est_norm.startswith("neural_"))
@@ -159,7 +161,7 @@ def _iter_commands(
                                             ):
                                                 seed_component = f"/seedfrac_{_fmt_float(float(seed_frac))}"
                                             sub = (
-                                                f"{proc_prefix}{theta_prefix}phi_{str(est)}{docs_component}{seed_component}"
+                                                f"{proc_prefix}{theta_prefix}{baseline_prefix}phi_{str(est)}{docs_component}{seed_component}"
                                                 f"/train_{int(td)}"
                                                 f"/lt_{int(fixed_leaf_tokens)}"
                                                 f"/cal_{_fmt_float(cal)}"
@@ -238,6 +240,8 @@ def _iter_commands(
                                                 f"--seed {int(seed)} "
                                                 f"--json-summary {out_json} --csv-summary {out_csv}"
                                             )
+                                            if bool(include_full_doc_theta_baseline):
+                                                cmd += " --include-full-doc-theta-baseline"
                                             if cuda_device is not None:
                                                 cmd += f" --cuda-device {int(cuda_device)}"
                                             cmds.append(cmd)
@@ -270,6 +274,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--leaf-theta-mlp-batch-size", type=int, default=256)
     p.add_argument("--leaf-theta-mlp-lr", type=float, default=1e-3)
     p.add_argument("--leaf-theta-mlp-weight-decay", type=float, default=1e-4)
+    p.add_argument(
+        "--include-full-doc-theta-baseline",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
     p.add_argument("--topic-process", choices=["segments", "bag_of_words"], default="segments")
     p.add_argument(
         "--topic-processes",
@@ -455,6 +464,7 @@ def main() -> int:
         leaf_theta_mlp_batch_size=int(args.leaf_theta_mlp_batch_size),
         leaf_theta_mlp_lr=float(args.leaf_theta_mlp_lr),
         leaf_theta_mlp_weight_decay=float(args.leaf_theta_mlp_weight_decay),
+        include_full_doc_theta_baseline=bool(args.include_full_doc_theta_baseline),
         device=str(args.device),
         cuda_device=(int(args.cuda_device) if args.cuda_device is not None else None),
         torch_threads=int(args.torch_threads),

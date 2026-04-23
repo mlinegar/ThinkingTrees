@@ -7,10 +7,17 @@ import argparse
 import json
 import math
 from pathlib import Path
+import sys
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.ctreepo.sim.util import safe_float
 
 
 GOOD_GREEN = "#2E8B57"
@@ -27,12 +34,7 @@ LEAF_COLORS = {
 }
 
 
-def _safe_float(value: object) -> float:
-    try:
-        out = float(value)  # type: ignore[arg-type]
-    except Exception:
-        return math.nan
-    return out if math.isfinite(out) else math.nan
+_safe_float = safe_float
 
 
 def _load_rows(paths: Sequence[Path]) -> List[dict]:

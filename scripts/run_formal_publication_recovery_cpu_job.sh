@@ -54,14 +54,27 @@ export VECLIB_MAXIMUM_THREADS=1
 export BLIS_NUM_THREADS=1
 
 echo "cpu_recovery_start formal_root=${FORMAL_ROOT} jobs=${JOBS}"
-export JOBS="${JOBS}"
-export GPU_TOKENS="none"
-export MARKOV_DEVICE="cpu"
-export OUT_ROOT="${FORMAL_ROOT}/identifiable_zero_learnability"
-bash ./scripts/run_identifiable_zero_learnability_overnight.sh
+echo "cpu_publication_clean_start"
+venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-publication run \
+  --profile publication_clean \
+  --output-root "${FORMAL_ROOT}/identifiable_zero_longrun_clean" \
+  --groups cpu \
+  --jobs "${JOBS}" \
+  --gpu-tokens none
+venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-publication report \
+  --profile publication_clean \
+  --output-root "${FORMAL_ROOT}/identifiable_zero_longrun_clean" \
+  --emit-pdf
+
+venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-learnability run \
+  --output-root "${FORMAL_ROOT}/identifiable_zero_learnability" \
+  --jobs "${JOBS}" \
+  --gpu-tokens none \
+  --markov-device cpu \
+  --ctree-device cpu
 
 echo "cpu_recovery_report_start"
-venv/bin/python scripts/report_identifiable_zero_learnability.py \
+venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-learnability report \
   --output-root "${FORMAL_ROOT}/identifiable_zero_learnability" \
   --emit-pdf
 venv/bin/python scripts/generate_paper_simulation_report_bundle.py \

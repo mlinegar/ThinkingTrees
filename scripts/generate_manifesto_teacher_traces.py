@@ -32,6 +32,10 @@ from src.tasks.manifesto.teacher_trace_generator import (
     write_jsonl,
     write_teacher_trace_records_jsonl,
 )
+from src.ctreepo.distillation import (
+    build_labeled_tree_from_text,
+    write_labeled_trees_jsonl,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -438,6 +442,51 @@ def _summarize_text(
     ).strip()
 
 
+def _build_labeled_tree_node_summary_fn(
+    *,
+    client: OpenAIChatClient,
+    source_rile_raw: float,
+    temperature: float,
+    max_tokens: int,
+    max_chars: int,
+) -> Callable[[str, Dict[str, Any]], str]:
+    def _summarize_node(text: str, context: Dict[str, Any]) -> str:
+        clipped_text = _clip_for_prompt(str(text), max_chars=int(max_chars))
+        if bool(context.get("is_leaf")):
+            user = (
+                f"Target directional score to preserve: {float(source_rile_raw):.2f}\n"
+                "Summarize this C-TreePO leaf span for later score prediction.\n"
+                "Preserve directional stance, entities, factual commitments, and caveats.\n"
+                "Do NOT mention any numeric score or the term RILE.\n"
+                "Return only summary text.\n\n"
+                f"LEAF_SPAN:\n{clipped_text}"
+            )
+        else:
+            left_summary = str(context.get("left_summary") or "").strip()
+            right_summary = str(context.get("right_summary") or "").strip()
+            user = (
+                f"Target directional score to preserve: {float(source_rile_raw):.2f}\n"
+                "Merge these two child summaries into a C-TreePO parent summary.\n"
+                "Preserve all score-relevant commitments and caveats. Do not add unrelated claims.\n"
+                "Do NOT mention any numeric score or the term RILE.\n"
+                "Return only summary text.\n\n"
+                f"LEFT_CHILD_SUMMARY:\n{left_summary}\n\n"
+                f"RIGHT_CHILD_SUMMARY:\n{right_summary}\n\n"
+                f"PARENT_SPAN_REFERENCE:\n{clipped_text}"
+            )
+        return client.chat(
+            system=(
+                "Summarize for tree-indexed information extraction distillation. "
+                "Outputs must be concise, faithful, and score preserving."
+            ),
+            user=user,
+            temperature=float(temperature),
+            max_tokens=int(max_tokens),
+        ).strip()
+
+    return _summarize_node
+
+
 def _extract_trace(
     *,
     client: OpenAIChatClient,
@@ -761,6 +810,70 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--score-temperature", type=float, default=0.0)
     parser.add_argument("--score-max-tokens", type=int, default=32)
     parser.add_argument(
+        "--emit-labeled-trees",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Also emit Stage-0 C-TreePO labeled-tree artifacts with leaf/internal "
+            "node scores, summary targets, sibling triples, and idempotence pairs."
+        ),
+    )
+    parser.add_argument(
+        "--labeled-tree-leaf-size-chars",
+        type=int,
+        default=8000,
+        help="Fixed leaf size used to build labeled-tree artifacts.",
+    )
+    parser.add_argument(
+        "--labeled-tree-window-overlap-chars",
+        type=int,
+        default=0,
+        help="Window overlap used to build labeled-tree artifacts.",
+    )
+    parser.add_argument(
+        "--labeled-tree-target-leaves-per-doc",
+        "--target-leaves-per-doc",
+        type=int,
+        default=None,
+        help=(
+            "Optional target number of exact artifact leaves per document. "
+            "When set, this overrides fixed-size leaf construction for labeled trees."
+        ),
+    )
+    parser.add_argument(
+        "--labeled-tree-node-summary-mode",
+        choices=["teacher", "identity", "partial"],
+        default="teacher",
+        help=(
+            "How to populate non-root node summary targets: live teacher calls, "
+            "span identity fallback, or partial artifact mode with missing G targets."
+        ),
+    )
+    parser.add_argument(
+        "--labeled-tree-node-summary-max-chars",
+        type=int,
+        default=12000,
+        help="Max chars of a node span included in live node-summary prompts.",
+    )
+    parser.add_argument(
+        "--labeled-tree-node-summary-max-tokens",
+        type=int,
+        default=700,
+        help="Max tokens for live node-summary teacher calls.",
+    )
+    parser.add_argument(
+        "--labeled-tree-node-summary-temperature",
+        type=float,
+        default=0.2,
+        help="Temperature for live node-summary teacher calls.",
+    )
+    parser.add_argument(
+        "--labeled-tree-label-source",
+        type=str,
+        default="manifesto_teacher_trace_model_backed",
+        help="Provenance string stored on emitted labeled-tree node labels.",
+    )
+    parser.add_argument(
         "--dspy-guidance-source-max-chars",
         type=int,
         default=262144,
@@ -1050,6 +1163,95 @@ def main(argv: Optional[List[str]] = None) -> int:
     if rejected_rows:
         write_jsonl(rejected_path, rejected_rows)
 
+    labeled_trees_path: Optional[Path] = None
+    labeled_tree_count = 0
+    labeled_tree_failures: List[Dict[str, Any]] = []
+    if bool(args.emit_labeled_trees):
+        labeled_trees = []
+        for idx, row in enumerate(records, start=1):
+            try:
+                LOGGER.info(
+                    "Building labeled tree artifact %d/%d for %s",
+                    idx,
+                    len(records),
+                    row.example_id,
+                )
+                node_summary_mode = str(args.labeled_tree_node_summary_mode)
+                node_summary_fn = (
+                    _build_labeled_tree_node_summary_fn(
+                        client=teacher_client,
+                        source_rile_raw=float(row.source_rile_raw),
+                        temperature=float(args.labeled_tree_node_summary_temperature),
+                        max_tokens=int(args.labeled_tree_node_summary_max_tokens),
+                        max_chars=int(args.labeled_tree_node_summary_max_chars),
+                    )
+                    if node_summary_mode == "teacher"
+                    else None
+                )
+                labeled_trees.append(
+                    build_labeled_tree_from_text(
+                        doc_id=str(row.example_id),
+                        text=str(row.expanded_text),
+                        document_score=float(row.source_rile_raw),
+                        split=str(row.split),
+                        score_fn=score_fn,
+                        window_size=int(args.labeled_tree_leaf_size_chars),
+                        window_overlap=int(args.labeled_tree_window_overlap_chars),
+                        target_leaves_per_doc=args.labeled_tree_target_leaves_per_doc,
+                        label_source=str(args.labeled_tree_label_source),
+                        root_summary=str(row.summary1),
+                        resummary_target=str(row.summary2),
+                        node_summary_fn=node_summary_fn,
+                        fill_missing_summaries_from_span=(node_summary_mode == "identity"),
+                        summary_source=(
+                            "teacher_trace_node_summaries"
+                            if node_summary_mode == "teacher"
+                            else (
+                                "span_identity_fallback"
+                                if node_summary_mode == "identity"
+                                else "teacher_trace_root_only_partial"
+                            )
+                        ),
+                        extra_metadata={
+                            "source_manifesto_id": str(row.source_manifesto_id),
+                            "source_rile_raw": float(row.source_rile_raw),
+                            "expanded_score_raw": float(row.expanded_score_raw),
+                            "summary1_score_raw": float(row.summary1_score_raw),
+                            "summary2_score_raw": float(row.summary2_score_raw),
+                            "teacher_model": str(args.teacher_model),
+                            "teacher_base_url": str(args.teacher_base_url),
+                            "scorer_model": str(scorer_model),
+                            "scorer_base_url": str(scorer_base_url),
+                            "fixed_leaf_size_identity": {
+                                "leaf_size_chars": int(args.labeled_tree_leaf_size_chars),
+                                "window_overlap_chars": int(args.labeled_tree_window_overlap_chars),
+                            },
+                            "summary_target_policy": {
+                                "root": "teacher_trace_summary1",
+                                "idempotence": "teacher_trace_summary2",
+                                "non_root": node_summary_mode,
+                            },
+                        },
+                    )
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "Failed to build labeled tree artifact for %s: %s",
+                    row.example_id,
+                    _http_error_detail(exc),
+                )
+                labeled_tree_failures.append(
+                    {
+                        "example_id": row.example_id,
+                        "split": row.split,
+                        "source_manifesto_id": row.source_manifesto_id,
+                        "error": str(exc),
+                    }
+                )
+        labeled_trees_path = output_dir / "labeled_trees.jsonl"
+        labeled_tree_count = len(labeled_trees)
+        write_labeled_trees_jsonl(labeled_trees_path, labeled_trees)
+
     metrics = summarize_teacher_trace_records(records)
     manifest = {
         "requested_docs": total_requested,
@@ -1094,6 +1296,22 @@ def main(argv: Optional[List[str]] = None) -> int:
             "trace_source_max_chars": int(args.trace_source_max_chars),
             "trace_expanded_max_chars": int(args.trace_expanded_max_chars),
         },
+        "labeled_trees": {
+            "emitted": bool(args.emit_labeled_trees),
+            "leaf_size_chars": int(args.labeled_tree_leaf_size_chars),
+            "window_overlap_chars": int(args.labeled_tree_window_overlap_chars),
+            "target_leaves_per_doc": (
+                int(args.labeled_tree_target_leaves_per_doc)
+                if args.labeled_tree_target_leaves_per_doc is not None
+                else None
+            ),
+            "node_summary_mode": str(args.labeled_tree_node_summary_mode),
+            "node_summary_max_chars": int(args.labeled_tree_node_summary_max_chars),
+            "node_summary_max_tokens": int(args.labeled_tree_node_summary_max_tokens),
+            "label_source": str(args.labeled_tree_label_source),
+            "accepted_artifacts": int(labeled_tree_count),
+            "failures": labeled_tree_failures,
+        },
         "metrics": metrics,
         "paths": {
             "records": str(records_path),
@@ -1101,6 +1319,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "summary_training_pairs": str(summary_pairs_path),
             "trace_artifacts": str(trace_rows_path),
             "rejected_records": str(rejected_path) if rejected_rows else None,
+            "labeled_trees": str(labeled_trees_path) if labeled_trees_path else None,
         },
     }
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")

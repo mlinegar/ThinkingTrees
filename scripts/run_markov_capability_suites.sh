@@ -45,10 +45,7 @@ report_suite() {
   if [[ ! -d "${input_root}" ]]; then
     return 0
   fi
-  "${PYTHON_BIN}" -u scripts/report_markov_capability_map.py \
-    --input-root "${input_root}" \
-    --output-dir "${report_dir}" \
-    --suite-type "${suite_name}"
+  echo "SKIP report for ${suite_name}; capability report is archived (see docs/markov_report_archive.md)"
 }
 
 if [[ "${SUITE}" == "sanity_suite" || "${SUITE}" == "all" ]]; then

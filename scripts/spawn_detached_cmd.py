@@ -86,6 +86,12 @@ def main() -> int:
 
     # Grandchild: run the requested command.
     os.chdir(str(args.cwd))
+    try:
+        os.setpgid(0, 0)
+    except OSError:
+        # Best effort only. If the process is already the group leader or the
+        # platform rejects the call, launching can still proceed.
+        pass
 
     pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
 
@@ -102,4 +108,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

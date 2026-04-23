@@ -24,6 +24,10 @@ from matplotlib.patches import Rectangle
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.ctreepo.sim.util import safe_float
 
 
 def _parse_args() -> argparse.Namespace:
@@ -123,12 +127,7 @@ def _ensure_expectations(output_root: Path) -> Path:
     return out_json
 
 
-def _safe_float(value: object) -> float:
-    try:
-        out = float(value)  # type: ignore[arg-type]
-    except Exception:
-        return math.nan
-    return out if math.isfinite(out) else math.nan
+_safe_float = safe_float
 
 
 def _median(values: Sequence[float]) -> float:

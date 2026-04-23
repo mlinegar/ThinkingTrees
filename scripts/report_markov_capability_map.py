@@ -33,6 +33,7 @@ from src.ctreepo.sim.core.markov_capability import (
     classify_capability,
     markov_theorem_score,
 )
+from src.ctreepo.sim.util import safe_float as _safe_float_scalar
 
 
 @dataclass(frozen=True)
@@ -135,10 +136,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _safe_float(mapping: dict, key: str, default: float = float("nan")) -> float:
-    try:
-        return float(mapping.get(key, default))
-    except Exception:
-        return float(default)
+    return _safe_float_scalar(mapping.get(key), default=default)
 
 
 def _reduce(xs: Sequence[float], *, agg: str) -> float:
@@ -880,6 +878,23 @@ def _write_image_page(pdf: PdfPages, *, image_path: Path, title: str) -> None:
 
 
 def main() -> int:
+    try:
+        from scripts._markov_report_archive import archived_report_exit
+    except ModuleNotFoundError:
+        from _markov_report_archive import archived_report_exit
+
+    return archived_report_exit(
+        legacy_script="scripts/report_markov_capability_map.py",
+        replacements=(
+            "scripts/report_markov_optimization_tradeoffs.py",
+            "scripts/run_markov_optimization_tradeoff_pipeline.py",
+        ),
+        note=(
+            "Capability-map reporting came from the pre-v3 Markov OPS-count stack and is now "
+            "archived rather than carried forward into the supported report surface."
+        ),
+    )
+
     args = _parse_args()
     input_root = Path(args.input_root)
     if not input_root.exists():

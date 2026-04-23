@@ -5,14 +5,14 @@
     Use ``scripts/report_learnability.py --family markov`` instead.
 """
 
+from __future__ import annotations
+
 import warnings
 warnings.warn(
     "Deprecated. Use scripts/report_learnability.py --family markov",
     DeprecationWarning,
     stacklevel=1,
 )
-
-from __future__ import annotations
 
 import argparse
 import json
@@ -23,10 +23,18 @@ from pathlib import Path
 from statistics import fmean, median
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import sys
+
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.lines import Line2D
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.ctreepo.sim.util import safe_float as _safe_float_scalar
 
 
 @dataclass(frozen=True)
@@ -140,10 +148,7 @@ def _reduce(xs: Sequence[float], *, agg: str) -> float:
 
 
 def _safe_float(mapping: dict, key: str, default: float = float("nan")) -> float:
-    try:
-        return float(mapping.get(key, default))
-    except Exception:
-        return float(default)
+    return _safe_float_scalar(mapping.get(key), default=default)
 
 
 def _split_objective_metric_with_fallback(
@@ -1217,6 +1222,23 @@ def _format_operating_point(label: str, row: Optional[dict]) -> str:
 
 
 def main() -> int:
+    try:
+        from scripts._markov_report_archive import archived_report_exit
+    except ModuleNotFoundError:
+        from _markov_report_archive import archived_report_exit
+
+    return archived_report_exit(
+        legacy_script="scripts/report_markov_local_law_learnability.py",
+        replacements=(
+            "scripts/report_learnability.py --family markov --input-root <root>",
+            "scripts/report_markov_optimization_tradeoffs.py",
+        ),
+        note=(
+            "The family-specific Markov learnability wrapper is archived; use the current unified "
+            "learnability CLI where you still need that legacy suite."
+        ),
+    )
+
     args = _parse_args()
     input_root = Path(args.input_root)
     if not input_root.exists():

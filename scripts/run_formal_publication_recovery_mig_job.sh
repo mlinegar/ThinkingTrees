@@ -71,7 +71,11 @@ if [[ -z "${MIG_UUIDS}" ]]; then
   exit 2
 fi
 
-CMD_FILE="${FORMAL_ROOT}/commands/identifiable_zero_longrun_clean_gpu.txt"
+venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-publication build \
+  --profile publication_clean \
+  --output-root "${FORMAL_ROOT}/identifiable_zero_longrun_clean"
+
+CMD_FILE="${FORMAL_ROOT}/identifiable_zero_longrun_clean/suite_groups/cmds/gpu.txt"
 
 echo "mig_recovery_start formal_root=${FORMAL_ROOT} log_dir=${LOG_DIR}"
 venv/bin/python scripts/run_mig_command_queue.py \
@@ -110,7 +114,8 @@ if [[ "${MISSING_COUNT}" != "0" ]]; then
 fi
 
 echo "mig_recovery_report_start"
-venv/bin/python scripts/report_identifiable_zero_suite_publication_clean.py \
+venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-publication report \
+  --profile publication_clean \
   --output-root "${FORMAL_ROOT}/identifiable_zero_longrun_clean" \
   --emit-pdf
 venv/bin/python scripts/generate_paper_simulation_report_bundle.py \

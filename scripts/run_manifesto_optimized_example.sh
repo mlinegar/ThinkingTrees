@@ -3,12 +3,17 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DEFAULT_VENV_PYTHON="${PROJECT_ROOT}/venv/bin/python"
+
 PORT=${PORT:-8000}
 OPT_MODEL_PORT=${OPT_MODEL_PORT:-}
 TASK_REPLICA_PORT=${TASK_REPLICA_PORT:-8002}
 TRAIN_SAMPLES=${TRAIN_SAMPLES:-80}
 VAL_SAMPLES=${VAL_SAMPLES:-24}
 CHUNK_SIZE=${CHUNK_SIZE:-8000}
+CHUNK_TOKENS=${CHUNK_TOKENS:-}
 CONCURRENT_DOCS=${CONCURRENT_DOCS:-20}
 CONCURRENT_REQUESTS=${CONCURRENT_REQUESTS:-200}
 OPTIMIZER=${OPTIMIZER:-gepa}
@@ -79,6 +84,7 @@ Options:
   --train-samples N           Training sample count for optimization (default: 80)
   --val-samples N             Validation sample count for optimization (default: 24)
   --chunk-size N              Max chunk chars for tree building (default: 8000)
+  --chunk-tokens N            Max chunk tokens for tree building; takes precedence over char chunking
   --concurrent-docs N         Concurrent docs for batched runs (default: 20)
   --concurrent-requests N     Concurrent LLM requests (default: 200)
   --optimizer TYPE            DSPy optimizer (default: gepa)
@@ -211,6 +217,10 @@ while [[ $# -gt 0 ]]; do
       CHUNK_SIZE="$2"
       shift 2
       ;;
+    --chunk-tokens)
+      CHUNK_TOKENS="$2"
+      shift 2
+      ;;
     --concurrent-docs)
       CONCURRENT_DOCS="$2"
       shift 2
@@ -337,7 +347,9 @@ fi
 
 mkdir -p "${OUTPUT_DIR}"
 
-if command -v python >/dev/null 2>&1; then
+if [[ -x "${DEFAULT_VENV_PYTHON}" ]]; then
+  PYTHON_BIN="${DEFAULT_VENV_PYTHON}"
+elif command -v python >/dev/null 2>&1; then
   PYTHON_BIN="python"
 elif command -v python3 >/dev/null 2>&1; then
   PYTHON_BIN="python3"
@@ -593,40 +605,46 @@ fi
 echo "============================================================"
 echo "PHASE A: Optimize Scorer + Summarizers (batched)"
 echo "============================================================"
-"${PYTHON_BIN}" -m src.training.run_pipeline \
-  --task manifesto_rile \
-  --port "${PORT}" \
-  --train-samples "${TRAIN_SAMPLES}" \
-  --val-samples "${VAL_SAMPLES}" \
-  --test-samples 0 \
-  --concurrent-docs "${CONCURRENT_DOCS}" \
-  --concurrent-requests "${CONCURRENT_REQUESTS}" \
-  --max-chunk-chars "${CHUNK_SIZE}" \
-  --optimizer "${OPTIMIZER}" \
-  --optimizer-budget "${OPTIMIZER_BUDGET}" \
-  --num-threads "${NUM_THREADS}" \
-  --gepa-reflection-minibatch-size "${GEPA_REFLECTION_MINIBATCH_SIZE}" \
-  --n-iterations "${N_ITERATIONS}" \
-  "${PHASE1_SCORE_FLAG}" \
-  "${PHASE1_BASELINE_FLAG}" \
-  --phase1-max-tokens-summary "${PHASE1_MAX_TOKENS_SUMMARY}" \
-  --phase1-max-tokens-score "${PHASE1_MAX_TOKENS_SCORE}" \
-  --summarizer-leaf-max-ratio "${SUMMARIZER_LEAF_MAX_RATIO}" \
-  --summarizer-merge-max-ratio "${SUMMARIZER_MERGE_MAX_RATIO}" \
-  --summarizer-ratio-min-input-chars "${SUMMARIZER_RATIO_MIN_INPUT_CHARS}" \
-  --no-adaptive-chunking \
-  --no-honest-chunking \
-  --no-three-layer-honesty \
-  --no-adaptive-embedding-proxy \
-  "${INITIAL_SCORER_ARGS[@]}" \
-  "${OPT_MODEL_ARGS[@]}" \
-  "${RESUME_ARGS[@]}" \
-  "${RERUN_OPT_ARGS[@]}" \
-  "${SKIP_OPT_ARGS[@]}" \
-  "${INIT_MODULES_ARGS[@]}" \
-  --output-dir "${OUTPUT_DIR}" \
-  "${DYNAMIC_GPU_FLAG}" \
+RUN_PIPELINE_CMD=(
+  "${PYTHON_BIN}" -m src.training.run_pipeline
+  --task manifesto_rile
+  --port "${PORT}"
+  --train-samples "${TRAIN_SAMPLES}"
+  --val-samples "${VAL_SAMPLES}"
+  --test-samples 0
+  --concurrent-docs "${CONCURRENT_DOCS}"
+  --concurrent-requests "${CONCURRENT_REQUESTS}"
+  --max-chunk-chars "${CHUNK_SIZE}"
+  --optimizer "${OPTIMIZER}"
+  --optimizer-budget "${OPTIMIZER_BUDGET}"
+  --num-threads "${NUM_THREADS}"
+  --gepa-reflection-minibatch-size "${GEPA_REFLECTION_MINIBATCH_SIZE}"
+  --n-iterations "${N_ITERATIONS}"
+  "${PHASE1_SCORE_FLAG}"
+  "${PHASE1_BASELINE_FLAG}"
+  --phase1-max-tokens-summary "${PHASE1_MAX_TOKENS_SUMMARY}"
+  --phase1-max-tokens-score "${PHASE1_MAX_TOKENS_SCORE}"
+  --summarizer-leaf-max-ratio "${SUMMARIZER_LEAF_MAX_RATIO}"
+  --summarizer-merge-max-ratio "${SUMMARIZER_MERGE_MAX_RATIO}"
+  --summarizer-ratio-min-input-chars "${SUMMARIZER_RATIO_MIN_INPUT_CHARS}"
+  --no-adaptive-chunking
+  --no-honest-chunking
+  --no-three-layer-honesty
+  --no-adaptive-embedding-proxy
+  "${INITIAL_SCORER_ARGS[@]}"
+  "${OPT_MODEL_ARGS[@]}"
+  "${RESUME_ARGS[@]}"
+  "${RERUN_OPT_ARGS[@]}"
+  "${SKIP_OPT_ARGS[@]}"
+  "${INIT_MODULES_ARGS[@]}"
+  --output-dir "${OUTPUT_DIR}"
+  "${DYNAMIC_GPU_FLAG}"
   "${KEEP_SERVERS_ARGS[@]}"
+)
+if [[ -n "${CHUNK_TOKENS}" ]]; then
+  RUN_PIPELINE_CMD+=(--max-chunk-tokens "${CHUNK_TOKENS}")
+fi
+"${RUN_PIPELINE_CMD[@]}"
 
 LEAF_PATH="${OUTPUT_DIR}/trained_modules/leaf_summarizer_final.json"
 MERGE_PATH="${OUTPUT_DIR}/trained_modules/merge_summarizer_final.json"
@@ -694,16 +712,22 @@ else
   PHASE_B_PORT_ARGS+=(--port "${PORT}")
 fi
 
-"${PYTHON_BIN}" scripts/run_manifesto_batched_example.py \
-  --ids "${IDS[@]}" \
-  "${PHASE_B_PORT_ARGS[@]}" \
-  --chunk-size "${CHUNK_SIZE}" \
-  --concurrent-docs "${CONCURRENT_DOCS}" \
-  --concurrent-requests "${CONCURRENT_REQUESTS}" \
-  --leaf-module-path "${LEAF_PATH}" \
-  --merge-module-path "${MERGE_PATH}" \
-  --scorer-module-path "${SCORER_PATH}" \
+PHASE_B_CMD=(
+  "${PYTHON_BIN}" scripts/run_manifesto_batched_example.py
+  --ids "${IDS[@]}"
+  "${PHASE_B_PORT_ARGS[@]}"
+  --chunk-size "${CHUNK_SIZE}"
+  --concurrent-docs "${CONCURRENT_DOCS}"
+  --concurrent-requests "${CONCURRENT_REQUESTS}"
+  --leaf-module-path "${LEAF_PATH}"
+  --merge-module-path "${MERGE_PATH}"
+  --scorer-module-path "${SCORER_PATH}"
   --output "${OUTPUT_DIR}/rile_optimized_example.json"
+)
+if [[ -n "${CHUNK_TOKENS}" ]]; then
+  PHASE_B_CMD+=(--chunk-tokens "${CHUNK_TOKENS}")
+fi
+"${PHASE_B_CMD[@]}"
 
 echo
 echo "Done."

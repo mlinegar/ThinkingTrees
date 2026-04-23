@@ -12,10 +12,18 @@ from statistics import fmean
 import textwrap
 from typing import Dict, Iterable, List, Sequence, Tuple
 
+import sys
+
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 import numpy as np
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.ctreepo.sim.util import safe_float as _safe_float
 
 
 # ── Colour palettes ──
@@ -32,13 +40,6 @@ HEATMAP_CMAP = LinearSegmentedColormap.from_list("delta_winloss", ["#b2182b", "#
 
 
 # ── Helpers ──
-
-def _safe_float(x) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return float("nan")
-
 
 def _safe_mean(xs: Iterable[float]) -> float:
     vals = [float(x) for x in xs if math.isfinite(float(x))]

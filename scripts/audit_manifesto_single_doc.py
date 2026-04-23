@@ -36,6 +36,7 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.config.dspy_config import configure_dspy, create_vllm_lm
+from src.core.logged_supervision import write_logged_observations_jsonl
 from src.core.protocols import format_merge_input
 from src.core.scoring import SimilarityScorer, UNIT_SCALE
 from src.tasks.manifesto import ManifestoDataset, RILE_PRESERVATION_RUBRIC
@@ -359,6 +360,7 @@ def _audit_tree_with_auditor(
     tree: Tree,
     teacher_score_norm: Any,
     discrepancy_threshold: float,
+    output_dir: Path,
 ) -> Dict[str, Any]:
     scorer = SimilarityScorer(
         value_extractor=teacher_score_norm,
@@ -379,6 +381,13 @@ def _audit_tree_with_auditor(
         sampling_probability=1.0,
     )
     report = Auditor(oracle=scorer, config=config, summarizer=summarizer).audit_tree(tree)
+    if report.logged_observations:
+        artifact = write_logged_observations_jsonl(
+            Path(output_dir) / "logged_observations.jsonl",
+            report.logged_observations,
+            channel_name="sampled_substructure_supervision",
+        )
+        report.logged_observation_artifacts = {artifact.channel_name: artifact.to_dict()}
     return _audit_report_to_dict(report)
 
 
@@ -468,11 +477,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             tree=baseline_tree,
             teacher_score_norm=teacher_score_norm,
             discrepancy_threshold=float(args.discrepancy_threshold),
+            output_dir=baseline_dir,
         )
         optimized_report = _audit_tree_with_auditor(
             tree=optimized_tree,
             teacher_score_norm=teacher_score_norm,
             discrepancy_threshold=float(args.discrepancy_threshold),
+            output_dir=optimized_dir,
         )
 
         _save_json(baseline_dir / "audit_report.json", baseline_report)

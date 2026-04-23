@@ -42,6 +42,8 @@ from pathlib import Path
 # Allow running from repo root
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.core.engines import EngineType, build_server_manager
+from src.core.llm_client import ServerType
 from src.harness import TreeAudit, AuditBudget
 
 
@@ -73,28 +75,20 @@ def load_documents(paths: list[str]) -> list[str]:
 
 def _run_with_server(audit, documents, args):
     """Run the harness with an auto-started vLLM or SGLang server."""
-    server_type = getattr(args, "server_type", "vllm")
+    engine_type = EngineType.normalize(getattr(args, "engine", "") or getattr(args, "server_type", "vllm"))
 
     async def _inner():
-        if server_type == "sglang":
-            from src.benchmark.throughput import SGLangServerManager
-            manager = SGLangServerManager(
-                profile=args.start_server,
-                port=args.server_port,
-                cuda_devices=args.cuda_devices,
-            )
-        else:
-            from src.benchmark.throughput import VLLMServerManager
-            manager = VLLMServerManager(
-                profile=args.start_server,
-                port=args.server_port,
-                cuda_devices=args.cuda_devices,
-            )
+        manager = build_server_manager(
+            engine_type,
+            profile=args.start_server,
+            port=args.server_port,
+            cuda_devices=args.cuda_devices,
+        )
 
         async with manager as server:
             logging.info(
                 "%s server started: %s on port %d",
-                server_type.upper(), args.start_server, args.server_port,
+                engine_type.value.upper(), args.start_server, args.server_port,
             )
             return await audit.run(documents)
 
@@ -178,8 +172,12 @@ def main():
              "(e.g. 'nemotron-30b-nvfp4'). Stopped on exit.",
     )
     parser.add_argument(
+        "--engine", default="",
+        help="Primary engine selector for --start-server (preferred over --server-type).",
+    )
+    parser.add_argument(
         "--server-type", choices=["vllm", "sglang"], default="vllm",
-        help="Server backend for --start-server (default: vllm).",
+        help="Deprecated alias for --engine when auto-starting a managed server.",
     )
     parser.add_argument(
         "--server-port", type=int, default=None,
@@ -209,8 +207,8 @@ def main():
 
     # Validate: warn about server flags without --start-server
     if not args.start_server:
-        if args.server_type != "vllm":
-            logging.warning("--server-type has no effect without --start-server")
+        if EngineType.normalize(args.engine or args.server_type) is not EngineType.VLLM:
+            logging.warning("--engine/--server-type has no effect without --start-server")
         if args.server_port is not None:
             logging.warning("--server-port has no effect without --start-server")
         if args.cuda_devices is not None:
@@ -229,8 +227,9 @@ def main():
 
     # Determine endpoint
     if args.start_server:
+        engine_type = EngineType.normalize(args.engine or args.server_type)
         if args.server_port is None:
-            args.server_port = 30000 if args.server_type == "sglang" else 8000
+            args.server_port = engine_type.default_port or 8000
         llm_endpoint = f"http://localhost:{args.server_port}/v1"
     else:
         llm_endpoint = args.llm_endpoint

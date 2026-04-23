@@ -12,10 +12,18 @@ from statistics import fmean
 import textwrap
 from typing import Dict, Iterable, List, Sequence, Tuple
 
+import sys
+
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 import numpy as np
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.ctreepo.sim.util import safe_float as _safe_float
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,13 +38,6 @@ def parse_args() -> argparse.Namespace:
         help="Short label describing the report snapshot.",
     )
     return p.parse_args()
-
-
-def _safe_float(x) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return float("nan")
 
 
 def _safe_mean(xs: Sequence[float]) -> float:

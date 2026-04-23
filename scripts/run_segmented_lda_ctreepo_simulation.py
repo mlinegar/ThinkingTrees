@@ -49,6 +49,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--leaf-theta-mlp-batch-size", type=int, default=256)
     p.add_argument("--leaf-theta-mlp-lr", type=float, default=1e-3)
     p.add_argument("--leaf-theta-mlp-weight-decay", type=float, default=1e-4)
+    p.add_argument(
+        "--include-full-doc-theta-baseline",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Also fit the matched RF/MLP theta estimator on full-document counts to expose "
+            "the no-tree baseline under the same train-doc slice."
+        ),
+    )
 
     p.add_argument(
         "--topic-phi-estimator",
@@ -162,6 +171,7 @@ def main() -> int:
         leaf_theta_mlp_batch_size=int(args.leaf_theta_mlp_batch_size),
         leaf_theta_mlp_lr=float(args.leaf_theta_mlp_lr),
         leaf_theta_mlp_weight_decay=float(args.leaf_theta_mlp_weight_decay),
+        include_full_doc_theta_baseline=bool(args.include_full_doc_theta_baseline),
         topic_phi_estimator=str(args.topic_phi_estimator),
         topic_phi_docs=int(args.topic_phi_docs),
         tlda_delta=float(args.tlda_delta),

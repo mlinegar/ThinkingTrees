@@ -129,13 +129,11 @@ else
 fi
 
 echo "=== REPORT: local-law learnability ===" | tee -a "${RUN_LOG}"
-venv/bin/python -u scripts/report_markov_local_law_learnability.py \
+venv/bin/python -u scripts/report_learnability.py \
+  --family markov \
   --input-root "${MARKOV_OUT}" \
   --output-dir "${MARKOV_OUT}/local_law_report" | tee -a "${RUN_LOG}"
 
-echo "=== REPORT: generic OPS report ===" | tee -a "${RUN_LOG}"
-venv/bin/python -u scripts/report_markov_changepoint_ops_count_run.py \
-  --input-root "${MARKOV_OUT}" \
-  --output-dir "${MARKOV_OUT}/report" | tee -a "${RUN_LOG}"
+echo "=== REPORT: generic OPS report archived; see docs/markov_report_archive.md ===" | tee -a "${RUN_LOG}"
 
 echo "DONE | OUT_ROOT=${OUT_ROOT}" | tee -a "${RUN_LOG}"

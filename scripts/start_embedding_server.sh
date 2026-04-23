@@ -84,6 +84,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Detached launchers such as scripts/long_job.py run under systemd. In that
+# context, keep the server in the foreground so the unit owns the actual API
+# process instead of a short-lived wrapper that backgrounds it.
+if [[ "$FOREGROUND" != "true" ]]; then
+    if [[ -n "${INVOCATION_ID:-}" || -n "${JOURNAL_STREAM:-}" ]]; then
+        FOREGROUND=true
+    fi
+fi
+
 read -r DEFAULT_PROFILE DEFAULT_PORT < <(python3 - <<PY
 import os
 from urllib.parse import urlparse

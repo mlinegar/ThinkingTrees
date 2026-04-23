@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Debug summary-length blowups when using DSPy leaf/merge modules.
+Debug summary-length blowups when using a DSPy unified-g module.
 
 This builds a single OPS tree for a specific manifesto ID using the provided
-optimized modules, then reports per-level compression ratios and the largest
-nodes. It is useful for diagnosing why merges can grow until they hit
+optimized module, then reports per-level compression ratios and the largest
+nodes. It is useful for diagnosing why reductions can grow until they hit
 max_tokens and get truncated.
 """
 
@@ -13,9 +13,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
+
+project_root = Path(__file__).resolve().parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 from src.config.settings import load_settings
 from src.config.dspy_config import configure_dspy, create_vllm_lm, create_vllm_lm_multi
@@ -57,7 +62,7 @@ def _iter_nodes(root: Any) -> Iterable[Any]:
             queue.append(right)
 
 
-def _resolve_default_generation() -> Tuple[float, int]:
+def _resolve_default_generation() -> tuple[float, int]:
     settings = load_settings()
     summarizer_cfg = (
         (settings.get("generation", {}) or {}).get("summarizer", {}) if isinstance(settings, dict) else {}
@@ -67,15 +72,14 @@ def _resolve_default_generation() -> Tuple[float, int]:
     return temperature, max_tokens
 
 
-def _load_module_paths(args: argparse.Namespace) -> Tuple[Path, Path]:
+def _load_module_path(args: argparse.Namespace) -> Path:
     root = Path(args.modules_dir) if args.modules_dir else Path("outputs/latest/manifesto_rile/trained_modules")
-    leaf_path = Path(args.leaf_module_path) if args.leaf_module_path else root / "leaf_summarizer_final.json"
-    merge_path = Path(args.merge_module_path) if args.merge_module_path else root / "merge_summarizer_final.json"
-    if not leaf_path.exists():
-        raise FileNotFoundError(f"Missing leaf module: {leaf_path}")
-    if not merge_path.exists():
-        raise FileNotFoundError(f"Missing merge module: {merge_path}")
-    return leaf_path, merge_path
+    g_path = Path(args.leaf_module_path) if args.leaf_module_path else root / "unified_g_final.json"
+    if not g_path.exists():
+        raise FileNotFoundError(f"Missing unified-g module: {g_path}")
+    if args.merge_module_path:
+        logger.warning("--merge-module-path is ignored; unified-g reuses the same module for merges.")
+    return g_path
 
 
 def _make_doc_sample(sample: Any) -> DocumentSample:
@@ -96,7 +100,7 @@ def main() -> int:
     default_temp, default_max_tokens = _resolve_default_generation()
 
     parser = argparse.ArgumentParser(
-        description="Debug per-level summary lengths for DSPy leaf/merge modules.",
+        description="Debug per-level summary lengths for a DSPy unified-g module.",
     )
     parser.add_argument("--id", required=True, help="Manifesto ID (e.g., 51320_198306)")
     parser.add_argument("--chunk-size", type=int, default=8192, help="Max chunk chars (default: 8192)")
@@ -112,21 +116,23 @@ def main() -> int:
         "--modules-dir",
         type=str,
         default=None,
-        help="Directory containing leaf_summarizer_final.json and merge_summarizer_final.json (optional).",
+        help="Directory containing unified_g_final.json (optional).",
     )
-    parser.add_argument("--leaf-module-path", type=str, default=None, help="Explicit leaf module path (optional).")
-    parser.add_argument("--merge-module-path", type=str, default=None, help="Explicit merge module path (optional).")
+    parser.add_argument("--leaf-module-path", type=str, default=None,
+                        help="Explicit unified-g module path (optional).")
+    parser.add_argument("--merge-module-path", type=str, default=None,
+                        help="Legacy split argument; ignored by unified-g.")
     parser.add_argument(
         "--dspy-temperature",
         type=float,
         default=default_temp,
-        help="DSPy temperature for leaf/merge summaries (default: generation.summarizer.temperature)",
+        help="DSPy temperature for unified-g summaries (default: generation.summarizer.temperature)",
     )
     parser.add_argument(
         "--dspy-max-tokens",
         type=int,
         default=default_max_tokens,
-        help="DSPy max_tokens for leaf/merge summaries (default: generation.summarizer.max_tokens)",
+        help="DSPy max_tokens for unified-g summaries (default: generation.summarizer.max_tokens)",
     )
     parser.add_argument(
         "--output",
@@ -142,9 +148,8 @@ def main() -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    leaf_path, merge_path = _load_module_paths(args)
-    logger.info("Using leaf module: %s", leaf_path)
-    logger.info("Using merge module: %s", merge_path)
+    g_path = _load_module_path(args)
+    logger.info("Using unified-g module: %s", g_path)
 
     ports = list(dict.fromkeys(args.ports)) if args.ports else [int(args.port)]
     if len(ports) > 1:
@@ -177,14 +182,13 @@ def main() -> int:
     )
 
     task = get_task("manifesto_rile")
-    leaf_module = task.create_summarizer()
-    merge_module = task.create_merge_summarizer()
-    leaf_module.load(str(leaf_path))
-    merge_module.load(str(merge_path))
+    g_module = task.create_summarizer()
+    g_module.load(str(g_path))
 
     strategy = DSPyStrategy(
-        leaf_module=leaf_module,
-        merge_module=merge_module,
+        leaf_module=g_module,
+        merge_module=None,
+        unified_mode=True,
         default_temperature=float(args.dspy_temperature),
         max_tokens=int(args.dspy_max_tokens),
     )
@@ -303,4 +307,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

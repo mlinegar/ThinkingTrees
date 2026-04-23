@@ -11,6 +11,12 @@ import statistics
 import sys
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.ctreepo.sim.util import safe_float as _safe_float_shared
+
 
 def _parse_float_csv(s: str) -> Tuple[float, ...]:
     out = tuple(float(x.strip()) for x in s.split(",") if x.strip())
@@ -20,18 +26,13 @@ def _parse_float_csv(s: str) -> Tuple[float, ...]:
 
 
 def _safe_float(value: Any, *, default: float = 0.0) -> float:
-    if value is None:
-        return float(default)
     if isinstance(value, bool):
         return 1.0 if value else 0.0
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip()
-    if text == "":
-        return float(default)
-    if text.lower() in {"true", "false"}:
-        return 1.0 if text.lower() == "true" else 0.0
-    return float(text)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"true", "false"}:
+            return 1.0 if text == "true" else 0.0
+    return _safe_float_shared(value, default=default)
 
 
 def _safe_bool(value: Any, *, default: bool = False) -> bool:

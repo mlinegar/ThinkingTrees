@@ -22,6 +22,7 @@ import logging
 import os
 import random
 import sys
+import time
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,11 @@ import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.training.reproducibility import (
+    configure_reproducibility,
+    write_reproducibility_manifest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,18 +84,8 @@ def _set_conditional_memory_env(args: argparse.Namespace) -> None:
         os.environ[env_key] = str(value)
 
 
-def _seed_everything(seed: int) -> None:
-    seed = int(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    try:
-        import torch
-
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-    except Exception:
-        pass
+def _seed_everything(seed: int) -> Dict[str, Any]:
+    return dict(configure_reproducibility(int(seed)))
 
 
 def _maybe_subsample(ids: Sequence[str], *, max_items: Optional[int], seed: int) -> List[str]:
@@ -577,7 +573,7 @@ def main() -> int:
     )
 
     _set_conditional_memory_env(args)
-    _seed_everything(int(args.seed))
+    applied_repro = _seed_everything(int(args.seed))
 
     out_dir = _resolve_out_dir(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -668,6 +664,26 @@ def main() -> int:
             "document_embedding_config": asdict(embed_cfg),
         },
     )
+    repro_manifest_path = write_reproducibility_manifest(
+        out_dir,
+        seed=int(args.seed),
+        cli_args=vars(args),
+        config={
+            "document_embedding_config": asdict(embed_cfg),
+            "windowing_mode": str(args.windowing_mode),
+        },
+        applied=applied_repro,
+        extra={
+            "embedding_url": str(api_base),
+            "embedding_model_resolved": str(resolved_model),
+            "split_ids": {
+                "train": list(train_ids),
+                "val": list(val_ids),
+                "test": list(test_ids),
+            },
+        },
+    )
+    logger.info("Reproducibility manifest: %s", repro_manifest_path)
 
     embedding_dim: Optional[int] = None
     train_windows, train_counts, train_meta, train_query, train_targets, train_rows, embedding_dim = _embed_split(
@@ -831,6 +847,7 @@ def main() -> int:
         include_delta_head=bool(args.delta_head),
     )
     model = MergeableEmbeddingSketch(sketch_cfg).to(device)
+    training_started_at = time.time()
 
     learn_loss_weights = bool(args.learn_loss_weights) and bool(args.delta_head)
     fixed_rile_weight = max(0.0, float(args.fixed_rile_loss_weight))
@@ -867,7 +884,15 @@ def main() -> int:
         torch.from_numpy(y_test),
     )
 
-    train_loader = DataLoader(train_ds, batch_size=int(args.batch_size), shuffle=True, drop_last=False)
+    train_loader_seed = torch.Generator()
+    train_loader_seed.manual_seed(int(args.seed))
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=int(args.batch_size),
+        shuffle=True,
+        drop_last=False,
+        generator=train_loader_seed,
+    )
     val_loader = DataLoader(val_ds, batch_size=int(args.batch_size), shuffle=False, drop_last=False)
     test_loader = DataLoader(test_ds, batch_size=int(args.batch_size), shuffle=False, drop_last=False)
 
@@ -1167,6 +1192,7 @@ def main() -> int:
 
     summary = {
         "created_at": datetime.now().isoformat(),
+        "training_time_seconds": float(time.time() - training_started_at),
         "embedding_url": api_base,
         "embedding_model_resolved": resolved_model,
         "embedding_dim": int(embedding_dim),

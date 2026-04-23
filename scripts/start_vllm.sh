@@ -20,6 +20,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONFIG_FILE="$PROJECT_ROOT/config/settings.yaml"
 
+if [[ -z "${TT_START_ENGINE_DIRECT:-}" ]]; then
+    exec python3 "$SCRIPT_DIR/start_engine.py" --engine vllm -- "$@"
+fi
+
 # Parse arguments
 PROFILE=""
 PRESET=""
@@ -482,10 +486,10 @@ if [[ -n "${SERVED_MODEL_NAME:-}" ]]; then
     VLLM_CMD+=(--served-model-name "${SERVED_MODEL_NAME}")
 fi
 
-# Add prefix caching unless explicitly overridden
+# Add prefix caching unless explicitly overridden by runtime flags or CLI args.
 PREFIX_FLAG_PRESENT=false
-for arg in "${EXTRA_ARGS[@]}"; do
-    if [[ "$arg" == "--enable-prefix-caching" || "$arg" == "--disable-prefix-caching" ]]; then
+for arg in "${RUNTIME_ARGS[@]}" "${EXTRA_ARGS[@]}"; do
+    if [[ "$arg" == "--enable-prefix-caching" || "$arg" == "--no-enable-prefix-caching" || "$arg" == "--disable-prefix-caching" ]]; then
         PREFIX_FLAG_PRESENT=true
         break
     fi

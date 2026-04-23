@@ -12,12 +12,20 @@ from statistics import fmean
 import textwrap
 from typing import Dict, Iterable, List, Sequence, Tuple
 
+import sys
+
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 import numpy as np
 from matplotlib import colors as mcolors
 from matplotlib.patches import FancyBboxPatch
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.ctreepo.sim.util import safe_float
 
 
 DELTA_CMAP = LinearSegmentedColormap.from_list("delta", ["#b2182b", "#ffffff", "#1a9850"])
@@ -72,10 +80,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _safe_float(x, default: float = float("nan")) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return float(default)
+    return safe_float(x, default=default)
 
 
 def _safe_mean(xs: Iterable[float]) -> float:

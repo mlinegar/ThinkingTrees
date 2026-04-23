@@ -18,9 +18,12 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TREEPO_SRC = REPO_ROOT / "treepo" / "src"
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 if str(TREEPO_SRC) not in sys.path:
     sys.path.insert(0, str(TREEPO_SRC))
 
+from src.ctreepo.sim.util import safe_float
 from treepo.bench.lda.learned_segment_lda_ops_g import LearnedSegmentLDAOpsGConfig
 from treepo.bench.lda.learned_segmented_lda_theta_g import LearnedSegmentedLDATopicThetaGConfig
 from treepo.bench.runner import (
@@ -66,12 +69,7 @@ def _append_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> int:
     return n
 
 
-def _safe_float(value: object, default: float = float("nan")) -> float:
-    try:
-        x = float(value)
-    except Exception:
-        return float(default)
-    return float(x) if math.isfinite(x) else float(default)
+_safe_float = safe_float
 
 
 def _parse_seeds(text: str) -> List[int]:

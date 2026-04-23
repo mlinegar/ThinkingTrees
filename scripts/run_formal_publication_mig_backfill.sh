@@ -133,15 +133,23 @@ log "controller_start formal_root=${FORMAL_ROOT} wait_pids=${WAIT_PIDS[*]:-} mig
 wait_for_pids
 log "wait_complete"
 
+log "suite_build_start name=publication_clean"
+venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-publication build \
+  --profile publication_clean \
+  --output-root "${FORMAL_ROOT}/identifiable_zero_longrun_clean" \
+  >>"${LOG_DIR}/formal_publication_mig_backfill.reports.log" 2>&1
+log "suite_build_done name=publication_clean"
+
 run_suite \
   "publication_clean_gpu" \
-  "${FORMAL_ROOT}/commands/identifiable_zero_longrun_clean_gpu.txt" \
+  "${FORMAL_ROOT}/identifiable_zero_longrun_clean/suite_groups/cmds/gpu.txt" \
   "${LOG_DIR}/identifiable_zero_longrun_clean_gpu.backfill.log" \
   "${LOG_DIR}/identifiable_zero_longrun_clean_gpu_queue_logs"
 
 run_report \
   "publication_clean" \
-  venv/bin/python scripts/report_identifiable_zero_suite_publication_clean.py \
+  venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-publication report \
+    --profile publication_clean \
     --output-root "${FORMAL_ROOT}/identifiable_zero_longrun_clean" \
     --emit-pdf
 

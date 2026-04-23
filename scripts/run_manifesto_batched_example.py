@@ -161,6 +161,12 @@ def create_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ids", nargs="+", default=DEFAULT_IDS, help="Manifesto IDs to run")
     parser.add_argument("--chunk-size", type=int, default=8000, help="Chunk size in characters")
+    parser.add_argument(
+        "--chunk-tokens",
+        type=int,
+        default=None,
+        help="Optional token budget per leaf; takes precedence over --chunk-size.",
+    )
     parser.add_argument("--port", type=int, default=8000, help="Task model port")
     parser.add_argument(
         "--ports",
@@ -241,7 +247,12 @@ def main() -> int:
 
     analysis_rows = []
     for sample in loaded_samples:
-        chunks = chunk_for_ops(sample.text, max_chars=args.chunk_size, strategy="axis")
+        chunks = chunk_for_ops(
+            sample.text,
+            max_chars=args.chunk_size,
+            max_tokens=args.chunk_tokens,
+            strategy="axis",
+        )
         analysis_rows.append(
             {
                 "manifesto_id": sample.manifesto_id,
@@ -249,12 +260,20 @@ def main() -> int:
                 "year": sample.year,
                 "chars": len(sample.text),
                 "chunk_size": args.chunk_size,
+                "chunk_tokens": args.chunk_tokens,
                 "chunk_count": len(chunks),
                 "expert_rile": sample.rile,
             }
         )
 
-    logger.info("Chunk analysis (strategy=axis, max_chars=%d):", args.chunk_size)
+    if args.chunk_tokens:
+        logger.info(
+            "Chunk analysis (strategy=token_budget, max_tokens=%d, fallback_max_chars=%d):",
+            args.chunk_tokens,
+            args.chunk_size,
+        )
+    else:
+        logger.info("Chunk analysis (strategy=axis, max_chars=%d):", args.chunk_size)
     for row in analysis_rows:
         logger.info(
             "  %s | %s %s | chars=%d | chunks=%d | expert=%+.1f",
@@ -268,23 +287,28 @@ def main() -> int:
 
     published_module_dir = args.published_root_dir / "trained_modules"
     if args.use_published_modules and args.leaf_module_path is None and args.merge_module_path is None:
-        leaf_candidate = published_module_dir / "leaf_summarizer_final.json"
-        merge_candidate = published_module_dir / "merge_summarizer_final.json"
+        leaf_candidate = published_module_dir / "unified_g_final.json"
+        legacy_leaf_candidate = published_module_dir / "leaf_summarizer_final.json"
+        legacy_merge_candidate = published_module_dir / "merge_summarizer_final.json"
         scorer_candidate = published_module_dir / "scorer_final.json"
-        if leaf_candidate.exists() and merge_candidate.exists():
+        if leaf_candidate.exists():
             args.leaf_module_path = leaf_candidate
-            args.merge_module_path = merge_candidate
             if args.scorer_module_path is None and scorer_candidate.exists():
                 args.scorer_module_path = scorer_candidate
             logger.info("Using published optimized modules from %s", published_module_dir)
+        elif legacy_leaf_candidate.exists() or legacy_merge_candidate.exists():
+            logger.warning(
+                "Published split leaf/merge modules exist in %s but are not auto-loaded; "
+                "active batched DSPy path now expects unified_g_final.json.",
+                published_module_dir,
+            )
 
-    use_dspy_modules = args.leaf_module_path is not None or args.merge_module_path is not None
-    if args.leaf_module_path is None and args.merge_module_path is not None:
-        logger.error("--merge-module-path requires --leaf-module-path")
-        return 1
-    if args.merge_module_path is None and args.leaf_module_path is not None:
-        logger.error("--leaf-module-path requires --merge-module-path")
-        return 1
+    use_dspy_modules = args.leaf_module_path is not None
+    if args.merge_module_path is not None:
+        logger.warning(
+            "--merge-module-path is ignored by the unified-g batched path; "
+            "merges reuse --leaf-module-path via DSPyStrategy(unified_mode=True)."
+        )
 
     payload = {
         "timestamp": datetime.now().isoformat(),
@@ -300,6 +324,7 @@ def main() -> int:
             "port": args.port,
             "ports": args.ports,
             "chunk_size": args.chunk_size,
+            "chunk_tokens": args.chunk_tokens,
             "concurrent_docs": args.concurrent_docs,
             "concurrent_requests": args.concurrent_requests,
             "batch_size": args.batch_size,
@@ -370,6 +395,7 @@ def main() -> int:
             batch_size=args.batch_size,
             batch_timeout=args.batch_timeout,
             max_chunk_chars=args.chunk_size,
+            max_chunk_tokens=args.chunk_tokens,
             run_baseline=not args.no_baseline,
             show_progress=True,
             rubric=RILE_PRESERVATION_RUBRIC,
@@ -402,19 +428,25 @@ def main() -> int:
                 )
             configure_dspy(lm=lm)
 
-            leaf_module = task.create_summarizer()
-            merge_module = task.create_merge_summarizer()
-            leaf_module.load(str(args.leaf_module_path))
-            merge_module.load(str(args.merge_module_path))
+            g_module = task.create_summarizer()
+            g_module.load(str(args.leaf_module_path))
 
             scorer = task.create_predictor()
             if args.scorer_module_path:
-                scorer.load(str(args.scorer_module_path))
+                try:
+                    scorer.load(str(args.scorer_module_path))
+                except Exception as exc:
+                    logger.warning(
+                        "Could not load scorer module %s; falling back to runtime predictor. error=%s",
+                        args.scorer_module_path,
+                        exc,
+                    )
 
             pipeline = BatchedDocPipeline(config)
             strategy = DSPyStrategy(
-                leaf_module=leaf_module,
-                merge_module=merge_module,
+                leaf_module=g_module,
+                merge_module=None,
+                unified_mode=True,
                 default_temperature=float(args.dspy_temperature),
                 max_tokens=int(args.dspy_max_tokens),
             )
@@ -443,10 +475,10 @@ def main() -> int:
                         "predicted_rile": predicted_rile,
                         "predicted_normalized": predicted_norm,
                         "absolute_gap_rile": gap,
-                        "representation_selected_backend": result.metadata.get("representation_selected_backend"),
-                        "representation_selected_score": result.metadata.get("representation_selected_score"),
-                        "representation_selected_score_raw": result.metadata.get("representation_selected_score_raw"),
-                        "representation_backend_scores": result.metadata.get("representation_backend_scores"),
+                        "selected_program_family": result.metadata.get("selected_program_family"),
+                        "selected_program_score": result.metadata.get("selected_program_score"),
+                        "selected_program_score_raw": result.metadata.get("selected_program_score_raw"),
+                        "program_family_scores": result.metadata.get("program_family_scores"),
                         "llm_score_failure_reason": result.metadata.get("llm_score_failure_reason"),
                         "llm_score_failure_preview": result.metadata.get("llm_score_failure_preview"),
                         "missing_score_default_applied": result.metadata.get("missing_score_default_applied"),
@@ -479,10 +511,10 @@ def main() -> int:
                         "predicted_rile": predicted_rile,
                         "predicted_normalized": predicted_norm,
                         "absolute_gap_rile": gap,
-                        "representation_selected_backend": result.metadata.get("representation_selected_backend"),
-                        "representation_selected_score": result.metadata.get("representation_selected_score"),
-                        "representation_selected_score_raw": result.metadata.get("representation_selected_score_raw"),
-                        "representation_backend_scores": result.metadata.get("representation_backend_scores"),
+                        "selected_program_family": result.metadata.get("selected_program_family"),
+                        "selected_program_score": result.metadata.get("selected_program_score"),
+                        "selected_program_score_raw": result.metadata.get("selected_program_score_raw"),
+                        "program_family_scores": result.metadata.get("program_family_scores"),
                         "llm_score_failure_reason": result.metadata.get("llm_score_failure_reason"),
                         "llm_score_failure_preview": result.metadata.get("llm_score_failure_preview"),
                         "missing_score_default_applied": result.metadata.get("missing_score_default_applied"),

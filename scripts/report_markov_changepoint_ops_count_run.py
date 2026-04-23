@@ -257,6 +257,22 @@ def _write_text_page(pdf: PdfPages, *, title: str, lines: Sequence[str]) -> None
 
 
 def main() -> int:
+    try:
+        from scripts._markov_report_archive import archived_report_exit
+    except ModuleNotFoundError:
+        from _markov_report_archive import archived_report_exit
+
+    return archived_report_exit(
+        legacy_script="scripts/report_markov_changepoint_ops_count_run.py",
+        replacements=(
+            "scripts/report_markov_optimization_tradeoffs.py",
+            "scripts/run_markov_optimization_tradeoff_pipeline.py",
+        ),
+        note=(
+            "The dedicated OPS-count PDF report is a legacy non-v3 surface and has been archived."
+        ),
+    )
+
     args = parse_args()
     input_root = Path(args.input_root)
     if not input_root.exists():

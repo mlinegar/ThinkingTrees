@@ -12,12 +12,20 @@ from statistics import fmean
 import textwrap
 from typing import Dict, Iterable, List, Sequence, Tuple
 
+import sys
+
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 from matplotlib.lines import Line2D
 from matplotlib.patches import FancyBboxPatch
 import numpy as np
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.ctreepo.sim.util import safe_float as _safe_float
 
 
 POOL_COLOR = "#1f77b4"
@@ -50,13 +58,6 @@ def parse_args() -> argparse.Namespace:
         help="Short label for the report title page.",
     )
     return p.parse_args()
-
-
-def _safe_float(x) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return float("nan")
 
 
 def _safe_mean(xs: Iterable[float]) -> float:

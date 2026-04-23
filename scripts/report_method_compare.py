@@ -10,6 +10,14 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import sys
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.experiments.reporting import build_canonical_report_views, load_canonical_result_rows
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -59,6 +67,7 @@ def main() -> int:
 
     output_root = manifest_path.parent
     rows: List[Dict[str, Any]] = []
+    canonical_rows = []
     for entry in manifest.get("entries", []):
         if not isinstance(entry, dict):
             continue
@@ -72,7 +81,14 @@ def main() -> int:
                     stats = json.load(handle)
             except Exception:
                 stats = {}
+        run_canonical_rows = []
+        try:
+            run_canonical_rows = load_canonical_result_rows(run_dir)
+        except Exception:
+            run_canonical_rows = []
+        canonical_rows.extend(run_canonical_rows)
         method_status = stats.get("method_status", {}) if isinstance(stats.get("method_status"), dict) else {}
+        run_report_views = build_canonical_report_views(run_canonical_rows) if run_canonical_rows else {"row_count": 0}
         row = {
             "profile": profile,
             "run_status": str(entry.get("status", "unknown")),
@@ -84,9 +100,14 @@ def main() -> int:
             "method_status": method_status,
             "run_dir": str(run_dir),
             "final_stats_path": str(stats_path),
+            "canonical_row_count": int(run_report_views.get("row_count", 0) or 0),
+            "canonical_method_families": list(run_report_views.get("method_families", []) or []),
+            "canonical_supervision_labels": list(run_report_views.get("supervision_labels", []) or []),
+            "canonical_control_labels": list(run_report_views.get("control_labels", []) or []),
         }
         rows.append(row)
 
+    canonical_reporting = build_canonical_report_views(canonical_rows) if canonical_rows else {"row_count": 0}
     summary = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "manifest_path": str(manifest_path),
@@ -95,6 +116,7 @@ def main() -> int:
         "task": manifest.get("task"),
         "dataset": manifest.get("dataset"),
         "rows": rows,
+        "canonical_reporting": canonical_reporting,
     }
 
     summary_json_path = output_root / "comparison_summary.json"
@@ -107,6 +129,8 @@ def main() -> int:
     md_lines.append(f"- Generated: {summary['generated_at']}")
     md_lines.append(f"- Manifest: `{manifest_path}`")
     md_lines.append(f"- Task/Dataset: `{summary.get('task')}` / `{summary.get('dataset')}`")
+    if canonical_reporting.get("row_count"):
+        md_lines.append(f"- Canonical rows: `{canonical_reporting['row_count']}`")
     md_lines.append("")
     md_lines.append("| Profile | Run | Pipeline | Train MAE | Test MAE | Duration (s) | LLM Opt | Embed | Neural | Generator |")
     md_lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
@@ -126,6 +150,38 @@ def main() -> int:
             f"{_method_cell(method_status, 'generator_finetune')} |"
         )
     md_lines.append("")
+    if canonical_reporting.get("row_count"):
+        md_lines.append("## Comparison Policy")
+        md_lines.append("")
+        md_lines.append("- Main comparable plots are budget-matched on benchmark, split, train-doc count, and direct document/root label budget.")
+        md_lines.append("- Local supervision and verifier/local-law controls are tracked separately and are not counted as direct labels.")
+        md_lines.append("- The observed frontier means the best achieved comparable test MAE at the same train-doc count.")
+        md_lines.append("")
+        md_lines.append("## Canonical Coverage")
+        md_lines.append("")
+        md_lines.append(f"- Method families: `{', '.join(canonical_reporting.get('method_families', [])) or 'n/a'}`")
+        md_lines.append(f"- Comparison domains: `{', '.join(canonical_reporting.get('comparison_domains', [])) or 'n/a'}`")
+        md_lines.append(f"- Supervision labels: `{', '.join(canonical_reporting.get('supervision_labels', [])) or 'n/a'}`")
+        md_lines.append(f"- Control labels: `{', '.join(canonical_reporting.get('control_labels', [])) or 'n/a'}`")
+        md_lines.append("")
+        main_specs = list(canonical_reporting.get("main_body_plot_specs", []) or [])
+        appendix_specs = list(canonical_reporting.get("appendix_plot_specs", []) or [])
+        if main_specs:
+            md_lines.append("## Main-Body Plot Specs")
+            md_lines.append("")
+            for spec in main_specs:
+                title = str(dict(spec or {}).get("title", "") or "")
+                kind = str(dict(spec or {}).get("plot_kind", "") or "")
+                md_lines.append(f"- `{kind}`: {title}")
+            md_lines.append("")
+        if appendix_specs:
+            md_lines.append("## Appendix Plot Specs")
+            md_lines.append("")
+            for spec in appendix_specs:
+                title = str(dict(spec or {}).get("title", "") or "")
+                kind = str(dict(spec or {}).get("plot_kind", "") or "")
+                md_lines.append(f"- `{kind}`: {title}")
+            md_lines.append("")
     md_lines.append("## Runs")
     for row in rows:
         md_lines.append(f"- `{row['profile']}`: `{row['run_dir']}`")

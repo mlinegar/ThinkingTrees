@@ -63,7 +63,8 @@ python scripts/backfill_markov_local_law_objectives.py \
   --log-dir "${BACKFILL_LOG_ROOT}/phase2_logs" \
   --manifest-path "${BACKFILL_LOG_ROOT}/phase2_manifest.json"
 
-python scripts/report_markov_local_law_learnability.py \
+python scripts/report_learnability.py \
+  --family markov \
   --input-root "${LOCAL_LAW_ROOT}" \
   --output-dir "${REPORT_OUT}" \
   --expected-run-count "${EXPECTED_RUNS}" \

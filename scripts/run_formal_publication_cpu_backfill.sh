@@ -133,13 +133,33 @@ wait_for_pids
 log "wait_complete"
 
 run_suite \
+  "publication_clean_cpu" \
+  "${LOG_DIR}/identifiable_zero_longrun_clean_cpu.backfill.log" \
+  venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-publication run \
+    --profile publication_clean \
+    --output-root "${FORMAL_ROOT}/identifiable_zero_longrun_clean" \
+    --groups cpu \
+    --jobs "${JOBS}" \
+    --gpu-tokens none
+run_report \
+  "publication_clean" \
+  venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-publication report \
+    --profile publication_clean \
+    --output-root "${FORMAL_ROOT}/identifiable_zero_longrun_clean" \
+    --emit-pdf
+refresh_bundle "publication_clean"
+
+run_suite \
   "lda_leafnoise" \
   "${LOG_DIR}/identifiable_zero_lda_leafnoise.backfill.log" \
-  env JOBS="${JOBS}" GPU_TOKENS="none" OUT_ROOT="${FORMAL_ROOT}/identifiable_zero_lda_leafnoise" \
-    bash ./scripts/run_identifiable_zero_lda_leafnoise_overnight.sh
+  venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-lda-leafnoise run \
+    --output-root "${FORMAL_ROOT}/identifiable_zero_lda_leafnoise" \
+    --device cpu \
+    --jobs "${JOBS}" \
+    --gpu-tokens none
 run_report \
   "lda_leafnoise" \
-  venv/bin/python scripts/report_identifiable_zero_lda_leafnoise_progression.py \
+  venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-lda-leafnoise report \
     --output-root "${FORMAL_ROOT}/identifiable_zero_lda_leafnoise" \
     --emit-pdf
 refresh_bundle "lda_leafnoise"
@@ -147,11 +167,14 @@ refresh_bundle "lda_leafnoise"
 run_suite \
   "dtm_lda" \
   "${LOG_DIR}/identifiable_zero_dtm_lda.backfill.log" \
-  env JOBS="${JOBS}" GPU_TOKENS="none" OUT_ROOT="${FORMAL_ROOT}/identifiable_zero_dtm_lda" \
-    bash ./scripts/run_identifiable_zero_dtm_lda_overnight.sh
+  venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-dtm-lda run \
+    --output-root "${FORMAL_ROOT}/identifiable_zero_dtm_lda" \
+    --device cpu \
+    --jobs "${JOBS}" \
+    --gpu-tokens none
 run_report \
   "dtm_lda" \
-  venv/bin/python scripts/report_identifiable_zero_dtm_lda.py \
+  venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-dtm-lda report \
     --output-root "${FORMAL_ROOT}/identifiable_zero_dtm_lda" \
     --emit-pdf
 refresh_bundle "dtm_lda"
@@ -159,11 +182,15 @@ refresh_bundle "dtm_lda"
 run_suite \
   "learnability" \
   "${LOG_DIR}/identifiable_zero_learnability.backfill.log" \
-  env JOBS="${JOBS}" GPU_TOKENS="none" MARKOV_DEVICE="cpu" OUT_ROOT="${FORMAL_ROOT}/identifiable_zero_learnability" \
-    bash ./scripts/run_identifiable_zero_learnability_overnight.sh
+  venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-learnability run \
+    --output-root "${FORMAL_ROOT}/identifiable_zero_learnability" \
+    --jobs "${JOBS}" \
+    --gpu-tokens none \
+    --markov-device cpu \
+    --ctree-device cpu
 run_report \
   "learnability" \
-  venv/bin/python scripts/report_identifiable_zero_learnability.py \
+  venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-learnability report \
     --output-root "${FORMAL_ROOT}/identifiable_zero_learnability" \
     --emit-pdf
 refresh_bundle "learnability"

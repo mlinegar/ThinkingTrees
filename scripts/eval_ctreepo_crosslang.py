@@ -87,6 +87,7 @@ def main() -> int:
     parser.add_argument("--sketch-dim", type=int, default=32)
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--merge-type", default="gated")
+    parser.add_argument("--tree-model-version", choices=["legacy", "v2"], default=None)
     parser.add_argument("--window-size", type=int, default=1200)
     parser.add_argument("--embedding-url", type=str, default=None)
     parser.add_argument("--embedding-model", type=str, default=None)
@@ -99,25 +100,26 @@ def main() -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    import torch
     from src.config.settings import get_embedding_model, get_embedding_url, load_settings
     from src.tasks.manifesto.data_loader import ManifestoDataset
     from src.training.embedding_proxy import VLLMEmbeddingClient
-    from src.tree.ctreepo_model import CTreePOConfig, CTreePOModel
+    from src.tree.ctreepo_model import load_ctreepo_model_checkpoint
     from src.tree.embedding_tree import build_tree_from_text, forward_ctreepo, get_root_sketch
 
     # ------------------------------------------------------------------
     # Load model
     # ------------------------------------------------------------------
-    config = CTreePOConfig(
-        sketch_dim=args.sketch_dim,
-        hidden_dim=args.hidden_dim,
-        merge_type=args.merge_type,
-        head_names=("rile",),
+    model, config = load_ctreepo_model_checkpoint(
+        args.model,
+        config_overrides={
+            "sketch_dim": int(args.sketch_dim),
+            "hidden_dim": int(args.hidden_dim),
+            "merge_type": str(args.merge_type),
+            "head_names": ("rile",),
+        },
+        tree_model_version=args.tree_model_version,
+        map_location="cpu",
     )
-    model = CTreePOModel(config)
-    model.load_state_dict(torch.load(args.model, map_location="cpu", weights_only=True))
-    model.eval()
     logger.info("Loaded model from %s", args.model)
 
     # ------------------------------------------------------------------

@@ -2,14 +2,14 @@
 """Build a local-law companion PDF report for tree-relevant LDA.
 
 .. deprecated::
-    Use ``scripts/report_law_stress.py --family lda`` instead.
+    Use ``python -m src.ctreepo.cli sim suite law-stress report --family lda --output-root ...`` instead.
 """
 
 from __future__ import annotations
 
 import warnings
 warnings.warn(
-    "Deprecated. Use scripts/report_law_stress.py --family lda",
+    "Deprecated. Use python -m src.ctreepo.cli sim suite law-stress report --family lda --output-root ...",
     DeprecationWarning,
     stacklevel=1,
 )
@@ -39,6 +39,7 @@ from src.ctreepo.sim.local_law_report_common import (
     render_local_law_report_markdown,
     write_local_law_report_core_pages,
 )
+from src.ctreepo.sim.util import safe_float
 
 
 DELTA_CMAP = LinearSegmentedColormap.from_list("delta", ["#b2182b", "#ffffff", "#1a9850"])
@@ -61,10 +62,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _safe_float(x, default: float = float("nan")) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return float(default)
+    return safe_float(x, default=default)
 
 
 def _safe_mean(xs: Iterable[float]) -> float:

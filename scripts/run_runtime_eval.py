@@ -15,18 +15,32 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.core.engines import (
+    EngineSurface,
+    EngineType,
+    build_server_manager,
+    default_engine_port,
+    normalize_engine_name,
+    normalize_fallback_engine_name,
+    resolve_engine_base_url,
+    resolve_engine_for_usage,
+)
+from src.experiments import (
+    ArtifactRef,
+    ProgressSnapshot,
+    ResultRow,
+    append_result_rows,
+    canonical_artifact_refs_from_paths,
+    merge_artifacts,
+    write_experiment_manifest,
+    write_experiment_status,
+)
+from src.experiments.legacy import runtime_run_spec_to_experiment
 from src.runtime.adapters.ruler import RulerDatasetSpec, RulerSyntheticAdapter
 from src.runtime.backbone import BackboneAdapter, BackboneConfig
 from src.runtime.contracts import RunPhaseSpec, RunSpec, RunUnit, RuntimeConfig, expand_units, units_digest
 from src.runtime.loop import run_unit
 from src.runtime.trace import JsonlWriter, TraceWriter
-
-
-def _normalize_backend_name(raw: Any, default: str = "vllm") -> str:
-    rendered = str(raw or "").strip().lower()
-    if rendered in {"vllm", "sglang"}:
-        return rendered
-    return default
 
 
 def _load_inference_backend_defaults() -> Dict[str, Any]:
@@ -36,34 +50,24 @@ def _load_inference_backend_defaults() -> Dict[str, Any]:
         "fallback_backend": "none",
         "sglang_venv_path": "/home/mlinegar/sglang-env",
         "vllm_venv_path": "/home/mlinegar/vllm-env",
-        "sglang_port": 30000,
-        "vllm_port": 8000,
+        "settings": {},
     }
     try:
         from src.config.settings import get_inference_backend_config, load_settings
 
         settings = load_settings()
         backend_cfg = get_inference_backend_config(settings)
-        sglang_cfg = settings.get("sglang", {}) if isinstance(settings, dict) else {}
-        vllm_cfg = settings.get("vllm", {}) if isinstance(settings, dict) else {}
         defaults.update(
             {
-                "task_backend": _normalize_backend_name(
-                    backend_cfg.get("task_backend"),
-                    default="vllm",
-                ),
-                "fallback_backend": _normalize_backend_name(
-                    backend_cfg.get("fallback_backend"),
-                    default="vllm",
-                ),
+                "task_backend": str(backend_cfg.get("task_backend", "vllm")),
+                "fallback_backend": str(backend_cfg.get("fallback_backend", "none")),
                 "sglang_venv_path": str(
                     backend_cfg.get("sglang_venv_path") or defaults["sglang_venv_path"]
                 ),
                 "vllm_venv_path": str(
                     backend_cfg.get("vllm_venv_path") or defaults["vllm_venv_path"]
                 ),
-                "sglang_port": int(sglang_cfg.get("port", defaults["sglang_port"])),
-                "vllm_port": int(vllm_cfg.get("port", defaults["vllm_port"])),
+                "settings": settings,
             }
         )
     except Exception:
@@ -73,14 +77,25 @@ def _load_inference_backend_defaults() -> Dict[str, Any]:
 
 def _default_backend_port(backend: str, defaults: Optional[Dict[str, Any]] = None) -> int:
     cfg = defaults or _load_inference_backend_defaults()
-    backend_name = _normalize_backend_name(backend, default="vllm")
-    if backend_name == "sglang":
-        return int(cfg.get("sglang_port", 30000))
-    return int(cfg.get("vllm_port", 8000))
+    backend_name = normalize_engine_name(backend, default="vllm") or "vllm"
+    return int(default_engine_port(backend_name, role="task", settings=cfg.get("settings")) or 0)
 
 
 def _default_backend_base_url(backend: str, defaults: Optional[Dict[str, Any]] = None) -> str:
-    return f"http://localhost:{_default_backend_port(backend, defaults)}/v1"
+    cfg = defaults or _load_inference_backend_defaults()
+    resolved = resolve_engine_base_url(
+        normalize_engine_name(backend, default="vllm") or "vllm",
+        surface=EngineSurface.CHAT_OPENAI,
+        role="task",
+        settings=cfg.get("settings"),
+        host="localhost",
+        port=_default_backend_port(backend, defaults),
+    )
+    if resolved:
+        return resolved
+    raise ValueError(
+        f"Engine '{backend}' requires an explicit model base URL for runtime evaluation."
+    )
 
 
 def _endpoint_ready(base_url: str, timeout_seconds: float = 2.0) -> bool:
@@ -148,6 +163,39 @@ def _run_dir(output_dir: Path, run_id: str) -> Path:
     return output_dir / run_id
 
 
+def _runtime_experiment_status(
+    *,
+    spec: RunSpec,
+    run_dir: Path,
+    state: str,
+    active_phase: str = "",
+    completed_items: int = 0,
+    active_items: int = 0,
+    pending_items: int = 0,
+    failed_items: int = 0,
+) -> ProgressSnapshot:
+    total_units = len(expand_units(spec))
+    finished = int(completed_items) + int(failed_items)
+    percent_complete = (
+        100.0 * float(finished) / float(total_units)
+        if total_units > 0
+        else 100.0
+    )
+    return ProgressSnapshot(
+        experiment_id=str(spec.run_id),
+        state=str(state),
+        active_phase=str(active_phase),
+        items_total=int(total_units),
+        completed_items=int(completed_items),
+        failed_items=int(failed_items),
+        active_items=int(active_items),
+        pending_items=int(pending_items),
+        percent_complete=percent_complete,
+        artifact_targets=("metrics_json", "merged_predictions_jsonl"),
+        metadata={"adapter": "runtime_eval", "output_root": str(run_dir)},
+    )
+
+
 def cmd_init(args: argparse.Namespace) -> None:
     config_path = Path(args.config).resolve()
     output_dir = Path(args.output_dir).resolve()
@@ -169,6 +217,39 @@ def cmd_init(args: argparse.Namespace) -> None:
         units_writer.write(u.to_dict())
 
     (run_dir / "units_digest.txt").write_text(digest + "\n")
+    experiment_spec = runtime_run_spec_to_experiment(
+        spec,
+        launch_command=[
+            sys.executable,
+            "scripts/run_runtime_eval.py",
+            "run",
+            "--run-dir",
+            str(run_dir),
+        ],
+    )
+    write_experiment_manifest(run_dir, experiment_spec)
+    write_experiment_status(
+        run_dir,
+        _runtime_experiment_status(
+            spec=spec,
+            run_dir=run_dir,
+            state="initialized",
+            pending_items=len(units),
+        ),
+    )
+    merge_artifacts(
+        run_dir,
+        canonical_artifact_refs_from_paths(
+            {
+                "resolved_run_yaml": str(run_dir / "resolved_run.yaml"),
+                "config_json": str(run_dir / "config.json"),
+                "units_jsonl": str(units_path),
+                "units_digest_txt": str(run_dir / "units_digest.txt"),
+            },
+            phase_id="init",
+            required=True,
+        ),
+    )
 
     print(f"Initialized run {spec.run_id}")
     print(f"- Run dir: {run_dir}")
@@ -321,16 +402,18 @@ def _resolve_model_base_url(
     args: argparse.Namespace,
     defaults: Dict[str, Any],
 ) -> str:
-    explicit_backend = (
-        _normalize_backend_name(args.backend, default="")
-        if getattr(args, "backend", None)
-        else ""
-    )
+    explicit_backend = None
+    if getattr(args, "backend", None):
+        explicit_backend = resolve_engine_for_usage(
+            args.backend,
+            surface=EngineSurface.CHAT_OPENAI,
+            usage="runtime evaluation backend selection",
+        ).engine.value
     base_url = str(
         args.model_base_url
         or (spec.get("model", {}) or {}).get("base_url")
         or _default_backend_base_url(
-            explicit_backend or defaults.get("task_backend", "vllm"),
+            explicit_backend or str(defaults.get("task_backend", "vllm")),
             defaults,
         )
     )
@@ -344,8 +427,13 @@ def _resolve_model_base_url(
     if _endpoint_ready(base_url):
         return base_url
 
-    fallback_backend = str(getattr(args, "backend_fallback", "none") or "none").strip().lower()
-    if fallback_backend in {"vllm", "sglang"}:
+    raw_fallback_backend = getattr(args, "backend_fallback", defaults.get("fallback_backend", "none"))
+    if str(raw_fallback_backend or "").strip().lower().replace("-", "_") not in {"", "none", "off", "disabled"}:
+        fallback_backend = resolve_engine_for_usage(
+            raw_fallback_backend,
+            surface=EngineSurface.CHAT_OPENAI,
+            usage="runtime evaluation fallback endpoint selection",
+        ).engine.value
         fallback_url = _default_backend_base_url(fallback_backend, defaults)
         if fallback_url != base_url and _endpoint_ready(fallback_url):
             print(
@@ -362,26 +450,30 @@ def _build_server_manager(
     args: argparse.Namespace,
     defaults: Dict[str, Any],
 ):
-    from src.benchmark.throughput import SGLangServerManager, VLLMServerManager
-
     profile = str(args.start_server)
+    normalized = normalize_engine_name(backend, default="vllm") or "vllm"
+    spec = resolve_engine_for_usage(
+        normalized,
+        surface=EngineSurface.CHAT_OPENAI,
+        usage="runtime evaluation managed startup",
+        require_managed=True,
+    )
     port = (
         int(args.server_port)
         if args.server_port is not None
-        else _default_backend_port(backend, defaults)
+        else int(default_engine_port(spec.engine, role="task", settings=defaults.get("settings")) or 0)
     )
-    if _normalize_backend_name(backend) == "sglang":
-        return SGLangServerManager(
-            profile=profile,
-            port=port,
-            cuda_devices=args.cuda_devices,
-            venv_path=str(args.sglang_venv_path or defaults.get("sglang_venv_path")),
-        )
-    return VLLMServerManager(
+    venv_path = None
+    if spec.engine is EngineType.SGLANG:
+        venv_path = str(args.sglang_venv_path or defaults.get("sglang_venv_path"))
+    elif spec.engine is EngineType.VLLM:
+        venv_path = str(args.vllm_venv_path or defaults.get("vllm_venv_path"))
+    return build_server_manager(
+        spec.engine,
         profile=profile,
         port=port,
         cuda_devices=args.cuda_devices,
-        venv_path=str(args.vllm_venv_path or defaults.get("vllm_venv_path")),
+        venv_path=venv_path,
     )
 
 
@@ -420,6 +512,41 @@ def cmd_run(args: argparse.Namespace) -> None:
     spec = _load_config(run_dir)
     defaults = _load_inference_backend_defaults()
     selected = _select_units(run_dir, args)
+    run_spec = RunSpec(
+        run_id=str(spec.get("run_id", "")),
+        created_utc=str(spec.get("created_utc", "")),
+        output_dir=str(spec.get("output_dir", "")),
+        benchmark=dict(spec.get("benchmark", {}) or {}),
+        model=dict(spec.get("model", {}) or {}),
+        runtime_defaults=dict(spec.get("runtime_defaults", {}) or {}),
+        phases=[
+            RunPhaseSpec(
+                phase_id=str(phase.get("phase_id", "")),
+                tasks=list(phase.get("tasks", []) or []),
+                lengths=[int(item) for item in list(phase.get("lengths", []) or [])],
+                seeds=[int(item) for item in list(phase.get("seeds", []) or [])],
+                num_samples=int(phase.get("num_samples", 0) or 0),
+                split=str(phase.get("split", "validation") or "validation"),
+                modes=list(phase.get("modes", []) or []),
+                runtime_overrides=dict(phase.get("runtime_overrides", {}) or {}),
+                benchmark_overrides=dict(phase.get("benchmark_overrides", {}) or {}),
+                runtime_grid=dict(phase.get("runtime_grid", {}) or {}),
+                benchmark_grid=dict(phase.get("benchmark_grid", {}) or {}),
+            )
+            for phase in list(spec.get("phases", []) or [])
+        ],
+    )
+    write_experiment_status(
+        run_dir,
+        _runtime_experiment_status(
+            spec=run_spec,
+            run_dir=run_dir,
+            state="running",
+            active_phase=(selected[0].phase_id if selected else ""),
+            active_items=len(selected),
+            pending_items=max(0, len(expand_units(run_spec)) - len(selected)),
+        ),
+    )
 
     if args.dry_run:
         for u in selected:
@@ -430,13 +557,23 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     # Optional auto-started backend manager path.
     if args.start_server:
-        primary_backend = _normalize_backend_name(
+        primary_backend = resolve_engine_for_usage(
             args.backend or defaults.get("task_backend", "vllm"),
-            default="vllm",
-        )
-        fallback_backend = str(getattr(args, "backend_fallback", "none") or "none").strip().lower()
+            surface=EngineSurface.CHAT_OPENAI,
+            usage="runtime evaluation managed startup",
+            require_managed=True,
+        ).engine.value
+        raw_fallback_backend = getattr(args, "backend_fallback", defaults.get("fallback_backend", "none"))
+        fallback_backend = "none"
+        if str(raw_fallback_backend or "").strip().lower().replace("-", "_") not in {"", "none", "off", "disabled"}:
+            fallback_backend = resolve_engine_for_usage(
+                raw_fallback_backend,
+                surface=EngineSurface.CHAT_OPENAI,
+                usage="runtime evaluation managed fallback startup",
+                require_managed=True,
+            ).engine.value
         backends_to_try = [primary_backend]
-        if fallback_backend in {"vllm", "sglang"} and fallback_backend != primary_backend:
+        if fallback_backend != "none" and fallback_backend != primary_backend:
             backends_to_try.append(fallback_backend)
 
         last_error: Optional[Exception] = None
@@ -481,6 +618,21 @@ def cmd_run(args: argparse.Namespace) -> None:
         selected=selected,
         args=args,
         model_base_url=model_base_url,
+    )
+    completed_units = sum(
+        1
+        for unit in _iter_units(run_dir)
+        if (run_dir / "units" / unit.unit_id / "metrics_partial.json").exists()
+    )
+    write_experiment_status(
+        run_dir,
+        _runtime_experiment_status(
+            spec=run_spec,
+            run_dir=run_dir,
+            state="units_completed",
+            completed_items=completed_units,
+            pending_items=max(0, len(expand_units(run_spec)) - completed_units),
+        ),
     )
 
 
@@ -558,6 +710,99 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
     }
 
     _write_json(run_dir / "metrics.json", metrics_out)
+    merge_artifacts(
+        run_dir,
+        canonical_artifact_refs_from_paths(
+            {
+                "metrics_json": str(run_dir / "metrics.json"),
+                "merged_steps_jsonl": str(merged_steps),
+                "merged_predictions_jsonl": str(merged_preds),
+            },
+            phase_id="aggregate",
+            required=True,
+        ),
+    )
+    result_rows: list[ResultRow] = []
+    benchmark_name = ""
+    method_model = ""
+    config_json = _load_config(run_dir)
+    benchmark_name = str(dict(config_json.get("benchmark", {}) or {}).get("name", "") or "")
+    method_model = str(dict(config_json.get("model", {}) or {}).get("model", "") or "")
+    for raw_line in merged_preds.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        payload = json.loads(line)
+        metrics = dict(payload.get("metrics", {}) or {})
+        for metric_name, metric_value in metrics.items():
+            result_rows.append(
+                ResultRow.from_dict(
+                    {
+                        "experiment_id": str(run_dir.name),
+                        "phase": str(payload.get("phase_id", "") or ""),
+                        "benchmark_ref": {
+                            "benchmark_id": benchmark_name or "runtime_benchmark",
+                            "family": "runtime_benchmark",
+                            "scope": benchmark_name,
+                            "name": benchmark_name,
+                        },
+                        "method_ref": {
+                            "method_id": method_model or "runtime_eval",
+                            "family": "runtime_eval",
+                            "variant": str(payload.get("mode", "") or ""),
+                            "engine": "",
+                            "model": method_model,
+                            "adapter": "runtime_eval",
+                        },
+                        "split": str(payload.get("split", "") or ""),
+                        "seed": payload.get("seed"),
+                        "train_docs": None,
+                        "metric_name": str(metric_name),
+                        "metric_value": metric_value,
+                        "artifact_refs": ["merged_predictions_jsonl", "metrics_json"],
+                        "metadata": {
+                            "task_id": payload.get("task_id"),
+                            "problem_id": payload.get("problem_id"),
+                            "max_seq_length": payload.get("max_seq_length"),
+                            "primary_metric": payload.get("primary_metric"),
+                        },
+                    }
+                )
+            )
+    append_result_rows(run_dir, result_rows)
+    run_spec = RunSpec(
+        run_id=str(config_json.get("run_id", "")),
+        created_utc=str(config_json.get("created_utc", "")),
+        output_dir=str(config_json.get("output_dir", "")),
+        benchmark=dict(config_json.get("benchmark", {}) or {}),
+        model=dict(config_json.get("model", {}) or {}),
+        runtime_defaults=dict(config_json.get("runtime_defaults", {}) or {}),
+        phases=[
+            RunPhaseSpec(
+                phase_id=str(phase.get("phase_id", "")),
+                tasks=list(phase.get("tasks", []) or []),
+                lengths=[int(item) for item in list(phase.get("lengths", []) or [])],
+                seeds=[int(item) for item in list(phase.get("seeds", []) or [])],
+                num_samples=int(phase.get("num_samples", 0) or 0),
+                split=str(phase.get("split", "validation") or "validation"),
+                modes=list(phase.get("modes", []) or []),
+                runtime_overrides=dict(phase.get("runtime_overrides", {}) or {}),
+                benchmark_overrides=dict(phase.get("benchmark_overrides", {}) or {}),
+                runtime_grid=dict(phase.get("runtime_grid", {}) or {}),
+                benchmark_grid=dict(phase.get("benchmark_grid", {}) or {}),
+            )
+            for phase in list(config_json.get("phases", []) or [])
+        ],
+    )
+    write_experiment_status(
+        run_dir,
+        _runtime_experiment_status(
+            spec=run_spec,
+            run_dir=run_dir,
+            state="completed",
+            completed_items=len(expand_units(run_spec)),
+        ),
+    )
 
     print(f"Wrote merged predictions: {merged_preds}")
     print(f"Wrote merged steps: {merged_steps}")
@@ -568,9 +813,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Runtime benchmark evaluation harness.")
     sub = parser.add_subparsers(dest="cmd", required=True)
     backend_defaults = _load_inference_backend_defaults()
-    fallback_default = str(backend_defaults.get("fallback_backend", "none")).strip().lower()
-    if fallback_default not in {"vllm", "sglang"}:
-        fallback_default = "none"
+    fallback_default = normalize_fallback_engine_name(
+        backend_defaults.get("fallback_backend", "none"),
+        default=None,
+    )
 
     p_init = sub.add_parser("init", help="Initialize a run: expand phases into units.jsonl")
     p_init.add_argument("--config", required=True, help="Path to run config YAML")
@@ -597,15 +843,13 @@ def main() -> None:
     p_run.add_argument("--model-base-url", default=None, help="Override model.base_url for this run")
     p_run.add_argument(
         "--backend",
-        choices=["vllm", "sglang"],
         default=None,
-        help="Backend hint for default endpoint selection when --model-base-url is omitted.",
+        help="Engine hint for default endpoint selection when --model-base-url is omitted.",
     )
     p_run.add_argument(
         "--backend-fallback",
-        choices=["none", "vllm", "sglang"],
         default=fallback_default,
-        help="Fallback backend when primary endpoint/manager is unavailable.",
+        help="Fallback engine when the primary endpoint/manager is unavailable.",
     )
     p_run.add_argument(
         "--start-server",
