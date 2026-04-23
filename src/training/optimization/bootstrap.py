@@ -139,9 +139,20 @@ class BootstrapOptimizer(AbstractOptimizer):
                 teacher=teacher,
                 trainset=trainset,
             )
+            self._update_compile_audit(
+                compile_status="completed",
+                optimizer_used=self.name,
+                fallback_reason="none",
+            )
             return compiled
 
         except Exception as e:
+            self._update_compile_audit(
+                compile_status="failed",
+                optimizer_used=self.name,
+                fallback_reason="none",
+                exception_summary=f"{type(e).__name__}: {e}",
+            )
             logger.error(f"BootstrapFewShot compilation failed: {e}")
             raise
 
@@ -236,6 +247,11 @@ class BootstrapRandomSearchOptimizer(AbstractOptimizer):
                 student_for_compile,
                 trainset=trainset,
             )
+            self._update_compile_audit(
+                compile_status="completed",
+                optimizer_used=self.name,
+                fallback_reason="none",
+            )
             return compiled
 
         except ImportError:
@@ -245,9 +261,22 @@ class BootstrapRandomSearchOptimizer(AbstractOptimizer):
             )
             # Fall back to basic bootstrap
             basic = BootstrapOptimizer(self.config)
-            return basic.compile(student, trainset, valset, metric, teacher, **kwargs)
+            compiled = basic.compile(student, trainset, valset, metric, teacher, **kwargs)
+            self._update_compile_audit(
+                compile_status="fallback",
+                optimizer_used=basic.name,
+                fallback_reason="teleprompter_unavailable",
+                fallback_metadata=basic.last_compile_audit,
+            )
+            return compiled
 
         except Exception as e:
+            self._update_compile_audit(
+                compile_status="failed",
+                optimizer_used=self.name,
+                fallback_reason="none",
+                exception_summary=f"{type(e).__name__}: {e}",
+            )
             logger.error(f"BootstrapFewShotWithRandomSearch compilation failed: {e}")
             raise
 
@@ -322,13 +351,30 @@ class LabeledFewShotOptimizer(AbstractOptimizer):
                 student,
                 trainset=trainset,
             )
+            self._update_compile_audit(
+                compile_status="completed",
+                optimizer_used=self.name,
+                fallback_reason="none",
+            )
             return compiled
 
         except ImportError:
             logger.warning("LabeledFewShot not available, returning student unchanged")
+            self._update_compile_audit(
+                compile_status="noop",
+                optimizer_used=self.name,
+                fallback_reason="teleprompter_unavailable",
+                noop_reason="teleprompter_unavailable",
+            )
             return student
 
         except Exception as e:
+            self._update_compile_audit(
+                compile_status="failed",
+                optimizer_used=self.name,
+                fallback_reason="none",
+                exception_summary=f"{type(e).__name__}: {e}",
+            )
             logger.error(f"LabeledFewShot compilation failed: {e}")
             raise
 

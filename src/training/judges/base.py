@@ -1,14 +1,15 @@
 """
-Base classes and protocols for pairwise comparison judges.
+Base classes and protocols for supervision backends.
 
-Judges compare two summaries and determine which better preserves
-task-relevant information. This module provides the protocol that
-all judge implementations must follow.
+Backends may compare multiple summaries, compare two summaries, or provide
+scalar judgments over single responses. The canonical stored data surface lives
+under ``src.training.supervision``; this module defines backend protocols and
+result objects that supervision collectors can normalize.
 
 Available judge types:
-- DSPyJudge: Uses DSPy PairwiseComparison signature (optimizable)
-- GenRMJudge: Uses NVIDIA Qwen3-Nemotron GenRM model
-- OracleJudge: Uses oracle scoring function for comparison
+- DSPyJudge: Optimizable LLM judge backend
+- GenRMJudge: NVIDIA Qwen3-Nemotron GenRM backend
+- OracleJudge: Oracle scoring backend
 
 Usage:
     from src.training.judges import get_judge, JudgeConfig
@@ -17,7 +18,7 @@ Usage:
     config = JudgeConfig(type="genrm", base_url="http://localhost:8001/v1")
     judge = get_judge("genrm", config)
 
-    # Compare summaries
+    # Compare summaries or candidates
     result = judge.compare(
         context="Preserve key information",
         original_text="...",
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class JudgeResult:
     """
-    Result from a pairwise comparison judge.
+    Result from a binary comparison backend.
 
     This is the unified result type returned by all judge implementations.
     """
@@ -123,9 +124,9 @@ class BaseJudge(Protocol):
     """
     Protocol that all judge implementations must follow.
 
-    Judges compare two summaries and determine which better preserves
-    the specified information. This protocol defines the minimal interface
-    that all judges must implement.
+    Backends compare two summaries and determine which better preserves
+    the specified information. This protocol defines the minimal compatibility
+    interface for binary callers.
     """
 
     def compare(

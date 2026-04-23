@@ -162,6 +162,7 @@ class AbstractOptimizer(ABC):
         """
         self.config = config
         self._compile_count = 0
+        self._last_compile_audit: Dict[str, Any] = {}
 
     @property
     @abstractmethod
@@ -221,6 +222,14 @@ class AbstractOptimizer(ABC):
     def _log_compile_start(self, trainset_size: int, valset_size: int):
         """Log the start of a compile operation."""
         self._compile_count += 1
+        self._last_compile_audit = {
+            "optimizer_requested": self.name,
+            "optimizer_used": self.name,
+            "compile_status": "running",
+            "trainset_size": int(trainset_size),
+            "valset_size": int(valset_size),
+            "supports_parallel": bool(self.supports_parallel),
+        }
         logger.info(
             f"[{self.name}] Starting optimization #{self._compile_count} "
             f"(train={trainset_size}, val={valset_size})"
@@ -233,3 +242,12 @@ class AbstractOptimizer(ABC):
             f"[{self.name}] Optimization complete: "
             f"{metric_before:.4f} -> {metric_after:.4f} ({improvement:+.4f})"
         )
+
+    @property
+    def last_compile_audit(self) -> Dict[str, Any]:
+        """Best-effort metadata about the most recent compile() call."""
+        return dict(self._last_compile_audit)
+
+    def _update_compile_audit(self, **fields: Any) -> None:
+        """Record wrapper-specific compile metadata for pipeline diagnostics."""
+        self._last_compile_audit.update(fields)

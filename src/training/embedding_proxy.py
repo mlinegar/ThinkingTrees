@@ -22,6 +22,20 @@ import zlib
 import numpy as np
 import requests
 from src.core.conditional_memory import canonical_hash, get_default_memory
+from src.training.supervision import (
+    DenseScalarRidgeModelConfig,
+    DenseScalarRidgeTrainingConfig,
+    DenseSupervisionExample,
+    OPTIMIZER_FAMILY_BAG_LEVEL_GRADIENT,
+    OPTIMIZER_FAMILY_CLOSED_FORM_LINEAR,
+    OPTIMIZER_FAMILY_GRADIENT_DENSE,
+    REPRESENTATION_BAG_OF_EMBEDDING_VECTORS,
+    REPRESENTATION_EMBEDDING_VECTOR,
+    TARGET_SCALAR,
+    build_dense_full_document_supervision_dataset,
+    fit_dense_scalar_ridge_regressor,
+    supervision_training_contract,
+)
 try:
     import torch
 except Exception:  # pragma: no cover - optional dependency path
@@ -39,11 +53,13 @@ def _clamp01(value: float) -> float:
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
+        if value is None:
+            return float(default)
         converted = float(value)
     except (TypeError, ValueError):
-        return default
-    if converted != converted:
-        return default
+        return float(default)
+    if not math.isfinite(converted):
+        return float(default)
     return converted
 
 
@@ -135,6 +151,7 @@ class EmbeddingRidgeProxyModel:
     model_id: str = "embedding_proxy_v1"
     ridge_lambda: float = 1.0
     train_size: int = 0
+    training_contract: Optional[Dict[str, Any]] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def predict_from_embedding(self, embedding: Sequence[float]) -> float:
@@ -152,6 +169,9 @@ class EmbeddingRidgeProxyModel:
             "embedding_dim": self.embedding_dim,
             "ridge_lambda": self.ridge_lambda,
             "train_size": self.train_size,
+            "training_contract": (
+                dict(self.training_contract) if isinstance(self.training_contract, dict) else None
+            ),
             "bias": self.bias,
             "weights": [float(w) for w in self.weights],
             "created_at": self.created_at,
@@ -168,6 +188,11 @@ class EmbeddingRidgeProxyModel:
             model_id=str(data.get("model_id", "embedding_proxy_v1")),
             ridge_lambda=float(data.get("ridge_lambda", 1.0)),
             train_size=int(data.get("train_size", 0)),
+            training_contract=(
+                dict(data["training_contract"])
+                if isinstance(data.get("training_contract"), dict)
+                else None
+            ),
             created_at=str(data.get("created_at", datetime.now().isoformat())),
         )
 
@@ -192,6 +217,7 @@ class EmbeddingLinearSGDProxyModel:
     weight_decay: float = 1e-4
     train_size: int = 0
     final_train_loss: Optional[float] = None
+    training_contract: Optional[Dict[str, Any]] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def predict_from_embedding(self, embedding: Sequence[float]) -> float:
@@ -213,6 +239,9 @@ class EmbeddingLinearSGDProxyModel:
             "weight_decay": self.weight_decay,
             "train_size": self.train_size,
             "final_train_loss": self.final_train_loss,
+            "training_contract": (
+                dict(self.training_contract) if isinstance(self.training_contract, dict) else None
+            ),
             "bias": self.bias,
             "weights": [float(w) for w in self.weights],
             "created_at": self.created_at,
@@ -232,6 +261,11 @@ class EmbeddingLinearSGDProxyModel:
             weight_decay=float(data.get("weight_decay", 1e-4)),
             train_size=int(data.get("train_size", 0)),
             final_train_loss=_safe_optional_float(data.get("final_train_loss")),
+            training_contract=(
+                dict(data["training_contract"])
+                if isinstance(data.get("training_contract"), dict)
+                else None
+            ),
             created_at=str(data.get("created_at", datetime.now().isoformat())),
         )
 
@@ -278,6 +312,7 @@ class EmbeddingMILSGDProxyModel:
     drift_temperature: float = 0.15
     train_size: int = 0
     final_train_loss: Optional[float] = None
+    training_contract: Optional[Dict[str, Any]] = None
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def _sigmoid(self, logit: float) -> float:
@@ -352,6 +387,9 @@ class EmbeddingMILSGDProxyModel:
             "drift_temperature": self.drift_temperature,
             "train_size": self.train_size,
             "final_train_loss": self.final_train_loss,
+            "training_contract": (
+                dict(self.training_contract) if isinstance(self.training_contract, dict) else None
+            ),
             "bag_bias": float(self.bag_bias),
             "bias": float(self.bias),
             "weights": [float(w) for w in self.weights],
@@ -378,6 +416,11 @@ class EmbeddingMILSGDProxyModel:
             drift_temperature=float(data.get("drift_temperature", 0.15)),
             train_size=int(data.get("train_size", 0)),
             final_train_loss=_safe_optional_float(data.get("final_train_loss")),
+            training_contract=(
+                dict(data["training_contract"])
+                if isinstance(data.get("training_contract"), dict)
+                else None
+            ),
             created_at=str(data.get("created_at", datetime.now().isoformat())),
         )
 
@@ -623,36 +666,52 @@ def fit_embedding_ridge_proxy(
         raise ValueError("Embedding dimension is zero")
     if any(len(vec) != dim for vec in embeddings):
         raise ValueError("Inconsistent embedding dimensions in fit data")
-
-    # Dual-form ridge solve: robust when embedding dim >> sample count.
-    # Avoids the previous O(d^2) pure-Python accumulation over ~4k dimensions.
+    supervision = build_dense_full_document_supervision_dataset(
+        [
+            DenseSupervisionExample(
+                example_id=str(ex.doc_id or f"embedding_doc_{idx}"),
+                features=list(vec),
+                scalar_target=float(ex.target_score),
+                original_text=f"embedding_proxy::{ex.doc_id}",
+                rubric="Predict scalar document scores from fixed embedding features.",
+                response="embedded_document_candidate",
+                response_id=str(ex.doc_id or f"embedding_doc_{idx}"),
+                source_doc_id=str(ex.doc_id or f"embedding_doc_{idx}"),
+                truth_label_source=str(ex.truth_label_source),
+                metadata={
+                    "embedding_model": embedding_client.resolve_model(),
+                    "embedding_dim": int(dim),
+                },
+            )
+            for idx, (ex, vec) in enumerate(zip(cleaned, embeddings))
+        ],
+        application_name="embedding_proxy",
+        supervision_signal_name="document_level_target",
+        response_signal_name="document_score",
+        law_type="document_level_target",
+        split="train",
+        response_signal_min=0.0,
+        response_signal_max=1.0,
+        metadata={
+            "embedding_model": embedding_client.resolve_model(),
+            "embedding_dim": int(dim),
+            "training_application": "embedding_proxy",
+        },
+    )
     ridge = max(0.0, float(ridge_lambda))
-    x_mat = np.asarray(embeddings, dtype=np.float64)
-    y_vec = np.asarray([float(ex.target_score) for ex in cleaned], dtype=np.float64)
-
-    x_mean = x_mat.mean(axis=0)
-    y_mean = float(y_vec.mean()) if y_vec.size else 0.5
-    x_centered = x_mat - x_mean
-    y_centered = y_vec - y_mean
-
-    n_samples = int(x_centered.shape[0])
-    if n_samples <= 0:
-        raise ValueError("No valid examples for embedding proxy fit")
-
-    gram = x_centered @ x_centered.T
-    diag_reg = ridge if ridge > 0.0 else 1e-8
-    gram[np.diag_indices_from(gram)] += float(diag_reg)
-
-    try:
-        alpha = np.linalg.solve(gram, y_centered)
-    except np.linalg.LinAlgError:
-        alpha = np.linalg.lstsq(gram, y_centered, rcond=None)[0]
-
-    weights_arr = x_centered.T @ alpha
-    bias = float(y_mean - np.dot(x_mean, weights_arr))
+    ridge_model, _fit_result = fit_dense_scalar_ridge_regressor(
+        supervision,
+        config=DenseScalarRidgeTrainingConfig(
+            model=DenseScalarRidgeModelConfig(ridge_alpha=ridge)
+        ),
+    )
+    weights_arr = np.asarray(ridge_model.weights, dtype=np.float64)
+    bias = float(ridge_model.bias)
     if (not np.isfinite(bias)) or (not np.all(np.isfinite(weights_arr))):
         mean_target = sum(ex.target_score for ex in cleaned) / float(len(cleaned))
-        logger.warning("Embedding ridge solve produced non-finite values; using intercept-only fallback")
+        logger.warning(
+            "Embedding ridge solve produced non-finite values; using intercept-only fallback"
+        )
         bias = float(mean_target)
         weights_arr = np.zeros((dim,), dtype=np.float64)
 
@@ -665,6 +724,13 @@ def fit_embedding_ridge_proxy(
         model_id=model_id,
         ridge_lambda=ridge,
         train_size=len(cleaned),
+        training_contract=supervision_training_contract(
+            representation_kind=REPRESENTATION_EMBEDDING_VECTOR,
+            target_kind=TARGET_SCALAR,
+            optimizer_family=OPTIMIZER_FAMILY_CLOSED_FORM_LINEAR,
+            optimizer_backend="closed_form_ridge",
+            n_train_rows=len(cleaned),
+        ),
     )
 
 
@@ -750,6 +816,13 @@ def fit_embedding_linear_sgd_proxy(
         weight_decay=float(weight_decay),
         train_size=len(cleaned),
         final_train_loss=final_loss,
+        training_contract=supervision_training_contract(
+            representation_kind=REPRESENTATION_EMBEDDING_VECTOR,
+            target_kind=TARGET_SCALAR,
+            optimizer_family=OPTIMIZER_FAMILY_GRADIENT_DENSE,
+            optimizer_backend="torch_linear",
+            n_train_rows=len(cleaned),
+        ),
     )
 
 
@@ -937,6 +1010,13 @@ def fit_embedding_mil_sgd_proxy(
         drift_temperature=drift_temp,
         train_size=len(bags),
         final_train_loss=final_loss,
+        training_contract=supervision_training_contract(
+            representation_kind=REPRESENTATION_BAG_OF_EMBEDDING_VECTORS,
+            target_kind=TARGET_SCALAR,
+            optimizer_family=OPTIMIZER_FAMILY_BAG_LEVEL_GRADIENT,
+            optimizer_backend="torch_mil",
+            n_train_rows=len(bags),
+        ),
     )
 
 

@@ -42,10 +42,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
+from src.training.supervision import BinaryComparison, ComparativeJudgment, SupervisionDataset
+
 if TYPE_CHECKING:
-    from src.training.preference import PreferencePair
-    from src.training.preference.genrm import GenRMJudge
-    from src.training.preference.genrm_dspy import GenRMComparisonModule
+    from src.training.judges import GenRMJudge
+    from src.training.judges.genrm_dspy import GenRMComparisonModule
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ class ToTConfig:
     random_seed: int = 42
 
     # Preference labeling (optional override)
-    preference_labeler: Optional[Callable[['PreferencePair', float], Optional[str]]] = None
+    preference_labeler: Optional[Callable[[BinaryComparison, float], Optional[str]]] = None
 
     # Checkpointing
     save_checkpoints: bool = True
@@ -105,8 +106,9 @@ class ToTIterationResult:
 
     iteration: int
     n_trees_built: int
-    n_preferences_collected: int
-    n_preferences_with_oracle: int
+    n_binary_projection_records: int
+    n_comparative_judgments_collected: int
+    n_binary_records_with_oracle: int
     judge_accuracy_before: float
     judge_accuracy_after: float
     improvement: float
@@ -179,8 +181,8 @@ class TournamentOfTournamentsTrainer:
         # Track current DSPy-wrapped judge (for optimization)
         self._current_dspy_judge: Optional['GenRMComparisonModule'] = None
 
-        # Track all collected preferences (for export to unified training)
-        self._all_preferences: List['PreferencePair'] = []
+        # Track all collected supervision for downstream export.
+        self._all_supervision_dataset = SupervisionDataset()
 
     def train(
         self,
@@ -197,7 +199,7 @@ class TournamentOfTournamentsTrainer:
         Returns:
             ToTResult with training statistics and final judge path
         """
-        from src.training.preference.genrm_dspy import GenRMComparisonModule
+        from src.training.judges.genrm_dspy import GenRMComparisonModule
 
         # Initialize prompt-tuned GenRM judge for optimization + tournament selection
         self._current_dspy_judge = GenRMComparisonModule(
@@ -220,33 +222,49 @@ class TournamentOfTournamentsTrainer:
             logger.info(f"{'='*60}")
 
             # Step 1: Build trees with current judge, collect preferences
-            preferences = self._build_trees_and_collect_preferences(
+            supervision_dataset = self._build_trees_and_collect_supervision(
                 samples, rubric, iteration
             )
 
-            if not preferences:
-                logger.warning(f"Iteration {iteration}: No preferences collected, skipping")
+            if (
+                supervision_dataset is None
+                or (
+                    len(supervision_dataset) == 0
+                    and len(getattr(supervision_dataset, "comparative_judgments", []) or []) == 0
+                )
+            ):
+                logger.warning(f"Iteration {iteration}: No supervision collected, skipping")
                 continue
 
-            # Accumulate preferences for export
-            self._all_preferences.extend(preferences)
+            # Accumulate supervision for export.
+            self._all_supervision_dataset.add_comparative_judgments(
+                list(getattr(supervision_dataset, "comparative_judgments", []) or [])
+            )
 
             # Step 2: Enrich with oracle scores
-            enriched = self._enrich_with_oracle(preferences, samples)
+            enriched_dataset = self._enrich_with_oracle(supervision_dataset, samples)
+            optimizer_dataset = enriched_dataset
 
-            if len(enriched) < 10:
-                logger.warning(f"Iteration {iteration}: Only {len(enriched)} enriched examples, may be insufficient")
+            optimizer_pair_count = len(
+                optimizer_dataset.project_binary(projection="adjacent").comparisons
+            )
+            if optimizer_pair_count < 10:
+                logger.warning(
+                    "Iteration %d: Only %d optimizer-ready binary records after oracle enrichment, may be insufficient",
+                    iteration,
+                    optimizer_pair_count,
+                )
 
             # Step 3: Optimize judge and evaluate on holdout
-            optimized_judge, opt_results = self._optimize_judge(enriched, iteration)
+            optimized_judge, opt_results = self._optimize_judge(optimizer_dataset, iteration)
             final_optimized_judge = optimized_judge
 
             if opt_results and 'baseline' in opt_results and 'optimized' in opt_results:
                 accuracy_before = opt_results['baseline'].get('accuracy', 0.0)
                 accuracy_after = opt_results['optimized'].get('accuracy', 0.0)
             else:
-                accuracy_before = self._evaluate_judge(enriched)
-                accuracy_after = self._evaluate_judge(enriched, optimized_judge)
+                accuracy_before = self._evaluate_judge(optimizer_dataset)
+                accuracy_after = self._evaluate_judge(optimizer_dataset, optimized_judge)
 
             logger.info(f"  Judge accuracy before: {accuracy_before:.3f}")
             logger.info(f"  Judge accuracy after: {accuracy_after:.3f}")
@@ -260,8 +278,13 @@ class TournamentOfTournamentsTrainer:
             result = ToTIterationResult(
                 iteration=iteration,
                 n_trees_built=len(samples[:self.config.n_samples_per_iteration]),
-                n_preferences_collected=len(preferences),
-                n_preferences_with_oracle=len(enriched),
+                n_binary_projection_records=len(
+                    supervision_dataset.project_binary(projection="adjacent").comparisons
+                ),
+                n_comparative_judgments_collected=len(
+                    getattr(supervision_dataset, "comparative_judgments", []) or []
+                ),
+                n_binary_records_with_oracle=optimizer_pair_count,
                 judge_accuracy_before=accuracy_before,
                 judge_accuracy_after=accuracy_after,
                 improvement=improvement,
@@ -311,21 +334,25 @@ class TournamentOfTournamentsTrainer:
             optimized_judge_path=judge_path,
         )
 
-    def _build_trees_and_collect_preferences(
+    def _build_trees_and_collect_supervision(
         self,
         samples: List[Dict[str, Any]],
         rubric: str,
         iteration: int,
-    ) -> List['PreferencePair']:
+    ):
         """
-        Build trees using current judge, collect preferences as byproduct.
+        Build trees using current judge and return the collected supervision dataset.
 
-        Preferences are "free" - we get them from the tournament selection
-        process without any extra GenRM calls.
+        Binary optimizer projections remain derivable on demand, but the primary
+        collected object is a supervision dataset with comparative judgments.
         """
         from src.tree.builder import TreeBuilder, BuildConfig
-        from src.core.strategy import CallableStrategy, TournamentStrategy, TournamentConfig
-
+        from src.core.strategy import (
+            CallableStrategy,
+            TournamentStrategy,
+            TournamentConfig,
+            tournament_doc_id,
+        )
         base_strategy = CallableStrategy(self.summarizer)
         judge = self._current_dspy_judge or self.judge
         strategy = TournamentStrategy(
@@ -338,7 +365,7 @@ class TournamentOfTournamentsTrainer:
         )
         builder = TreeBuilder(strategy=strategy, config=BuildConfig())
 
-        all_preferences = []
+        collected = SupervisionDataset()
         samples_to_process = list(samples)
         if self.config.shuffle_samples_each_iteration:
             rng = random.Random(self.config.random_seed + iteration)
@@ -353,15 +380,26 @@ class TournamentOfTournamentsTrainer:
                 if not text:
                     continue
 
-                result = builder.build_sync(text, rubric)
-
-                # Tag preferences with document ID
                 doc_id = sample.get('doc_id', f"doc_{idx}")
-                for pref in result.preferences:
+                token = tournament_doc_id.set(str(doc_id))
+                try:
+                    result = builder.build_sync(text, rubric)
+                finally:
+                    tournament_doc_id.reset(token)
+
+                direct_binary_projection = result.supervision.project_binary(
+                    projection="adjacent"
+                )
+                for pref in direct_binary_projection.comparisons:
                     pref.source_example_id = doc_id
                     pref.reference_score = sample.get('reference_score')
+                for record in list(result.supervision.comparative_judgments):
+                    record.source_example_id = doc_id
+                    record.reference_score = float(sample.get('reference_score') or 0.0)
 
-                all_preferences.extend(result.preferences)
+                collected.add_comparative_judgments(
+                    list(result.supervision.comparative_judgments)
+                )
 
             except Exception as e:
                 logger.warning(f"  Tree building failed for sample {idx}: {e}")
@@ -369,25 +407,25 @@ class TournamentOfTournamentsTrainer:
             # Reset for next tree
             builder.reset()
 
-        logger.info(f"  Collected {len(all_preferences)} preferences from {len(samples_to_process)} trees")
-        return all_preferences
+        logger.info(
+            "  Collected %d binary projections and %d comparative judgments from %d trees",
+            len(collected.project_binary(projection="adjacent").comparisons),
+            len(collected.comparative_judgments),
+            len(samples_to_process),
+        )
+        return collected
 
     def _enrich_with_oracle(
         self,
-        preferences: List['PreferencePair'],
+        supervision_dataset,
         samples: List[Dict[str, Any]],
-    ) -> List['PreferencePair']:
+    ):
         """
-        Add oracle scores to preferences.
+        Add oracle scores to collected supervision records.
 
-        For each preference pair, we:
-        1. Score each summary with the oracle
-        2. Look up the ground truth score for this document
-        3. Compute oracle error for each summary
-        4. Update the preference with this data
-
-        The oracle error tells us which summary is objectively better
-        for the downstream task.
+        Pairwise records keep the legacy oracle-error annotations used by the
+        binary judge optimizer. Comparative records are also re-ranked by the
+        same oracle signal so grouped objectives can consume the same iteration.
         """
         # Create lookup for ground truth scores (if available)
         gt_lookup = {
@@ -395,56 +433,87 @@ class TournamentOfTournamentsTrainer:
             for i, s in enumerate(samples)
         }
 
-        enriched = []
-        for pref in preferences:
+        enriched_records = []
+        for record in list(getattr(supervision_dataset, "comparative_judgments", []) or []):
             try:
-                # Score each summary with oracle
-                score_a = self.oracle_predict(pref.summary_a)
-                score_b = self.oracle_predict(pref.summary_b)
+                gt = gt_lookup.get(record.source_example_id)
+                candidate_rows = []
+                for candidate in record.candidates:
+                    oracle_score = self.oracle_predict(candidate.response)
+                    oracle_error = abs(float(oracle_score) - float(gt)) if gt is not None else None
+                    if self.config.normalize_errors and oracle_error is not None:
+                        scale_range = self.config.scale_range
+                        if scale_range is None:
+                            logger.warning(
+                                "No scale_range specified for error normalization. "
+                                "Using default 1.0 (DSPy convention). "
+                                "Set scale_range to the task scale range if normalization is needed."
+                            )
+                            scale_range = 1.0
+                        if scale_range <= 0:
+                            raise ValueError(f"scale_range must be positive, got {scale_range}.")
+                        oracle_error = min(1.0, max(0.0, float(oracle_error) / float(scale_range)))
+                    utility = -float(oracle_error) if oracle_error is not None else float(oracle_score)
+                    candidate.metadata["oracle_score"] = float(oracle_score)
+                    if oracle_error is not None:
+                        candidate.metadata["oracle_error"] = float(oracle_error)
+                    candidate.response_signal_value = float(utility)
+                    candidate_rows.append(
+                        (candidate, float(utility), oracle_error)
+                    )
 
-                # Get ground truth for this document (if available)
-                gt = gt_lookup.get(pref.source_example_id)
+                candidate_rows.sort(
+                    key=lambda item: (
+                        -float(item[1]),
+                        item[0].candidate_id,
+                    )
+                )
+                prev_utility = None
+                current_rank = 0
+                for index, (candidate, utility, _oracle_error) in enumerate(candidate_rows, start=1):
+                    if prev_utility is None or abs(float(utility) - float(prev_utility)) >= float(
+                        self.config.tie_margin
+                    ):
+                        current_rank = index
+                        prev_utility = float(utility)
+                    candidate.rank = current_rank
 
-                # Compute errors (lower is better) when GT exists
-                raw_error_a = abs(score_a - gt) if gt is not None else None
-                raw_error_b = abs(score_b - gt) if gt is not None else None
-
-                error_a = raw_error_a
-                error_b = raw_error_b
-                if self.config.normalize_errors and gt is not None:
-                    scale_range = self.config.scale_range
-                    if scale_range is None:
-                        logger.warning(
-                            "No scale_range specified for error normalization. "
-                            "Using default 1.0 (DSPy convention). "
-                            "Set scale_range to the task scale range if normalization is needed."
-                        )
-                        scale_range = 1.0
-                    if scale_range <= 0:
-                        raise ValueError(f"scale_range must be positive, got {scale_range}.")
-                    # Normalize errors to [0, 1] range
-                    error_a = min(1.0, max(0.0, raw_error_a / scale_range))
-                    error_b = min(1.0, max(0.0, raw_error_b / scale_range))
-
-                # Update preference with oracle data
-                pref.score_estimate_a = score_a
-                pref.score_estimate_b = score_b
-                pref.oracle_error_a = error_a
-                pref.oracle_error_b = error_b
+                top_utility = candidate_rows[0][1] if candidate_rows else None
+                next_utility = candidate_rows[1][1] if len(candidate_rows) > 1 else None
+                record.preference_supervision = record.preference_supervision.with_updates(
+                    response_signal_name="oracle_relative_utility",
+                    comparison_signal_name="oracle_relative_margin",
+                    metadata={
+                        **dict(record.preference_supervision.metadata or {}),
+                        "oracle_enriched": True,
+                    },
+                )
+                record.comparison_signal_value = (
+                    float(top_utility) - float(next_utility)
+                    if top_utility is not None and next_utility is not None
+                    else None
+                )
+                record.metadata["oracle_enriched"] = True
+                record.metadata["oracle_tie_margin"] = float(self.config.tie_margin)
                 if gt is not None:
-                    pref.reference_score = gt
-
-                enriched.append(pref)
-
+                    record.reference_score = float(gt)
+                enriched_records.append(record)
             except Exception as e:
-                logger.debug(f"Oracle enrichment failed for preference: {e}")
+                logger.debug(f"Oracle enrichment failed for comparative record: {e}")
 
-        logger.info(f"  Enriched {len(enriched)}/{len(preferences)} preferences with oracle scores")
-        return enriched
+        logger.info(
+            "  Enriched %d projected binary records from %d/%d comparative judgments",
+            len(supervision_dataset.project_binary(projection="adjacent").comparisons),
+            len(enriched_records),
+            len(getattr(supervision_dataset, "comparative_judgments", []) or []),
+        )
+        return SupervisionDataset(
+            comparative_judgments=enriched_records,
+        )
 
     def _optimize_judge(
         self,
-        preferences: List['PreferencePair'],
+        supervision,
         iteration: int,
     ) -> tuple['GenRMComparisonModule', dict]:
         """
@@ -470,12 +539,12 @@ class TournamentOfTournamentsTrainer:
             import dspy
             with dspy.context(lm=self.prompt_lm):
                 optimized, results = optimizer.optimize(
-                    preferences,
+                    supervision,
                     initial_judge=self._current_dspy_judge,
                 )
         else:
             optimized, results = optimizer.optimize(
-                preferences,
+                supervision,
                 initial_judge=self._current_dspy_judge,
             )
 
@@ -485,7 +554,7 @@ class TournamentOfTournamentsTrainer:
 
     def _evaluate_judge(
         self,
-        preferences: List['PreferencePair'],
+        supervision,
         judge: Optional['GenRMComparisonModule'] = None,
     ) -> float:
         """
@@ -502,7 +571,11 @@ class TournamentOfTournamentsTrainer:
         correct = 0
         total = 0
 
-        for pref in preferences:
+        pair_list = list(
+            supervision.project_binary(projection="adjacent").comparisons
+        )
+
+        for pref in pair_list:
             try:
                 # Get oracle ground truth
                 gt = derive_ground_truth_preference(
@@ -583,7 +656,7 @@ class TournamentOfTournamentsTrainer:
             List of (original_text, rubric, winning_summary) tuples
         """
         winners = []
-        for pref in getattr(self, '_all_preferences', []):
+        for pref in self._all_supervision_dataset.project_binary(projection="adjacent").comparisons:
             winner = pref.get_winner()
             if winner is not None:
                 winners.append((
@@ -593,14 +666,21 @@ class TournamentOfTournamentsTrainer:
                 ))
         return winners
 
-    def get_all_preferences(self) -> List['PreferencePair']:
-        """
-        Return all collected preferences from tournament iterations.
+    def get_all_binary_projection(self) -> List[BinaryComparison]:
+        """Return all collected binary optimizer projections."""
+        return list(self._all_supervision_dataset.project_binary(projection="adjacent").comparisons)
 
-        Returns:
-            List of PreferencePair objects
-        """
-        return getattr(self, '_all_preferences', [])
+    def get_all_binary_projection_dataset(self):
+        """Return the binary optimizer view of collected supervision."""
+        return self._all_supervision_dataset.project_binary(projection="adjacent")
+
+    def get_all_supervision_dataset(self):
+        """Return the full collected supervision dataset."""
+        return self._all_supervision_dataset
+
+    def get_all_comparative_judgments(self) -> List[ComparativeJudgment]:
+        """Return all collected comparative judgments from tournament iterations."""
+        return list(getattr(self._all_supervision_dataset, "comparative_judgments", []) or [])
 
 
 # =============================================================================

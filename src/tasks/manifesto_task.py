@@ -18,8 +18,7 @@ from .manifesto import (
     RILE_PRESERVATION_RUBRIC,
     RILE_TASK_CONTEXT,
     RILEScorer,
-    GenericSummarizer,
-    MergeSummarizer,
+    UnifiedManifestoG,
     create_rile_oracle,
 )
 from .registry import register_task
@@ -100,13 +99,13 @@ class ManifestoRILETask(ScoringTask):
                 temperature=scorer_temperature,
                 strict_parse=scorer_strict_parse,
             ),
-            summarizer_factory=lambda: GenericSummarizer(use_cot=use_cot_summarizer),
+            summarizer_factory=lambda: UnifiedManifestoG(use_cot=use_cot_summarizer),
             oracle_scorer_factory=scorer.value_extractor,
         )
 
     def create_merge_summarizer(self):
-        """Use a dedicated merge module instead of reusing the leaf summarizer."""
-        return MergeSummarizer(use_cot=self._use_cot_merge)
+        """Return the same unified g module for merge compatibility callers."""
+        return self.create_summarizer()
 
     def describe_local_law_oracle(self) -> Dict[str, Any]:
         return {

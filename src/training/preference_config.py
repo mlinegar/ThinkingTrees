@@ -32,7 +32,7 @@ class JudgeType(Enum):
     """Numeric oracle scorer (ERROR_DIFFERENCE strategy)."""
 
     DSPY = "dspy"
-    """DSPy PairwiseJudge (RANKING_SCORE_DISCRETE strategy)."""
+    """DSPy listwise judge over multiple candidate summaries."""
 
 
 class DataSourceType(Enum):
@@ -130,12 +130,8 @@ class GenerationSettings:
     Controls how many candidates are generated and with what parameters.
 
     The k_candidates parameter determines how many candidate summaries are
-    generated per input, which affects the number of pairwise comparisons:
-    - k=2 → 1 comparison (fast, minimal coverage)
-    - k=4 → 6 comparisons (default, good coverage)
-    - k=8 → 28 comparisons (thorough, expensive)
-
-    Formula: num_comparisons = k * (k-1) / 2
+    generated per input. Pairwise backends induce O(k^2) comparisons, while
+    listwise backends can judge all k candidates in one call.
     """
 
     k_candidates: int = 4

@@ -25,6 +25,7 @@ from typing import Callable, Dict, List, Optional, Set
 import aiohttp
 
 from src.config.concurrency import get_concurrency_config
+from src.core.async_utils import to_thread
 from .genrm import GenRMResult, GenRMErrorResult, GenRMComparisonResult
 
 logger = logging.getLogger(__name__)
@@ -694,7 +695,7 @@ class AsyncBatchGenRMClient:
                 self.base_url,
                 reason,
             )
-            recovered = await asyncio.to_thread(self.recover_base_url_callback, self.base_url)
+            recovered = await to_thread(self.recover_base_url_callback, self.base_url)
         except Exception as exc:
             logger.warning("GenRM server recovery callback failed for %s: %s", self.base_url, exc)
             return False

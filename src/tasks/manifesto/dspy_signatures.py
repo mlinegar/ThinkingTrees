@@ -503,38 +503,44 @@ class RILEScorer(dspy.Module):
 
 
 class RILEComparator(dspy.Module):
-    """DSPy module for comparing RILE scores between texts."""
+    """DSPy module for comparing RILE scores between texts.
 
-    def __init__(self, threshold: float = 10.0, use_cot: bool = False):
-        """
-        Initialize comparator.
+    Honors the repo-wide output-budget convention via
+    ``DEFAULT_COMPARATOR_MAX_TOKENS`` (see
+    ``src/tasks/manifesto/pipeline_config.py``). The ``drift_explanation``
+    OutputField is a short-prose field whose length must stay bounded so
+    the call fits comfortably in the vLLM context window even when the
+    inputs are long.
+    """
 
-        Args:
-            threshold: Maximum acceptable score difference for preservation
-        """
+    def __init__(
+        self,
+        threshold: float = 10.0,
+        use_cot: bool = False,
+        *,
+        max_output_tokens: Optional[int] = None,
+    ):
         super().__init__()
+        from .pipeline_config import DEFAULT_COMPARATOR_MAX_TOKENS
         if use_cot:
             self.compare = dspy.ChainOfThought(RILEComparison)
         else:
             self.compare = dspy.Predict(RILEComparison)
         self.threshold = threshold
+        self.max_output_tokens = (
+            int(max_output_tokens) if max_output_tokens is not None
+            else DEFAULT_COMPARATOR_MAX_TOKENS
+        )
 
     def forward(self, original_text: str, summary_text: str, task_context: str) -> dict:
-        """
-        Compare RILE positions between original and summary.
-
-        Args:
-            original_text: Original text
-            summary_text: Summary text
-            task_context: Explanation of the scoring task
-
-        Returns:
-            Dictionary with comparison results
-        """
-        result = self.compare(
+        """Compare RILE positions between original and summary."""
+        from .pipeline import _call_with_budget
+        result = _call_with_budget(
+            self.compare,
+            max_tokens=self.max_output_tokens,
             task_context=task_context,
             original_text=original_text,
-            summary_text=summary_text
+            summary_text=summary_text,
         )
 
         # Use normalized accessor to handle key casing variations

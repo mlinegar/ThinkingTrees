@@ -79,12 +79,15 @@ class OptimizerRegistry(GenericRegistry[BaseOptimizer]):
         # Get thresholds from config or use defaults
         if config is not None:
             bootstrap_threshold = getattr(config, 'bootstrap_threshold', 10)
-            random_search_threshold = getattr(config, 'random_search_threshold', 50)
+            random_search_threshold = getattr(config, 'random_search_threshold', 120)
             mipro_threshold = getattr(config, 'mipro_threshold', 200)
         else:
-            bootstrap_threshold = 10
-            random_search_threshold = 50
-            mipro_threshold = 200
+            from ..config import OptimizationConfig
+
+            defaults = OptimizationConfig()
+            bootstrap_threshold = int(getattr(defaults, 'bootstrap_threshold', 10))
+            random_search_threshold = int(getattr(defaults, 'random_search_threshold', 120))
+            mipro_threshold = int(getattr(defaults, 'mipro_threshold', 200))
 
         # Select based on dataset size
         if dataset_size <= bootstrap_threshold:

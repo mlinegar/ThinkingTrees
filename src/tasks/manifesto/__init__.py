@@ -71,6 +71,7 @@ from .pipeline import (
     RILEMerge,
     RILEScoreSignature,
     # Modules
+    UnifiedManifestoG,
     ManifestoSummarizer,
     ManifestoMerger,
     ManifestoScorer,
@@ -144,6 +145,7 @@ __all__ = [
     "RILEScoreSignature",
 
     # Pipeline modules
+    "UnifiedManifestoG",
     "ManifestoSummarizer",
     "ManifestoMerger",
     "ManifestoScorer",

@@ -97,7 +97,7 @@ def generate_dpo_data(args) -> None:
     from src.config.dspy_config import configure_dspy
     from src.config.settings import load_settings
     from src.training.comparison import OPSComparisonModule
-    from src.training.preference import PreferenceDataset, PreferencePair
+    from src.training.supervision import BinaryComparison, BinaryProjectionDataset
     from src.tasks.manifesto import LeafSummarizer, ManifestoDataset
 
     if not args.comparison_module or not args.comparison_module.exists():
@@ -150,7 +150,7 @@ def generate_dpo_data(args) -> None:
 
     logger.info(f"Processing {len(samples)} documents")
 
-    dataset = PreferenceDataset()
+    dataset = BinaryProjectionDataset()
     pair_counter = 0
 
     for i, sample in enumerate(samples):
@@ -201,13 +201,19 @@ def generate_dpo_data(args) -> None:
                     preferred = "B" if preferred == "A" else "A"
 
                 pair_counter += 1
-                dataset.add_pair(PreferencePair(
+                from src.core.preference_supervision import preference_supervision_metadata
+
+                dataset.add_comparison(BinaryComparison(
                     pair_id=f"dpo_{pair_counter:06d}",
                     source_example_id=doc_id,
                     original_text=doc_text,  # Use full text
                     rubric=RILE_RUBRIC,
                     reference_score=reference_score,
                     law_type=args.law_type,
+                    preference_supervision=preference_supervision_metadata(
+                        application_name="manifesto_generate_data",
+                        law_type=args.law_type,
+                    ),
                     summary_a=summary_a if not swapped else summary_b,
                     summary_b=summary_b if not swapped else summary_a,
                     preferred=preferred,

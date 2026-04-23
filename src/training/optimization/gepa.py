@@ -10,6 +10,13 @@ from typing import Any, Callable, Dict, List, Optional
 
 import dspy
 
+from src.training.supervision.timing import (
+    ACQUISITION_SYNCHRONOUS_OPTIMIZER_METRIC,
+    ACTIVATION_IMMEDIATE,
+    CONSUMER_GEPA_OPTIMIZER,
+    supervision_timing_contract,
+)
+
 from .base import AbstractOptimizer, OptimizationResult
 from .registry import register_optimizer
 
@@ -71,6 +78,12 @@ class GEPAOptimizer(AbstractOptimizer):
         """
         valset = valset or trainset
         self._log_compile_start(len(trainset), len(valset))
+        supervision_timing = self._supervision_timing_contract(
+            metric_attached=bool(metric is not None),
+            trainset_size=len(trainset),
+            valset_size=len(valset),
+        )
+        self._update_compile_audit(supervision_timing=supervision_timing)
 
         # Wrap metric for GEPA's 5-argument signature
         wrapped_metric = self._wrap_metric_gepa(metric) if metric else None
@@ -88,9 +101,28 @@ class GEPAOptimizer(AbstractOptimizer):
                 trainset=trainset,
                 valset=valset,
             )
+            self._update_compile_audit(
+                compile_status="completed",
+                optimizer_used=self.name,
+                fallback_reason="none",
+                supervision_timing=supervision_timing,
+                gepa_kwargs={
+                    k: str(v)
+                    if not isinstance(v, (str, int, float, bool, type(None)))
+                    else v
+                    for k, v in gepa_kwargs.items()
+                },
+            )
             return compiled
 
         except Exception as e:
+            self._update_compile_audit(
+                compile_status="failed",
+                optimizer_used=self.name,
+                fallback_reason="none",
+                supervision_timing=supervision_timing,
+                exception_summary=f"{type(e).__name__}: {e}",
+            )
             logger.error(f"GEPA compilation failed: {e}")
             raise
 
@@ -151,13 +183,43 @@ class GEPAOptimizer(AbstractOptimizer):
                     return 0.0
             return result
 
+        wrapped.supervision_timing = self._supervision_timing_contract(  # type: ignore[attr-defined]
+            metric_attached=True,
+        )
         return wrapped
+
+    def _supervision_timing_contract(
+        self,
+        *,
+        metric_attached: bool,
+        trainset_size: Optional[int] = None,
+        valset_size: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return supervision_timing_contract(
+            acquisition_policy=ACQUISITION_SYNCHRONOUS_OPTIMIZER_METRIC,
+            activation_barrier=ACTIVATION_IMMEDIATE,
+            consumer=CONSUMER_GEPA_OPTIMIZER,
+            producer="metric_callback",
+            delivery_mode="dspy_gepa_metric",
+            blocking=True,
+            notes=(
+                "GEPA must receive metric scores and optional feedback during optimizer search.",
+                "Feedback is active immediately for candidate ranking and reflection inside compile().",
+            ),
+            metadata={
+                "metric_attached": bool(metric_attached),
+                "trainset_size": None if trainset_size is None else int(trainset_size),
+                "valset_size": None if valset_size is None else int(valset_size),
+            },
+        )
 
     def _build_gepa_kwargs(self, metric: Optional[Callable]) -> Dict[str, Any]:
         """Build kwargs for GEPA constructor."""
         kwargs: Dict[str, Any] = {
             'metric': metric,
             'reflection_lm': dspy.settings.lm,  # Use current LM for reflection
+            'use_wandb': False,
+            'use_mlflow': False,
         }
 
         if self.config is None:

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import math
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from src.ctreepo.sim.util import safe_float
 from src.tasks.manifesto.lawstress_eval import LawStressEvalConfig, RILE_RUBRIC, strict_same_side
 from src.tasks.manifesto.lawstress_generator import length_weighted_mean, normalize_rile
 
@@ -23,14 +24,7 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        converted = float(value)
-    except (TypeError, ValueError):
-        return float(default)
-    if converted != converted:
-        return float(default)
-    return float(converted)
+_safe_float = lambda v, default=0.0: safe_float(v, default=default)
 
 
 @dataclass

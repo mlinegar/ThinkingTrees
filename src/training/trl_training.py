@@ -1,26 +1,27 @@
 """
-TRL Integration for Preference-Based Training.
+TRL Integration for Supervision-Based Training.
 
-This module provides wrappers around TRL (Transformers Reinforcement Learning)
-trainers for DPO, GRPO, and reward model training. It bridges our preference
+This module provides wrappers around TRL/HF training
+trainers for DPO, GRPO, pairwise reward, and scalar reward model training. It bridges our preference
 collection system with TRL's training infrastructure.
 
 Dependencies:
     pip install trl>=0.7.0 transformers>=4.40.0 peft>=0.8.0
 
 Architecture:
-    PreferenceDataset → Export Format → HuggingFace Dataset → TRL Trainer
+    SupervisionDataset → Optimizer Projection → HuggingFace Dataset → TRL Trainer
 
 Usage:
     from src.training.trl_training import (
         train_dpo,
         train_grpo,
         train_reward_model,
+        train_scalar_reward_model,
         TRLTrainingConfig,
     )
 
-    # Load preference data
-    dataset = PreferenceDataset.load("preferences.json")
+    # Load supervision data
+    dataset = SupervisionDataset.load("supervision.json")
 
     # Train DPO
     train_dpo(
@@ -34,22 +35,54 @@ Usage:
         ),
     )
 
-    # Train reward model
+    # Train pairwise reward model
     train_reward_model(
         dataset=dataset,
         model_name="nvidia/Nemotron-Nano-8B",
         output_dir="models/reward_model",
     )
+
+    # Train scalar reward regressor
+    train_scalar_reward_model(
+        dataset=dataset,
+        model_name="nvidia/Nemotron-Nano-8B",
+        output_dir="models/scalar_reward_model",
+    )
 """
 
 import logging
-import random
 import inspect
+import random
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Union
 
-from src.training.preference.types import render_prompt, PromptBuilder
+from src.training.supervision.adapters import (
+    build_dpo_training_records,
+    build_group_grpo_training_records,
+    build_reward_model_training_records,
+    build_scalar_reward_training_records,
+)
+from src.training.supervision import (
+    BinaryComparison,
+    BinaryProjectionDataset,
+    ComparativeDataset,
+    ComparativeJudgment,
+    PreferenceDataset,
+    PromptBuilder,
+    SupervisionDataset,
+)
+from src.training.supervision.optimizer_metadata import (
+    TreePOWeightingMode,
+    validate_discount_gamma,
+    validate_tree_objective_weighting_mode,
+)
+from src.training.config_sections import (
+    OptimizerConfig,
+    RuntimeConfig,
+    TrainConfig,
+    ValidationConfig,
+)
 from src.stats.sampling import (
     largest_remainder_allocation as _largest_remainder_allocation,
     pps_inclusion_probabilities as _pps_inclusion_probabilities,
@@ -58,25 +91,30 @@ from src.stats.sampling import (
 
 logger = logging.getLogger(__name__)
 
+TrainingSupervision = Union[
+    SupervisionDataset,
+    BinaryProjectionDataset,
+    ComparativeDataset,
+    Sequence[BinaryComparison],
+    Sequence[ComparativeJudgment],
+    PreferenceDataset,
+    Sequence[BinaryComparison],
+    Sequence[ComparativeJudgment],
+]
+
 
 # =============================================================================
 # Configuration
 # =============================================================================
 
-@dataclass
-class TRLTrainingConfig:
-    """Configuration for TRL-based training."""
-
-    # Training hyperparameters
-    learning_rate: float = 1e-5
-    num_train_epochs: int = 3
-    per_device_train_batch_size: int = 2
-    gradient_accumulation_steps: int = 8
-    warmup_ratio: float = 0.1
+@dataclass(frozen=True, kw_only=True)
+class TRLSequenceConfig:
     max_length: int = 2048
     max_prompt_length: int = 1024
 
-    # LoRA configuration
+
+@dataclass(frozen=True, kw_only=True)
+class TRLLoraConfig:
     use_lora: bool = True
     lora_r: int = 16
     lora_alpha: int = 32
@@ -85,23 +123,35 @@ class TRLTrainingConfig:
         default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"]
     )
 
-    # Quantization (for large models)
+
+@dataclass(frozen=True, kw_only=True)
+class TRLQuantizationConfig:
     load_in_4bit: bool = True
     bnb_4bit_compute_dtype: str = "bfloat16"
     bnb_4bit_quant_type: str = "nf4"
 
-    # DPO-specific
-    beta: float = 0.1  # KL penalty coefficient
 
-    # GRPO-specific
-    num_generations: int = 4  # Number of generations per prompt
+@dataclass(frozen=True, kw_only=True)
+class TRLDPOConfig:
+    beta: float = 0.1
 
-    # Reward model-specific
+
+@dataclass(frozen=True, kw_only=True)
+class TRLGRPOConfig:
+    num_generations: int = 4
+
+
+@dataclass(frozen=True, kw_only=True)
+class TRLRewardObjectiveConfig:
     reward_use_margin: bool = False
     reward_margin_source: Literal["score_estimate", "oracle_error"] = "score_estimate"
     reward_margin_scale: Optional[float] = None
+    scalar_reward_loss: Literal["mse", "smooth_l1", "l1"] = "mse"
+    scalar_reward_huber_delta: float = 1.0
 
-    # Propensity/IPW weighting
+
+@dataclass(frozen=True, kw_only=True)
+class TRLPropensityWeightingConfig:
     use_propensity_weighting: bool = True
     propensity_resample: bool = True
     propensity_native_loss_weighting: bool = True
@@ -113,16 +163,56 @@ class TRLTrainingConfig:
         "stratified_multinomial",
     ] = "pps_systematic"
     propensity_stratify_key: Optional[str] = "law_type"
-    propensity_stratify_by: Optional[str] = None  # backwards-compatible alias
+    tree_objective_weighting_mode: TreePOWeightingMode = "legacy_channel"
+    discount_gamma: float = 1.0
 
-    # Logging
-    logging_steps: int = 10
-    save_steps: int = 100
-    eval_steps: int = 100
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "tree_objective_weighting_mode",
+            validate_tree_objective_weighting_mode(self.tree_objective_weighting_mode),
+        )
+        object.__setattr__(
+            self,
+            "discount_gamma",
+            validate_discount_gamma(self.discount_gamma),
+        )
 
-    # Hardware
-    bf16: bool = True
-    gradient_checkpointing: bool = True
+
+@dataclass(frozen=True, kw_only=True)
+class TRLTrainingConfig:
+    """Sectioned configuration for TRL-based training."""
+
+    train: TrainConfig = field(
+        default_factory=lambda: TrainConfig(
+            epochs=3,
+            batch_size=2,
+            gradient_accumulation_steps=8,
+            logging_steps=10,
+            save_steps=100,
+        )
+    )
+    optimizer: OptimizerConfig = field(
+        default_factory=lambda: OptimizerConfig(
+            learning_rate=1e-5,
+            warmup_ratio=0.1,
+        )
+    )
+    validation: ValidationConfig = field(
+        default_factory=lambda: ValidationConfig(eval_steps=100)
+    )
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    lora: TRLLoraConfig = field(default_factory=TRLLoraConfig)
+    quantization: TRLQuantizationConfig = field(default_factory=TRLQuantizationConfig)
+    sequence: TRLSequenceConfig = field(default_factory=TRLSequenceConfig)
+    dpo: TRLDPOConfig = field(default_factory=TRLDPOConfig)
+    grpo: TRLGRPOConfig = field(default_factory=TRLGRPOConfig)
+    reward_objective: TRLRewardObjectiveConfig = field(
+        default_factory=TRLRewardObjectiveConfig
+    )
+    propensity_weighting: TRLPropensityWeightingConfig = field(
+        default_factory=TRLPropensityWeightingConfig
+    )
 
 
 # =============================================================================
@@ -137,21 +227,29 @@ def _extract_sample_weight(
     if "sample_weight" in record:
         try:
             value = float(record["sample_weight"])
-            if value > 0:
+            if value >= 0:
                 return value
         except (TypeError, ValueError):
             pass
 
     metadata = record.get("metadata") or {}
-    try:
-        value = float(metadata.get("sample_weight", default_weight))
-        if value > 0:
-            return value
-    except (TypeError, ValueError):
-        pass
+    if isinstance(metadata, dict) and "sample_weight" in metadata:
+        try:
+            value = float(metadata.get("sample_weight"))
+            if value >= 0:
+                return value
+        except (TypeError, ValueError):
+            pass
 
     treepo = metadata.get("treepo") if isinstance(metadata, dict) else None
     if isinstance(treepo, dict):
+        for key in ("effective_weight", "sample_weight", "ipw_weight"):
+            try:
+                value = float(treepo.get(key))
+                if value >= 0:
+                    return value
+            except (TypeError, ValueError):
+                continue
         try:
             propensity = float(treepo.get("joint_propensity", 1.0))
             if propensity > 0:
@@ -160,6 +258,121 @@ def _extract_sample_weight(
             pass
 
     return default_weight
+
+
+def _treepo_metadata_from_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = record.get("metadata") if isinstance(record, dict) else None
+    if isinstance(metadata, dict):
+        treepo = metadata.get("treepo")
+        if isinstance(treepo, dict):
+            return treepo
+    treepo = record.get("treepo") if isinstance(record, dict) else None
+    if isinstance(treepo, dict):
+        return treepo
+    return {}
+
+
+def _summarize_weight_values(values: Sequence[float]) -> Dict[str, float]:
+    if not values:
+        return {"count": 0.0, "min": 0.0, "mean": 0.0, "max": 0.0}
+    return {
+        "count": float(len(values)),
+        "min": float(min(values)),
+        "mean": float(sum(values) / len(values)),
+        "max": float(max(values)),
+    }
+
+
+def _summarize_treepo_weighting(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    objective_weights: List[float] = []
+    ipw_weights: List[float] = []
+    effective_weights: List[float] = []
+    depths: List[int] = []
+    channels: Dict[str, int] = {}
+    roles: Dict[str, int] = {}
+    weighting_modes: Dict[str, int] = {}
+    sample_weight_sources: Dict[str, int] = {}
+
+    for record in records:
+        treepo = _treepo_metadata_from_record(record)
+        if not treepo:
+            continue
+
+        try:
+            objective_weights.append(float(treepo.get("objective_weight", 0.0)))
+        except (TypeError, ValueError):
+            pass
+        try:
+            ipw_weights.append(float(treepo.get("ipw_weight", 0.0)))
+        except (TypeError, ValueError):
+            pass
+        try:
+            effective_weights.append(float(treepo.get("effective_weight", _extract_sample_weight(record))))
+        except (TypeError, ValueError):
+            effective_weights.append(_extract_sample_weight(record))
+        try:
+            depths.append(int(treepo.get("depth", 0)))
+        except (TypeError, ValueError):
+            pass
+
+        channel = str(treepo.get("channel", "unknown") or "unknown")
+        channels[channel] = channels.get(channel, 0) + 1
+
+        rl_role = treepo.get("rl_role")
+        if rl_role is not None:
+            role_key = str(rl_role)
+            roles[role_key] = roles.get(role_key, 0) + 1
+
+        weighting_mode = str(treepo.get("weighting_mode", "unknown") or "unknown")
+        weighting_modes[weighting_mode] = weighting_modes.get(weighting_mode, 0) + 1
+
+        sample_weight_source = str(
+            treepo.get("sample_weight_source", "unknown") or "unknown"
+        )
+        sample_weight_sources[sample_weight_source] = (
+            sample_weight_sources.get(sample_weight_source, 0) + 1
+        )
+
+    return {
+        "objective_weight": _summarize_weight_values(objective_weights),
+        "ipw_weight": _summarize_weight_values(ipw_weights),
+        "effective_weight": _summarize_weight_values(effective_weights),
+        "depth": _summarize_weight_values([float(depth) for depth in depths]),
+        "channels": channels,
+        "rl_roles": roles,
+        "weighting_modes": weighting_modes,
+        "sample_weight_sources": sample_weight_sources,
+    }
+
+
+def _log_treepo_weighting_summary(
+    records: Sequence[Dict[str, Any]],
+    *,
+    trainer_name: str,
+    config: TRLTrainingConfig,
+) -> None:
+    summary = _summarize_treepo_weighting(records)
+    logger.info(
+        "%s TreePO RL weighting: mode=%s gamma=%.4f sample_weight_source=effective_weight "
+        "objective[min=%.4g mean=%.4g max=%.4g] "
+        "ipw[min=%.4g mean=%.4g max=%.4g] "
+        "effective[min=%.4g mean=%.4g max=%.4g] "
+        "channels=%s roles=%s",
+        trainer_name,
+        config.propensity_weighting.tree_objective_weighting_mode,
+        float(config.propensity_weighting.discount_gamma),
+        summary["objective_weight"]["min"],
+        summary["objective_weight"]["mean"],
+        summary["objective_weight"]["max"],
+        summary["ipw_weight"]["min"],
+        summary["ipw_weight"]["mean"],
+        summary["ipw_weight"]["max"],
+        summary["effective_weight"]["min"],
+        summary["effective_weight"]["mean"],
+        summary["effective_weight"]["max"],
+        summary["channels"],
+        summary["rl_roles"],
+    )
 
 
 def _resample_records_by_weight(
@@ -172,12 +385,12 @@ def _resample_records_by_weight(
     This provides weighting support for trainers that do not consume
     per-example weights natively.
     """
-    if not config.use_propensity_weighting or not config.propensity_resample or not records:
+    if not config.propensity_weighting.use_propensity_weighting or not config.propensity_weighting.propensity_resample or not records:
         return records
 
     weights = [
-        min(_extract_sample_weight(record), config.propensity_weight_clip)
-        if config.propensity_weight_clip is not None
+        min(_extract_sample_weight(record), config.propensity_weighting.propensity_weight_clip)
+        if config.propensity_weighting.propensity_weight_clip is not None
         else _extract_sample_weight(record)
         for record in records
     ]
@@ -185,8 +398,8 @@ def _resample_records_by_weight(
     if total_weight <= 0:
         return records
 
-    strategy = config.propensity_sampling_strategy
-    rng = random.Random(config.propensity_random_seed)
+    strategy = config.propensity_weighting.propensity_sampling_strategy
+    rng = random.Random(config.propensity_weighting.propensity_random_seed)
     size = len(records)
 
     if strategy == "multinomial":
@@ -207,9 +420,7 @@ def _resample_records_by_weight(
         return sampled
 
     if strategy == "stratified_multinomial":
-        stratify_key = config.propensity_stratify_key
-        if stratify_key is None:
-            stratify_key = config.propensity_stratify_by
+        stratify_key = config.propensity_weighting.propensity_stratify_key
         if not stratify_key:
             return rng.choices(records, weights=weights, k=size)
 
@@ -291,6 +502,13 @@ def _preference_to_hf_dpo(
             "chosen": d["chosen"],
             "rejected": d["rejected"],
             "sample_weight": _extract_sample_weight(d),
+            "metadata": d.get("metadata", {}),
+            "preference_supervision": dict(
+                dict(d.get("metadata", {}) or {}).get("preference_supervision", {}) or {}
+            ),
+            "comparative_signal": dict(
+                dict(d.get("metadata", {}) or {}).get("comparative_signal", {}) or {}
+            ),
         }
         for d in preference_data
         if d.get("chosen") and d.get("rejected")
@@ -344,12 +562,51 @@ def _preference_to_hf_reward(
             "input_ids_rejected": rejected_enc["input_ids"],
             "attention_mask_rejected": rejected_enc["attention_mask"],
             "sample_weight": float(pair.get("sample_weight", 1.0)),
+            "metadata": dict(pair.get("metadata", {}) or {}),
+            "preference_supervision": dict(pair.get("preference_supervision", {}) or {}),
+            "comparative_signal": dict(pair.get("comparative_signal", {}) or {}),
         }
         if pair.get("margin") is not None:
             entry["margin"] = pair["margin"]
         converted.append(entry)
 
     logger.info(f"Converted {len(converted)} preference pairs to reward model format")
+    return Dataset.from_list(converted)
+
+
+def _scalar_reward_to_hf_dataset(
+    reward_records: List[Dict[str, Any]],
+    tokenizer: Any,
+    max_length: int,
+) -> "Dataset":
+    """Convert scalar reward rows into a tokenized HuggingFace Dataset."""
+    try:
+        from datasets import Dataset
+    except ImportError:
+        raise ImportError("datasets library required. Install with: pip install datasets")
+
+    converted: List[Dict[str, Any]] = []
+    for record in reward_records:
+        prompt = str(record.get("prompt", "") or "")
+        response = str(record.get("response", "") or "")
+        score = record.get("score")
+        if not response or score is None:
+            continue
+        encoded = tokenizer(
+            _concat_prompt_response(prompt, response),
+            truncation=True,
+            max_length=max_length,
+        )
+        converted.append(
+            {
+                "input_ids": encoded["input_ids"],
+                "attention_mask": encoded["attention_mask"],
+                "labels": float(score),
+                "sample_weight": _extract_sample_weight(record),
+            }
+        )
+
+    logger.info("Converted %d scalar reward records to tokenized format", len(converted))
     return Dataset.from_list(converted)
 
 
@@ -375,6 +632,15 @@ def _preference_to_hf_grpo(
             "prompt": d["prompt"],
             "responses": d["responses"],
             "ranks": d["ranks"],
+            "scores": d.get("scores"),
+            "sample_weight": _extract_sample_weight(d),
+            "metadata": dict(d.get("metadata", {}) or {}),
+            "preference_supervision": dict(
+                dict(d.get("metadata", {}) or {}).get("preference_supervision", {}) or {}
+            ),
+            "comparative_signal": dict(
+                dict(d.get("metadata", {}) or {}).get("comparative_signal", {}) or {}
+            ),
         }
         for d in grpo_data
     ]
@@ -391,11 +657,11 @@ def _compute_reward_margin(
     config: TRLTrainingConfig,
 ) -> Optional[float]:
     """Compute optional margin for reward modeling."""
-    if not config.reward_use_margin:
+    if not config.reward_objective.reward_use_margin:
         return None
 
     margin = None
-    if config.reward_margin_source == "oracle_error":
+    if config.reward_objective.reward_margin_source == "oracle_error":
         if chosen_error is not None and rejected_error is not None:
             margin = rejected_error - chosen_error
     else:
@@ -405,8 +671,8 @@ def _compute_reward_margin(
     if margin is None:
         return None
 
-    if config.reward_margin_scale:
-        margin = margin / config.reward_margin_scale
+    if config.reward_objective.reward_margin_scale:
+        margin = margin / config.reward_objective.reward_margin_scale
 
     if margin <= 0:
         return None
@@ -443,17 +709,17 @@ def _load_model_for_training(
         )
 
     # Determine compute dtype
-    compute_dtype = getattr(torch, config.bnb_4bit_compute_dtype)
+    compute_dtype = getattr(torch, config.quantization.bnb_4bit_compute_dtype)
 
     # Quantization config
     quantization_config = None
-    if config.load_in_4bit:
+    if config.quantization.load_in_4bit:
         try:
             from transformers import BitsAndBytesConfig
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=compute_dtype,
-                bnb_4bit_quant_type=config.bnb_4bit_quant_type,
+                bnb_4bit_quant_type=config.quantization.bnb_4bit_quant_type,
             )
         except ImportError:
             logger.warning("bitsandbytes not available, skipping quantization")
@@ -469,6 +735,7 @@ def _load_model_for_training(
     }
     if is_reward_model:
         model_kwargs["num_labels"] = 1
+        model_kwargs["ignore_mismatched_sizes"] = True
 
     model = model_cls.from_pretrained(model_name, **model_kwargs)
 
@@ -479,14 +746,14 @@ def _load_model_for_training(
 
     # LoRA config
     peft_config = None
-    if config.use_lora:
+    if config.lora.use_lora:
         try:
             from peft import LoraConfig, TaskType
             peft_config = LoraConfig(
-                r=config.lora_r,
-                lora_alpha=config.lora_alpha,
-                lora_dropout=config.lora_dropout,
-                target_modules=config.lora_target_modules,
+                r=config.lora.lora_r,
+                lora_alpha=config.lora.lora_alpha,
+                lora_dropout=config.lora.lora_dropout,
+                target_modules=config.lora.lora_target_modules,
                 task_type=TaskType.SEQ_CLS if is_reward_model else TaskType.CAUSAL_LM,
             )
         except ImportError:
@@ -904,6 +1171,94 @@ def _build_weighted_reward_trainer(base_cls):
     return WeightedRewardTrainer
 
 
+def _build_scalar_reward_data_collator(tokenizer: Any, max_length: Optional[int]):
+    """Create a scalar-reward data collator that preserves sample_weight."""
+    import torch
+
+    class ScalarRewardDataCollator:
+        def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+            batch = tokenizer.pad(
+                [
+                    {
+                        "input_ids": feature["input_ids"],
+                        "attention_mask": feature["attention_mask"],
+                    }
+                    for feature in features
+                ],
+                padding=True,
+                max_length=max_length,
+                return_tensors="pt",
+            )
+            batch["labels"] = torch.tensor(
+                [float(feature["labels"]) for feature in features],
+                dtype=torch.float32,
+            )
+            batch["sample_weight"] = torch.tensor(
+                [float(feature.get("sample_weight", 1.0)) for feature in features],
+                dtype=torch.float32,
+            )
+            return batch
+
+    return ScalarRewardDataCollator()
+
+
+def _build_weighted_scalar_reward_trainer(
+    base_cls,
+    *,
+    loss_name: Literal["mse", "smooth_l1", "l1"] = "mse",
+    huber_delta: float = 1.0,
+):
+    """Create a Trainer subclass for scalar reward regression with IPW weights."""
+    import torch
+    import torch.nn.functional as F
+
+    class WeightedScalarRewardTrainer(base_cls):
+        def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+            del num_items_in_batch
+            labels = inputs.pop("labels")
+            raw_weights = inputs.pop("sample_weight", None)
+            outputs = model(**inputs)
+            logits = outputs.logits.squeeze(-1).reshape(-1)
+            labels = labels.to(device=logits.device, dtype=logits.dtype).reshape(-1)
+
+            if loss_name == "mse":
+                per_example_loss = (logits - labels) ** 2
+            elif loss_name == "l1":
+                per_example_loss = torch.abs(logits - labels)
+            elif loss_name == "smooth_l1":
+                per_example_loss = F.smooth_l1_loss(
+                    logits,
+                    labels,
+                    reduction="none",
+                    beta=float(huber_delta),
+                )
+            else:
+                raise ValueError(
+                    f"Unknown scalar reward loss: {loss_name!r}. "
+                    "Expected one of {'mse', 'smooth_l1', 'l1'}."
+                )
+
+            if bool(getattr(self, "apply_sample_weight", True)):
+                weights = _coerce_sample_weight_tensor(
+                    raw_weights,
+                    batch_size=per_example_loss.shape[0],
+                    device=per_example_loss.device,
+                )
+            else:
+                weights = None
+            if weights is None:
+                loss = per_example_loss.mean()
+            else:
+                denom = weights.sum().clamp(min=1e-12)
+                loss = (per_example_loss * weights).sum() / denom
+
+            if return_outputs:
+                return loss, outputs
+            return loss
+
+    return WeightedScalarRewardTrainer
+
+
 def _build_weighted_grpo_trainer(base_cls):
     """Create a GRPOTrainer subclass that applies per-example sample weights."""
     import torch
@@ -966,7 +1321,7 @@ def _build_weighted_grpo_trainer(base_cls):
 
 
 def train_dpo(
-    dataset: "PreferenceDataset",
+    dataset: TrainingSupervision,
     model_name: str,
     output_dir: Union[str, Path],
     config: Optional[TRLTrainingConfig] = None,
@@ -978,7 +1333,7 @@ def train_dpo(
     Train model using Direct Preference Optimization (DPO).
 
     Args:
-        dataset: PreferenceDataset with collected preferences
+        dataset: Preference or comparative supervision records
         model_name: HuggingFace model name to fine-tune
         output_dir: Directory to save trained model
         config: Training configuration (uses defaults if None)
@@ -1001,15 +1356,18 @@ def train_dpo(
     logger.info(f"Starting DPO training with model: {model_name}")
 
     # Convert preference data to HF format
-    dpo_data = dataset.to_preference_format(
-        "dpo",
+    dpo_data = build_dpo_training_records(
+        dataset,
         law_type=law_type,
         prompt_builder=prompt_builder,
+        tree_objective_weighting_mode=config.propensity_weighting.tree_objective_weighting_mode,
+        discount_gamma=config.propensity_weighting.discount_gamma,
     )
+    _log_treepo_weighting_summary(dpo_data, trainer_name="DPO", config=config)
     if (
-        config.use_propensity_weighting
-        and config.propensity_resample
-        and not config.propensity_native_loss_weighting
+        config.propensity_weighting.use_propensity_weighting
+        and config.propensity_weighting.propensity_resample
+        and not config.propensity_weighting.propensity_native_loss_weighting
     ):
         dpo_data = _resample_records_by_weight(dpo_data, config)
 
@@ -1026,23 +1384,23 @@ def train_dpo(
     # DPO config
     training_args = DPOConfig(
         output_dir=str(output_dir),
-        learning_rate=config.learning_rate,
-        num_train_epochs=config.num_train_epochs,
-        per_device_train_batch_size=config.per_device_train_batch_size,
-        gradient_accumulation_steps=config.gradient_accumulation_steps,
-        warmup_ratio=config.warmup_ratio,
-        max_length=config.max_length,
-        max_prompt_length=config.max_prompt_length,
-        beta=config.beta,
-        logging_steps=config.logging_steps,
-        save_steps=config.save_steps,
-        bf16=config.bf16,
-        gradient_checkpointing=config.gradient_checkpointing,
+        learning_rate=config.optimizer.learning_rate,
+        num_train_epochs=config.train.epochs,
+        per_device_train_batch_size=config.train.batch_size,
+        gradient_accumulation_steps=config.train.gradient_accumulation_steps,
+        warmup_ratio=config.optimizer.warmup_ratio,
+        max_length=config.sequence.max_length,
+        max_prompt_length=config.sequence.max_prompt_length,
+        beta=config.dpo.beta,
+        logging_steps=config.train.logging_steps,
+        save_steps=config.train.save_steps,
+        bf16=config.runtime.bf16,
+        gradient_checkpointing=config.runtime.gradient_checkpointing,
     )
 
     # Create trainer
     trainer_cls = DPOTrainer
-    if config.use_propensity_weighting and config.propensity_native_loss_weighting:
+    if config.propensity_weighting.use_propensity_weighting and config.propensity_weighting.propensity_native_loss_weighting:
         trainer_cls = _build_weighted_dpo_trainer(DPOTrainer)
 
     trainer = trainer_cls(
@@ -1066,7 +1424,7 @@ def train_dpo(
 
 
 def _build_grpo_train_records(
-    dataset: "PreferenceDataset",
+    dataset: TrainingSupervision,
     *,
     config: TRLTrainingConfig,
     law_type: Optional[str],
@@ -1078,44 +1436,48 @@ def _build_grpo_train_records(
     Reward functions may rely on `reference_score`/`original_text`, so these
     fields must survive any de-duplication or resampling path.
     """
-    prompt_records: List[Dict[str, Any]] = []
-    for pair in dataset.pairs:
-        if pair.preferred == "tie":
-            continue
-        if law_type is not None and pair.law_type != law_type:
-            continue
-        prompt_records.append(
-            {
-                "prompt": render_prompt(pair.original_text, pair.rubric, prompt_builder),
-                "sample_weight": pair.ipw_weight(max_weight=config.propensity_weight_clip),
-                "reference_score": pair.reference_score,
-                "original_text": pair.original_text,
-                "rubric": pair.rubric,
-                "law_type": pair.law_type,
-            }
-        )
+    prompt_records = build_group_grpo_training_records(
+        dataset,
+        law_type=law_type,
+        prompt_builder=prompt_builder,
+        tree_objective_weighting_mode=config.propensity_weighting.tree_objective_weighting_mode,
+        discount_gamma=config.propensity_weighting.discount_gamma,
+    )
+    _log_treepo_weighting_summary(prompt_records, trainer_name="GRPO prompts", config=config)
+    for record in prompt_records:
+        sample_weight = float(record.get("sample_weight", 1.0))
+        if config.propensity_weighting.propensity_weight_clip is not None:
+            sample_weight = min(sample_weight, float(config.propensity_weighting.propensity_weight_clip))
+        record["sample_weight"] = sample_weight
 
     if not prompt_records:
         return []
 
-    if config.use_propensity_weighting:
-        if config.propensity_resample and not config.propensity_native_loss_weighting:
+    if config.propensity_weighting.use_propensity_weighting:
+        if config.propensity_weighting.propensity_resample and not config.propensity_weighting.propensity_native_loss_weighting:
             logger.info(
                 "Using weighted prompt resampling fallback for GRPO (native weighting disabled)."
             )
             prompt_records = _resample_records_by_weight(prompt_records, config)
-        elif config.propensity_native_loss_weighting:
+        elif config.propensity_weighting.propensity_native_loss_weighting:
             logger.info(
                 "Using native GRPO sample-weighted advantages for propensity weighting."
             )
         return [
             {
                 "prompt": str(record.get("prompt", "")),
+                "responses": list(record.get("responses", []) or []),
+                "ranks": list(record.get("ranks", []) or []),
+                "scores": list(record.get("scores", []) or []),
+                "k": record.get("k"),
                 "sample_weight": float(record.get("sample_weight", 1.0)),
                 "reference_score": record.get("reference_score"),
                 "original_text": record.get("original_text"),
                 "rubric": record.get("rubric"),
                 "law_type": record.get("law_type"),
+                "preference_supervision": dict(record.get("preference_supervision", {}) or {}),
+                "comparative_signal": dict(record.get("comparative_signal", {}) or {}),
+                "metadata": dict(record.get("metadata", {}) or {}),
             }
             for record in prompt_records
             if str(record.get("prompt", "")).strip()
@@ -1136,18 +1498,25 @@ def _build_grpo_train_records(
         deduped.append(
             {
                 "prompt": prompt,
-                "sample_weight": 1.0,
+                "responses": list(record.get("responses", []) or []),
+                "ranks": list(record.get("ranks", []) or []),
+                "scores": list(record.get("scores", []) or []),
+                "k": record.get("k"),
+                "sample_weight": float(record.get("sample_weight", 1.0)),
                 "reference_score": reference_score,
                 "original_text": original_text,
                 "rubric": record.get("rubric"),
                 "law_type": record.get("law_type"),
+                "preference_supervision": dict(record.get("preference_supervision", {}) or {}),
+                "comparative_signal": dict(record.get("comparative_signal", {}) or {}),
+                "metadata": dict(record.get("metadata", {}) or {}),
             }
         )
     return deduped
 
 
 def train_grpo(
-    dataset: "PreferenceDataset",
+    dataset: TrainingSupervision,
     model_name: str,
     output_dir: Union[str, Path],
     config: Optional[TRLTrainingConfig] = None,
@@ -1162,7 +1531,7 @@ def train_grpo(
     them using reward functions. It does not consume offline ranked groups.
 
     Args:
-        dataset: PreferenceDataset used to extract prompts for training
+        dataset: Preference or comparative supervision used to extract prompts
         model_name: HuggingFace model name to fine-tune
         output_dir: Directory to save trained model
         config: Training configuration
@@ -1216,21 +1585,21 @@ def train_grpo(
     # GRPO config
     training_args = GRPOConfig(
         output_dir=str(output_dir),
-        learning_rate=config.learning_rate,
-        num_train_epochs=config.num_train_epochs,
-        per_device_train_batch_size=config.per_device_train_batch_size,
-        gradient_accumulation_steps=config.gradient_accumulation_steps,
-        warmup_ratio=config.warmup_ratio,
-        num_generations=config.num_generations,
-        logging_steps=config.logging_steps,
-        save_steps=config.save_steps,
-        bf16=config.bf16,
-        gradient_checkpointing=config.gradient_checkpointing,
+        learning_rate=config.optimizer.learning_rate,
+        num_train_epochs=config.train.epochs,
+        per_device_train_batch_size=config.train.batch_size,
+        gradient_accumulation_steps=config.train.gradient_accumulation_steps,
+        warmup_ratio=config.optimizer.warmup_ratio,
+        num_generations=config.grpo.num_generations,
+        logging_steps=config.train.logging_steps,
+        save_steps=config.train.save_steps,
+        bf16=config.runtime.bf16,
+        gradient_checkpointing=config.runtime.gradient_checkpointing,
     )
 
     # Create trainer
     trainer_cls = GRPOTrainer
-    if config.use_propensity_weighting and config.propensity_native_loss_weighting:
+    if config.propensity_weighting.use_propensity_weighting and config.propensity_weighting.propensity_native_loss_weighting:
         trainer_cls = _build_weighted_grpo_trainer(GRPOTrainer)
 
     trainer = trainer_cls(
@@ -1254,7 +1623,7 @@ def train_grpo(
 
 
 def train_reward_model(
-    dataset: "PreferenceDataset",
+    dataset: TrainingSupervision,
     model_name: str,
     output_dir: Union[str, Path],
     config: Optional[TRLTrainingConfig] = None,
@@ -1267,7 +1636,7 @@ def train_reward_model(
     The reward model learns to assign higher reward to preferred responses.
 
     Args:
-        dataset: PreferenceDataset with collected preferences
+        dataset: Preference or comparative supervision records
         model_name: HuggingFace model name to fine-tune
         output_dir: Directory to save trained model
         config: Training configuration
@@ -1289,55 +1658,36 @@ def train_reward_model(
     logger.info(f"Starting reward model training with model: {model_name}")
 
     # Build reward pairs (chosen/rejected) from preference data
-    reward_pairs = []
-    for pair in dataset.pairs:
-        if pair.preferred == "tie":
-            continue
-        if law_type is not None and pair.law_type != law_type:
-            continue
-
-        prompt = render_prompt(pair.original_text, pair.rubric, prompt_builder)
-
-        if pair.preferred == "A":
-            chosen = pair.summary_a
-            rejected = pair.summary_b
-            chosen_score = pair.score_estimate_a
-            rejected_score = pair.score_estimate_b
-            chosen_error = pair.oracle_error_a
-            rejected_error = pair.oracle_error_b
-        else:
-            chosen = pair.summary_b
-            rejected = pair.summary_a
-            chosen_score = pair.score_estimate_b
-            rejected_score = pair.score_estimate_a
-            chosen_error = pair.oracle_error_b
-            rejected_error = pair.oracle_error_a
-
+    reward_pairs = build_reward_model_training_records(
+        dataset,
+        law_type=law_type,
+        prompt_builder=prompt_builder,
+        tree_objective_weighting_mode=config.propensity_weighting.tree_objective_weighting_mode,
+        discount_gamma=config.propensity_weighting.discount_gamma,
+    )
+    _log_treepo_weighting_summary(reward_pairs, trainer_name="Reward", config=config)
+    for entry in reward_pairs:
+        sample_weight = float(entry.get("sample_weight", 1.0))
+        if config.propensity_weighting.propensity_weight_clip is not None:
+            sample_weight = min(sample_weight, float(config.propensity_weighting.propensity_weight_clip))
+        entry["sample_weight"] = sample_weight
         margin = _compute_reward_margin(
-            chosen_score,
-            rejected_score,
-            chosen_error,
-            rejected_error,
+            entry.get("chosen_score"),
+            entry.get("rejected_score"),
+            entry.get("chosen_error"),
+            entry.get("rejected_error"),
             config,
         )
-
-        entry = {
-            "prompt": prompt,
-            "chosen": chosen,
-            "rejected": rejected,
-            "sample_weight": pair.ipw_weight(max_weight=config.propensity_weight_clip),
-        }
         if margin is not None:
             entry["margin"] = margin
-        reward_pairs.append(entry)
 
     if not reward_pairs:
         raise ValueError("No reward pairs available after filtering")
 
     if (
-        config.use_propensity_weighting
-        and config.propensity_resample
-        and not config.propensity_native_loss_weighting
+        config.propensity_weighting.use_propensity_weighting
+        and config.propensity_weighting.propensity_resample
+        and not config.propensity_weighting.propensity_native_loss_weighting
     ):
         reward_pairs = _resample_records_by_weight(reward_pairs, config)
 
@@ -1349,7 +1699,7 @@ def train_reward_model(
     # RewardTrainer API compatibility: newer TRL expects raw chosen/rejected text
     # with `processing_class`, while older paths used pre-tokenized pair fields.
     trainer_cls = RewardTrainer
-    if config.use_propensity_weighting and config.propensity_native_loss_weighting:
+    if config.propensity_weighting.use_propensity_weighting and config.propensity_weighting.propensity_native_loss_weighting:
         trainer_cls = _build_weighted_reward_trainer(RewardTrainer)
     processing_kwargs = _build_processing_class_kwargs(trainer_cls, tokenizer)
     uses_processing_class = "processing_class" in processing_kwargs
@@ -1362,30 +1712,30 @@ def train_reward_model(
         train_dataset = _preference_to_hf_reward(
             reward_pairs,
             tokenizer=tokenizer,
-            max_length=config.max_length,
+            max_length=config.sequence.max_length,
         )
 
     # Reward training config
     training_args = RewardConfig(
         output_dir=str(output_dir),
-        learning_rate=config.learning_rate,
-        num_train_epochs=config.num_train_epochs,
-        per_device_train_batch_size=config.per_device_train_batch_size,
-        gradient_accumulation_steps=config.gradient_accumulation_steps,
-        warmup_ratio=config.warmup_ratio,
-        max_length=config.max_length,
-        logging_steps=config.logging_steps,
-        save_steps=config.save_steps,
-        bf16=config.bf16,
-        gradient_checkpointing=config.gradient_checkpointing,
+        learning_rate=config.optimizer.learning_rate,
+        num_train_epochs=config.train.epochs,
+        per_device_train_batch_size=config.train.batch_size,
+        gradient_accumulation_steps=config.train.gradient_accumulation_steps,
+        warmup_ratio=config.optimizer.warmup_ratio,
+        max_length=config.sequence.max_length,
+        logging_steps=config.train.logging_steps,
+        save_steps=config.train.save_steps,
+        bf16=config.runtime.bf16,
+        gradient_checkpointing=config.runtime.gradient_checkpointing,
     )
 
     # Create trainer
     data_collator = None
-    if config.use_propensity_weighting and config.propensity_native_loss_weighting:
+    if config.propensity_weighting.use_propensity_weighting and config.propensity_weighting.propensity_native_loss_weighting:
         data_collator = _build_weighted_reward_data_collator(
             tokenizer=tokenizer,
-            max_length=config.max_length,
+            max_length=config.sequence.max_length,
         )
 
     trainer = trainer_cls(
@@ -1408,6 +1758,328 @@ def train_reward_model(
     return str(output_dir / "final")
 
 
+def train_scalar_reward_model(
+    dataset: TrainingSupervision,
+    model_name: str,
+    output_dir: Union[str, Path],
+    config: Optional[TRLTrainingConfig] = None,
+    law_type: Optional[str] = None,
+    prompt_builder: Optional[PromptBuilder] = None,
+) -> str:
+    """Train a scalar reward regressor from response-level supervision."""
+    try:
+        from transformers import Trainer, TrainingArguments
+    except ImportError:
+        raise ImportError(
+            "transformers library required. Install with: pip install transformers"
+        )
+
+    config = config or TRLTrainingConfig()
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("Starting scalar reward model training with model: %s", model_name)
+
+    scalar_records = build_scalar_reward_training_records(
+        dataset,
+        law_type=law_type,
+        prompt_builder=prompt_builder,
+        tree_objective_weighting_mode=config.propensity_weighting.tree_objective_weighting_mode,
+        discount_gamma=config.propensity_weighting.discount_gamma,
+    )
+    _log_treepo_weighting_summary(
+        scalar_records,
+        trainer_name="Scalar reward",
+        config=config,
+    )
+    for entry in scalar_records:
+        sample_weight = float(entry.get("sample_weight", 1.0))
+        if config.propensity_weighting.propensity_weight_clip is not None:
+            sample_weight = min(sample_weight, float(config.propensity_weighting.propensity_weight_clip))
+        entry["sample_weight"] = sample_weight
+
+    if not scalar_records:
+        raise ValueError("No scalar reward records available after filtering")
+
+    apply_scalar_sample_weight = bool(
+        config.propensity_weighting.use_propensity_weighting and config.propensity_weighting.propensity_native_loss_weighting
+    )
+    if config.propensity_weighting.use_propensity_weighting and config.propensity_weighting.propensity_resample and not apply_scalar_sample_weight:
+        scalar_records = _resample_records_by_weight(scalar_records, config)
+
+    model, tokenizer, peft_config = _load_model_for_training(
+        model_name,
+        config,
+        is_reward_model=True,
+    )
+    if hasattr(model, "config"):
+        model.config.problem_type = "regression"
+
+    if peft_config is not None:
+        try:
+            from peft import get_peft_model
+
+            model = get_peft_model(model, peft_config)
+        except ImportError:
+            logger.warning("peft not available, training scalar reward model without LoRA")
+
+    train_dataset = _scalar_reward_to_hf_dataset(
+        scalar_records,
+        tokenizer=tokenizer,
+        max_length=config.sequence.max_length,
+    )
+
+    training_args = TrainingArguments(
+        output_dir=str(output_dir),
+        learning_rate=config.optimizer.learning_rate,
+        num_train_epochs=config.train.epochs,
+        per_device_train_batch_size=config.train.batch_size,
+        gradient_accumulation_steps=config.train.gradient_accumulation_steps,
+        warmup_ratio=config.optimizer.warmup_ratio,
+        logging_steps=config.train.logging_steps,
+        save_steps=config.train.save_steps,
+        bf16=config.runtime.bf16,
+        gradient_checkpointing=config.runtime.gradient_checkpointing,
+        remove_unused_columns=False,
+        report_to=[],
+    )
+
+    trainer_cls = _build_weighted_scalar_reward_trainer(
+        Trainer,
+        loss_name=config.reward_objective.scalar_reward_loss,
+        huber_delta=config.reward_objective.scalar_reward_huber_delta,
+    )
+    trainer = trainer_cls(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        data_collator=_build_scalar_reward_data_collator(
+            tokenizer=tokenizer,
+            max_length=config.sequence.max_length,
+        ),
+    )
+    trainer.apply_sample_weight = apply_scalar_sample_weight
+
+    logger.info("Starting scalar reward training...")
+    trainer.train()
+
+    final_dir = output_dir / "final"
+    trainer.save_model(str(final_dir))
+    tokenizer.save_pretrained(str(final_dir))
+    logger.info("Scalar reward training complete. Model saved to %s", final_dir)
+    return str(final_dir)
+
+
+def train_scalar_reward_records(
+    records: Sequence[Dict[str, Any]],
+    model_name: str,
+    output_dir: Union[str, Path],
+    config: Optional[TRLTrainingConfig] = None,
+    eval_records: Optional[Sequence[Dict[str, Any]]] = None,
+) -> str:
+    """Train a sequence-classification scalar regressor from exported rows.
+
+    ``records`` are already in the scalar-reward wire format:
+    ``{"prompt": str, "response": str, "score": float}``, with optional
+    ``sample_weight``.  This is the lightweight bridge used by labeled-tree
+    distillation when the scalar ``f`` student is a small LM rather than an
+    embedding proxy.
+    """
+    try:
+        from transformers import Trainer, TrainingArguments
+    except ImportError:
+        raise ImportError(
+            "transformers library required. Install with: pip install transformers"
+        )
+
+    config = config or TRLTrainingConfig()
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    scalar_records = [dict(record) for record in records]
+    if not scalar_records:
+        raise ValueError("No scalar reward records available after filtering")
+
+    for entry in scalar_records:
+        sample_weight = float(_extract_sample_weight(entry, default_weight=1.0))
+        if config.propensity_weighting.propensity_weight_clip is not None:
+            sample_weight = min(sample_weight, float(config.propensity_weighting.propensity_weight_clip))
+        entry["sample_weight"] = sample_weight
+
+    if (
+        config.propensity_weighting.use_propensity_weighting
+        and config.propensity_weighting.propensity_resample
+        and not config.propensity_weighting.propensity_native_loss_weighting
+    ):
+        scalar_records = _resample_records_by_weight(scalar_records, config)
+
+    apply_scalar_sample_weight = bool(
+        config.propensity_weighting.use_propensity_weighting and config.propensity_weighting.propensity_native_loss_weighting
+    )
+
+    model, tokenizer, peft_config = _load_model_for_training(
+        model_name,
+        config,
+        is_reward_model=True,
+    )
+    if hasattr(model, "config"):
+        model.config.problem_type = "regression"
+
+    if peft_config is not None:
+        try:
+            from peft import get_peft_model
+
+            model = get_peft_model(model, peft_config)
+        except ImportError:
+            logger.warning("peft not available, training scalar reward records without LoRA")
+
+    train_dataset = _scalar_reward_to_hf_dataset(
+        scalar_records,
+        tokenizer=tokenizer,
+        max_length=config.sequence.max_length,
+    )
+    eval_dataset = (
+        _scalar_reward_to_hf_dataset(
+            [dict(record) for record in eval_records],
+            tokenizer=tokenizer,
+            max_length=config.sequence.max_length,
+        )
+        if eval_records
+        else None
+    )
+
+    training_args = TrainingArguments(
+        output_dir=str(output_dir),
+        learning_rate=config.optimizer.learning_rate,
+        num_train_epochs=config.train.epochs,
+        per_device_train_batch_size=config.train.batch_size,
+        gradient_accumulation_steps=config.train.gradient_accumulation_steps,
+        warmup_ratio=config.optimizer.warmup_ratio,
+        logging_steps=config.train.logging_steps,
+        save_steps=config.train.save_steps,
+        eval_steps=config.validation.eval_steps if eval_dataset is not None else None,
+        bf16=config.runtime.bf16,
+        gradient_checkpointing=config.runtime.gradient_checkpointing,
+        remove_unused_columns=False,
+        report_to=[],
+    )
+
+    trainer_cls = _build_weighted_scalar_reward_trainer(
+        Trainer,
+        loss_name=config.reward_objective.scalar_reward_loss,
+        huber_delta=config.reward_objective.scalar_reward_huber_delta,
+    )
+    trainer_kwargs: Dict[str, Any] = dict(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        data_collator=_build_scalar_reward_data_collator(
+            tokenizer=tokenizer,
+            max_length=config.sequence.max_length,
+        ),
+    )
+    if eval_dataset is not None:
+        trainer_kwargs["eval_dataset"] = eval_dataset
+    trainer = trainer_cls(**trainer_kwargs)
+    trainer.apply_sample_weight = apply_scalar_sample_weight
+
+    logger.info("Starting scalar reward record training...")
+    trainer.train()
+
+    final_dir = output_dir / "final"
+    trainer.save_model(str(final_dir))
+    tokenizer.save_pretrained(str(final_dir))
+    logger.info("Scalar reward record training complete. Model saved to %s", final_dir)
+    return str(final_dir)
+
+
+def train_sft(
+    records: Sequence[Dict[str, str]],
+    model_name: str,
+    output_dir: Union[str, Path],
+    config: Optional[TRLTrainingConfig] = None,
+    eval_records: Optional[Sequence[Dict[str, str]]] = None,
+) -> str:
+    """Supervised fine-tuning via TRL's SFTTrainer with PEFT/LoRA + quantization.
+
+    Parallel to `train_dpo` / `train_grpo` / `train_reward_model` —
+    same `TRLTrainingConfig` controls use_lora, lora_r, target_modules,
+    load_in_4bit, learning_rate, etc. Uses `_load_model_for_training` so
+    SFT inherits identical LoRA and quantization handling as the preference
+    path.
+
+    `records` is a sequence of `{"prompt": str, "completion": str}` dicts
+    (or `{"text": str}` directly). The train tensor is the concatenated
+    "{prompt}\\n{completion}" text; TRL masks the prompt tokens in the loss.
+
+    Returns the path to the saved final model.
+    """
+    try:
+        from trl import SFTConfig, SFTTrainer
+    except ImportError:
+        raise ImportError("TRL library required. Install with: pip install trl>=0.7.0")
+    try:
+        from datasets import Dataset
+    except ImportError:
+        raise ImportError("datasets library required. Install with: pip install datasets")
+
+    config = config or TRLTrainingConfig()
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"Starting SFT training with model: {model_name}")
+
+    def _to_text(rec: Dict[str, Any]) -> Dict[str, str]:
+        if "text" in rec:
+            return {"text": str(rec["text"])}
+        prompt = str(rec.get("prompt", ""))
+        completion = str(rec.get("completion", ""))
+        return {"text": f"{prompt}\n{completion}"}
+
+    train_ds = Dataset.from_list([_to_text(r) for r in records])
+    eval_ds = (
+        Dataset.from_list([_to_text(r) for r in eval_records])
+        if eval_records else None
+    )
+
+    # Single source of truth: model + tokenizer + peft_config (NVFP4 / bitsandbytes
+    # 4-bit + LoRA all handled here identically to the DPO/GRPO/reward paths).
+    model, tokenizer, peft_config = _load_model_for_training(model_name, config)
+
+    sft_config = SFTConfig(
+        output_dir=str(output_dir),
+        learning_rate=float(config.optimizer.learning_rate),
+        num_train_epochs=int(config.train.epochs),
+        per_device_train_batch_size=int(config.train.batch_size),
+        gradient_accumulation_steps=int(config.train.gradient_accumulation_steps),
+        warmup_ratio=float(config.optimizer.warmup_ratio),
+        max_length=int(config.sequence.max_length),
+        logging_steps=int(config.train.logging_steps),
+        save_steps=int(config.train.save_steps),
+        bf16=config.runtime.bf16,
+        gradient_checkpointing=config.runtime.gradient_checkpointing,
+    )
+
+    trainer_kwargs: Dict[str, Any] = dict(
+        model=model,
+        args=sft_config,
+        train_dataset=train_ds,
+        **_build_processing_class_kwargs(SFTTrainer, tokenizer),
+    )
+    if peft_config is not None:
+        trainer_kwargs["peft_config"] = peft_config
+    if eval_ds is not None:
+        trainer_kwargs["eval_dataset"] = eval_ds
+
+    trainer = SFTTrainer(**trainer_kwargs)
+
+    logger.info("Starting SFT training...")
+    trainer.train()
+    trainer.save_model(str(output_dir / "final"))
+    logger.info(f"SFT training complete. Model saved to {output_dir / 'final'}")
+    return str(output_dir / "final")
+
+
 # =============================================================================
 # CLI Interface
 # =============================================================================
@@ -1417,11 +2089,11 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Train models using TRL (DPO, GRPO, Reward Model)"
+        description="Train models using TRL/HF (DPO, GRPO, pairwise reward, scalar reward)"
     )
     parser.add_argument(
         "--method",
-        choices=["dpo", "grpo", "reward"],
+        choices=["dpo", "grpo", "reward", "scalar_reward"],
         required=True,
         help="Training method (grpo requires reward_funcs; see train_grpo)",
     )
@@ -1429,7 +2101,7 @@ def main():
         "--dataset",
         type=Path,
         required=True,
-        help="Path to PreferenceDataset JSON file",
+        help="Path to supervision JSON file",
     )
     parser.add_argument(
         "--model",
@@ -1466,21 +2138,35 @@ def main():
         action="store_true",
         help="Disable LoRA (full fine-tuning)",
     )
+    parser.add_argument(
+        "--tree-objective-weighting-mode",
+        type=str,
+        default="legacy_channel",
+        choices=["legacy_channel", "discounted_tree"],
+        help="How TreePO supervision exports map objective weights into TRL sample weights.",
+    )
+    parser.add_argument(
+        "--discount-gamma",
+        type=float,
+        default=1.0,
+        help="Depth-discount factor for discounted TreePO weighting mode.",
+    )
 
     args = parser.parse_args()
 
-    # Import here to avoid circular imports
-    from src.training.preference.types import PreferenceDataset
-
     # Load dataset
     logger.info(f"Loading dataset from {args.dataset}")
-    dataset = PreferenceDataset.load(args.dataset)
+    dataset = SupervisionDataset.load(args.dataset)
 
     # Create config
     config = TRLTrainingConfig(
-        learning_rate=args.learning_rate,
-        num_train_epochs=args.epochs,
-        use_lora=not args.no_lora,
+        train=TrainConfig(epochs=args.epochs, batch_size=2, gradient_accumulation_steps=8),
+        optimizer=OptimizerConfig(learning_rate=args.learning_rate, warmup_ratio=0.1),
+        lora=TRLLoraConfig(use_lora=not args.no_lora),
+        propensity_weighting=TRLPropensityWeightingConfig(
+            tree_objective_weighting_mode=args.tree_objective_weighting_mode,
+            discount_gamma=args.discount_gamma,
+        ),
     )
 
     # Train
@@ -1490,6 +2176,14 @@ def main():
         train_grpo(dataset, args.model, args.output_dir, config, law_type=args.law_type)
     elif args.method == "reward":
         train_reward_model(dataset, args.model, args.output_dir, config, law_type=args.law_type)
+    elif args.method == "scalar_reward":
+        train_scalar_reward_model(
+            dataset,
+            args.model,
+            args.output_dir,
+            config,
+            law_type=args.law_type,
+        )
 
 
 if __name__ == "__main__":

@@ -189,3 +189,20 @@ class GenRMJudgeWrapper:
 def create_genrm_judge(config: Optional[JudgeConfig] = None) -> GenRMJudgeWrapper:
     """Factory function for creating GenRM judges."""
     return GenRMJudgeWrapper(config=config)
+
+
+from src.training.preference.genrm import (  # noqa: E402
+    GenRMErrorResult,
+    GenRMJudge,
+    GenRMResult,
+    is_genrm_error,
+)
+
+__all__ = [
+    "GenRMErrorResult",
+    "GenRMJudge",
+    "GenRMJudgeWrapper",
+    "GenRMResult",
+    "create_genrm_judge",
+    "is_genrm_error",
+]

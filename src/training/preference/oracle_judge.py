@@ -11,6 +11,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from src.core.async_utils import to_thread
 
 @dataclass
 class OracleJudgeResult:
@@ -124,7 +125,7 @@ class OraclePairwiseJudge:
         summary_b: str,
         law_type: str = "sufficiency",
     ) -> OracleJudgeResult:
-        return await asyncio.to_thread(
+        return await to_thread(
             self.compare,
             context=context,
             original_text=original_text,
@@ -135,4 +136,3 @@ class OraclePairwiseJudge:
 
 
 __all__ = ["OracleJudgeResult", "OraclePairwiseJudge"]
-

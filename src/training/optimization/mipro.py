@@ -78,8 +78,8 @@ class MIPROOptimizer(AbstractOptimizer):
         opt_kwargs = self._build_kwargs()
         compile_kwargs = self._build_compile_kwargs(trainset, kwargs)
 
-        compact_trainset = self._compact_trainset(student, trainset)
-        compact_valset = self._compact_trainset(student, valset or [])
+        compact_trainset, train_compaction = self._compact_trainset(student, trainset)
+        compact_valset, val_compaction = self._compact_trainset(student, valset or [])
         if compact_valset:
             compile_kwargs.setdefault("valset", compact_valset)
 
@@ -95,9 +95,28 @@ class MIPROOptimizer(AbstractOptimizer):
                 trainset=compact_trainset,
                 **compile_kwargs,
             )
+            self._update_compile_audit(
+                compile_status="completed",
+                optimizer_used=self.name,
+                fallback_reason="none",
+                input_mutation_flags={
+                    "train_compaction": train_compaction,
+                    "val_compaction": val_compaction,
+                },
+            )
             return compiled
 
         except Exception as e:
+            self._update_compile_audit(
+                compile_status="failed",
+                optimizer_used=self.name,
+                fallback_reason="none",
+                input_mutation_flags={
+                    "train_compaction": train_compaction,
+                    "val_compaction": val_compaction,
+                },
+                exception_summary=f"{type(e).__name__}: {e}",
+            )
             logger.error(f"MIPROv2 compilation failed: {e}")
             raise
 
@@ -158,10 +177,19 @@ class MIPROOptimizer(AbstractOptimizer):
         self,
         student: dspy.Module,
         examples: List[dspy.Example],
-    ) -> List[dspy.Example]:
+    ) -> tuple[List[dspy.Example], Dict[str, Any]]:
         """Drop optional heavy fields before MIPRO proposer stages."""
         if not examples:
-            return examples
+            return examples, {
+                "examples_before": 0,
+                "examples_after": 0,
+                "chars_before": 0,
+                "chars_after": 0,
+                "max_chars": 0,
+                "keep_original_content": True,
+                "truncated": False,
+                "dropped_optional_original_content": False,
+            }
 
         if self.config is None:
             max_chars = 0
@@ -205,7 +233,18 @@ class MIPROOptimizer(AbstractOptimizer):
                 max_chars,
                 keep_original,
             )
-        return compacted
+        return compacted, {
+            "examples_before": int(len(examples)),
+            "examples_after": int(len(compacted)),
+            "chars_before": int(chars_before),
+            "chars_after": int(chars_after),
+            "max_chars": int(max_chars),
+            "keep_original_content": bool(keep_original),
+            "truncated": bool(chars_after < chars_before),
+            "dropped_optional_original_content": bool(
+                drop_optional_original and not keep_original
+            ),
+        }
 
     def _required_forward_inputs(self, student: dspy.Module) -> tuple[Set[str], bool]:
         """Infer required forward parameters for the student module."""

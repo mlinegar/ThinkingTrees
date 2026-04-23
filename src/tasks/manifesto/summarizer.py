@@ -10,17 +10,16 @@ The key difference from the hardcoded prompts in batched_pipeline.py:
 - Demonstrations can be learned from training data
 
 Usage:
-    from src.tasks.manifesto import LeafSummarizer, MergeSummarizer
+    from src.tasks.manifesto import UnifiedManifestoG
 
     # Create modules
-    leaf_summarizer = LeafSummarizer()
-    merge_summarizer = MergeSummarizer()
+    g = UnifiedManifestoG()
 
     # Use directly
-    summary = leaf_summarizer(content="...", rubric="...")
+    summary = g(content="...", rubric="...")
 
     # Or optimize with DSPy GEPA
-    optimized = gepa.compile(leaf_summarizer, trainset=trainset)
+    optimized = gepa.compile(g, trainset=trainset)
 """
 
 import dspy
@@ -32,6 +31,7 @@ from src.core.summarization import (
     GenericMerger,
     SummarizationResult,
 )
+from .pipeline import UnifiedManifestoG
 
 
 # =============================================================================
@@ -86,48 +86,43 @@ class LeafSummarizer(dspy.Module):
     """
     Optimizable leaf summarization module for RILE preservation.
 
-    This module can be trained with DSPy's optimizers (GEPA, MIPROv2) to learn
-    the best instructions and demonstrations for preserving political
-    positioning information during summarization.
+    Honours the repo-wide two-tier output budget (see
+    ``pipeline.ManifestoSummarizer`` docstring): prompt carries a soft
+    target; API ``max_tokens`` caps at ``CONCAT_RATIO × input`` so
+    concatenation remains physically possible.
 
     Example:
         summarizer = LeafSummarizer()
-
-        # Direct use
         summary = summarizer(content="The party supports...", rubric=RILE_RUBRIC)
-
-        # With GEPA optimization
-        metric = create_rile_summarization_metric(oracle_classifier)
-        optimizer = dspy.GEPA(metric=metric, auto='light')
-        optimized_summarizer = optimizer.compile(summarizer, trainset=trainset)
     """
 
-    def __init__(self, use_cot: bool = False):
-        """
-        Initialize the leaf summarizer.
-
-        Args:
-            use_cot: Whether to use Chain-of-Thought reasoning (recommended for
-                     better preservation of nuanced political content)
-        """
+    def __init__(
+        self,
+        use_cot: bool = False,
+        *,
+        output_token_ratio: float | None = None,
+        target_token_ratio: float | None = None,
+    ):
         super().__init__()
+        from .pipeline_config import CONCAT_RATIO, DEFAULT_TARGET_RATIO
+        self.output_token_ratio = CONCAT_RATIO if output_token_ratio is None else float(output_token_ratio)
+        self.target_token_ratio = DEFAULT_TARGET_RATIO if target_token_ratio is None else float(target_token_ratio)
         if use_cot:
             self.summarize = dspy.ChainOfThought(RILELeafSummary)
         else:
             self.summarize = dspy.Predict(RILELeafSummary)
 
     def forward(self, content: str, rubric: str) -> str:
-        """
-        Generate a RILE-preserving summary of the content.
-
-        Args:
-            content: Raw political text chunk to summarize
-            rubric: Information preservation criteria
-
-        Returns:
-            Summary string preserving RILE-relevant information
-        """
-        result = self.summarize(content=content, rubric=rubric)
+        from .pipeline import compute_output_budget, _budget_instruction, _infer_context_window
+        ctx = _infer_context_window()
+        target, hmax = compute_output_budget(
+            content,
+            ratio=self.output_token_ratio,
+            target_ratio=self.target_token_ratio,
+            context_window=ctx,
+        )
+        effective_rubric = rubric + _budget_instruction(target, hmax)
+        result = self.summarize(content=content, rubric=effective_rubric, config={"max_tokens": int(hmax)})
         return result.summary
 
 
@@ -135,53 +130,44 @@ class MergeSummarizer(dspy.Module):
     """
     Optimizable merge summarization module for RILE preservation.
 
-    This module combines two summaries while preserving all political
-    positioning information from both. Can be trained separately from
-    leaf summarization since the task is different.
-
-    Example:
-        merger = MergeSummarizer()
-
-        # Direct use
-        merged = merger(
-            left_summary="Summary A...",
-            right_summary="Summary B...",
-            rubric=RILE_RUBRIC
-        )
-
-        # With optimization
-        optimized_merger = optimizer.compile(merger, trainset=merge_trainset)
+    Honours the repo-wide two-tier output budget. Inputs are two summaries
+    of total tokens ``T``; hard-max output ≤ ``CONCAT_RATIO × T`` so the
+    merger can *concatenate* when merging would lose information, with
+    the prompt nudging compression in the typical case.
     """
 
-    def __init__(self, use_cot: bool = False):
-        """
-        Initialize the merge summarizer.
-
-        Args:
-            use_cot: Whether to use Chain-of-Thought reasoning
-        """
+    def __init__(
+        self,
+        use_cot: bool = False,
+        *,
+        output_token_ratio: float | None = None,
+        target_token_ratio: float | None = None,
+    ):
         super().__init__()
+        from .pipeline_config import CONCAT_RATIO, DEFAULT_TARGET_RATIO
+        self.output_token_ratio = CONCAT_RATIO if output_token_ratio is None else float(output_token_ratio)
+        self.target_token_ratio = DEFAULT_TARGET_RATIO if target_token_ratio is None else float(target_token_ratio)
         if use_cot:
             self.merge = dspy.ChainOfThought(RILEMergeSummary)
         else:
             self.merge = dspy.Predict(RILEMergeSummary)
 
     def forward(self, left_summary: str, right_summary: str, rubric: str) -> str:
-        """
-        Merge two summaries while preserving RILE information.
-
-        Args:
-            left_summary: First summary to merge
-            right_summary: Second summary to merge
-            rubric: Information preservation criteria
-
-        Returns:
-            Merged summary string
-        """
+        """Merge two summaries while preserving RILE information."""
+        from .pipeline import compute_output_budget, _budget_instruction, _infer_context_window
+        ctx = _infer_context_window()
+        target, hmax = compute_output_budget(
+            left_summary + right_summary,
+            ratio=self.output_token_ratio,
+            target_ratio=self.target_token_ratio,
+            context_window=ctx,
+        )
+        effective_rubric = rubric + _budget_instruction(target, hmax)
         result = self.merge(
             left_summary=left_summary,
             right_summary=right_summary,
-            rubric=rubric
+            rubric=effective_rubric,
+            config={"max_tokens": int(hmax)},
         )
         return result.merged_summary
 
@@ -196,16 +182,21 @@ def create_summarizers(
     use_cot: bool = False,
 ) -> tuple:
     """
-    Create leaf and merge summarizer modules.
+    Create summarizer modules.
+
+    Manifesto active paths now use a unified ``g(content, rubric)`` module for
+    leaves and merges. This factory still returns a 2-tuple for compatibility;
+    the second element is ``None`` for the RILE-specific path and callers should
+    pass ``unified_mode=True`` to strategy wrappers.
 
     Args:
         use_rile_specific: Use RILE-specific signatures (recommended for manifesto work)
         use_cot: Use Chain-of-Thought reasoning
 
     Returns:
-        Tuple of (leaf_summarizer, merge_summarizer)
+        Tuple of (g_summarizer, legacy_merge_summarizer_or_none)
     """
     if use_rile_specific:
-        return LeafSummarizer(use_cot=use_cot), MergeSummarizer(use_cot=use_cot)
+        return UnifiedManifestoG(use_cot=use_cot), None
     else:
         return GenericSummarizer(use_cot=use_cot), GenericMerger(use_cot=use_cot)

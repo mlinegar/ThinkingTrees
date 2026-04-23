@@ -3,17 +3,17 @@
 Unified Model Training for OPS Framework.
 
 Consolidates training workflows into a single entry point:
-- ops-comparison: Train OPS comparison module from preference pairs
+- ops-comparison: Train OPS comparison module from supervision data
 
 Usage Examples:
-    # Train OPS comparison module from preference data
+    # Train OPS comparison module from supervision data
     python -m src.training.train_model --type ops-comparison \
-        --preference-data data/preferences/pairs.json \
+        --supervision-data data/preferences/supervision.json \
         --output-dir models/comparison
 
-    # Train OPS comparison module from preference data
+    # Train OPS comparison module from supervision data
     python -m src.training.train_model --type ops-comparison \
-        --preference-data data/preferences/pairs.json \
+        --supervision-data data/preferences/supervision.json \
         --output-dir models/comparison
 
     # Task-specific oracle training lives under the task package, e.g.:
@@ -36,7 +36,7 @@ logger = get_logger(__name__)
 # =============================================================================
 
 def preference_metric(example, prediction, trace=None) -> float:
-    """Metric for preference prediction accuracy."""
+    """Metric for binary projection accuracy."""
     predicted = str(getattr(prediction, "preferred", "")).upper().strip()
     actual = str(getattr(example, "preferred", "")).upper().strip()
 
@@ -64,18 +64,18 @@ def print_banner(title: str, config: dict) -> None:
 # =============================================================================
 
 def train_ops_comparison(args) -> None:
-    """Train OPS comparison module from preference pairs."""
+    """Train OPS comparison module from supervision judgments."""
     import dspy
     from src.config.dspy_config import configure_dspy
     from src.config.settings import load_settings
     from src.training.comparison import OPSComparisonModule
-    from src.training.preference import PreferenceDataset
+    from src.training.supervision import SupervisionDataset
 
-    if not args.preference_data or not args.preference_data.exists():
-        raise ValueError(f"Preference data required: {args.preference_data}")
+    if not args.supervision_data or not args.supervision_data.exists():
+        raise ValueError(f"Supervision data required: {args.supervision_data}")
 
     print_banner("OPS COMPARISON MODULE TRAINING", {
-        "Preference Data:": str(args.preference_data),
+        "Supervision Data:": str(args.supervision_data),
         "Law Type:": args.law_type,
         "Model:": args.model,
         "Port:": str(args.port),
@@ -84,18 +84,19 @@ def train_ops_comparison(args) -> None:
     })
 
     # Load and filter dataset
-    logger.info("Loading preference dataset...")
-    dataset = PreferenceDataset.load(args.preference_data)
+    logger.info("Loading supervision dataset...")
+    supervision = SupervisionDataset.load(args.supervision_data)
+    dataset = supervision.project_binary(projection="adjacent")
 
     if args.law_type != "all":
         pairs = [p for p in dataset.pairs if p.law_type == args.law_type]
-        dataset = PreferenceDataset(pairs)
+        dataset = dataset.__class__(pairs)
 
     if args.max_pairs:
-        dataset = PreferenceDataset(dataset.pairs[:args.max_pairs])
+        dataset = dataset.__class__(dataset.pairs[:args.max_pairs])
 
     if len(dataset) == 0:
-        raise ValueError("No preference pairs available after filtering")
+        raise ValueError("No binary supervision pairs available after filtering")
 
     weighted_dataset = dataset
     if hasattr(dataset, "resample_by_propensity"):
@@ -104,7 +105,7 @@ def train_ops_comparison(args) -> None:
             seed=args.seed,
         )
 
-    logger.info(f"Training on {len(dataset)} pairs (law_type={args.law_type})")
+    logger.info(f"Training on {len(dataset)} projected pairs (law_type={args.law_type})")
 
     # Configure LM
     settings = load_settings(args.config)
@@ -136,6 +137,8 @@ def train_ops_comparison(args) -> None:
         metric=preference_metric,
         auto=args.budget,
         num_threads=args.num_threads,
+        use_wandb=False,
+        use_mlflow=False,
     )
 
     compile_kwargs = {
@@ -158,6 +161,7 @@ def train_ops_comparison(args) -> None:
         "created_at": datetime.now().isoformat(),
         "type": "ops-comparison",
         "model_path": str(model_path),
+        "num_supervision_judgments": len(supervision),
         "num_pairs": len(dataset),
         "effective_pairs_after_resample": len(weighted_dataset),
         "law_type": args.law_type,
@@ -213,7 +217,14 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", action="store_true")
 
     # OPS comparison options
-    parser.add_argument("--preference-data", type=Path, default=None)
+    parser.add_argument(
+        "--supervision-data",
+        "--preference-data",
+        dest="supervision_data",
+        type=Path,
+        default=None,
+        help="Path to supervision JSON file",
+    )
     parser.add_argument("--law-type", type=str, default="all",
                        choices=["all", "sufficiency", "idempotence", "merge"])
     parser.add_argument("--max-pairs", type=int, default=None)

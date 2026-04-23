@@ -38,10 +38,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, TYPE_CHECKING, Union
 
+from src.training.supervision import (
+    BinaryComparison,
+    SupervisionDataset,
+    save_supervision_artifact_bundle,
+)
+
 if TYPE_CHECKING:
-    from src.training.preference.types import PreferenceDataset, PreferencePair
-    from src.training.preference.genrm import GenRMJudge
-    from src.training.preference.genrm_dspy import GenRMComparisonModule
+    from src.training.judges import GenRMJudge
+    from src.training.judges.genrm_dspy import GenRMComparisonModule
     from src.training.generator_trainers import BaseGeneratorTrainer
 
 logger = logging.getLogger(__name__)
@@ -153,7 +158,8 @@ class UnifiedTrainingResult:
 
     # Paths
     optimized_judge_path: Optional[Path] = None
-    final_preferences_path: Optional[Path] = None
+    final_supervision_path: Optional[Path] = None
+    final_binary_projection_path: Optional[Path] = None
 
 
 # =============================================================================
@@ -212,7 +218,7 @@ class UnifiedTrainer:
         # Track current state
         self._current_dspy_judge: Optional['GenRMComparisonModule'] = None
         self._current_generator_path: Optional[str] = None
-        self._all_preferences: List['PreferencePair'] = []
+        self._all_supervision_dataset = SupervisionDataset()
         self._iteration_history: List[UnifiedIterationResult] = []
 
     def train(
@@ -230,7 +236,7 @@ class UnifiedTrainer:
         Returns:
             UnifiedTrainingResult with training statistics and final paths
         """
-        from src.training.preference.genrm_dspy import GenRMComparisonModule
+        from src.training.judges.genrm_dspy import GenRMComparisonModule
 
         logger.info("=" * 60)
         logger.info("UNIFIED TRAINING LOOP - Starting")
@@ -283,7 +289,7 @@ class UnifiedTrainer:
 
         # Save final artifacts
         final_judge_path = self._save_final_judge()
-        final_prefs_path = self._save_all_preferences()
+        final_supervision_path, final_binary_projection_path = self._save_all_supervision()
 
         return UnifiedTrainingResult(
             converged=convergence_reason in ('accuracy_threshold', 'patience'),
@@ -294,7 +300,8 @@ class UnifiedTrainer:
             iterations=self._iteration_history,
             accuracy_history=[it.judge_accuracy_after for it in self._iteration_history],
             optimized_judge_path=final_judge_path,
-            final_preferences_path=final_prefs_path,
+            final_supervision_path=final_supervision_path,
+            final_binary_projection_path=final_binary_projection_path,
         )
 
     def _run_iteration(
@@ -319,20 +326,23 @@ class UnifiedTrainer:
             logger.info(f"        Collected {len(audit_prefs)} audit preferences")
 
         # Merge preferences
-        from src.training.preference.types import PreferenceDataset
         all_iteration_prefs = tournament_prefs + audit_prefs
-        self._all_preferences.extend(all_iteration_prefs)
-        preferences = PreferenceDataset(all_iteration_prefs)
+        iteration_supervision = SupervisionDataset(
+            comparative_judgments=[pref.to_comparative_judgment() for pref in all_iteration_prefs]
+        )
+        self._all_supervision_dataset.add_comparative_judgments(
+            list(iteration_supervision.comparative_judgments)
+        )
 
         # Step 3: Train generator
         logger.info("  [3/4] Training generator...")
         generator_trained = False
         generator_path = None
 
-        if len(preferences.pairs) >= self.config.min_preferences_for_training:
+        if len(iteration_supervision.project_binary(projection="adjacent").comparisons) >= self.config.min_preferences_for_training:
             try:
                 generator_path = self.generator_trainer.train(
-                    preferences=preferences,
+                    preferences=iteration_supervision,
                     model_name=self._get_generator_model_name(),
                     output_dir=self.output_dir / f"generator_iter{iteration}",
                 )
@@ -344,12 +354,13 @@ class UnifiedTrainer:
         else:
             logger.warning(
                 f"        Skipping generator training: "
-                f"{len(preferences.pairs)} < {self.config.min_preferences_for_training} preferences"
+                f"{len(iteration_supervision.project_binary(projection='adjacent').comparisons)} "
+                f"< {self.config.min_preferences_for_training} preferences"
             )
 
         # Step 4: Enrich with oracle and optimize judge
         logger.info("  [4/4] Optimizing judge...")
-        enriched = self._enrich_with_oracle(all_iteration_prefs, samples)
+        enriched = self._enrich_with_oracle(iteration_supervision, samples)
         accuracy_before = self._evaluate_judge(enriched)
 
         if len(enriched) >= 10:
@@ -384,8 +395,8 @@ class UnifiedTrainer:
         samples: List[Dict[str, Any]],
         rubric: str,
         iteration: int,
-    ) -> List['PreferencePair']:
-        """Build trees and collect preferences from tournaments."""
+    ) -> List[BinaryComparison]:
+        """Build trees and collect binary optimizer projections from tournaments."""
         from src.tree.builder import TreeBuilder, BuildConfig
         from src.core.strategy import CallableStrategy, TournamentStrategy, TournamentConfig
 
@@ -418,13 +429,13 @@ class UnifiedTrainer:
 
                 result = builder.build_sync(text, rubric)
 
-                # Tag preferences
+                binary_projection = result.supervision.project_binary(projection="adjacent")
                 doc_id = sample.get('doc_id', f"doc_{idx}")
-                for pref in result.preferences:
+                for pref in binary_projection.comparisons:
                     pref.source_example_id = doc_id
                     pref.reference_score = sample.get('reference_score')
 
-                all_preferences.extend(result.preferences)
+                all_preferences.extend(binary_projection.comparisons)
                 builder.reset()
 
             except Exception as e:
@@ -436,8 +447,8 @@ class UnifiedTrainer:
         self,
         samples: List[Dict[str, Any]],
         rubric: str,
-    ) -> List['PreferencePair']:
-        """Collect preferences from audit violations."""
+    ) -> List[BinaryComparison]:
+        """Collect binary optimizer projections from audit violations."""
         # This integrates with the audit system to find violations
         # and generate targeted preference pairs for them
         # For now, return empty - can be extended later
@@ -445,17 +456,17 @@ class UnifiedTrainer:
 
     def _enrich_with_oracle(
         self,
-        preferences: List['PreferencePair'],
+        supervision: SupervisionDataset,
         samples: List[Dict[str, Any]],
-    ) -> List['PreferencePair']:
-        """Add oracle scores to preferences."""
+    ) -> SupervisionDataset:
+        """Add oracle scores to supervision and return an enriched supervision dataset."""
         gt_lookup = {
             s.get('doc_id', f"doc_{i}"): s.get('reference_score')
             for i, s in enumerate(samples)
         }
 
         enriched = []
-        for pref in preferences:
+        for pref in supervision.project_binary(projection="adjacent").comparisons:
             try:
                 score_a = self.oracle_predict(pref.summary_a)
                 score_b = self.oracle_predict(pref.summary_b)
@@ -481,11 +492,13 @@ class UnifiedTrainer:
             except Exception as e:
                 logger.debug(f"Oracle enrichment failed: {e}")
 
-        return enriched
+        return SupervisionDataset(
+            comparative_judgments=[pref.to_comparative_judgment() for pref in enriched]
+        )
 
     def _optimize_judge(
         self,
-        preferences: List['PreferencePair'],
+        preferences,
         iteration: int,
     ) -> tuple['GenRMComparisonModule', dict]:
         """Train judge to predict oracle preferences using GEPA."""
@@ -525,10 +538,10 @@ class UnifiedTrainer:
 
     def _evaluate_judge(
         self,
-        preferences: List['PreferencePair'],
+        supervision: SupervisionDataset,
         judge: Optional['GenRMComparisonModule'] = None,
     ) -> float:
-        """Evaluate judge accuracy on oracle-labeled preferences."""
+        """Evaluate judge accuracy on oracle-labeled supervision."""
         from src.training.judge_optimization import derive_ground_truth_preference
 
         judge = judge or self._current_dspy_judge
@@ -538,7 +551,7 @@ class UnifiedTrainer:
         correct = 0
         total = 0
 
-        for pref in preferences:
+        for pref in supervision.project_binary(projection="adjacent").comparisons:
             try:
                 gt = derive_ground_truth_preference(pref, tie_margin=self.config.tie_margin)
                 if gt is None:
@@ -596,22 +609,28 @@ class UnifiedTrainer:
             logger.warning(f"Failed to save final judge: {e}")
             return None
 
-    def _save_all_preferences(self) -> Optional[Path]:
-        """Save all collected preferences."""
-        if not self._all_preferences:
-            return None
+    def _save_all_supervision(self) -> tuple[Optional[Path], Optional[Path]]:
+        """Save all collected supervision and an explicit binary optimizer export."""
+        if len(self._all_supervision_dataset) == 0:
+            return None, None
 
-        from src.training.preference.types import PreferenceDataset
-
-        prefs_path = self.output_dir / 'all_preferences.json'
+        supervision_path = self.output_dir / 'all_supervision.json'
+        binary_projection_path = self.output_dir / 'all_binary_projection.json'
         try:
-            dataset = PreferenceDataset(self._all_preferences)
-            dataset.save(prefs_path)
-            logger.info(f"Saved {len(self._all_preferences)} preferences to {prefs_path}")
-            return prefs_path
+            save_supervision_artifact_bundle(
+                self._all_supervision_dataset,
+                supervision_path=supervision_path,
+            )
+            logger.info("Saved collected supervision to %s", supervision_path)
+            if len(self._all_supervision_dataset.project_binary(projection="adjacent")) > 0:
+                self._all_supervision_dataset.project_binary(
+                    projection="adjacent"
+                ).save(binary_projection_path)
+                return supervision_path, binary_projection_path
+            return supervision_path, None
         except Exception as e:
-            logger.warning(f"Failed to save preferences: {e}")
-            return None
+            logger.warning(f"Failed to save collected supervision: {e}")
+            return None, None
 
     # =========================================================================
     # Public Properties
@@ -628,9 +647,14 @@ class UnifiedTrainer:
         return self._current_generator_path
 
     @property
-    def all_preferences(self) -> List['PreferencePair']:
-        """Get all collected preferences."""
-        return self._all_preferences.copy()
+    def all_binary_projection(self) -> List[BinaryComparison]:
+        """Get all collected binary optimizer projections."""
+        return list(self._all_supervision_dataset.project_binary(projection="adjacent").comparisons)
+
+    @property
+    def all_supervision_dataset(self) -> SupervisionDataset:
+        """Get all collected supervision as the primary dataset surface."""
+        return self._all_supervision_dataset
 
     @property
     def history(self) -> List[UnifiedIterationResult]:

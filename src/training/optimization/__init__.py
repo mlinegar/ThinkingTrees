@@ -11,6 +11,13 @@ from src.training.optimization.base import (
     BaseOptimizer,
     AbstractOptimizer,
 )
+from src.training.optimization.performance import (
+    OptimizerRunRecord,
+    OptimizerCellSummary,
+    dataset_regime_label,
+    metric_gain,
+    summarize_optimizer_runs,
+)
 
 # Registry
 from src.training.optimization.registry import (
@@ -52,6 +59,8 @@ from src.training.optimization.optimizer import (
 __all__ = [
     # Base
     "OptimizationResult",
+    "OptimizerRunRecord",
+    "OptimizerCellSummary",
     "BaseOptimizer",
     "AbstractOptimizer",
     # Registry
@@ -60,6 +69,9 @@ __all__ = [
     "get_optimizer",
     "auto_select_optimizer",
     "list_optimizers",
+    "dataset_regime_label",
+    "metric_gain",
+    "summarize_optimizer_runs",
     # Implementations
     "GEPAOptimizer",
     "BootstrapOptimizer",

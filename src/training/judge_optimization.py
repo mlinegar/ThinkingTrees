@@ -29,15 +29,40 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Callable
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Callable, Sequence, Union
 
 import dspy
 
 from src.core.prompting import clean_summary_text
-from src.training.preference.genrm_dspy import GenRMComparisonModule
-from src.training.preference import PreferencePair
+from src.training.judges.genrm_dspy import GenRMComparisonModule
+from src.training.supervision import (
+    BinaryComparison,
+    SupervisionDataset,
+    coerce_supervision_dataset,
+)
+from src.training.supervision.adapters import (
+    prepare_binary_optimizer_dataset,
+)
+from src.training.supervision.judge_capabilities import invoke_pairwise_judgment_sync
+from src.training.supervision.timing import (
+    ACQUISITION_SYNCHRONOUS_OPTIMIZER_METRIC,
+    ACTIVATION_IMMEDIATE,
+    CONSUMER_JUDGE_GEPA_OPTIMIZER,
+    supervision_timing_contract,
+)
 
-PreferenceLabeler = Callable[[PreferencePair, float], Optional[str]]
+if TYPE_CHECKING:
+    from src.training.supervision import ComparativeDataset, PreferenceDataset
+    from src.training.supervision.comparative_types import ComparativeJudgmentRecord
+
+PreferenceLabeler = Callable[[BinaryComparison, float], Optional[str]]
+OptimizerSupervision = Union[
+    SupervisionDataset,
+    "PreferenceDataset",
+    "ComparativeDataset",
+    Sequence[BinaryComparison],
+    Sequence["ComparativeJudgmentRecord"],
+]
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +129,7 @@ RANKING_SCALE_HALF_RANGE = 2.5  # Distance from center to extremes: (6-1)/2
 # =============================================================================
 
 def derive_ground_truth_preference(
-    pair: PreferencePair,
+    pair: BinaryComparison,
     tie_margin: float = 0.5,
     preference_labeler: Optional[PreferenceLabeler] = None,
 ) -> Optional[str]:
@@ -116,7 +141,7 @@ def derive_ground_truth_preference(
     - Otherwise, requires a preference_labeler to provide ground truth.
 
     Args:
-        pair: PreferencePair with optional score estimates
+        pair: BinaryComparison with optional score estimates
         tie_margin: Score difference below this is considered a tie
         preference_labeler: Optional override for custom metrics
 
@@ -140,7 +165,7 @@ def make_preference_labeler(
     prefer_lower: bool = False,
 ) -> PreferenceLabeler:
     """
-    Create a preference labeler from a metric stored on PreferencePair.
+    Create a preference labeler from a metric stored on a binary supervision row.
 
     Args:
         metric_name: Base metric name (e.g., "oracle_error", "score_estimate")
@@ -149,7 +174,7 @@ def make_preference_labeler(
     metric_a_field = f"{metric_name}_a"
     metric_b_field = f"{metric_name}_b"
 
-    def _label(pair: PreferencePair, tie_margin: float = 0.5) -> Optional[str]:
+    def _label(pair: BinaryComparison, tie_margin: float = 0.5) -> Optional[str]:
         value_a = getattr(pair, metric_a_field, None)
         value_b = getattr(pair, metric_b_field, None)
         if value_a is None or value_b is None:
@@ -167,7 +192,7 @@ def make_preference_labeler(
 
 
 def create_judge_trainset(
-    pairs: List[PreferencePair],
+    pairs: List[BinaryComparison],
     tie_margin: float = 0.5,
     use_oracle_as_ground_truth: bool = True,
     preference_labeler: Optional[PreferenceLabeler] = None,
@@ -176,7 +201,7 @@ def create_judge_trainset(
     Create DSPy training examples for judge optimization.
 
     Args:
-        pairs: List of PreferencePair objects
+        pairs: List of binary supervision rows
         tie_margin: Score difference below this is considered a tie
         use_oracle_as_ground_truth: If True, derive ground truth from oracle scores.
                                    If False, use the existing 'preferred' field.
@@ -431,7 +456,7 @@ class JudgeOptimizer:
 
     def optimize(
         self,
-        pairs: List[PreferencePair],
+        supervision: OptimizerSupervision,
         use_oracle_as_ground_truth: bool = True,
         initial_judge: Optional[GenRMComparisonModule] = None,
     ) -> Tuple[GenRMComparisonModule, dict]:
@@ -439,27 +464,35 @@ class JudgeOptimizer:
         Optimize GenRMComparisonModule using GEPA.
 
         Args:
-            pairs: List of PreferencePair for training
+            supervision: Canonical supervision records for training
             use_oracle_as_ground_truth: Derive ground truth from oracle scores
             initial_judge: Optional starting judge (used for baseline + warm start)
 
         Returns:
             Tuple of (optimized_judge, evaluation_results)
         """
-        from src.training.preference.types import compute_propensity_diagnostics
+        from src.training.supervision import compute_propensity_diagnostics
 
-        weighted_pairs = pairs
-        if self.config.use_propensity_weighting and pairs:
-            from src.training.preference.types import PreferenceDataset
+        input_supervision = coerce_supervision_dataset(supervision)
+        input_dataset = input_supervision.project_binary(projection="adjacent")
+        optimizer_dataset = prepare_binary_optimizer_dataset(
+            input_dataset,
+            projection="adjacent",
+            keep_existing=True,
+        )
+        optimizer_pairs = list(optimizer_dataset.pairs)
 
-            weighted_pairs = PreferenceDataset(pairs).resample_by_propensity(
-                target_size=len(pairs),
+        weighted_dataset = optimizer_dataset
+        if self.config.use_propensity_weighting and optimizer_pairs:
+            weighted_dataset = optimizer_dataset.resample_by_propensity(
+                target_size=len(optimizer_pairs),
                 seed=self.config.propensity_random_seed,
                 max_weight=self.config.propensity_weight_clip,
-            ).pairs
+            )
+        weighted_pairs = list(weighted_dataset.pairs)
 
         propensity_input = compute_propensity_diagnostics(
-            pairs, include_ties=False, max_weight=self.config.propensity_weight_clip
+            optimizer_pairs, include_ties=False, max_weight=self.config.propensity_weight_clip
         )
         propensity_weighted = compute_propensity_diagnostics(
             weighted_pairs, include_ties=False, max_weight=self.config.propensity_weight_clip
@@ -487,12 +520,28 @@ class JudgeOptimizer:
             logger.warning(f"Only {len(all_examples)} examples, returning unoptimized judge")
             return judge_module, {
                 'error': 'insufficient_data',
-                'total_pairs_input': len(pairs),
+                'total_pairs_input': len(optimizer_pairs),
                 'total_pairs_weighted': len(weighted_pairs),
+                'total_comparative_input': len(input_supervision.comparative_judgments),
                 'propensity_diagnostics': {
                     'input': propensity_input,
                     'weighted': propensity_weighted,
                 },
+                'supervision_timing': supervision_timing_contract(
+                    acquisition_policy=ACQUISITION_SYNCHRONOUS_OPTIMIZER_METRIC,
+                    activation_barrier=ACTIVATION_IMMEDIATE,
+                    consumer=CONSUMER_JUDGE_GEPA_OPTIMIZER,
+                    producer="judge_accuracy_metric",
+                    delivery_mode="dspy_gepa_metric",
+                    blocking=True,
+                    notes=(
+                        "Judge GEPA optimization would consume metric feedback synchronously, but optimization was skipped for insufficient data.",
+                    ),
+                    metadata={
+                        "examples_available": len(all_examples),
+                        "budget": str(self.config.budget),
+                    },
+                ),
             }
 
         # Split train/test
@@ -509,6 +558,24 @@ class JudgeOptimizer:
             judge_accuracy_with_confidence if self.config.use_confidence_metric
             else judge_accuracy_metric
         )
+        supervision_timing = supervision_timing_contract(
+            acquisition_policy=ACQUISITION_SYNCHRONOUS_OPTIMIZER_METRIC,
+            activation_barrier=ACTIVATION_IMMEDIATE,
+            consumer=CONSUMER_JUDGE_GEPA_OPTIMIZER,
+            producer="judge_accuracy_metric",
+            delivery_mode="dspy_gepa_metric",
+            blocking=True,
+            notes=(
+                "Judge GEPA optimization consumes metric feedback synchronously during compile().",
+                "Feedback is active immediately for GEPA candidate ranking and reflection.",
+            ),
+            metadata={
+                "train_size": len(trainset),
+                "test_size": len(testset),
+                "budget": str(self.config.budget),
+                "use_confidence_metric": bool(self.config.use_confidence_metric),
+            },
+        )
 
         # Evaluate baseline
         baseline_results = self._evaluate(judge_module, testset)
@@ -519,6 +586,8 @@ class JudgeOptimizer:
             metric=metric_fn,
             auto=self.config.budget,
             num_threads=self.config.num_threads,
+            use_wandb=False,
+            use_mlflow=False,
         )
 
         # Run optimization
@@ -541,12 +610,14 @@ class JudgeOptimizer:
             'test_size': len(testset),
             'budget': self.config.budget,
             'skipped_pairs': skipped_reasons.to_dict(),
-            'total_pairs_input': len(pairs),
+            'total_pairs_input': len(optimizer_pairs),
             'total_pairs_weighted': len(weighted_pairs),
+            'total_comparative_input': len(input_supervision.comparative_judgments),
             'propensity_diagnostics': {
                 'input': propensity_input,
                 'weighted': propensity_weighted,
             },
+            'supervision_timing': supervision_timing,
         }
 
         return optimized_judge, results
@@ -562,15 +633,16 @@ class JudgeOptimizer:
 
         for example in testset:
             try:
-                result = judge.forward(
+                result = invoke_pairwise_judgment_sync(
                     context=example.context,
                     original_text=example.original_text,
                     summary_a=example.summary_a,
                     summary_b=example.summary_b,
+                    judge=judge,
                     law_type=example.law_type,
                 )
 
-                predicted = getattr(result, 'preference', 'tie')
+                predicted = result.preferred
                 ground_truth = example.ground_truth_preference
 
                 total += 1
@@ -621,7 +693,7 @@ class JudgeOptimizer:
 # =============================================================================
 
 def optimize_judge_from_preferences(
-    preferences: List[PreferencePair],
+    preferences: OptimizerSupervision,
     budget: str = 'light',
     num_threads: int = 4,
     output_path: Optional[Path] = None,

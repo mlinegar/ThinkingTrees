@@ -5,7 +5,7 @@ This module provides a protocol and implementations for different generator
 training methods. The unified trainer can use any of these methods interchangeably.
 
 Supported Methods:
-- DPO (Direct Preference Optimization): TRL-based, uses preference pairs
+- DPO (Direct Preference Optimization): TRL-based, projects comparative supervision to pairs
 - SFT (Supervised Fine-Tuning): TRL-based, uses tournament winners
 - GRPO (Group Relative Policy Optimization): TRL-based, online with reward functions
 - BootstrapFinetune: DSPy-based, teacher-student distillation
@@ -34,6 +34,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Protocol, Tuple, Type, Union, runtime_checkable
 
+from src.training.supervision import (
+    BinaryProjectionDataset,
+    SupervisionDataset,
+    coerce_supervision_dataset,
+    render_prompt,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,7 +59,7 @@ class GeneratorTrainer(Protocol):
 
     def train(
         self,
-        preferences: "PreferenceDataset",
+        preferences: Union[BinaryProjectionDataset, SupervisionDataset],
         model_name: str,
         output_dir: Union[str, Path],
         **kwargs,
@@ -61,7 +68,7 @@ class GeneratorTrainer(Protocol):
         Train generator on preference data.
 
         Args:
-            preferences: PreferenceDataset with collected preferences
+            preferences: SupervisionDataset as the primary input surface
             model_name: HuggingFace model name to fine-tune
             output_dir: Directory to save trained model
             **kwargs: Method-specific arguments
@@ -112,7 +119,7 @@ class GeneratorTrainerConfig:
     propensity_weight_clip: Optional[float] = None
     propensity_random_seed: int = 42
     propensity_sampling_strategy: str = "pps_systematic"
-    propensity_stratify_by: Optional[str] = "law_type"
+    propensity_stratify_key: Optional[str] = "law_type"
 
 
 # =============================================================================
@@ -187,7 +194,7 @@ class BaseGeneratorTrainer(ABC):
     @abstractmethod
     def train(
         self,
-        preferences: "PreferenceDataset",
+        preferences: Union[BinaryProjectionDataset, SupervisionDataset],
         model_name: str,
         output_dir: Union[str, Path],
         **kwargs,
@@ -207,7 +214,7 @@ class BaseGeneratorTrainer(ABC):
 
     def _prepare_pairs(
         self,
-        preferences: "PreferenceDataset",
+        preferences: Union[BinaryProjectionDataset, SupervisionDataset],
         law_type: Optional[str] = None,
     ) -> List[Any]:
         """
@@ -216,8 +223,12 @@ class BaseGeneratorTrainer(ABC):
         The global default propensity is uniform (all ones), so resampling is
         a no-op in the absence of logged non-uniform propensities.
         """
+        projected_dataset = coerce_supervision_dataset(preferences).project_binary(
+            projection="adjacent"
+        )
+
         pairs = [
-            pair for pair in preferences.pairs
+            pair for pair in projected_dataset.pairs
             if pair.preferred != "tie" and (law_type is None or pair.law_type == law_type)
         ]
         if not pairs:
@@ -226,16 +237,14 @@ class BaseGeneratorTrainer(ABC):
         if not self.config.use_propensity_weighting or not self.config.propensity_resample:
             return pairs
 
-        from src.training.preference.types import PreferenceDataset
-
-        sampled = PreferenceDataset(pairs).sample_by_propensity(
+        sampled = BinaryProjectionDataset(comparisons=pairs).sample_by_propensity(
             target_size=len(pairs),
             seed=self.config.propensity_random_seed,
             max_weight=self.config.propensity_weight_clip,
             strategy=self.config.propensity_sampling_strategy,
-            stratify_by=self.config.propensity_stratify_by,
+            stratify_by=self.config.propensity_stratify_key,
         )
-        return sampled.pairs
+        return sampled.comparisons
 
 
 # =============================================================================
@@ -257,7 +266,7 @@ class DPOGeneratorTrainer(BaseGeneratorTrainer):
 
     def train(
         self,
-        preferences: "PreferenceDataset",
+        preferences: Union[BinaryProjectionDataset, SupervisionDataset],
         model_name: str,
         output_dir: Union[str, Path],
         law_type: Optional[str] = None,
@@ -268,7 +277,7 @@ class DPOGeneratorTrainer(BaseGeneratorTrainer):
         Train using DPO.
 
         Args:
-            preferences: PreferenceDataset with collected preferences
+            preferences: SupervisionDataset or binary projection dataset
             model_name: HuggingFace model name to fine-tune
             output_dir: Directory to save trained model
             law_type: Optional filter for specific law type
@@ -278,34 +287,50 @@ class DPOGeneratorTrainer(BaseGeneratorTrainer):
         Returns:
             Path to saved model
         """
-        from src.training.trl_training import train_dpo, TRLTrainingConfig
+        from src.training.config_sections import OptimizerConfig, RuntimeConfig, TrainConfig
+        from src.training.trl_training import (
+            TRLLoraConfig,
+            TRLPropensityWeightingConfig,
+            TRLQuantizationConfig,
+            TRLSequenceConfig,
+            TRLTrainingConfig,
+            train_dpo,
+        )
 
         logger.info(f"Starting {self.method_name} training with model: {model_name}")
 
         # Create TRL config from our config
         trl_config = TRLTrainingConfig(
-            learning_rate=self.config.learning_rate,
-            num_train_epochs=self.config.num_train_epochs,
-            per_device_train_batch_size=self.config.per_device_train_batch_size,
-            gradient_accumulation_steps=self.config.gradient_accumulation_steps,
-            warmup_ratio=self.config.warmup_ratio,
-            max_length=self.config.max_length,
-            use_lora=self.config.use_lora,
-            lora_r=self.config.lora_r,
-            lora_alpha=self.config.lora_alpha,
-            lora_dropout=self.config.lora_dropout,
-            lora_target_modules=self.config.lora_target_modules,
-            load_in_4bit=self.config.load_in_4bit,
-            bf16=self.config.bf16,
-            logging_steps=self.config.logging_steps,
-            save_steps=self.config.save_steps,
-            use_propensity_weighting=self.config.use_propensity_weighting,
-            propensity_resample=self.config.propensity_resample,
-            propensity_native_loss_weighting=self.config.propensity_native_loss_weighting,
-            propensity_weight_clip=self.config.propensity_weight_clip,
-            propensity_random_seed=self.config.propensity_random_seed,
-            propensity_sampling_strategy=self.config.propensity_sampling_strategy,
-            propensity_stratify_key=self.config.propensity_stratify_by,
+            train=TrainConfig(
+                epochs=self.config.num_train_epochs,
+                batch_size=self.config.per_device_train_batch_size,
+                gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+                logging_steps=self.config.logging_steps,
+                save_steps=self.config.save_steps,
+            ),
+            optimizer=OptimizerConfig(
+                learning_rate=self.config.learning_rate,
+                warmup_ratio=self.config.warmup_ratio,
+            ),
+            runtime=RuntimeConfig(bf16=self.config.bf16, gradient_checkpointing=True),
+            sequence=TRLSequenceConfig(max_length=self.config.max_length),
+            lora=TRLLoraConfig(
+                use_lora=self.config.use_lora,
+                lora_r=self.config.lora_r,
+                lora_alpha=self.config.lora_alpha,
+                lora_dropout=self.config.lora_dropout,
+                lora_target_modules=self.config.lora_target_modules,
+            ),
+            quantization=TRLQuantizationConfig(load_in_4bit=self.config.load_in_4bit),
+            propensity_weighting=TRLPropensityWeightingConfig(
+                use_propensity_weighting=self.config.use_propensity_weighting,
+                propensity_resample=self.config.propensity_resample,
+                propensity_native_loss_weighting=self.config.propensity_native_loss_weighting,
+                propensity_weight_clip=self.config.propensity_weight_clip,
+                propensity_random_seed=self.config.propensity_random_seed,
+                propensity_sampling_strategy=self.config.propensity_sampling_strategy,
+                propensity_stratify_key=self.config.propensity_stratify_key,
+            ),
         )
 
         return train_dpo(
@@ -338,7 +363,7 @@ class SFTGeneratorTrainer(BaseGeneratorTrainer):
 
     def train(
         self,
-        preferences: "PreferenceDataset",
+        preferences: Union[BinaryProjectionDataset, SupervisionDataset],
         model_name: str,
         output_dir: Union[str, Path],
         law_type: Optional[str] = None,
@@ -348,7 +373,7 @@ class SFTGeneratorTrainer(BaseGeneratorTrainer):
         Train using SFT on tournament winners.
 
         Args:
-            preferences: PreferenceDataset (winners extracted from preferences)
+            preferences: SupervisionDataset or binary projection dataset
             model_name: HuggingFace model name to fine-tune
             output_dir: Directory to save trained model
             law_type: Optional filter for specific law type
@@ -372,8 +397,6 @@ class SFTGeneratorTrainer(BaseGeneratorTrainer):
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Extract winners from preferences
-        from src.training.preference.types import render_prompt
-
         sft_data = []
         for pair in self._prepare_pairs(preferences, law_type=law_type):
 
@@ -493,7 +516,7 @@ class GRPOGeneratorTrainer(BaseGeneratorTrainer):
 
     def train(
         self,
-        preferences: "PreferenceDataset",
+        preferences: Union[BinaryProjectionDataset, SupervisionDataset],
         model_name: str,
         output_dir: Union[str, Path],
         law_type: Optional[str] = None,
@@ -504,7 +527,7 @@ class GRPOGeneratorTrainer(BaseGeneratorTrainer):
         Train using GRPO with online generation.
 
         Args:
-            preferences: PreferenceDataset (prompts extracted from preferences)
+            preferences: SupervisionDataset or binary projection dataset
             model_name: HuggingFace model name to fine-tune
             output_dir: Directory to save trained model
             law_type: Optional filter for specific law type
@@ -516,14 +539,23 @@ class GRPOGeneratorTrainer(BaseGeneratorTrainer):
         Returns:
             Path to saved model
         """
-        from src.training.trl_training import train_grpo, TRLTrainingConfig
+        from src.training.config_sections import OptimizerConfig, RuntimeConfig, TrainConfig
+        from src.training.trl_training import (
+            TRLGRPOConfig,
+            TRLLoraConfig,
+            TRLPropensityWeightingConfig,
+            TRLQuantizationConfig,
+            TRLSequenceConfig,
+            TRLTrainingConfig,
+            train_grpo,
+        )
 
         logger.info(f"Starting {self.method_name} training with model: {model_name}")
 
         # Create reward function from GenRM if not provided
         if reward_funcs is None:
             if self.genrm_judge is not None:
-                from src.training.preference.genrm_reward import create_genrm_reward_func
+                from src.training.supervision.rewards import create_genrm_reward_func
                 reward_funcs = create_genrm_reward_func(self.genrm_judge)
             else:
                 raise ValueError(
@@ -533,29 +565,37 @@ class GRPOGeneratorTrainer(BaseGeneratorTrainer):
 
         # Create TRL config
         trl_config = TRLTrainingConfig(
-            learning_rate=self.config.learning_rate,
-            num_train_epochs=self.config.num_train_epochs,
-            per_device_train_batch_size=self.config.per_device_train_batch_size,
-            gradient_accumulation_steps=self.config.gradient_accumulation_steps,
-            warmup_ratio=self.config.warmup_ratio,
-            max_length=self.config.max_length,
-            num_generations=self.num_generations,
-            use_lora=self.config.use_lora,
-            lora_r=self.config.lora_r,
-            lora_alpha=self.config.lora_alpha,
-            lora_dropout=self.config.lora_dropout,
-            lora_target_modules=self.config.lora_target_modules,
-            load_in_4bit=self.config.load_in_4bit,
-            bf16=self.config.bf16,
-            logging_steps=self.config.logging_steps,
-            save_steps=self.config.save_steps,
-            use_propensity_weighting=self.config.use_propensity_weighting,
-            propensity_resample=self.config.propensity_resample,
-            propensity_native_loss_weighting=self.config.propensity_native_loss_weighting,
-            propensity_weight_clip=self.config.propensity_weight_clip,
-            propensity_random_seed=self.config.propensity_random_seed,
-            propensity_sampling_strategy=self.config.propensity_sampling_strategy,
-            propensity_stratify_key=self.config.propensity_stratify_by,
+            train=TrainConfig(
+                epochs=self.config.num_train_epochs,
+                batch_size=self.config.per_device_train_batch_size,
+                gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+                logging_steps=self.config.logging_steps,
+                save_steps=self.config.save_steps,
+            ),
+            optimizer=OptimizerConfig(
+                learning_rate=self.config.learning_rate,
+                warmup_ratio=self.config.warmup_ratio,
+            ),
+            runtime=RuntimeConfig(bf16=self.config.bf16, gradient_checkpointing=True),
+            sequence=TRLSequenceConfig(max_length=self.config.max_length),
+            grpo=TRLGRPOConfig(num_generations=self.num_generations),
+            lora=TRLLoraConfig(
+                use_lora=self.config.use_lora,
+                lora_r=self.config.lora_r,
+                lora_alpha=self.config.lora_alpha,
+                lora_dropout=self.config.lora_dropout,
+                lora_target_modules=self.config.lora_target_modules,
+            ),
+            quantization=TRLQuantizationConfig(load_in_4bit=self.config.load_in_4bit),
+            propensity_weighting=TRLPropensityWeightingConfig(
+                use_propensity_weighting=self.config.use_propensity_weighting,
+                propensity_resample=self.config.propensity_resample,
+                propensity_native_loss_weighting=self.config.propensity_native_loss_weighting,
+                propensity_weight_clip=self.config.propensity_weight_clip,
+                propensity_random_seed=self.config.propensity_random_seed,
+                propensity_sampling_strategy=self.config.propensity_sampling_strategy,
+                propensity_stratify_key=self.config.propensity_stratify_key,
+            ),
         )
 
         return train_grpo(
@@ -612,7 +652,7 @@ class BootstrapFinetuneTrainer(BaseGeneratorTrainer):
 
     def train(
         self,
-        preferences: "PreferenceDataset",
+        preferences: Union[BinaryProjectionDataset, SupervisionDataset],
         model_name: str,
         output_dir: Union[str, Path],
         law_type: Optional[str] = None,
@@ -622,7 +662,7 @@ class BootstrapFinetuneTrainer(BaseGeneratorTrainer):
         Train using DSPy BootstrapFinetune.
 
         Args:
-            preferences: PreferenceDataset (winners used as gold labels)
+            preferences: SupervisionDataset or binary projection dataset
             model_name: Model to fine-tune (student)
             output_dir: Directory to save trained model
             law_type: Optional filter for specific law type
@@ -681,7 +721,7 @@ class BootstrapFinetuneTrainer(BaseGeneratorTrainer):
         logger.info(f"  Built trainset with {len(trainset)} examples")
 
         # Create metric from GenRM
-        from src.training.preference.genrm_reward import create_genrm_dspy_metric
+        from src.training.supervision.rewards import create_genrm_dspy_metric
         metric = create_genrm_dspy_metric(
             self.genrm_judge,
             threshold=self.metric_threshold,

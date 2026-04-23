@@ -147,3 +147,105 @@ RIGHT SOCIAL indicators:
 
 Preserve statements about values, identity, and social norms.
 """
+
+
+IMMIGRATION_RUBRIC = """
+Task: This text will be scored on immigration policy stance (1 = strongly opposes
+tough policy, 7 = strongly favors tough policy).
+
+Preserve all information about immigration policy:
+- Border control, deportations, asylum policy
+- Quotas / caps / points-based systems
+- Refugee acceptance or rejection
+- Integration vs assimilation language
+- Citizenship, naturalization
+- Treatment of undocumented migrants
+- Statements about cultural impact of migration
+- EU free-movement / Schengen positions
+Preserve concrete proposals (numbers, mechanisms) and rhetorical framing.
+"""
+
+
+EU_RUBRIC = """
+Task: This text will be scored on orientation toward European integration
+(1 = strongly opposed, 7 = strongly in favor).
+
+Preserve all information about the party's stance on the EU:
+- Support for or opposition to EU membership
+- Position on deeper integration vs national sovereignty
+- Eurozone / single currency stance
+- Common foreign / defense / migration policy
+- EU institutions (Commission, Parliament, ECJ) — accept or reform?
+- Treaty changes, Brexit-style positions
+- Trade with EU / customs union / single market
+Preserve concrete proposals and the framing (pro-EU, EU-skeptic, federalist, etc.).
+"""
+
+
+ENVIRONMENT_RUBRIC = """
+Task: This text will be scored on environment vs growth tradeoff (1 = environment
+even at cost of growth, 7 = growth even at cost of environment).
+
+Preserve all information about environmental and energy policy:
+- Climate change framing and targets (net-zero dates, emission reductions)
+- Renewable vs fossil-fuel energy positions
+- Environmental regulation (industrial, transport, agricultural)
+- Natural-resource protection, biodiversity
+- Carbon pricing, green taxes, subsidies
+- Trade-offs against jobs, growth, competitiveness
+- Just-transition language
+Preserve concrete proposals and the explicit balance struck against economic concerns.
+"""
+
+
+DECENTRALIZATION_RUBRIC = """
+Task: This text will be scored on political decentralization (1 = strongly favors
+decentralization to regions/localities, 7 = strongly opposes decentralization).
+
+Preserve all information about the territorial organization of the state:
+- Regional / federal / local government powers
+- Devolution proposals (transfer of competencies)
+- Fiscal autonomy of regions
+- Recognition of national minorities, regional languages
+- Subsidiarity language
+- Independence movements; federalism / unitarism positions
+- Centralization of decision-making vs local autonomy
+Preserve concrete proposals about what decisions are made at which level.
+"""
+
+
+JOINT_RUBRIC = """
+Task: This text will be scored on SIX policy dimensions, all on a 1-7 scale.
+Produce one summary that preserves evidence relevant to every dimension.
+
+For EACH of the following, preserve concrete policy proposals, rhetorical
+stance, specific numbers or targets, and the party's relative emphasis:
+
+1. ECONOMIC (public services vs tax reduction):
+   - Taxation, public spending, welfare, nationalization vs privatization,
+     regulation vs deregulation, redistribution, labor policy.
+
+2. SOCIAL / LIBERALISM (liberal values vs traditional values):
+   - Gender equality, LGBTQ+ rights, minority rights, religious / moral
+     positions, family policy, multiculturalism vs traditionalism.
+
+3. IMMIGRATION (permissive vs tough):
+   - Border control, asylum, refugee policy, quotas, integration vs
+     assimilation, citizenship, cultural-impact framing.
+
+4. EU INTEGRATION (opposed vs in favor):
+   - EU membership, deeper integration vs sovereignty, Eurozone, treaty
+     changes, trade with EU, EU institutions.
+
+5. ENVIRONMENT (environmental protection vs economic growth):
+   - Climate targets, renewables vs fossil fuels, regulation, carbon
+     pricing, growth/jobs tradeoffs, just-transition language.
+
+6. DECENTRALIZATION (favor vs oppose):
+   - Regional / federal / local powers, devolution, fiscal autonomy,
+     minority / regional recognition, federalism vs unitarism.
+
+If the text is silent on a dimension, say so explicitly for that dimension
+rather than inventing content. Preserve the original wording of key
+quotes where possible.
+"""

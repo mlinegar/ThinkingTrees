@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import dspy
 
+from src.core.async_utils import to_thread
 from .base import AbstractOptimizer, OptimizationResult
 from .registry import OptimizerRegistry
 
@@ -172,7 +173,7 @@ class ParallelModuleOptimizer:
         async def optimize_module(name: str) -> Tuple[str, dspy.Module, OptimizationResult]:
             async with semaphore:
                 logger.info(f"Starting optimization for module: {name}")
-                return await asyncio.to_thread(
+                return await to_thread(
                     self._optimize_single_module,
                     name,
                     modules[name],

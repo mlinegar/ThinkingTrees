@@ -6,7 +6,7 @@ to the TRL training pipeline. When audits find violations, this system:
 
 1. Extracts failed nodes from the audit report
 2. Generates preference pairs for the violated laws
-3. Triggers TRL training (DPO, GRPO, or reward model)
+3. Triggers training (DPO, GRPO, pairwise reward, or scalar reward model)
 4. Re-audits to verify improvement
 
 This implements the closed-loop improvement cycle:
@@ -41,6 +41,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Union
 
+from src.training.supervision import (
+    BinaryComparison,
+    SupervisionDataset,
+    save_supervision_artifact_bundle,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,7 +59,7 @@ class AuditDrivenConfig:
     """Configuration for audit-driven training."""
 
     # Training method
-    training_method: Literal["dpo", "grpo", "reward"] = "dpo"
+    training_method: Literal["dpo", "grpo", "reward", "scalar_reward"] = "dpo"
     """Which TRL trainer to use."""
 
     # Preference collection
@@ -95,8 +101,8 @@ class IterationResult:
     violations_after: Optional[Dict[str, float]]
     """Violation rates after training (None if not re-audited)."""
 
-    num_preferences_collected: int
-    """Number of preference pairs collected."""
+    num_binary_projection_records: int
+    """Number of binary optimizer records collected."""
 
     training_completed: bool
     """Whether training was executed."""
@@ -211,9 +217,9 @@ class AuditDrivenTrainer:
     def collect_preferences_for_violations(
         self,
         violations: Dict[str, List[Dict[str, Any]]],
-    ) -> "PreferenceDataset":
+    ) -> SupervisionDataset:
         """
-        Collect preferences for violated nodes.
+        Collect supervision for violated nodes.
 
         Generates candidate summaries and collects preferences
         via the judge (GenRM or oracle).
@@ -222,12 +228,9 @@ class AuditDrivenTrainer:
             violations: Dict from extract_violations()
 
         Returns:
-            PreferenceDataset with collected preferences
+            SupervisionDataset with collected comparative judgments
         """
-        from src.training.preference.types import PreferencePair, PreferenceDataset
-        from src.training.preference.collector import GenerationConfig
-
-        pairs = []
+        pairs: List[BinaryComparison] = []
 
         for law_type, violation_list in violations.items():
             logger.info(f"Collecting preferences for {len(violation_list)} {law_type} violations")
@@ -262,8 +265,10 @@ class AuditDrivenTrainer:
                 except Exception as e:
                     logger.warning(f"Failed to collect preferences for violation: {e}")
 
-        logger.info(f"Collected {len(pairs)} preference pairs total")
-        return PreferenceDataset(pairs)
+        logger.info(f"Collected {len(pairs)} binary supervision records total")
+        return SupervisionDataset(
+            comparative_judgments=[pair.to_comparative_judgment() for pair in pairs]
+        )
 
     def _generate_candidates(
         self,
@@ -295,10 +300,11 @@ class AuditDrivenTrainer:
         summary_a: str,
         summary_b: str,
         law_type: str,
-    ) -> Optional["PreferencePair"]:
+    ) -> Optional[BinaryComparison]:
         """Compare two candidates using the judge."""
-        from src.training.preference.types import PreferencePair
+        from src.training.supervision import BinaryComparison
         import uuid
+        from src.core.supervision_metadata import judgment_supervision_metadata
 
         try:
             result = self.judge.compare(
@@ -308,7 +314,7 @@ class AuditDrivenTrainer:
                 summary_b=summary_b,
             )
 
-            return PreferencePair(
+            return BinaryComparison(
                 pair_id=str(uuid.uuid4()),
                 source_example_id=f"audit_{law_type}",
                 original_text=original_text,
@@ -320,6 +326,10 @@ class AuditDrivenTrainer:
                 reasoning=getattr(result, 'reasoning', ''),
                 confidence=getattr(result, 'confidence', 0.5),
                 law_type=law_type,
+                preference_supervision=judgment_supervision_metadata(
+                    application_name="audit_driven_training",
+                    law_type=law_type,
+                ),
                 score_estimate_a=getattr(result, 'helpfulness_a', None),
                 score_estimate_b=getattr(result, 'helpfulness_b', None),
             )
@@ -364,7 +374,7 @@ class AuditDrivenTrainer:
                 iteration=iteration_num,
                 violations_before=violations_before,
                 violations_after=None,
-                num_preferences_collected=0,
+                num_binary_projection_records=0,
                 training_completed=False,
                 model_path=None,
                 timestamp=datetime.now().isoformat(),
@@ -373,47 +383,59 @@ class AuditDrivenTrainer:
             self._iteration_history.append(result)
             return result
 
-        preferences = self.collect_preferences_for_violations(violations)
+        supervision = self.collect_preferences_for_violations(violations)
 
-        if len(preferences.pairs) < self.config.min_preferences_for_training:
+        projected_pairs = supervision.project_binary(projection="adjacent").comparisons
+        if len(projected_pairs) < self.config.min_preferences_for_training:
             logger.warning(
-                f"Insufficient preferences ({len(preferences.pairs)} < "
+                f"Insufficient preferences ({len(projected_pairs)} < "
                 f"{self.config.min_preferences_for_training}), skipping training"
             )
             result = IterationResult(
                 iteration=iteration_num,
                 violations_before=violations_before,
                 violations_after=None,
-                num_preferences_collected=len(preferences.pairs),
+                num_binary_projection_records=len(projected_pairs),
                 training_completed=False,
                 model_path=None,
                 timestamp=datetime.now().isoformat(),
-                metadata={"reason": "insufficient_preferences"},
+                metadata={"reason": "insufficient_binary_projection"},
             )
             self._iteration_history.append(result)
             return result
 
-        # Save preferences
-        pref_path = self.output_dir / f"preferences_iter{iteration_num}.json"
-        preferences.save(pref_path)
+        # Save primary supervision. Binary projections are emitted only when needed.
+        supervision_path = self.output_dir / f"supervision_iter{iteration_num}.json"
+        save_supervision_artifact_bundle(
+            supervision,
+            supervision_path=supervision_path,
+        )
 
         # Train model
         from src.training.trl_training import (
+            TRLTrainingConfig,
             train_dpo,
             train_grpo,
             train_reward_model,
-            TRLTrainingConfig,
+            train_scalar_reward_model,
         )
 
         model_dir = self.output_dir / f"model_iter{iteration_num}"
         trl_config = TRLTrainingConfig()
 
         if method == "dpo":
-            model_path = train_dpo(preferences, self.model_name, model_dir, trl_config)
+            model_path = train_dpo(supervision, self.model_name, model_dir, trl_config)
         elif method == "grpo":
-            model_path = train_grpo(preferences, self.model_name, model_dir, trl_config)
+            model_path = train_grpo(supervision, self.model_name, model_dir, trl_config)
         elif method == "reward":
-            model_path = train_reward_model(preferences, self.model_name, model_dir, trl_config)
+            model_path = train_reward_model(supervision, self.model_name, model_dir, trl_config)
+        elif method == "scalar_reward":
+            model_path = train_scalar_reward_model(
+                supervision,
+                self.model_name,
+                model_dir,
+                trl_config,
+            )
         else:
             raise ValueError(f"Unknown training method: {method}")
 
@@ -429,11 +451,14 @@ class AuditDrivenTrainer:
             iteration=iteration_num,
             violations_before=violations_before,
             violations_after=violations_after,
-            num_preferences_collected=len(preferences.pairs),
+            num_binary_projection_records=len(projected_pairs),
             training_completed=True,
             model_path=model_path,
             timestamp=datetime.now().isoformat(),
-            metadata={"method": method},
+            metadata={
+                "method": method,
+                "supervision_path": str(supervision_path),
+            },
         )
         self._iteration_history.append(result)
 
@@ -556,7 +581,7 @@ def run_audit_driven_training(
     judge: Any,
     summarizer: Any,
     output_dir: Union[str, Path],
-    training_method: Literal["dpo", "grpo", "reward"] = "dpo",
+    training_method: Literal["dpo", "grpo", "reward", "scalar_reward"] = "dpo",
 ) -> IterationResult:
     """
     Convenience function for single training iteration.

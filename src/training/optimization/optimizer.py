@@ -341,6 +341,8 @@ class OracleOptimizer:
                     "max_merge_invocations": self.config.max_merge_invocations,
                     "num_threads": self.config.num_threads,
                     "track_stats": self.config.track_stats,
+                    "use_wandb": False,
+                    "use_mlflow": False,
                 }
                 if self.config.log_dir:
                     gepa_kwargs["log_dir"] = str(self.config.log_dir)
@@ -643,5 +645,4 @@ class OracleOptimizer:
 def create_optimizer(config: Optional[OptimizationConfig] = None) -> OracleOptimizer:
     """Create an OracleOptimizer with optional config."""
     return OracleOptimizer(config)
-
 

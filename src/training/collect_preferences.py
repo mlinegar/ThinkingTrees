@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unified Preference Collection for OPS Training.
+Unified Supervision Collection for OPS Training.
 
 Consolidates three collection workflows into a single, task-agnostic script:
 1. GenRM judge on direct documents
@@ -64,7 +64,7 @@ logger = get_logger(__name__)
 def create_argument_parser() -> argparse.ArgumentParser:
     """Create CLI argument parser with all options."""
     parser = argparse.ArgumentParser(
-        description="Unified preference collection for OPS training",
+        description="Unified supervision collection for OPS training",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -102,7 +102,7 @@ Examples:
         type=str,
         default="genrm",
         choices=["genrm", "oracle", "dspy"],
-        help="Type of judge for preference derivation (default: genrm)",
+        help="Type of supervision backend for comparative judgments (default: genrm)",
     )
     judge_group.add_argument(
         "--judge-port",
@@ -189,9 +189,8 @@ Examples:
         default=None,
         help=(
             "Number of candidate summaries per input (default: 4). "
-            "Trade-off: k=2 → 1 pairwise comparison (fast), "
-            "k=4 → 6 comparisons (thorough), k=8 → 28 comparisons (exhaustive). "
-            "Formula: k*(k-1)/2 comparisons."
+            "Listwise-capable judges consume these in one judgment; "
+            "pairwise-only backends fall back internally."
         ),
     )
     gen_group.add_argument(
@@ -249,7 +248,7 @@ def print_banner(config) -> None:
     """Print configuration banner."""
     print()
     print("=" * 70)
-    print("  UNIFIED PREFERENCE COLLECTION")
+    print("  UNIFIED SUPERVISION COLLECTION")
     print("=" * 70)
     print(f"  Task:             {config.task_name}")
     print(f"  Judge Type:       {config.judge.judge_type.value}")
@@ -266,15 +265,20 @@ def print_banner(config) -> None:
 
 def print_summary(stats: dict, output_file: Path) -> None:
     """Print collection summary."""
+    pairs = dict(stats.get("pairs", {}) or {})
+    preferences = dict(stats.get("preferences", {}) or {})
+    comparative = dict(stats.get("comparative", {}) or {})
     print()
     print("=" * 70)
     print("  COLLECTION COMPLETE")
     print("=" * 70)
-    print(f"  Total pairs:       {stats.get('total_pairs', 0)}")
-    print(f"  Prefer A:          {stats.get('prefer_a', 0)}")
-    print(f"  Prefer B:          {stats.get('prefer_b', 0)}")
-    print(f"  Ties:              {stats.get('ties', 0)}")
-    print(f"  Avg confidence:    {stats.get('avg_confidence', 0):.2f}")
+    print(f"  Binary pairs:      {pairs.get('collected', 0)}")
+    if comparative:
+        print(f"  Comparative recs:  {comparative.get('records_collected', 0)}")
+    print(f"  Prefer A:          {preferences.get('prefer_a', 0)}")
+    print(f"  Prefer B:          {preferences.get('prefer_b', 0)}")
+    print(f"  Ties:              {preferences.get('ties', 0)}")
+    print(f"  Avg confidence:    {preferences.get('avg_confidence', 0):.2f}")
     print(f"  Output file:       {output_file}")
     print("=" * 70)
 
@@ -322,9 +326,10 @@ def create_data_source(config, task):
 
 
 def create_collector(config, task, summarizer, memory=None):
-    """Create appropriate preference collector based on judge type."""
+    """Create an appropriate supervision collector based on judge type."""
     from .preference_config import JudgeType
-    from src.training.preference import GenerationConfig
+    from src.training.supervision import GenerationConfig, PreferenceCollector
+    from src.training.judges import GenRMJudge, LargeJudgeListwiseModule
 
     gen = config.generation
     judge_settings = config.judge
@@ -337,8 +342,6 @@ def create_collector(config, task, summarizer, memory=None):
     ]
 
     if judge_settings.judge_type == JudgeType.GENRM:
-        from src.training.preference import GenRMJudge, PreferenceCollector
-
         genrm_judge = GenRMJudge(
             base_url=server.judge_url,
             model_name=server.judge_model or "nvidia/Qwen3-Nemotron-235B-A22B-GenRM",
@@ -356,8 +359,6 @@ def create_collector(config, task, summarizer, memory=None):
         )
 
     elif judge_settings.judge_type == JudgeType.ORACLE:
-        from src.training.preference import PreferenceCollector
-
         # Get oracle predictor from task
         oracle_predict = task.create_oracle_scorer()
 
@@ -372,48 +373,56 @@ def create_collector(config, task, summarizer, memory=None):
         )
 
     elif judge_settings.judge_type == JudgeType.DSPY:
-        # DSPy-based preference collection (future)
-        raise NotImplementedError("DSPy judge type not yet implemented")
+        return PreferenceCollector(
+            summarizer=summarizer,
+            judge=LargeJudgeListwiseModule(use_cot=True),
+            strategy="judge",
+            k=gen.k_candidates,
+            generation_configs=generation_configs,
+            comparison_mode="listwise",
+            memory=memory,
+        )
 
     else:
         raise ValueError(f"Unknown judge type: {judge_settings.judge_type}")
 
 
 def save_results(collector, config) -> Path:
-    """Save preference dataset and statistics."""
-    dataset = collector.get_dataset()
+    """Save the primary supervision artifact and any explicitly requested projections."""
+    from src.training.supervision import save_supervision_artifact_bundle
+
+    supervision_dataset = collector.get_supervision_dataset()
     stats = collector.get_statistics()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     prefix = config.output_prefix or f"{config.task_name}_{config.judge.judge_type.value}"
-
-    # Save preference pairs
-    pref_file = config.output_dir / f"{prefix}_preferences_{timestamp}.json"
-    dataset.save(pref_file)
-    logger.info(f"Saved preferences to {pref_file}")
-
-    # Save DPO format if requested
-    dpo_file = None
+    supervision_file = config.output_dir / f"{prefix}_supervision_{timestamp}.json"
+    dpo_file = config.output_dir / f"{prefix}_dpo_{timestamp}.json" if (
+        config.save_dpo_format and config.law_type == "sufficiency"
+    ) else None
     if config.save_dpo_format and config.law_type == "sufficiency":
-        dpo_data = dataset.to_dpo_format(law_type="sufficiency")
-        dpo_file = config.output_dir / f"{prefix}_dpo_{timestamp}.json"
-        with open(dpo_file, "w") as f:
-            json.dump(dpo_data, f, indent=2)
-        logger.info(f"Saved DPO format to {dpo_file}")
+        logger.info("Saving DPO projection for sufficiency supervision")
 
     # Save statistics
     stats["config"] = config.to_dict()
     stats_file = config.output_dir / f"{prefix}_stats_{timestamp}.json"
-    with open(stats_file, "w") as f:
-        json.dump(stats, f, indent=2)
-    logger.info(f"Saved statistics to {stats_file}")
+    save_supervision_artifact_bundle(
+        supervision_dataset,
+        supervision_path=supervision_file,
+        dpo_path=dpo_file,
+        stats_path=stats_file,
+        stats=stats,
+        law_type="sufficiency" if config.law_type == "sufficiency" else None,
+    )
+    logger.info("Saved primary supervision artifact to %s", supervision_file)
+    logger.info("Saved statistics to %s", stats_file)
 
-    return pref_file
+    return supervision_file
 
 
 def main(args: Optional[argparse.Namespace] = None) -> int:
     """
-    Main entry point for unified preference collection.
+    Main entry point for unified supervision collection.
 
     Args:
         args: Optional pre-parsed arguments. If None, parses from sys.argv.
@@ -484,11 +493,11 @@ def main(args: Optional[argparse.Namespace] = None) -> int:
     logger.info("Creating data source...")
     data_source = create_data_source(config, task)
 
-    logger.info("Creating preference collector...")
+    logger.info("Creating supervision collector...")
     collector = create_collector(config, task, summarizer)
 
-    # Collect preferences
-    logger.info(f"Starting preference collection from {data_source.source_name}...")
+    # Collect supervision
+    logger.info(f"Starting supervision collection from {data_source.source_name}...")
     print()
 
     example_count = 0
@@ -496,14 +505,27 @@ def main(args: Optional[argparse.Namespace] = None) -> int:
         logger.info(f"[{i+1}] Processing {example.example_id}...")
 
         try:
-            pairs = collector.collect_pairs_for_example(
-                example_id=example.example_id,
-                original_text=example.text,
-                rubric=example.rubric,
-                reference_score=example.reference_score or 0.0,
-                law_type=config.law_type,
-            )
-            logger.info(f"  Generated {len(pairs)} preference pairs")
+            if getattr(collector, "comparison_mode", "pairwise") == "listwise":
+                record = collector.collect_comparative_for_example(
+                    example_id=example.example_id,
+                    original_text=example.text,
+                    rubric=example.rubric,
+                    reference_score=example.reference_score or 0.0,
+                    law_type=config.law_type,
+                )
+                logger.info(
+                    "  Generated 1 comparative record with %d candidates",
+                    len(record.candidates),
+                )
+            else:
+                pairs = collector.collect_pairs_for_example(
+                    example_id=example.example_id,
+                    original_text=example.text,
+                    rubric=example.rubric,
+                    reference_score=example.reference_score or 0.0,
+                    law_type=config.law_type,
+                )
+                logger.info(f"  Generated {len(pairs)} binary projection pairs")
             example_count += 1
 
         except Exception as e:
@@ -513,7 +535,12 @@ def main(args: Optional[argparse.Namespace] = None) -> int:
         # Progress update every 10 examples
         if (i + 1) % 10 == 0:
             stats = collector.get_statistics()
-            logger.info(f"Progress: {stats['total_pairs']} pairs from {example_count} examples")
+            logger.info(
+                "Progress: %s pairs, %s comparative records from %s examples",
+                stats.get("pairs", {}).get("collected", 0),
+                stats.get("comparative", {}).get("records_collected", 0),
+                example_count,
+            )
 
     # Save results
     logger.info("Saving results...")

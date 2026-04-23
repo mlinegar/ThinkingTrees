@@ -41,16 +41,18 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
 import dspy
 
 from src.config.constants import DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS
-from src.config.dspy_config import configure_dspy
+from src.ctreepo.sim.util import safe_float
+from src.config.dspy_config import close_dspy_cache, configure_dspy
 from src.config.context_window import ContextWindowManager, create_manager_for_task
 from src.core.model_detection import get_context_window_from_port
 from src.core.provenance import normalize_truth_label_source
+from src.core.async_utils import to_thread
 from src.preprocessing.chunker import (
     AdaptiveChunkMemory,
     AdaptiveChunkingConfig,
@@ -80,6 +82,22 @@ from src.training.embedding_proxy import (
     fit_embedding_mil_sgd_proxy,
     fit_embedding_ridge_proxy,
     load_embedding_proxy_model,
+)
+from src.training.supervision import (
+    DenseScalarRidgeModelConfig,
+    DenseScalarRidgeTrainingConfig,
+    DenseSupervisionExample,
+    OPTIMIZER_FAMILY_CLOSED_FORM_LINEAR,
+    REPRESENTATION_RAW_SCALAR_SCORE,
+    TARGET_SCALAR,
+    build_dense_full_document_supervision_dataset,
+    fit_dense_scalar_ridge_regressor,
+    save_supervision_artifact_bundle,
+    supervision_training_contract,
+)
+from src.training.reproducibility import (
+    configure_reproducibility,
+    write_reproducibility_manifest,
 )
 from src.training.gepa_sampling import (
     sample_srswor_examples,
@@ -115,6 +133,52 @@ class DSPyForwardFilter(logging.Filter):
         return "Calling module.forward" not in record.getMessage()
 
 logging.getLogger("dspy.primitives.module").addFilter(DSPyForwardFilter())
+
+
+def _safe_open_fd_count() -> Optional[int]:
+    """Best-effort Linux fd count for resource debugging."""
+    try:
+        return int(len(os.listdir("/proc/self/fd")))
+    except Exception:
+        return None
+
+
+def _apply_training_runtime_safety_defaults() -> None:
+    """
+    Apply long-run safety defaults before the pipeline starts creating DSPy LMs.
+
+    These defaults are scoped to this training entrypoint and can still be
+    overridden explicitly via the environment.
+    """
+    os.environ.setdefault("TT_DSPY_ENABLE_DISK_CACHE", "0")
+    os.environ.setdefault("TT_DSPY_ENABLE_MEMORY_CACHE", "0")
+    os.environ.setdefault("WANDB_DISABLED", "true")
+    os.environ.setdefault("WANDB_MODE", "disabled")
+    os.environ.setdefault("WANDB_SILENT", "true")
+
+    fd_count = _safe_open_fd_count()
+    if fd_count is None:
+        logger.info(
+            "Training runtime defaults: DSPy cache disk=%s memory=%s | wandb disabled=%s",
+            os.environ.get("TT_DSPY_ENABLE_DISK_CACHE"),
+            os.environ.get("TT_DSPY_ENABLE_MEMORY_CACHE"),
+            os.environ.get("WANDB_DISABLED"),
+        )
+    else:
+        logger.info(
+            "Training runtime defaults: DSPy cache disk=%s memory=%s | wandb disabled=%s | open_fds=%d",
+            os.environ.get("TT_DSPY_ENABLE_DISK_CACHE"),
+            os.environ.get("TT_DSPY_ENABLE_MEMORY_CACHE"),
+            os.environ.get("WANDB_DISABLED"),
+            fd_count,
+        )
+
+
+def _dspy_request_cache_enabled() -> bool:
+    """DSPy request-level caching should be off for long training runs by default."""
+    disk_enabled = str(os.environ.get("TT_DSPY_ENABLE_DISK_CACHE", "1") or "").strip().lower()
+    memory_enabled = str(os.environ.get("TT_DSPY_ENABLE_MEMORY_CACHE", "1") or "").strip().lower()
+    return disk_enabled not in {"0", "false", "no", "off"} or memory_enabled not in {"0", "false", "no", "off"}
 
 
 # -----------------------------------------------------------------------------
@@ -468,7 +532,7 @@ class ContextSafeLM(dspy.LM):
                 )
             if sem_key is not None:
                 sem = _get_lm_concurrency_semaphore(sem_key, self._max_concurrent_requests)
-                await asyncio.to_thread(sem.acquire)
+                await to_thread(sem.acquire)
 
         try:
             token_key = self._token_key(call_kwargs)
@@ -956,16 +1020,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--task-backend',
         type=str,
-        choices=['vllm', 'sglang'],
         default=None,
-        help='Inference backend for task model requests.',
+        help='Inference engine for task model requests (managed local support remains vLLM/SGLang).',
     )
     parser.add_argument(
         '--genrm-backend',
         type=str,
-        choices=['vllm', 'sglang'],
         default=None,
-        help='Inference backend for GenRM/judge requests.',
+        help='Inference engine for GenRM/judge requests (managed local support remains vLLM/SGLang).',
     )
     parser.add_argument(
         '--routing-policy',
@@ -977,9 +1039,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         '--backend-fallback',
         type=str,
-        choices=['none', 'vllm', 'sglang'],
         default=None,
-        help='Fallback backend when the selected backend endpoint is unavailable.',
+        help='Fallback engine when the selected backend endpoint is unavailable.',
     )
     parser.add_argument(
         '--sglang-venv-path',
@@ -1018,6 +1079,19 @@ def parse_args() -> argparse.Namespace:
                         help='After interleaved optimization, run a final optimization pass')
     parser.add_argument('--max-chunk-chars', type=int, default=4000,
                         help='Maximum characters per chunk for batched tree building')
+    parser.add_argument(
+        '--max-chunk-tokens',
+        type=int,
+        default=None,
+        help='Primary leaf token budget for tree building; when set, tokenized leaf partitioning takes precedence over character chunking.',
+    )
+    parser.add_argument(
+        '--runtime-mode',
+        type=str,
+        default='legacy',
+        choices=['legacy', 'unified_v2'],
+        help='Tree batching runtime selector for batched document processing and init-tree collection.',
+    )
     parser.add_argument(
         '--fail-on-degenerate-summary',
         action=argparse.BooleanOptionalAction,
@@ -1740,22 +1814,44 @@ def parse_args() -> argparse.Namespace:
         help='Optional explicit mergeable embedding sketch checkpoint path for representation routing.',
     )
     parser.add_argument(
+        '--program-families',
+        type=str,
+        default=None,
+        help=(
+            'Comma-separated canonical program family order for score routing '
+            '(for example: text__llm__llm,embedding_sequence__linear_head__linear_head,'
+            'embedding_sequence__mlp__mlp,numeric_sequence__mlp__linear_head,ensemble,auto).'
+        ),
+    )
+    parser.add_argument(
+        '--primary-program-family',
+        type=str,
+        default=None,
+        help='Primary canonical program family to select for estimated_score (or auto).',
+    )
+    parser.add_argument(
+        '--program-weights',
+        type=str,
+        default=None,
+        help='Optional canonical program-family ensemble weights as comma-separated key=value pairs.',
+    )
+    parser.add_argument(
         '--representation-backends',
         type=str,
         default=None,
-        help='Comma-separated backend order for score routing (llm,embedding,ctreepo,mergeable_sketch,ensemble,auto).',
+        help='Legacy alias for --program-families.',
     )
     parser.add_argument(
         '--primary-representation-backend',
         type=str,
         default=None,
-        help='Primary score backend to select for estimated_score (or auto).',
+        help='Legacy alias for --primary-program-family.',
     )
     parser.add_argument(
         '--representation-weights',
         type=str,
         default=None,
-        help='Optional ensemble weights as comma-separated key=value pairs, e.g. llm=0.6,ctreepo=0.4.',
+        help='Legacy alias for --program-weights.',
     )
     parser.add_argument(
         '--fallback-to-available-backend',
@@ -1923,6 +2019,18 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help='Raw passthrough args for scripts/train_rile_embedding_sketch.py.',
+    )
+    parser.add_argument(
+        '--neural-operators-ctreepo-search-spec',
+        type=str,
+        default=None,
+        help='Optional JSON search spec forwarded to scripts/train_neural_operators.py for CTreePO trial selection.',
+    )
+    parser.add_argument(
+        '--neural-operators-mergeable-search-spec',
+        type=str,
+        default=None,
+        help='Optional JSON search spec forwarded to scripts/train_neural_operators.py for mergeable-sketch trial selection.',
     )
     parser.add_argument(
         '--neural-operators-ctreepo-root-weight',
@@ -2456,23 +2564,37 @@ def resolve_inference_backend_config(
 ) -> InferenceBackendConfig:
     """Resolve inference backend config from settings + CLI overrides."""
     from src.config.settings import get_inference_backend_config
+    from src.core.engines import (
+        EngineSurface,
+        LOCAL_CHAT_MANAGED_ENGINES,
+        resolve_engine_for_usage,
+    )
 
     cfg = get_inference_backend_config(settings)
-    task_backend = str(getattr(args, "task_backend", None) or cfg.get("task_backend") or "vllm").strip().lower()
-    genrm_backend = str(getattr(args, "genrm_backend", None) or cfg.get("genrm_backend") or "vllm").strip().lower()
-    fallback_raw = str(getattr(args, "backend_fallback", None) or cfg.get("fallback_backend") or "vllm").strip().lower()
+    task_backend = resolve_engine_for_usage(
+        getattr(args, "task_backend", None) or cfg.get("task_backend") or "vllm",
+        surface=EngineSurface.CHAT_OPENAI,
+        usage="training pipeline task backend selection",
+        allowed_engines=LOCAL_CHAT_MANAGED_ENGINES,
+    ).engine.value
+    genrm_backend = resolve_engine_for_usage(
+        getattr(args, "genrm_backend", None) or cfg.get("genrm_backend") or "vllm",
+        surface=EngineSurface.CHAT_OPENAI,
+        usage="training pipeline GenRM backend selection",
+        allowed_engines=LOCAL_CHAT_MANAGED_ENGINES,
+    ).engine.value
+    fallback_raw = str(getattr(args, "backend_fallback", None) or cfg.get("fallback_backend") or "vllm")
     routing_policy = str(getattr(args, "routing_policy", None) or cfg.get("routing_policy") or "affinity_load_aware").strip().lower()
 
-    if task_backend not in {"vllm", "sglang"}:
-        task_backend = "vllm"
-    if genrm_backend not in {"vllm", "sglang"}:
-        genrm_backend = "vllm"
-    if fallback_raw in {"none", "off", "disabled"}:
+    if fallback_raw.strip().lower().replace("-", "_") in {"none", "off", "disabled"}:
         fallback_backend = "none"
-    elif fallback_raw in {"vllm", "sglang"}:
-        fallback_backend = fallback_raw
     else:
-        fallback_backend = "vllm"
+        fallback_backend = resolve_engine_for_usage(
+            fallback_raw,
+            surface=EngineSurface.CHAT_OPENAI,
+            usage="training pipeline fallback backend selection",
+            allowed_engines=LOCAL_CHAT_MANAGED_ENGINES,
+        ).engine.value
     if routing_policy not in {"round_robin", "document_affinity", "affinity_load_aware"}:
         routing_policy = "affinity_load_aware"
 
@@ -2504,22 +2626,25 @@ def apply_inference_backend_defaults(
     settings: Dict[str, Any],
 ) -> None:
     """Apply resolved backend defaults back onto CLI args for downstream code."""
+    from src.core.engines import default_engine_port
+
     args.task_backend = config.task_backend
     args.genrm_backend = config.genrm_backend
     args.routing_policy = config.routing_policy
     args.backend_fallback = config.fallback_backend
     args.sglang_venv_path = config.sglang_venv_path
 
-    sglang_cfg = settings.get("sglang", {}) if isinstance(settings, dict) else {}
-    sglang_port = int(sglang_cfg.get("port", 30000) or 30000)
-    sglang_genrm_port = int(sglang_cfg.get("genrm_port", sglang_port + 1) or (sglang_port + 1))
+    vllm_task_port = int(default_engine_port("vllm", role="task", settings=settings) or 8000)
+    vllm_genrm_port = int(default_engine_port("vllm", role="genrm", settings=settings) or 8001)
+    target_task_port = int(default_engine_port(config.task_backend, role="task", settings=settings) or vllm_task_port)
+    target_genrm_port = int(default_engine_port(config.genrm_backend, role="genrm", settings=settings) or vllm_genrm_port)
 
     # Preserve explicit user ports whenever possible. Shift defaults when a
     # backend switch is requested but CLI is still on legacy defaults.
-    if config.task_backend == "sglang" and int(getattr(args, "port", 8000)) == 8000:
-        args.port = sglang_port
-    if config.genrm_backend == "sglang" and int(getattr(args, "genrm_port", 8001)) == 8001:
-        args.genrm_port = sglang_genrm_port
+    if int(getattr(args, "port", vllm_task_port)) == vllm_task_port:
+        args.port = target_task_port
+    if int(getattr(args, "genrm_port", vllm_genrm_port)) == vllm_genrm_port:
+        args.genrm_port = target_genrm_port
 
 @dataclass
 class ThreeLayerHonestyConfig:
@@ -3917,7 +4042,7 @@ def build_default_grpo_reward_funcs(
     Returns a list compatible with TRL GRPOTrainer plus a metadata payload for
     checkpoint/manifest provenance.
     """
-    from src.training.preference.oracle_reward import create_oracle_alignment_reward_func
+    from src.training.supervision.rewards import create_oracle_alignment_reward_func
 
     oracle_predict = task.create_oracle_scorer()
     reward_func = create_oracle_alignment_reward_func(
@@ -4479,6 +4604,7 @@ def setup_dspy(
             api_key="EMPTY",
             temperature=scorer_temperature,
             max_tokens=scorer_max_tokens,
+            cache=_dspy_request_cache_enabled(),
             context_window=context_window,
             num_retries=scorer_num_retries,
             timeout=scorer_timeout_seconds,
@@ -4495,6 +4621,7 @@ def setup_dspy(
             api_key="EMPTY",
             temperature=scorer_temperature,
             max_tokens=scorer_max_tokens,
+            cache=_dspy_request_cache_enabled(),
             context_window=context_window,
             num_retries=scorer_num_retries,
             timeout=scorer_timeout_seconds,
@@ -4541,6 +4668,7 @@ def create_prompt_lm(args: argparse.Namespace) -> tuple[Optional[dspy.LM], Optio
         api_key="EMPTY",
         temperature=prompt_cfg.get('temperature', 0.3),
         max_tokens=prompt_cfg.get('max_tokens', 16384),
+        cache=_dspy_request_cache_enabled(),
         context_window=context_window,
         num_retries=prompt_num_retries,
         timeout=prompt_timeout_seconds,
@@ -4624,14 +4752,22 @@ def build_trees(
     """
     from datetime import datetime
     from src.tree.builder import TreeBuilder, BuildConfig
-    from src.training.preference import (
-        PreferenceDataset,
-        LargeJudgeComparisonModule,
-        OraclePairwiseJudge,
+    from src.training.judges import (
         GenRMJudge,
-        create_genrm_batch_client,
+        LargeJudgeListwiseModule,
+        OraclePairwiseJudge,
     )
-    from src.core.strategy import CallableStrategy, TournamentStrategy, TournamentConfig
+    from src.training.judges.genrm_batch import create_genrm_batch_client
+    from src.training.supervision import BinaryProjectionDataset
+    from src.core.strategy import (
+        DSPyStrategy,
+        CallableStrategy,
+        TournamentStrategy,
+        TournamentConfig,
+        tournament_doc_id,
+    )
+    from src.core.batch_orchestrator import BatchTreeOrchestrator
+    from src.core.unified_runtime import normalize_runtime_mode
     from src.core.model_detection import detect_model_from_port
     from src.config.settings import load_settings
     from src.tasks import get_task
@@ -4737,6 +4873,7 @@ def build_trees(
             api_key="EMPTY",
             temperature=summarizer_cfg.get('temperature', 0.5),
             max_tokens=summarizer_manager.max_output_tokens,
+            cache=_dspy_request_cache_enabled(),
             context_window=summarizer_context_window,
             num_retries=summarizer_num_retries,
             timeout=summarizer_timeout_seconds,
@@ -4752,6 +4889,7 @@ def build_trees(
             api_key="EMPTY",
             temperature=summarizer_cfg.get('temperature', 0.5),
             max_tokens=summarizer_manager.max_output_tokens,
+            cache=_dspy_request_cache_enabled(),
             context_window=summarizer_context_window,
             num_retries=summarizer_num_retries,
             timeout=summarizer_timeout_seconds,
@@ -4829,8 +4967,8 @@ def build_trees(
                 batch_client=genrm_batch_client,
             )
         elif preference_judge_backend == "large_dspy":
-            judge = LargeJudgeComparisonModule(use_cot=True)
-            logger.info("  Preference judge backend: large_dspy (active DSPy LM)")
+            judge = LargeJudgeListwiseModule(use_cot=True)
+            logger.info("  Preference judge backend: large_dspy listwise (active DSPy LM)")
         else:
             oracle_predict = task.create_oracle_scorer()
             score_range = 1.0
@@ -5762,7 +5900,7 @@ def build_trees(
             f"(skipped {skipped_count}/{len(train_results)}). "
             "Proceeding without preference init trees."
         )
-        return [], PreferenceDataset(), []
+        return [], BinaryProjectionDataset(), []
 
     if skipped_count > 0:
         logger.info(f"Using {len(segments)} segments for tree building (skipped {skipped_count} unsuitable)")
@@ -5848,8 +5986,17 @@ def build_trees(
         honest_chunking_policy.split_seed,
     )
 
+    tree_runtime_mode = normalize_runtime_mode(getattr(args, "runtime_mode", "legacy"))
+
     # Build trees using TreeBuilder + TournamentStrategy (consolidated path)
-    base_strategy = CallableStrategy(summarizer)
+    if tree_runtime_mode == "unified_v2":
+        base_strategy = DSPyStrategy(
+            leaf_module=summarizer,
+            merge_module=None,
+            unified_mode=True,
+        )
+    else:
+        base_strategy = CallableStrategy(summarizer)
     tournament_strategy = TournamentStrategy(
         base=base_strategy,
         judge=judge,
@@ -5858,11 +6005,12 @@ def build_trees(
 
     trees = []
     all_demos = []
-    all_preferences = PreferenceDataset()
+    all_preferences = BinaryProjectionDataset()
 
     # Build all trees CONCURRENTLY for maximum GPU utilization
     async def build_single_tree(segment: dict, tree_builder: TreeBuilder) -> tuple:
         """Build a single tree asynchronously."""
+        token = tournament_doc_id.set(str(segment.get('doc_id', '') or ''))
         try:
             result = await tree_builder.build(segment['text'], rubric)
             tree = result.tree
@@ -5881,12 +6029,87 @@ def build_trees(
             tree.metadata['oracle_view'] = segment.get('oracle_view', oracle_views.online_view_name)
             tree.metadata['oracle_proxy_source'] = segment.get('oracle_proxy_source')
             tree.metadata['three_layer_roles'] = segment.get('three_layer_roles', {})
-            return (segment, tree, result.preferences, None)
+            return (
+                segment,
+                tree,
+                result.supervision.project_binary(projection="adjacent").comparisons,
+                list(getattr(result.supervision, 'comparative_judgments', []) or []),
+                None,
+            )
         except Exception as e:
-            return (segment, None, [], str(e))
+            return (segment, None, [], [], str(e))
+        finally:
+            tournament_doc_id.reset(token)
 
     async def build_all_trees_concurrent():
         """Build all trees concurrently using asyncio.gather."""
+        if tree_runtime_mode == "unified_v2" and not adaptive_chunking_config.enabled:
+            build_config = BuildConfig(
+                k=k_candidates,
+                max_chunk_chars=int(getattr(args, "max_chunk_chars", 2000) or 2000),
+                max_chunk_tokens=getattr(args, "max_chunk_tokens", None),
+                runtime_mode=tree_runtime_mode,
+                batch_plan_cache_name="run_pipeline_init_trees",
+            )
+            orchestrator = BatchTreeOrchestrator(
+                strategy=tournament_strategy,
+                config=build_config,
+            )
+            if genrm_batch_client is not None:
+                async with genrm_batch_client:
+                    build_results = await orchestrator.process_documents(
+                        documents=samples,
+                        rubric=rubric,
+                        get_text_fn=lambda segment: str(segment.get("text", "") or ""),
+                        get_id_fn=lambda segment: str(segment.get("doc_id", "") or ""),
+                    )
+            else:
+                build_results = await orchestrator.process_documents(
+                    documents=samples,
+                    rubric=rubric,
+                    get_text_fn=lambda segment: str(segment.get("text", "") or ""),
+                    get_id_fn=lambda segment: str(segment.get("doc_id", "") or ""),
+                )
+
+            results = []
+            for segment, result in zip(samples, build_results):
+                try:
+                    tree = result.tree
+                    tree.metadata['doc_id'] = segment['doc_id']
+                    tree.metadata['source_doc_id'] = segment.get('source_doc_id')
+                    tree.metadata['reference_score'] = segment['reference_score']
+                    tree.metadata['honest_chunk_split'] = segment.get('honest_chunk_split', 'all')
+                    tree.metadata['adaptive_feedback_count'] = segment.get('adaptive_feedback_count', 0)
+                    tree.metadata['adaptive_chunking_enabled'] = adaptive_chunking_config.enabled
+                    tree.metadata['adaptive_proxy_model'] = adaptive_chunking_config.proxy_model
+                    tree.metadata['adaptive_proxy_score_key'] = adaptive_chunking_config.proxy_score_key
+                    tree.metadata['adaptive_proxy_fallback_baseline'] = adaptive_chunking_config.proxy_fallback_to_baseline
+                    tree.metadata['honest_chunking_enabled'] = honest_chunking_policy.enabled
+                    tree.metadata['three_layer_honesty_enabled'] = three_layer_honesty.enabled
+                    tree.metadata['truth_label_source'] = segment.get('truth_label_source', truth_label_source_default)
+                    tree.metadata['oracle_view'] = segment.get('oracle_view', oracle_views.online_view_name)
+                    tree.metadata['oracle_proxy_source'] = segment.get('oracle_proxy_source')
+                    tree.metadata['three_layer_roles'] = segment.get('three_layer_roles', {})
+                    results.append(
+                        (
+                            segment,
+                            tree,
+                            result.supervision.project_binary(projection="adjacent").comparisons,
+                            list(getattr(result.supervision, 'comparative_judgments', []) or []),
+                            None if not result.errors else "; ".join(result.errors),
+                        )
+                    )
+                except Exception as exc:
+                    results.append((segment, None, [], [], str(exc)))
+            return results
+
+        if tree_runtime_mode == "unified_v2" and adaptive_chunking_config.enabled:
+            logger.warning(
+                "Init-tree unified_v2 runtime requested with adaptive chunking enabled. "
+                "Falling back to legacy per-tree builder because per-document adaptive feedback "
+                "signals are not yet batch-lowered in this path."
+            )
+
         tree_semaphore = asyncio.Semaphore(tree_build_concurrency)
 
         async def _run_single_tree_limited(segment: dict, tree_builder: TreeBuilder) -> tuple:
@@ -5907,8 +6130,12 @@ def build_trees(
 
             build_config = BuildConfig(
                 k=k_candidates,
+                max_chunk_chars=int(getattr(args, "max_chunk_chars", 2000) or 2000),
+                max_chunk_tokens=getattr(args, "max_chunk_tokens", None),
                 adaptive_chunking=adaptive_chunking_config if adaptive_chunking_config.enabled else None,
                 chunk_feedback_signals=feedback_signals,
+                runtime_mode=tree_runtime_mode,
+                batch_plan_cache_name="run_pipeline_init_trees_legacy",
             )
             # Each tree needs its own builder instance
             tree_builder = TreeBuilder(strategy=tournament_strategy, config=build_config)
@@ -5933,7 +6160,7 @@ def build_trees(
             logger.warning(f"  Tree {i+1} failed with exception: {result}")
             continue
 
-        segment, tree, preferences, error = result
+        segment, tree, preferences, comparative_judgments, error = result
         if error:
             logger.warning(f"  Failed to build tree for {segment['doc_id']}: {error}")
             continue
@@ -5948,6 +6175,18 @@ def build_trees(
             pref.oracle_view = segment.get('oracle_view', oracle_views.online_view_name)
             pref.oracle_proxy_source = segment.get('oracle_proxy_source')
         all_preferences.add_pairs(preferences)
+        for record in comparative_judgments:
+            record.source_example_id = segment['doc_id']
+            record.reference_score = float(segment.get('reference_score') or 0.0)
+            record.source_doc_id = segment.get('source_doc_id')
+            record.three_layer_roles = segment.get('three_layer_roles', {})
+            record.truth_label_source = segment.get(
+                'truth_label_source',
+                truth_label_source_default,
+            )
+            record.oracle_view = segment.get('oracle_view', oracle_views.online_view_name)
+            record.oracle_proxy_source = segment.get('oracle_proxy_source')
+        all_preferences.add_comparative_records(comparative_judgments)
 
         # Create demos: pair leaves with final summary
         for leaf in tree.leaves:
@@ -5963,11 +6202,23 @@ def build_trees(
 
         logger.debug(f"  Tree {i+1}/{len(samples)}: {tree}")
 
-    logger.info(f"  Completed: {len(trees)}/{len(samples)} trees, {len(all_preferences)} preferences")
+    comparative_dataset = all_preferences.to_comparative_dataset()
+    logger.info(
+        "  Completed: %d/%d trees, %d preferences, %d comparative judgments",
+        len(trees),
+        len(samples),
+        len(all_preferences),
+        len(comparative_dataset),
+    )
 
-    if int(k_candidates) >= 2 and len(trees) > 0 and len(all_preferences) == 0:
+    if (
+        int(k_candidates) >= 2
+        and len(trees) > 0
+        and len(all_preferences) == 0
+        and len(comparative_dataset) == 0
+    ):
         raise RuntimeError(
-            "Collected 0 preferences despite k_candidates >= 2. "
+            "Collected 0 comparative supervision records despite k_candidates >= 2. "
             "This usually indicates task-model candidate generation failures "
             "(e.g., task endpoint instability or repeated LM connection errors)."
         )
@@ -5978,16 +6229,13 @@ def build_trees(
         prefs_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        pref_file = prefs_dir / f"preferences_ops_tree_{timestamp}.json"
-        all_preferences.save(pref_file)
-
-        # Save DPO format using task prompt builder
-        dpo_data = all_preferences.to_dpo_format(
-            prompt_builder=prompt_builders.summarize
+        supervision_dataset = all_preferences.to_supervision_dataset()
+        supervision_file = prefs_dir / f"supervision_ops_tree_{timestamp}.json"
+        save_supervision_artifact_bundle(
+            supervision_dataset,
+            supervision_path=supervision_file,
+            prompt_builder=prompt_builders.summarize,
         )
-        dpo_file = prefs_dir / f"dpo_ops_tree_{timestamp}.json"
-        with open(dpo_file, 'w') as f:
-            json.dump(dpo_data, f, indent=2)
 
         # Save tree stats
         split_counts = {
@@ -6005,7 +6253,8 @@ def build_trees(
 
         tree_stats = {
             'n_trees': len(trees),
-            'n_preferences': len(all_preferences),
+            'n_binary_projection_records': len(all_preferences),
+            'n_comparative_records': len(comparative_dataset),
             'n_demos': len(all_demos),
             'init_prompt_token_limit': init_prompt_token_limit,
             'k_candidates': k_candidates,
@@ -6073,11 +6322,14 @@ def build_trees(
         with open(stats_file, 'w') as f:
             json.dump(tree_stats, f, indent=2)
 
-        logger.info(f"  Saved preferences to: {pref_file}")
+        logger.info(f"  Saved primary supervision to: {supervision_file}")
+        logger.info(f"  Saved binary projection to: {pref_file}")
+        logger.info(f"  Saved comparative judgments to: {comparative_file}")
 
     logger.info(f"\nOPS Tree Building Complete:")
     logger.info(f"  Trees built: {len(trees)}")
-    logger.info(f"  Preferences collected: {len(all_preferences)}")
+    logger.info(f"  Binary optimizer records collected: {len(all_preferences)}")
+    logger.info(f"  Comparative judgments collected: {len(comparative_dataset)}")
     logger.info(f"  Demos extracted: {len(all_demos)}")
 
     # Log server metrics after tree building (prefix cache hit rate is the key signal)
@@ -6094,15 +6346,7 @@ def build_trees(
     return trees, all_preferences, all_demos
 
 
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    """Convert a value to float with fallback."""
-    try:
-        converted = float(value)
-    except (TypeError, ValueError):
-        return default
-    if converted != converted:  # NaN check
-        return default
-    return converted
+_safe_float = lambda v, default=0.0: safe_float(v, default=default)
 
 
 def _safe_optional_float(value: Any) -> Optional[float]:
@@ -6271,7 +6515,7 @@ def train_embedding_proxy_from_phase1(
         raw_scores: Sequence[float],
         targets: Sequence[float],
     ) -> Tuple[float, float]:
-        """Fit y ~= slope*x + intercept with least squares."""
+        """Fit y ~= slope*x + intercept through the shared scalar supervision surface."""
         xs = [max(0.0, min(1.0, float(v))) for v in raw_scores]
         ys = [max(0.0, min(1.0, float(v))) for v in targets]
         n = min(len(xs), len(ys))
@@ -6279,15 +6523,47 @@ def train_embedding_proxy_from_phase1(
             return 1.0, 0.0
         xs = xs[:n]
         ys = ys[:n]
-        mean_x = sum(xs) / float(n)
-        mean_y = sum(ys) / float(n)
-        var_x = sum((x - mean_x) ** 2 for x in xs) / float(n)
-        if var_x <= 1e-12:
-            return 0.0, mean_y
-        cov_xy = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / float(n)
-        slope = cov_xy / var_x
-        intercept = mean_y - slope * mean_x
-        return float(slope), float(intercept)
+        supervision = build_dense_full_document_supervision_dataset(
+            [
+                DenseSupervisionExample(
+                    example_id=f"embedding_proxy_calibration_{idx}",
+                    features=[float(x)],
+                    scalar_target=float(y),
+                    original_text=f"embedding_proxy_calibration::{idx}",
+                    rubric="Calibrate raw embedding proxy scores to held-out scalar targets.",
+                    response="raw_proxy_score",
+                    response_id=f"embedding_proxy_calibration_{idx}",
+                    reference_score=0.0,
+                    source_doc_id=f"embedding_proxy_calibration_{idx}",
+                    truth_label_source="held_out_eval_label",
+                    metadata={
+                        "training_application": "embedding_proxy_eval_calibration",
+                        "input_view": "raw_proxy_score",
+                    },
+                )
+                for idx, (x, y) in enumerate(zip(xs, ys))
+            ],
+            application_name="embedding_proxy_eval_calibration",
+            supervision_signal_name="document_level_target",
+            response_signal_name="document_score",
+            law_type="document_level_target",
+            split="val_calibration",
+            response_signal_min=0.0,
+            response_signal_max=1.0,
+            metadata={
+                "training_application": "embedding_proxy_eval_calibration",
+                "input_view": "raw_proxy_score",
+            },
+        )
+        model, _fit_result = fit_dense_scalar_ridge_regressor(
+            supervision,
+            config=DenseScalarRidgeTrainingConfig(
+                model=DenseScalarRidgeModelConfig(ridge_alpha=0.0)
+            ),
+        )
+        slope = float(model.weights[0]) if int(model.weights.size) > 0 else 0.0
+        intercept = float(model.bias)
+        return slope, intercept
 
     def _apply_linear_calibration(score: float, slope: float, intercept: float) -> float:
         return max(0.0, min(1.0, slope * float(score) + intercept))
@@ -6541,6 +6817,12 @@ def train_embedding_proxy_from_phase1(
         calibration_metrics: Dict[str, Any] = {
             "enabled": False,
             "source": calibration_source,
+            **supervision_training_contract(
+                representation_kind=REPRESENTATION_RAW_SCALAR_SCORE,
+                target_kind=TARGET_SCALAR,
+                optimizer_family=OPTIMIZER_FAMILY_CLOSED_FORM_LINEAR,
+                optimizer_backend="closed_form_ridge",
+            ),
         }
 
         def _predict_scores(examples: Sequence[LabeledEmbeddingExample]) -> List[float]:
@@ -6576,6 +6858,15 @@ def train_embedding_proxy_from_phase1(
                     "n_eval": len(val_examples),
                     "mae_before": _mean_abs_error(val_raw_scores, val_targets),
                     "mae_after": _mean_abs_error(val_calibrated_scores, val_targets),
+                    **supervision_training_contract(
+                        representation_kind=REPRESENTATION_RAW_SCALAR_SCORE,
+                        target_kind=TARGET_SCALAR,
+                        optimizer_family=OPTIMIZER_FAMILY_CLOSED_FORM_LINEAR,
+                        optimizer_backend="closed_form_ridge",
+                        selection_mode="direct_fit_no_validation",
+                        selection_split="val_eval",
+                        n_train_rows=len(val_examples),
+                    ),
                 }
             except Exception as calibration_error:
                 calibration_slope = 1.0
@@ -6585,6 +6876,12 @@ def train_embedding_proxy_from_phase1(
                     "enabled": False,
                     "source": calibration_source,
                     "error": str(calibration_error),
+                    **supervision_training_contract(
+                        representation_kind=REPRESENTATION_RAW_SCALAR_SCORE,
+                        target_kind=TARGET_SCALAR,
+                        optimizer_family=OPTIMIZER_FAMILY_CLOSED_FORM_LINEAR,
+                        optimizer_backend="closed_form_ridge",
+                    ),
                 }
                 logger.warning(
                     "Embedding proxy calibration skipped due to runtime error: %s",
@@ -6914,6 +7211,7 @@ def train_embedding_proxy_from_phase1(
                 "method": f"embedding_{effective_head_method}_proxy",
                 "effective_head_method": effective_head_method,
                 "head_fallback": head_fallback,
+                "output_dir": str(output_dir / "proxy_models"),
                 "embedding_api_base": client.api_base,
                 "embedding_model": trained_model.embedding_model,
                 "embedding_batch_size": client.batch_size,
@@ -7333,6 +7631,8 @@ def annotate_preferences_with_treepo_metadata(
     tree_audit_index: Dict[str, Dict[str, Any]],
 ) -> Dict[str, Any]:
     """Attach propensity and tree-level audit metadata to preference pairs."""
+    from src.core.logged_supervision import ObservationUnitKind, SamplingMetadata
+
     if preference_dataset is None:
         return {"total_pairs": 0, "pairs_with_propensity": 0, "pairs_with_audit_context": 0}
 
@@ -7341,27 +7641,16 @@ def annotate_preferences_with_treepo_metadata(
     pairs_with_audit_context = 0
 
     for pair in preference_dataset:
-        if getattr(pair, "doc_propensity", None) is None:
-            pair.doc_propensity = 1.0
-        if getattr(pair, "node_propensity", None) is None:
-            pair.node_propensity = 1.0
-        if getattr(pair, "label_propensity", None) is None:
-            pair.label_propensity = 1.0
-        if getattr(pair, "joint_propensity", None) is None:
-            pair.joint_propensity = (
-                float(pair.doc_propensity)
-                * float(pair.node_propensity)
-                * float(pair.label_propensity)
-            )
-        if getattr(pair, "sampling_scheme", None) is None:
-            pair.sampling_scheme = "full_tournament_observation"
+        sampling = getattr(pair, "sampling", None)
+        if not isinstance(sampling, SamplingMetadata):
+            sampling = SamplingMetadata(unit_kind=ObservationUnitKind.PAIR)
+        if sampling.sampling_scheme is None:
+            sampling = sampling.with_updates(sampling_scheme="full_tournament_observation")
+        if sampling.unit_kind is None:
+            sampling = sampling.with_updates(unit_kind=ObservationUnitKind.PAIR)
+        pair.sampling = sampling
 
-        if (
-            getattr(pair, "doc_propensity", None) is not None
-            and getattr(pair, "node_propensity", None) is not None
-            and getattr(pair, "label_propensity", None) is not None
-            and getattr(pair, "joint_propensity", None) is not None
-        ):
+        if isinstance(getattr(pair, "sampling", None), SamplingMetadata):
             pairs_with_propensity += 1
 
         source_id = str(getattr(pair, "source_example_id", ""))
@@ -7390,8 +7679,8 @@ def get_propensity_diagnostics_for_dataset(
     include_ties: bool = False,
     max_weight: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Compute propensity diagnostics for any PreferenceDataset-like object."""
-    from src.training.preference.types import compute_propensity_diagnostics
+    """Compute propensity diagnostics for any binary-projection-like object."""
+    from src.training.supervision import compute_propensity_diagnostics
 
     if preference_dataset is None:
         return compute_propensity_diagnostics([], include_ties=include_ties, max_weight=max_weight)
@@ -7419,7 +7708,7 @@ def filter_preference_dataset_by_three_layer_role(
     """Filter preference pairs by three-layer role using source document IDs."""
     if preference_dataset is None or not cfg.enabled:
         return preference_dataset
-    from src.training.preference.types import PreferenceDataset
+    from src.training.supervision import BinaryProjectionDataset
 
     filtered_pairs = []
     for pair in preference_dataset:
@@ -7433,7 +7722,7 @@ def filter_preference_dataset_by_three_layer_role(
             continue
         if assign_three_layer_split(str(source_doc_id), layer, cfg) == role:
             filtered_pairs.append(pair)
-    return PreferenceDataset(filtered_pairs)
+    return BinaryProjectionDataset(comparisons=filtered_pairs)
 
 
 def summarize_preference_dataset_three_layer_roles(
@@ -8466,6 +8755,7 @@ def _build_summarizer_examples(
     *,
     rubric: str,
     max_chunk_chars: int,
+    max_chunk_tokens: Optional[int],
     max_leaf_examples: int,
     max_merge_examples: int,
     leaf_input_name: str,
@@ -8491,7 +8781,12 @@ def _build_summarizer_examples(
             continue
 
         if len(leaf_examples) < max_leaf_examples:
-            chunks = chunk_for_ops(original_text, max_chars=max_chunk_chars, strategy="axis")
+            chunks = chunk_for_ops(
+                original_text,
+                max_chars=max_chunk_chars,
+                max_tokens=max_chunk_tokens,
+                strategy="axis",
+            )
             for chunk in chunks:
                 if len(leaf_examples) >= max_leaf_examples:
                     break
@@ -8970,6 +9265,7 @@ def process_docs_with_dspy_modules(
         max_concurrent_documents=args.concurrent_docs,
         max_concurrent_requests=args.concurrent_requests,
         max_chunk_chars=args.max_chunk_chars,
+        max_chunk_tokens=getattr(args, "max_chunk_tokens", None),
         fail_on_degenerate_summary=bool(getattr(args, "fail_on_degenerate_summary", False)),
         max_degenerate_leaf_fallbacks=max(
             0, int(getattr(args, "max_degenerate_leaf_fallbacks", 0) or 0)
@@ -8985,6 +9281,21 @@ def process_docs_with_dspy_modules(
         score_parser=task.parse_score,
         task_model_recovery_callback=lm_port_recovery_callback,
         conditional_memory=memory,
+        program_families=(
+            getattr(args, "program_families", None)
+            if getattr(args, "program_families", None) is not None
+            else getattr(args, "representation_backends", None)
+        ),
+        primary_program_family=(
+            getattr(args, "primary_program_family", None)
+            if getattr(args, "primary_program_family", None) is not None
+            else (getattr(args, "primary_representation_backend", None) or "auto")
+        ),
+        program_weights=(
+            getattr(args, "program_weights", None)
+            if getattr(args, "program_weights", None) is not None
+            else getattr(args, "representation_weights", None)
+        ),
         representation_backends=getattr(args, "representation_backends", None),
         primary_representation_backend=getattr(args, "primary_representation_backend", None) or "auto",
         representation_weights=getattr(args, "representation_weights", None),
@@ -9111,6 +9422,8 @@ def process_docs(
         f"Concurrent requests: {args.concurrent_requests}, "
         f"Max chunk chars: {args.max_chunk_chars}"
     )
+    if getattr(args, "max_chunk_tokens", None):
+        logger.info("  Max chunk tokens: %s", int(args.max_chunk_tokens))
     logger.info(
         "  Routing policy: %s (task backend=%s)",
         str(getattr(args, "routing_policy", "affinity_load_aware")),
@@ -9164,6 +9477,7 @@ def process_docs(
         max_concurrent_documents=args.concurrent_docs,
         max_concurrent_requests=args.concurrent_requests,
         max_chunk_chars=args.max_chunk_chars,
+        max_chunk_tokens=getattr(args, "max_chunk_tokens", None),
         fail_on_degenerate_summary=bool(getattr(args, "fail_on_degenerate_summary", False)),
         max_degenerate_leaf_fallbacks=max(
             0, int(getattr(args, "max_degenerate_leaf_fallbacks", 0) or 0)
@@ -9175,6 +9489,7 @@ def process_docs(
         max_tokens_summary=phase1_max_tokens_summary,
         max_tokens_score=phase1_max_tokens_score,
         run_baseline=phase1_run_baseline,
+        runtime_mode=str(getattr(args, "runtime_mode", "legacy") or "legacy"),
         show_progress=True,
         rubric=task.create_rubric(),
         task_context=task.get_task_context(),
@@ -9245,11 +9560,17 @@ def process_docs(
         pipeline_kwargs["oracle_feedback_to_chunks"] = args.oracle_feedback_to_chunks
     if getattr(args, "mil_proxy_model", None):
         pipeline_kwargs["mil_proxy_model_path"] = args.mil_proxy_model
-    if getattr(args, "representation_backends", None):
+    if getattr(args, "program_families", None):
+        pipeline_kwargs["program_families"] = args.program_families
+    elif getattr(args, "representation_backends", None):
         pipeline_kwargs["representation_backends"] = args.representation_backends
-    if getattr(args, "primary_representation_backend", None):
+    if getattr(args, "primary_program_family", None):
+        pipeline_kwargs["primary_program_family"] = args.primary_program_family
+    elif getattr(args, "primary_representation_backend", None):
         pipeline_kwargs["primary_representation_backend"] = args.primary_representation_backend
-    if getattr(args, "representation_weights", None):
+    if getattr(args, "program_weights", None):
+        pipeline_kwargs["program_weights"] = args.program_weights
+    elif getattr(args, "representation_weights", None):
         pipeline_kwargs["representation_weights"] = args.representation_weights
     if getattr(args, "fallback_to_available_backend", None) is not None:
         pipeline_kwargs["fallback_to_available_backend"] = args.fallback_to_available_backend
@@ -10407,6 +10728,16 @@ def run_optimization(
     """
     from src.training.config import OptimizationConfig
     from src.training.optimization import get_optimizer, auto_select_optimizer
+    from src.training.optimization.performance import (
+        COMPILE_STATUS_COMPLETED,
+        COMPILE_STATUS_FAILED,
+        COMPILE_STATUS_SKIPPED,
+        METRIC_DIRECTION_HIGHER_IS_BETTER,
+        OptimizerRunRecord,
+        dataset_regime_label,
+        metric_gain,
+        summarize_optimizer_runs,
+    )
     from src.core.scoring import UNIT_SCALE
 
     logger.info("Starting optimization...")
@@ -10569,6 +10900,7 @@ def run_optimization(
                     api_key="EMPTY",
                     temperature=reflection_temperature,
                     max_tokens=reflection_max_tokens,
+                    cache=_dspy_request_cache_enabled(),
                     context_window=context_window,
                     num_retries=scorer_num_retries,
                     timeout=scorer_timeout_seconds,
@@ -10585,6 +10917,7 @@ def run_optimization(
                     api_key="EMPTY",
                     temperature=reflection_temperature,
                     max_tokens=reflection_max_tokens,
+                    cache=_dspy_request_cache_enabled(),
                     context_window=context_window,
                     num_retries=scorer_num_retries,
                     timeout=scorer_timeout_seconds,
@@ -10645,6 +10978,8 @@ def run_optimization(
         kwargs: Dict[str, Any] = {}
         if optimizer_name == "gepa":
             gepa_kwargs: Dict[str, Any] = {}
+            gepa_kwargs["use_wandb"] = False
+            gepa_kwargs["use_mlflow"] = False
             if gepa_reflection_lm is not None:
                 gepa_kwargs["reflection_lm"] = gepa_reflection_lm
                 logger.info(
@@ -10795,6 +11130,62 @@ def run_optimization(
         )
         return selected
 
+    optimizer_audit_runs: List[Dict[str, Any]] = []
+
+    def _append_optimizer_audit(
+        *,
+        component: str,
+        optimizer_requested: str,
+        dataset_size: int,
+        iteration_number: int,
+        metric_before: Optional[float] = None,
+        metric_after: Optional[float] = None,
+        train_metric_before: Optional[float] = None,
+        train_metric_after: Optional[float] = None,
+        compile_status: str = COMPILE_STATUS_COMPLETED,
+        skip_reason: str = "none",
+        fallback_reason: str = "none",
+        optimizer_used: Optional[str] = None,
+        input_mutation_flags: Optional[Dict[str, Any]] = None,
+        exception_summary: Optional[str] = None,
+        comparison_control_flag: bool = False,
+        extra_fields: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        record = OptimizerRunRecord(
+            optimizer_requested=str(optimizer_requested),
+            optimizer_used=str(optimizer_used or optimizer_requested),
+            component=str(component),
+            dataset_size=int(max(0, dataset_size)),
+            dataset_regime=dataset_regime_label(dataset_size, opt_config),
+            budget_mode=str(getattr(args, "optimizer_budget", "unknown")),
+            seed=int(getattr(args, "data_seed", 0) or 0),
+            iteration=int(iteration_number),
+            compile_status=str(compile_status),
+            skip_reason=str(skip_reason),
+            fallback_reason=str(fallback_reason),
+            metric_direction=METRIC_DIRECTION_HIGHER_IS_BETTER,
+            metric_before=float(metric_before) if metric_before is not None else float("nan"),
+            metric_after=float(metric_after) if metric_after is not None else float("nan"),
+            heldout_gain=metric_gain(
+                metric_before,
+                metric_after,
+                METRIC_DIRECTION_HIGHER_IS_BETTER,
+            ),
+            train_gain=metric_gain(
+                train_metric_before,
+                train_metric_after,
+                METRIC_DIRECTION_HIGHER_IS_BETTER,
+            ),
+            input_mutation_flags=dict(input_mutation_flags or {}),
+            exception_summary=str(exception_summary) if exception_summary else None,
+            comparison_control_flag=bool(comparison_control_flag),
+        )
+        payload = record.to_dict()
+        if extra_fields:
+            payload.update(extra_fields)
+        optimizer_audit_runs.append(payload)
+        return payload
+
     oracle_train_results = train_results
     oracle_val_results = val_results
     if three_layer_honesty and three_layer_honesty.enabled:
@@ -10883,7 +11274,22 @@ def run_optimization(
     if len(train_examples) < 4:
         logger.warning("Not enough training examples for optimization")
         logger.warning("Returning untrained scorer for test evaluation")
-        return {'error': 'insufficient_training_data', 'scorer_trained': False}, scorer, None
+        _append_optimizer_audit(
+            component="scorer",
+            optimizer_requested=str(getattr(args, "optimizer", "unknown")),
+            dataset_size=len(train_examples),
+            iteration_number=1,
+            compile_status=COMPILE_STATUS_SKIPPED,
+            skip_reason="insufficient_training_data",
+        )
+        return {
+            'error': 'insufficient_training_data',
+            'scorer_trained': False,
+            'optimizer_diagnostics': {
+                'runs': optimizer_audit_runs,
+                'cell_summaries': summarize_optimizer_runs(optimizer_audit_runs),
+            },
+        }, scorer, None
 
     min_eval_examples = max(1, min(4, len(oracle_val_results)))
     if len(val_examples) < min_eval_examples:
@@ -10894,12 +11300,24 @@ def run_optimization(
             len(oracle_val_results),
             min_eval_examples,
         )
+        _append_optimizer_audit(
+            component="scorer",
+            optimizer_requested=str(getattr(args, "optimizer", "unknown")),
+            dataset_size=len(train_examples),
+            iteration_number=1,
+            compile_status=COMPILE_STATUS_SKIPPED,
+            skip_reason="insufficient_eval_data",
+        )
         return {
             'error': 'insufficient_eval_data',
             'scorer_trained': False,
             'eval_examples': int(len(val_examples)),
             'eval_results': int(len(oracle_val_results)),
             'minimum_required_eval_examples': int(min_eval_examples),
+            'optimizer_diagnostics': {
+                'runs': optimizer_audit_runs,
+                'cell_summaries': summarize_optimizer_runs(optimizer_audit_runs),
+            },
         }, scorer, None
 
     # Seed scorer with demos if available
@@ -11170,6 +11588,7 @@ def run_optimization(
                 summarizer_train_results,
                 rubric=rubric,
                 max_chunk_chars=args.max_chunk_chars,
+                max_chunk_tokens=getattr(args, "max_chunk_tokens", None),
                 max_leaf_examples=max(0, args.summarizer_max_leaf_examples),
                 max_merge_examples=max(0, args.summarizer_max_merge_examples),
                 leaf_input_name=leaf_input_name,
@@ -11179,6 +11598,7 @@ def run_optimization(
                 summarizer_val_results,
                 rubric=rubric,
                 max_chunk_chars=args.max_chunk_chars,
+                max_chunk_tokens=getattr(args, "max_chunk_tokens", None),
                 max_leaf_examples=max(1, min(len(leaf_train_examples), args.summarizer_max_leaf_examples // 2 or 1)),
                 max_merge_examples=max(1, min(len(merge_train_examples), args.summarizer_max_merge_examples // 2 or 1)),
                 leaf_input_name=leaf_input_name,
@@ -11371,7 +11791,7 @@ def run_optimization(
     _phase2_persist_state()
 
     # Run optimization
-    stats = {'rounds': []}
+    stats = {'rounds': [], 'optimizer_diagnostics': {'runs': [], 'cell_summaries': []}}
     stats["phase2_runtime_resume_dir"] = str(phase2_runtime_dir)
     stats["phase2_runtime_signature_id"] = str(phase2_signature_id)
     if three_layer_honesty and three_layer_honesty.enabled:
@@ -11416,10 +11836,15 @@ def run_optimization(
             logger.info(f"Optimizing score predictor using '{scorer_optimizer_name}' optimizer...")
             scorer_component_state = _phase2_component_state(phase2_iteration, "scorer")
 
-            def _estimate_scorer_metric(module: Any, *, label: str) -> float:
+            def _estimate_scorer_metric(
+                module: Any,
+                metric_examples: Sequence[dspy.Example],
+                *,
+                label: str,
+            ) -> float:
                 metric_total = 0.0
                 metric_count = 0
-                metric_probe_examples = val_examples[:min(10, len(val_examples))]
+                metric_probe_examples = list(metric_examples[:min(10, len(metric_examples))])
 
                 def _probe_one(example: dspy.Example) -> Optional[float]:
                     try:
@@ -11473,15 +11898,33 @@ def run_optimization(
                     except (TypeError, ValueError):
                         metric_after = None
                     if metric_after is None:
-                        metric_after = _estimate_scorer_metric(scorer, label="resume_after")
+                        metric_after = _estimate_scorer_metric(scorer, val_examples, label="resume_after")
                     if metric_before is None:
                         metric_before = metric_after
+                    train_metric_after = _estimate_scorer_metric(scorer, train_examples, label="resume_train_after")
+                    train_metric_before = train_metric_after
                     round_stats['metric_before'] = float(metric_before)
                     round_stats['metric_after'] = float(metric_after)
                     round_stats['optimizer_used'] = str(
                         scorer_component_state.get("optimizer_used") or scorer_optimizer_name
                     )
                     round_stats['scorer_resumed_from_artifact'] = True
+                    round_stats['train_metric_before'] = float(train_metric_before)
+                    round_stats['train_metric_after'] = float(train_metric_after)
+                    round_stats['optimizer_audit'] = _append_optimizer_audit(
+                        component="scorer",
+                        optimizer_requested=scorer_optimizer_name,
+                        optimizer_used=str(
+                            scorer_component_state.get("optimizer_used") or scorer_optimizer_name
+                        ),
+                        dataset_size=len(train_examples),
+                        iteration_number=phase2_iteration,
+                        metric_before=float(metric_before),
+                        metric_after=float(metric_after),
+                        train_metric_before=float(train_metric_before),
+                        train_metric_after=float(train_metric_after),
+                        extra_fields={"resume_used": True},
+                    )
                     gepa_export_saved = scorer_component_state.get("gepa_export")
                     if isinstance(gepa_export_saved, dict):
                         round_stats["scorer_gepa_export"] = gepa_export_saved
@@ -11520,13 +11963,19 @@ def run_optimization(
                             "val": val_sampling_meta,
                         }
 
-                    metric_before = _estimate_scorer_metric(scorer, label="before")
+                    metric_before = _estimate_scorer_metric(scorer, val_examples, label="before")
+                    train_metric_before = _estimate_scorer_metric(
+                        scorer,
+                        train_examples,
+                        label="before_train",
+                    )
                     _phase2_update_component_state(
                         phase2_iteration,
                         "scorer",
                         status="running",
                         optimizer_used=scorer_optimizer_name,
                         metric_before=float(metric_before),
+                        train_metric_before=float(train_metric_before),
                         optimization_train_examples=int(len(scorer_opt_train_examples)),
                         optimization_val_examples=int(len(scorer_opt_val_examples)),
                         gepa_sampling=_to_checkpoint_jsonable(scorer_gepa_sampling) if scorer_gepa_sampling else None,
@@ -11570,11 +12019,40 @@ def run_optimization(
                     )
                     gepa_export = _phase2_export_gepa("scorer") if scorer_optimizer_name == "gepa" else {}
 
-                    metric_after = _estimate_scorer_metric(scorer, label="after")
+                    metric_after = _estimate_scorer_metric(scorer, val_examples, label="after")
+                    train_metric_after = _estimate_scorer_metric(
+                        scorer,
+                        train_examples,
+                        label="after_train",
+                    )
+                    scorer_audit = dict(getattr(optimizer, "last_compile_audit", {}) or {})
+                    audit_payload = _append_optimizer_audit(
+                        component="scorer",
+                        optimizer_requested=scorer_optimizer_name,
+                        optimizer_used=str(scorer_audit.get("optimizer_used") or scorer_optimizer_name),
+                        dataset_size=len(train_examples),
+                        iteration_number=phase2_iteration,
+                        metric_before=float(metric_before),
+                        metric_after=float(metric_after),
+                        train_metric_before=float(train_metric_before),
+                        train_metric_after=float(train_metric_after),
+                        compile_status=str(scorer_audit.get("compile_status") or COMPILE_STATUS_COMPLETED),
+                        skip_reason=str(scorer_audit.get("skip_reason") or "none"),
+                        fallback_reason=str(scorer_audit.get("fallback_reason") or "none"),
+                        input_mutation_flags=dict(scorer_audit.get("input_mutation_flags") or {}),
+                        exception_summary=(
+                            str(scorer_audit.get("exception_summary"))
+                            if scorer_audit.get("exception_summary")
+                            else None
+                        ),
+                    )
 
                     round_stats['metric_before'] = metric_before
                     round_stats['metric_after'] = metric_after
-                    round_stats['optimizer_used'] = scorer_optimizer_name
+                    round_stats['train_metric_before'] = train_metric_before
+                    round_stats['train_metric_after'] = train_metric_after
+                    round_stats['optimizer_used'] = audit_payload.get("optimizer_used", scorer_optimizer_name)
+                    round_stats['optimizer_audit'] = audit_payload
                     if scorer_gepa_sampling:
                         round_stats["scorer_gepa_sampling"] = _to_checkpoint_jsonable(scorer_gepa_sampling)
                     if gepa_export:
@@ -11585,17 +12063,29 @@ def run_optimization(
                         phase2_iteration,
                         "scorer",
                         status="completed",
-                        optimizer_used=scorer_optimizer_name,
+                        optimizer_used=str(audit_payload.get("optimizer_used", scorer_optimizer_name)),
                         metric_before=float(metric_before),
                         metric_after=float(metric_after),
+                        train_metric_before=float(train_metric_before),
+                        train_metric_after=float(train_metric_after),
                         optimization_train_examples=int(len(scorer_opt_train_examples)),
                         optimization_val_examples=int(len(scorer_opt_val_examples)),
                         gepa_sampling=_to_checkpoint_jsonable(scorer_gepa_sampling) if scorer_gepa_sampling else None,
+                        optimizer_audit=_to_checkpoint_jsonable(audit_payload),
                         artifact_path=str(artifact_path) if artifact_path is not None else None,
                         completed_at=datetime.now().isoformat(),
                         gepa_export=gepa_export,
                     )
                 except Exception as e:
+                    _append_optimizer_audit(
+                        component="scorer",
+                        optimizer_requested=scorer_optimizer_name,
+                        optimizer_used=scorer_optimizer_name,
+                        dataset_size=len(train_examples),
+                        iteration_number=phase2_iteration,
+                        compile_status=COMPILE_STATUS_FAILED,
+                        exception_summary=str(e),
+                    )
                     _phase2_update_component_state(
                         phase2_iteration,
                         "scorer",
@@ -11610,6 +12100,15 @@ def run_optimization(
                     logger.error(f"Scorer optimization failed: {e}")
                     raise
         else:
+            round_stats['optimizer_audit'] = _append_optimizer_audit(
+                component="scorer",
+                optimizer_requested=str(getattr(args, "optimizer", "unknown")),
+                optimizer_used=str(getattr(args, "optimizer", "unknown")),
+                dataset_size=len(train_examples),
+                iteration_number=phase2_iteration,
+                compile_status=COMPILE_STATUS_SKIPPED,
+                skip_reason="skip_oracle_opt",
+            )
             _phase2_update_component_state(
                 phase2_iteration,
                 "scorer",
@@ -11631,6 +12130,24 @@ def run_optimization(
             if leaf_metric is None or merge_metric is None:
                 summarizer_stats["skipped"] = True
                 summarizer_stats["reason"] = "metric_unavailable"
+                summarizer_stats["leaf_optimizer_audit"] = _append_optimizer_audit(
+                    component="leaf_summarizer",
+                    optimizer_requested=str(getattr(args, "optimizer", "unknown")),
+                    optimizer_used=str(getattr(args, "optimizer", "unknown")),
+                    dataset_size=len(leaf_train_examples),
+                    iteration_number=phase2_iteration,
+                    compile_status=COMPILE_STATUS_SKIPPED,
+                    skip_reason="metric_unavailable",
+                )
+                summarizer_stats["merge_optimizer_audit"] = _append_optimizer_audit(
+                    component="merge_summarizer",
+                    optimizer_requested=str(getattr(args, "optimizer", "unknown")),
+                    optimizer_used=str(getattr(args, "optimizer", "unknown")),
+                    dataset_size=len(merge_train_examples),
+                    iteration_number=phase2_iteration,
+                    compile_status=COMPILE_STATUS_SKIPPED,
+                    skip_reason="metric_unavailable",
+                )
                 _phase2_update_component_state(
                     phase2_iteration,
                     "leaf_summarizer",
@@ -11696,14 +12213,40 @@ def run_optimization(
                                 leaf_before = leaf_after
                             if leaf_before_n <= 0:
                                 leaf_before_n = leaf_after_n
+                            leaf_train_after, leaf_train_after_n = _estimate_module_metric(
+                                leaf_summarizer,
+                                leaf_train_examples,
+                                leaf_metric,
+                                module_kind="leaf",
+                                max_examples=max(1, args.summarizer_metric_eval_samples),
+                                num_threads=int(getattr(args, "num_threads", 1) or 1),
+                            )
                             summarizer_stats["leaf"] = {
                                 "metric_before": leaf_before,
                                 "metric_after": leaf_after,
+                                "train_metric_before": leaf_train_after,
+                                "train_metric_after": leaf_train_after,
                                 "eval_count_before": leaf_before_n,
                                 "eval_count_after": leaf_after_n,
+                                "train_eval_count_before": leaf_train_after_n,
+                                "train_eval_count_after": leaf_train_after_n,
                                 "trained": True,
                                 "resumed_from_artifact": True,
                             }
+                            summarizer_stats["leaf_optimizer_audit"] = _append_optimizer_audit(
+                                component="leaf_summarizer",
+                                optimizer_requested=leaf_optimizer_name,
+                                optimizer_used=str(
+                                    leaf_component_state.get("optimizer_used") or leaf_optimizer_name
+                                ),
+                                dataset_size=len(leaf_train_examples),
+                                iteration_number=phase2_iteration,
+                                metric_before=float(leaf_before),
+                                metric_after=float(leaf_after),
+                                train_metric_before=float(leaf_train_after),
+                                train_metric_after=float(leaf_train_after),
+                                extra_fields={"resume_used": True},
+                            )
                             saved_export = leaf_component_state.get("gepa_export")
                             if isinstance(saved_export, dict):
                                 summarizer_stats["leaf_gepa_export"] = saved_export
@@ -11726,13 +12269,23 @@ def run_optimization(
                             max_examples=max(1, args.summarizer_metric_eval_samples),
                             num_threads=int(getattr(args, "num_threads", 1) or 1),
                         )
+                        leaf_train_before, leaf_train_before_n = _estimate_module_metric(
+                            leaf_summarizer,
+                            leaf_train_examples,
+                            leaf_metric,
+                            module_kind="leaf",
+                            max_examples=max(1, args.summarizer_metric_eval_samples),
+                            num_threads=int(getattr(args, "num_threads", 1) or 1),
+                        )
                         _phase2_update_component_state(
                             phase2_iteration,
                             "leaf_summarizer",
                             status="running",
                             optimizer_used=leaf_optimizer_name,
                             metric_before=float(leaf_before),
+                            train_metric_before=float(leaf_train_before),
                             eval_count_before=int(leaf_before_n),
+                            train_eval_count_before=int(leaf_train_before_n),
                             started_at=datetime.now().isoformat(),
                         )
                         try:
@@ -11807,13 +12360,53 @@ def run_optimization(
                                 max_examples=max(1, args.summarizer_metric_eval_samples),
                                 num_threads=int(getattr(args, "num_threads", 1) or 1),
                             )
+                            leaf_train_after, leaf_train_after_n = _estimate_module_metric(
+                                leaf_summarizer,
+                                leaf_train_examples,
+                                leaf_metric,
+                                module_kind="leaf",
+                                max_examples=max(1, args.summarizer_metric_eval_samples),
+                                num_threads=int(getattr(args, "num_threads", 1) or 1),
+                            )
+                            leaf_wrapper_audit = dict(getattr(leaf_optimizer, "last_compile_audit", {}) or {})
+                            leaf_audit_payload = _append_optimizer_audit(
+                                component="leaf_summarizer",
+                                optimizer_requested=leaf_optimizer_name,
+                                optimizer_used=str(
+                                    leaf_wrapper_audit.get("optimizer_used") or leaf_optimizer_name
+                                ),
+                                dataset_size=len(leaf_train_examples),
+                                iteration_number=phase2_iteration,
+                                metric_before=float(leaf_before),
+                                metric_after=float(leaf_after),
+                                train_metric_before=float(leaf_train_before),
+                                train_metric_after=float(leaf_train_after),
+                                compile_status=str(
+                                    leaf_wrapper_audit.get("compile_status") or COMPILE_STATUS_COMPLETED
+                                ),
+                                skip_reason=str(leaf_wrapper_audit.get("skip_reason") or "none"),
+                                fallback_reason=str(leaf_wrapper_audit.get("fallback_reason") or "none"),
+                                input_mutation_flags=dict(
+                                    leaf_wrapper_audit.get("input_mutation_flags") or {}
+                                ),
+                                exception_summary=(
+                                    str(leaf_wrapper_audit.get("exception_summary"))
+                                    if leaf_wrapper_audit.get("exception_summary")
+                                    else None
+                                ),
+                            )
                             summarizer_stats["leaf"] = {
                                 "metric_before": leaf_before,
                                 "metric_after": leaf_after,
+                                "train_metric_before": leaf_train_before,
+                                "train_metric_after": leaf_train_after,
                                 "eval_count_before": leaf_before_n,
                                 "eval_count_after": leaf_after_n,
+                                "train_eval_count_before": leaf_train_before_n,
+                                "train_eval_count_after": leaf_train_after_n,
                                 "trained": True,
                             }
+                            summarizer_stats["leaf_optimizer_audit"] = leaf_audit_payload
                             if leaf_gepa_sampling:
                                 summarizer_stats["leaf_gepa_sampling"] = _to_checkpoint_jsonable(leaf_gepa_sampling)
                             if leaf_gepa_export:
@@ -11823,20 +12416,36 @@ def run_optimization(
                                 phase2_iteration,
                                 "leaf_summarizer",
                                 status="completed",
-                                optimizer_used=leaf_optimizer_name,
+                                optimizer_used=str(
+                                    leaf_audit_payload.get("optimizer_used", leaf_optimizer_name)
+                                ),
                                 metric_before=float(leaf_before),
                                 metric_after=float(leaf_after),
+                                train_metric_before=float(leaf_train_before),
+                                train_metric_after=float(leaf_train_after),
                                 eval_count_before=int(leaf_before_n),
                                 eval_count_after=int(leaf_after_n),
+                                train_eval_count_before=int(leaf_train_before_n),
+                                train_eval_count_after=int(leaf_train_after_n),
                                 optimization_train_examples=int(len(leaf_opt_train_examples)),
                                 optimization_val_examples=int(len(leaf_opt_val_examples)),
                                 gepa_sampling=_to_checkpoint_jsonable(leaf_gepa_sampling) if leaf_gepa_sampling else None,
+                                optimizer_audit=_to_checkpoint_jsonable(leaf_audit_payload),
                                 artifact_path=str(artifact_path) if artifact_path is not None else None,
                                 completed_at=datetime.now().isoformat(),
                                 gepa_export=leaf_gepa_export,
                             )
                         except Exception as e:
                             summarizer_stats["leaf"] = {"trained": False, "error": str(e)}
+                            summarizer_stats["leaf_optimizer_audit"] = _append_optimizer_audit(
+                                component="leaf_summarizer",
+                                optimizer_requested=leaf_optimizer_name,
+                                optimizer_used=leaf_optimizer_name,
+                                dataset_size=len(leaf_train_examples),
+                                iteration_number=phase2_iteration,
+                                compile_status=COMPILE_STATUS_FAILED,
+                                exception_summary=str(e),
+                            )
                             _phase2_update_component_state(
                                 phase2_iteration,
                                 "leaf_summarizer",
@@ -11850,6 +12459,15 @@ def run_optimization(
                         "trained": False,
                         "reason": "insufficient_examples",
                     }
+                    summarizer_stats["leaf_optimizer_audit"] = _append_optimizer_audit(
+                        component="leaf_summarizer",
+                        optimizer_requested=str(getattr(args, "optimizer", "unknown")),
+                        optimizer_used=str(getattr(args, "optimizer", "unknown")),
+                        dataset_size=len(leaf_train_examples),
+                        iteration_number=phase2_iteration,
+                        compile_status=COMPILE_STATUS_SKIPPED,
+                        skip_reason="insufficient_examples",
+                    )
                     _phase2_update_component_state(
                         phase2_iteration,
                         "leaf_summarizer",
@@ -11909,14 +12527,40 @@ def run_optimization(
                                 merge_before = merge_after
                             if merge_before_n <= 0:
                                 merge_before_n = merge_after_n
+                            merge_train_after, merge_train_after_n = _estimate_module_metric(
+                                merge_summarizer,
+                                merge_train_examples,
+                                merge_metric,
+                                module_kind="merge",
+                                max_examples=max(1, args.summarizer_metric_eval_samples),
+                                num_threads=int(getattr(args, "num_threads", 1) or 1),
+                            )
                             summarizer_stats["merge"] = {
                                 "metric_before": merge_before,
                                 "metric_after": merge_after,
+                                "train_metric_before": merge_train_after,
+                                "train_metric_after": merge_train_after,
                                 "eval_count_before": merge_before_n,
                                 "eval_count_after": merge_after_n,
+                                "train_eval_count_before": merge_train_after_n,
+                                "train_eval_count_after": merge_train_after_n,
                                 "trained": True,
                                 "resumed_from_artifact": True,
                             }
+                            summarizer_stats["merge_optimizer_audit"] = _append_optimizer_audit(
+                                component="merge_summarizer",
+                                optimizer_requested=merge_optimizer_name,
+                                optimizer_used=str(
+                                    merge_component_state.get("optimizer_used") or merge_optimizer_name
+                                ),
+                                dataset_size=len(merge_train_examples),
+                                iteration_number=phase2_iteration,
+                                metric_before=float(merge_before),
+                                metric_after=float(merge_after),
+                                train_metric_before=float(merge_train_after),
+                                train_metric_after=float(merge_train_after),
+                                extra_fields={"resume_used": True},
+                            )
                             saved_export = merge_component_state.get("gepa_export")
                             if isinstance(saved_export, dict):
                                 summarizer_stats["merge_gepa_export"] = saved_export
@@ -11939,13 +12583,23 @@ def run_optimization(
                             max_examples=max(1, args.summarizer_metric_eval_samples),
                             num_threads=int(getattr(args, "num_threads", 1) or 1),
                         )
+                        merge_train_before, merge_train_before_n = _estimate_module_metric(
+                            merge_summarizer,
+                            merge_train_examples,
+                            merge_metric,
+                            module_kind="merge",
+                            max_examples=max(1, args.summarizer_metric_eval_samples),
+                            num_threads=int(getattr(args, "num_threads", 1) or 1),
+                        )
                         _phase2_update_component_state(
                             phase2_iteration,
                             "merge_summarizer",
                             status="running",
                             optimizer_used=merge_optimizer_name,
                             metric_before=float(merge_before),
+                            train_metric_before=float(merge_train_before),
                             eval_count_before=int(merge_before_n),
+                            train_eval_count_before=int(merge_train_before_n),
                             started_at=datetime.now().isoformat(),
                         )
                         try:
@@ -12020,13 +12674,53 @@ def run_optimization(
                                 max_examples=max(1, args.summarizer_metric_eval_samples),
                                 num_threads=int(getattr(args, "num_threads", 1) or 1),
                             )
+                            merge_train_after, merge_train_after_n = _estimate_module_metric(
+                                merge_summarizer,
+                                merge_train_examples,
+                                merge_metric,
+                                module_kind="merge",
+                                max_examples=max(1, args.summarizer_metric_eval_samples),
+                                num_threads=int(getattr(args, "num_threads", 1) or 1),
+                            )
+                            merge_wrapper_audit = dict(getattr(merge_optimizer, "last_compile_audit", {}) or {})
+                            merge_audit_payload = _append_optimizer_audit(
+                                component="merge_summarizer",
+                                optimizer_requested=merge_optimizer_name,
+                                optimizer_used=str(
+                                    merge_wrapper_audit.get("optimizer_used") or merge_optimizer_name
+                                ),
+                                dataset_size=len(merge_train_examples),
+                                iteration_number=phase2_iteration,
+                                metric_before=float(merge_before),
+                                metric_after=float(merge_after),
+                                train_metric_before=float(merge_train_before),
+                                train_metric_after=float(merge_train_after),
+                                compile_status=str(
+                                    merge_wrapper_audit.get("compile_status") or COMPILE_STATUS_COMPLETED
+                                ),
+                                skip_reason=str(merge_wrapper_audit.get("skip_reason") or "none"),
+                                fallback_reason=str(merge_wrapper_audit.get("fallback_reason") or "none"),
+                                input_mutation_flags=dict(
+                                    merge_wrapper_audit.get("input_mutation_flags") or {}
+                                ),
+                                exception_summary=(
+                                    str(merge_wrapper_audit.get("exception_summary"))
+                                    if merge_wrapper_audit.get("exception_summary")
+                                    else None
+                                ),
+                            )
                             summarizer_stats["merge"] = {
                                 "metric_before": merge_before,
                                 "metric_after": merge_after,
+                                "train_metric_before": merge_train_before,
+                                "train_metric_after": merge_train_after,
                                 "eval_count_before": merge_before_n,
                                 "eval_count_after": merge_after_n,
+                                "train_eval_count_before": merge_train_before_n,
+                                "train_eval_count_after": merge_train_after_n,
                                 "trained": True,
                             }
+                            summarizer_stats["merge_optimizer_audit"] = merge_audit_payload
                             if merge_gepa_sampling:
                                 summarizer_stats["merge_gepa_sampling"] = _to_checkpoint_jsonable(merge_gepa_sampling)
                             if merge_gepa_export:
@@ -12036,20 +12730,36 @@ def run_optimization(
                                 phase2_iteration,
                                 "merge_summarizer",
                                 status="completed",
-                                optimizer_used=merge_optimizer_name,
+                                optimizer_used=str(
+                                    merge_audit_payload.get("optimizer_used", merge_optimizer_name)
+                                ),
                                 metric_before=float(merge_before),
                                 metric_after=float(merge_after),
+                                train_metric_before=float(merge_train_before),
+                                train_metric_after=float(merge_train_after),
                                 eval_count_before=int(merge_before_n),
                                 eval_count_after=int(merge_after_n),
+                                train_eval_count_before=int(merge_train_before_n),
+                                train_eval_count_after=int(merge_train_after_n),
                                 optimization_train_examples=int(len(merge_opt_train_examples)),
                                 optimization_val_examples=int(len(merge_opt_val_examples)),
                                 gepa_sampling=_to_checkpoint_jsonable(merge_gepa_sampling) if merge_gepa_sampling else None,
+                                optimizer_audit=_to_checkpoint_jsonable(merge_audit_payload),
                                 artifact_path=str(artifact_path) if artifact_path is not None else None,
                                 completed_at=datetime.now().isoformat(),
                                 gepa_export=merge_gepa_export,
                             )
                         except Exception as e:
                             summarizer_stats["merge"] = {"trained": False, "error": str(e)}
+                            summarizer_stats["merge_optimizer_audit"] = _append_optimizer_audit(
+                                component="merge_summarizer",
+                                optimizer_requested=merge_optimizer_name,
+                                optimizer_used=merge_optimizer_name,
+                                dataset_size=len(merge_train_examples),
+                                iteration_number=phase2_iteration,
+                                compile_status=COMPILE_STATUS_FAILED,
+                                exception_summary=str(e),
+                            )
                             _phase2_update_component_state(
                                 phase2_iteration,
                                 "merge_summarizer",
@@ -12063,6 +12773,15 @@ def run_optimization(
                         "trained": False,
                         "reason": "insufficient_examples",
                     }
+                    summarizer_stats["merge_optimizer_audit"] = _append_optimizer_audit(
+                        component="merge_summarizer",
+                        optimizer_requested=str(getattr(args, "optimizer", "unknown")),
+                        optimizer_used=str(getattr(args, "optimizer", "unknown")),
+                        dataset_size=len(merge_train_examples),
+                        iteration_number=phase2_iteration,
+                        compile_status=COMPILE_STATUS_SKIPPED,
+                        skip_reason="insufficient_examples",
+                    )
                     _phase2_update_component_state(
                         phase2_iteration,
                         "merge_summarizer",
@@ -12079,6 +12798,28 @@ def run_optimization(
 
             round_stats["summarizer"] = summarizer_stats
         else:
+            round_stats["summarizer"] = {
+                "enabled": False,
+                "reason": "skip_summarizer_opt",
+                "leaf_optimizer_audit": _append_optimizer_audit(
+                    component="leaf_summarizer",
+                    optimizer_requested=str(getattr(args, "optimizer", "unknown")),
+                    optimizer_used=str(getattr(args, "optimizer", "unknown")),
+                    dataset_size=len(leaf_train_examples),
+                    iteration_number=phase2_iteration,
+                    compile_status=COMPILE_STATUS_SKIPPED,
+                    skip_reason="skip_summarizer_opt",
+                ),
+                "merge_optimizer_audit": _append_optimizer_audit(
+                    component="merge_summarizer",
+                    optimizer_requested=str(getattr(args, "optimizer", "unknown")),
+                    optimizer_used=str(getattr(args, "optimizer", "unknown")),
+                    dataset_size=len(merge_train_examples),
+                    iteration_number=phase2_iteration,
+                    compile_status=COMPILE_STATUS_SKIPPED,
+                    skip_reason="skip_summarizer_opt",
+                ),
+            }
             _phase2_update_component_state(
                 phase2_iteration,
                 "leaf_summarizer",
@@ -12138,6 +12879,10 @@ def run_optimization(
     phase2_state["status"] = "completed"
     phase2_state["completed_at"] = datetime.now().isoformat()
     _phase2_persist_state()
+    stats["optimizer_diagnostics"] = {
+        "runs": optimizer_audit_runs,
+        "cell_summaries": summarize_optimizer_runs(optimizer_audit_runs),
+    }
     return stats, scorer, optimized_summarizers
 
 
@@ -13080,6 +13825,7 @@ def export_leaf_scores(
                         rebuilt_chunks = chunk_for_ops(
                             original_text,
                             max_chars=int(getattr(args, "max_chunk_chars", 2000) or 2000),
+                            max_tokens=getattr(args, "max_chunk_tokens", None),
                             strategy="axis",
                         )
                         leaf_texts = [getattr(c, "text", "") or "" for c in rebuilt_chunks]
@@ -13246,6 +13992,8 @@ def export_leaf_scores(
 def save_results(
     stats: Dict[str, Any],
     output_dir: Path,
+    *,
+    args: argparse.Namespace | None = None,
 ) -> None:
     """Save final results to output directory."""
     output_dir = Path(output_dir)
@@ -13256,14 +14004,919 @@ def save_results(
     with open(stats_path, 'w') as f:
         json.dump(stats, f, indent=2)
 
+    optimizer_diag = dict(stats.get("optimizer_diagnostics") or {})
+    if optimizer_diag:
+        optimizer_manifest = {
+            "final_stats_path": str(stats_path),
+            "runs": list(optimizer_diag.get("runs") or []),
+            "cell_summaries": list(optimizer_diag.get("cell_summaries") or []),
+            "comparison_control_runs": list(
+                optimizer_diag.get("comparison_control_runs") or []
+            ),
+        }
+        optimizer_manifest_path = output_dir / "optimizer_audit_manifest.json"
+        with open(optimizer_manifest_path, "w") as f:
+            json.dump(optimizer_manifest, f, indent=2)
+        logger.info("Optimizer audit manifest saved to %s", optimizer_manifest_path)
+
+    try:
+        _write_phase2_optimization_trace_artifacts(stats, output_dir, args=args)
+    except Exception as e:
+        logger.warning("Failed to write Phase 2 optimization trace artifacts: %s", e)
+    try:
+        _write_embedding_proxy_training_trace_artifacts(stats, output_dir, args=args)
+    except Exception as e:
+        logger.warning("Failed to write embedding-proxy trace artifacts: %s", e)
+    try:
+        _write_generator_training_trace_artifacts(stats, output_dir, args=args)
+    except Exception as e:
+        logger.warning("Failed to write generator-training trace artifacts: %s", e)
+
+    try:
+        _write_canonical_training_outputs(stats, output_dir, args=args)
+    except Exception as e:
+        logger.warning("Failed to write canonical experiment outputs: %s", e)
+
     logger.info(f"Results saved to {stats_path}")
+
+
+_NEURAL_OPERATOR_IMPORTED_ARTIFACT_REF_RENAMES: Dict[str, str] = {
+    "summary_json": "neural_operator_summary_json",
+    "search_spec_json": "neural_operator_search_spec_json",
+    "search_results_json": "neural_operator_search_results_json",
+    "reproducibility_manifest_json": "neural_operator_reproducibility_manifest_json",
+}
+
+
+def _existing_path_str(candidate: Any) -> Optional[str]:
+    rendered = str(candidate or "").strip()
+    if not rendered:
+        return None
+    path = Path(rendered).expanduser()
+    if not path.exists():
+        return None
+    try:
+        return str(path.resolve())
+    except Exception:
+        return str(path)
+
+
+def _collect_neural_operator_artifact_paths(
+    neural_operator_training: Mapping[str, Any],
+) -> Dict[str, str]:
+    artifact_map: Dict[str, str] = {}
+    output_dir = _existing_path_str(neural_operator_training.get("output_dir"))
+    summary_path = _existing_path_str(neural_operator_training.get("summary_path"))
+    if summary_path:
+        artifact_map["neural_operator_summary_json"] = str(summary_path)
+
+    output_dir_path = Path(output_dir) if output_dir else None
+    if output_dir_path is not None:
+        top_level_candidates = {
+            "neural_operator_reproducibility_manifest_json": output_dir_path / "reproducibility_manifest.json",
+            "neural_operator_search_spec_json": output_dir_path / "search_spec.json",
+            "neural_operator_search_results_json": output_dir_path / "search_results.json",
+        }
+        for key, path in top_level_candidates.items():
+            existing = _existing_path_str(path)
+            if existing:
+                artifact_map[key] = existing
+
+    summary_payload = {}
+    if summary_path:
+        loaded = _read_json_if_exists(Path(summary_path))
+        if isinstance(loaded, dict):
+            summary_payload = loaded
+
+    for run in list(summary_payload.get("runs") or []):
+        if not isinstance(run, dict):
+            continue
+        label = str(run.get("label", "") or "").strip().lower()
+        artifacts = dict(run.get("artifacts") or {})
+        if label == "ctreepo":
+            for key in (
+                "best_model_path",
+                "final_model_path",
+                "training_result_path",
+                "reproducibility_manifest_path",
+            ):
+                existing = _existing_path_str(artifacts.get(key))
+                if existing:
+                    artifact_map[f"ctreepo_{key}"] = existing
+        elif label == "mergeable_sketch":
+            for key in (
+                "metrics_path",
+                "predictions_path",
+                "best_model_path",
+                "reproducibility_manifest_path",
+            ):
+                existing = _existing_path_str(artifacts.get(key))
+                if existing:
+                    artifact_map[f"mergeable_{key}"] = existing
+    return artifact_map
+
+
+def _rewrite_neural_operator_artifact_refs(
+    artifact_refs: Sequence[Any],
+    *,
+    available_refs: Sequence[str],
+) -> tuple[str, ...]:
+    available = {str(ref) for ref in available_refs}
+    rewritten: List[str] = []
+    for candidate in artifact_refs:
+        rendered = str(candidate or "").strip()
+        if not rendered:
+            continue
+        mapped = _NEURAL_OPERATOR_IMPORTED_ARTIFACT_REF_RENAMES.get(rendered, rendered)
+        if mapped in available and mapped not in rewritten:
+            rewritten.append(mapped)
+    for fallback in ("neural_operator_summary_json", "final_stats_json"):
+        if fallback in available and fallback not in rewritten:
+            rewritten.append(fallback)
+    return tuple(rewritten)
+
+
+def _collect_phase2_runtime_artifact_paths(stats: Mapping[str, Any]) -> Dict[str, str]:
+    artifact_map: Dict[str, str] = {}
+    runtime_dir = _existing_path_str(stats.get("phase2_runtime_resume_dir"))
+    if not runtime_dir:
+        return artifact_map
+
+    runtime_dir_path = Path(runtime_dir)
+    runtime_state = _existing_path_str(runtime_dir_path / "state.json")
+    if runtime_state:
+        artifact_map["phase2_runtime_state_json"] = runtime_state
+
+    gepa_exports_dir = runtime_dir_path / "gepa_exports"
+    if gepa_exports_dir.exists():
+        for path in sorted(gepa_exports_dir.iterdir()):
+            if not path.is_file():
+                continue
+            resolved = _existing_path_str(path)
+            if not resolved:
+                continue
+            stem = re.sub(r"[^A-Za-z0-9_]+", "_", path.stem).strip("_") or "artifact"
+            suffix = path.suffix.lstrip(".") or "file"
+            key = f"phase2_{stem}_{suffix}"
+            artifact_map[key] = resolved
+    return artifact_map
+
+
+def _write_phase2_optimization_trace_artifacts(
+    stats: Mapping[str, Any],
+    output_dir: Path,
+    *,
+    args: argparse.Namespace | None = None,
+) -> Dict[str, str]:
+    optimizer_diag = (
+        dict(stats.get("optimizer_diagnostics") or {})
+        if isinstance(stats.get("optimizer_diagnostics"), dict)
+        else {}
+    )
+    diag_runs = list(optimizer_diag.get("runs") or [])
+    rounds = list(stats.get("rounds") or [])
+    if not diag_runs and not rounds:
+        return {}
+
+    def _component_sampling_design(component: str) -> str:
+        normalized = str(component or "").strip().lower()
+        if normalized == "leaf_summarizer":
+            return resolve_gepa_sampling_design(args, "leaf") if args is not None else "two_stage_pps_bernoulli"
+        if normalized == "merge_summarizer":
+            return resolve_gepa_sampling_design(args, "merge") if args is not None else "two_stage_pps_bernoulli"
+        return resolve_gepa_sampling_design(args, "scorer") if args is not None else "srswor"
+
+    components: Dict[str, Dict[str, Any]] = {}
+    for run in diag_runs:
+        if not isinstance(run, dict):
+            continue
+        component = str(run.get("component", "") or "").strip() or "unknown"
+        row = components.setdefault(
+            component,
+            {
+                "optimizer_requested": [],
+                "optimizer_used": [],
+                "iterations_observed": [],
+                "compile_statuses": [],
+                "gepa_sampling_design": _component_sampling_design(component),
+                "selection_metric": "heldout_gain",
+                "selection_metric_direction": "higher_is_better",
+            },
+        )
+        optimizer_requested = str(run.get("optimizer_requested", "") or "").strip()
+        optimizer_used = str(run.get("optimizer_used", "") or "").strip()
+        compile_status = str(run.get("compile_status", "") or "").strip()
+        iteration = run.get("iteration")
+        if optimizer_requested and optimizer_requested not in row["optimizer_requested"]:
+            row["optimizer_requested"].append(optimizer_requested)
+        if optimizer_used and optimizer_used not in row["optimizer_used"]:
+            row["optimizer_used"].append(optimizer_used)
+        if compile_status and compile_status not in row["compile_statuses"]:
+            row["compile_statuses"].append(compile_status)
+        try:
+            iteration_value = int(iteration)
+        except (TypeError, ValueError):
+            iteration_value = None
+        if iteration_value is not None and iteration_value not in row["iterations_observed"]:
+            row["iterations_observed"].append(iteration_value)
+
+    phase2_runtime_artifacts = _collect_phase2_runtime_artifact_paths(stats)
+    task_name = str(
+        (getattr(args, "task", None) if args is not None else None)
+        or stats.get("task")
+        or "manifesto_rile"
+    )
+    spec_payload = {
+        "created_at": datetime.now().isoformat(),
+        "task": task_name,
+        "optimizer_requested": (
+            str(getattr(args, "optimizer", "") or "")
+            if args is not None
+            else str(dict(stats.get("config") or {}).get("optimizer", "") or "")
+        ),
+        "optimizer_budget": (
+            str(getattr(args, "optimizer_budget", "") or "")
+            if args is not None
+            else str(dict(stats.get("config") or {}).get("optimizer_budget", "") or "")
+        ),
+        "max_metric_calls": (
+            int(getattr(args, "max_metric_calls", 0) or 0)
+            if args is not None
+            else int(dict(stats.get("config") or {}).get("max_metric_calls", 0) or 0)
+        ),
+        "num_threads": (
+            int(getattr(args, "num_threads", 1) or 1)
+            if args is not None
+            else int(dict(stats.get("config") or {}).get("num_threads", 1) or 1)
+        ),
+        "n_iterations_requested": (
+            int(getattr(args, "n_iterations", 1) or 1)
+            if args is not None
+            else int(dict(stats.get("config") or {}).get("n_iterations", 1) or 1)
+        ),
+        "skip_oracle_opt": (
+            bool(getattr(args, "skip_oracle_opt", False))
+            if args is not None
+            else bool(dict(stats.get("config") or {}).get("skip_oracle_opt", False))
+        ),
+        "skip_summarizer_opt": (
+            bool(getattr(args, "skip_summarizer_opt", False))
+            if args is not None
+            else bool(dict(stats.get("config") or {}).get("skip_summarizer_opt", False))
+        ),
+        "phase2_runtime_signature_id": str(stats.get("phase2_runtime_signature_id", "") or ""),
+        "phase2_runtime_resume_dir": str(stats.get("phase2_runtime_resume_dir", "") or ""),
+        "components": components,
+    }
+    results_payload = {
+        "created_at": datetime.now().isoformat(),
+        "task": task_name,
+        "phase2_runtime_signature_id": str(stats.get("phase2_runtime_signature_id", "") or ""),
+        "phase2_runtime_resume_dir": str(stats.get("phase2_runtime_resume_dir", "") or ""),
+        "rounds": rounds,
+        "optimizer_diagnostics": optimizer_diag,
+        "phase2_runtime_artifacts": phase2_runtime_artifacts,
+    }
+
+    spec_path = output_dir / "phase2_optimization_trace_spec.json"
+    results_path = output_dir / "phase2_optimization_trace_results.json"
+    _write_json_atomic(spec_path, spec_payload)
+    _write_json_atomic(results_path, results_payload)
+
+    artifact_map = {
+        "phase2_optimization_trace_spec_json": str(spec_path),
+        "phase2_optimization_trace_results_json": str(results_path),
+    }
+    artifact_map.update(phase2_runtime_artifacts)
+    return artifact_map
+
+
+def _write_embedding_proxy_training_trace_artifacts(
+    stats: Mapping[str, Any],
+    output_dir: Path,
+    *,
+    args: argparse.Namespace | None = None,
+) -> Dict[str, str]:
+    payload = (
+        dict(stats.get("adaptive_embedding_proxy_training") or {})
+        if isinstance(stats.get("adaptive_embedding_proxy_training"), dict)
+        else {}
+    )
+    if not payload:
+        return {}
+
+    config = dict(stats.get("config") or {}) if isinstance(stats.get("config"), dict) else {}
+    task_name = str(
+        (getattr(args, "task", None) if args is not None else None)
+        or stats.get("task")
+        or config.get("task")
+        or "manifesto_rile"
+    )
+    spec_payload = {
+        "created_at": datetime.now().isoformat(),
+        "task": task_name,
+        "phase": "phase1_25",
+        "enabled": bool(payload.get("enabled", config.get("adaptive_embedding_proxy", False))),
+        "requested_head_method": str(
+            payload.get("requested_head_method")
+            or (getattr(args, "adaptive_embedding_head_method", None) if args is not None else None)
+            or config.get("adaptive_embedding_head_method")
+            or ""
+        ),
+        "effective_head_method": str(
+            payload.get("effective_head_method")
+            or payload.get("requested_head_method")
+            or ""
+        ),
+        "requested_embedding_model": str(payload.get("requested_embedding_model", "") or ""),
+        "resolved_embedding_model": str(payload.get("embedding_model", "") or ""),
+        "embedding_api_base": str(payload.get("api_base", "") or ""),
+        "window_adapter": str(payload.get("window_adapter", "") or ""),
+        "score_key": str(payload.get("score_key", "") or ""),
+        "target_field": str(payload.get("target_field", "") or ""),
+        "target_transform": str(payload.get("target_transform", "") or ""),
+        "allowed_truth_sources": list(payload.get("allowed_truth_sources") or []),
+        "retrain_rounds": int(payload.get("retrain_rounds", 0) or 0),
+        "include_val_in_fit": bool(
+            dict(payload.get("collection") or {}).get("include_val_in_fit", False)
+        ),
+        "min_samples": int(
+            (getattr(args, "adaptive_embedding_min_samples", None) if args is not None else None)
+            or config.get("adaptive_embedding_min_samples")
+            or 0
+        ),
+        "selection_metric": "val_metrics.mae",
+        "selection_metric_mode": "minimize",
+        "full_finetune_enabled": bool(payload.get("full_finetune_enabled", False)),
+    }
+    results_payload = {
+        "created_at": datetime.now().isoformat(),
+        "task": task_name,
+        "phase": "phase1_25",
+        "training": payload,
+        "adaptive_chunking_auto_enable": (
+            dict(stats.get("adaptive_chunking_auto_enable") or {})
+            if isinstance(stats.get("adaptive_chunking_auto_enable"), dict)
+            else {}
+        ),
+        "artifacts": {
+            "artifact_path": str(payload.get("artifact_path", "") or ""),
+            "dataset_export_path": str(
+                dict(dict(payload.get("full_finetune") or {}).get("dataset_export") or {}).get("path", "") or ""
+            ),
+        },
+    }
+    spec_path = output_dir / "embedding_proxy_training_spec.json"
+    results_path = output_dir / "embedding_proxy_training_results.json"
+    _write_json_atomic(spec_path, spec_payload)
+    _write_json_atomic(results_path, results_payload)
+    return {
+        "embedding_proxy_training_spec_json": str(spec_path),
+        "embedding_proxy_training_results_json": str(results_path),
+    }
+
+
+def _write_generator_training_trace_artifacts(
+    stats: Mapping[str, Any],
+    output_dir: Path,
+    *,
+    args: argparse.Namespace | None = None,
+) -> Dict[str, str]:
+    payload = (
+        dict(stats.get("generator_training") or {})
+        if isinstance(stats.get("generator_training"), dict)
+        else {}
+    )
+    if not payload:
+        return {}
+
+    config = dict(stats.get("config") or {}) if isinstance(stats.get("config"), dict) else {}
+    task_name = str(
+        (getattr(args, "task", None) if args is not None else None)
+        or stats.get("task")
+        or config.get("task")
+        or "manifesto_rile"
+    )
+    spec_payload = {
+        "created_at": datetime.now().isoformat(),
+        "task": task_name,
+        "phase": "phase3_25",
+        "method": str(
+            payload.get("method")
+            or (getattr(args, "generator_method", None) if args is not None else None)
+            or config.get("generator_method")
+            or ""
+        ),
+        "model": str(
+            payload.get("model")
+            or (getattr(args, "generator_model", None) if args is not None else None)
+            or config.get("generator_model")
+            or ""
+        ),
+        "use_lora": bool(
+            payload.get("use_lora")
+            if "use_lora" in payload
+            else (
+                getattr(args, "generator_use_lora", False)
+                if args is not None
+                else config.get("generator_use_lora", False)
+            )
+        ),
+        "learning_rate": _safe_optional_float(
+            payload.get("learning_rate")
+            if "learning_rate" in payload
+            else (
+                getattr(args, "generator_learning_rate", None)
+                if args is not None
+                else config.get("generator_learning_rate")
+            )
+        ),
+        "epochs": int(
+            payload.get("epochs")
+            if payload.get("epochs") is not None
+            else (
+                getattr(args, "generator_epochs", 0)
+                if args is not None
+                else config.get("generator_epochs", 0)
+            )
+            or 0
+        ),
+        "batch_size": int(
+            payload.get("batch_size")
+            if payload.get("batch_size") is not None
+            else (
+                getattr(args, "generator_batch_size", 0)
+                if args is not None
+                else config.get("generator_batch_size", 0)
+            )
+            or 0
+        ),
+        "min_preferences_required": int(payload.get("min_preferences_required", 0) or 0),
+        "selection_metric": "downstream_eval_required",
+        "selection_metric_mode": "not_applicable",
+    }
+    results_payload = {
+        "created_at": datetime.now().isoformat(),
+        "task": task_name,
+        "phase": "phase3_25",
+        "training": payload,
+        "artifacts": {
+            "model_path": str(payload.get("model_path", "") or ""),
+        },
+    }
+    spec_path = output_dir / "generator_training_spec.json"
+    results_path = output_dir / "generator_training_results.json"
+    _write_json_atomic(spec_path, spec_payload)
+    _write_json_atomic(results_path, results_payload)
+    return {
+        "generator_training_spec_json": str(spec_path),
+        "generator_training_results_json": str(results_path),
+    }
+
+
+def _collect_pipeline_method_artifact_paths(stats: Mapping[str, Any]) -> Dict[str, str]:
+    artifact_map: Dict[str, str] = {}
+    for key in (
+        "scorer_module_path",
+        "leaf_summarizer_module_path",
+        "merge_summarizer_module_path",
+    ):
+        existing = _existing_path_str(stats.get(key))
+        if existing:
+            artifact_map[key] = existing
+
+    embedding_proxy_training = (
+        dict(stats.get("adaptive_embedding_proxy_training") or {})
+        if isinstance(stats.get("adaptive_embedding_proxy_training"), dict)
+        else {}
+    )
+    embedding_artifact = _existing_path_str(embedding_proxy_training.get("artifact_path"))
+    if embedding_artifact:
+        artifact_map["embedding_proxy_artifact_json"] = embedding_artifact
+    full_finetune = (
+        dict(embedding_proxy_training.get("full_finetune") or {})
+        if isinstance(embedding_proxy_training.get("full_finetune"), dict)
+        else {}
+    )
+    dataset_export = (
+        dict(full_finetune.get("dataset_export") or {})
+        if isinstance(full_finetune.get("dataset_export"), dict)
+        else {}
+    )
+    embedding_dataset = _existing_path_str(dataset_export.get("path"))
+    if embedding_dataset:
+        artifact_map["embedding_proxy_finetune_dataset_jsonl"] = embedding_dataset
+
+    generator_training = (
+        dict(stats.get("generator_training") or {})
+        if isinstance(stats.get("generator_training"), dict)
+        else {}
+    )
+    generator_model = _existing_path_str(generator_training.get("model_path"))
+    if generator_model:
+        artifact_map["generator_model_path"] = generator_model
+
+    artifact_map.update(_collect_phase2_runtime_artifact_paths(stats))
+    return artifact_map
+
+
+def _collect_learning_trace_artifact_paths(output_dir: Path) -> Dict[str, str]:
+    artifact_map: Dict[str, str] = {}
+    for trace_name in (
+        "embedding_proxy_training_spec.json",
+        "embedding_proxy_training_results.json",
+        "generator_training_spec.json",
+        "generator_training_results.json",
+    ):
+        candidate = output_dir / trace_name
+        existing = _existing_path_str(candidate)
+        if existing:
+            artifact_map[trace_name.replace(".", "_")] = existing
+    return artifact_map
+
+
+def _write_canonical_training_outputs(
+    stats: Dict[str, Any],
+    output_dir: Path,
+    *,
+    args: argparse.Namespace | None = None,
+) -> None:
+    from src.experiments import (
+        ExperimentSpec,
+        ProgressSnapshot,
+        ResultRow,
+        SupervisionRef,
+        append_result_rows,
+        benchmark_ref_from_parts,
+        canonical_artifact_refs_from_paths,
+        control_ref_from_ctreepo_local_law_config,
+        control_ref_from_treepo_audit_config,
+        default_phase_specs,
+        load_canonical_result_rows,
+        merge_artifacts,
+        method_ref_from_parts,
+        result_rows_from_scalar_metrics,
+        write_experiment_manifest,
+        write_experiment_status,
+    )
+
+    task_name = str(
+        (getattr(args, "task", None) if args is not None else None)
+        or stats.get("task")
+        or "manifesto_rile"
+    )
+    benchmark_ref = benchmark_ref_from_parts(
+        family="treepo_task",
+        scope=task_name,
+        name=task_name,
+    )
+    train_docs = None
+    if args is not None and getattr(args, "train_samples", None) not in {None, ""}:
+        try:
+            train_docs = int(getattr(args, "train_samples"))
+        except Exception:
+            train_docs = None
+    audit_config = None
+    if args is not None:
+        audit_config = {
+            "audit_leaves": bool(getattr(args, "enable_treepo_audit", False)),
+            "audit_internal": bool(getattr(args, "enable_treepo_audit", False)),
+            "audit_idempotence": bool(getattr(args, "treepo_audit_idempotence", True)),
+            "sample_budget": int(getattr(args, "treepo_audit_sample_budget", 10) or 10),
+            "sampling_probability": float(getattr(args, "treepo_audit_sampling_probability", 1.0) or 1.0),
+            "sampling_strategy": str(getattr(args, "treepo_audit_sampling_strategy", "random") or "random"),
+            "discrepancy_threshold": float(getattr(args, "treepo_audit_discrepancy_threshold", 0.1) or 0.1),
+        }
+    audit_control_ref = control_ref_from_treepo_audit_config(
+        audit_config,
+        metadata={"task": task_name},
+    )
+    document_label_supervision_ref = SupervisionRef(
+        topology_scope="document",
+        unit_selector="document",
+        supervision_kind="scalar",
+        label_source="dataset_labels",
+        labeler_kind="gold_score",
+        doc_sample_probability=1.0,
+        coverage_label="100% labeled docs",
+        metadata={"task": task_name},
+    )
+    llm_method_ref = method_ref_from_parts(
+        family="llm_prompt_optimization",
+        variant="training_pipeline",
+        adapter="treepo_training",
+        supervision=document_label_supervision_ref,
+        control_ref=audit_control_ref,
+    )
+    method_refs = [llm_method_ref]
+    neural_operator_training = (
+        dict(stats.get("neural_operator_training") or {})
+        if isinstance(stats.get("neural_operator_training"), dict)
+        else {}
+    )
+    ctreepo_local_law = (
+        dict(neural_operator_training.get("ctreepo_local_law") or {})
+        if isinstance(neural_operator_training.get("ctreepo_local_law"), dict)
+        else dict((dict(neural_operator_training.get("summary") or {}).get("ctreepo_local_law") or {}))
+    )
+    ctreepo_control_ref = control_ref_from_ctreepo_local_law_config(
+        ctreepo_local_law,
+        metadata={"task": task_name},
+    )
+    if neural_operator_training:
+        method_refs.append(
+            method_ref_from_parts(
+                family="ctreepo",
+                variant="training_pipeline",
+                adapter="treepo_training",
+                control_ref=ctreepo_control_ref,
+            )
+        )
+        method_refs.append(
+            method_ref_from_parts(
+                family="mergeable_sketch",
+                variant="training_pipeline",
+                adapter="treepo_training",
+            )
+        )
+    if isinstance(stats.get("method_status"), dict) and "embedding_proxy" in dict(stats.get("method_status") or {}):
+        method_refs.append(
+            method_ref_from_parts(
+                family="embedding_proxy",
+                variant="training_pipeline",
+                adapter="treepo_training",
+            )
+        )
+    if isinstance(stats.get("method_status"), dict) and "generator_finetune" in dict(stats.get("method_status") or {}):
+        method_refs.append(
+            method_ref_from_parts(
+                family="generator_finetune",
+                variant="training_pipeline",
+                adapter="treepo_training",
+            )
+        )
+    experiment_spec = ExperimentSpec.create(
+        adapter_id="treepo_training",
+        output_root=str(output_dir),
+        title="run_pipeline",
+        benchmark_refs=(benchmark_ref,),
+        method_refs=tuple(method_refs),
+        phases=default_phase_specs(("train", "eval", "aggregate", "report")),
+        report_profiles=("runtime_eval_summary",),
+        launch_command=tuple(sys.argv),
+        resume_command=tuple(sys.argv),
+        metadata={"task": task_name},
+    )
+    write_experiment_manifest(output_dir, experiment_spec)
+
+    artifact_map: Dict[str, str] = {
+        "final_stats_json": str(output_dir / "final_stats.json"),
+    }
+    reproducibility_manifest_path = output_dir / "reproducibility_manifest.json"
+    if reproducibility_manifest_path.exists():
+        artifact_map["reproducibility_manifest_json"] = str(reproducibility_manifest_path)
+    optimizer_manifest_path = output_dir / "optimizer_audit_manifest.json"
+    if optimizer_manifest_path.exists():
+        artifact_map["optimizer_audit_manifest_json"] = str(optimizer_manifest_path)
+    for phase2_name in (
+        "phase2_optimization_trace_spec.json",
+        "phase2_optimization_trace_results.json",
+    ):
+        candidate = output_dir / phase2_name
+        if candidate.exists():
+            artifact_map[phase2_name.replace(".", "_")] = str(candidate)
+    score_report_pdf = output_dir / "score_report.pdf"
+    if score_report_pdf.exists():
+        artifact_map["score_report_pdf"] = str(score_report_pdf)
+    for split_name in ("train", "validation", "val", "test"):
+        score_report = output_dir / f"{split_name}_score_report.jsonl"
+        if score_report.exists():
+            artifact_map[f"{split_name}_score_report_jsonl"] = str(score_report)
+    neural_output_dir = Path(str(neural_operator_training.get("output_dir", "") or "")).expanduser()
+    neural_summary_path = Path(str(neural_operator_training.get("summary_path", "") or "")).expanduser()
+    if neural_summary_path.exists():
+        artifact_map["neural_operator_summary_json"] = str(neural_summary_path)
+    elif neural_output_dir and neural_output_dir.exists():
+        candidate = neural_output_dir / "summary.json"
+        if candidate.exists():
+            artifact_map["neural_operator_summary_json"] = str(candidate)
+    artifact_map.update(_collect_pipeline_method_artifact_paths(stats))
+    artifact_map.update(_collect_learning_trace_artifact_paths(output_dir))
+    artifact_map.update(_collect_neural_operator_artifact_paths(neural_operator_training))
+    merge_artifacts(
+        output_dir,
+        canonical_artifact_refs_from_paths(artifact_map, phase_id="aggregate", required=False),
+    )
+
+    llm_trace_refs = tuple(
+        ref
+        for ref in (
+            "phase2_optimization_trace_results_json",
+            "scorer_module_path",
+            "leaf_summarizer_module_path",
+            "merge_summarizer_module_path",
+        )
+        if ref in artifact_map
+    )
+    rows: list[object] = []
+    for split_name in ("train", "test"):
+        split_metrics = dict(stats.get(split_name) or {})
+        if not split_metrics:
+            continue
+        rows.extend(
+            result_rows_from_scalar_metrics(
+                base_row=ResultRow(
+                    experiment_id=str(experiment_spec.experiment_id),
+                    phase="eval",
+                    benchmark_ref=benchmark_ref,
+                    method_ref=llm_method_ref,
+                    split="validation" if split_name == "val" else split_name,
+                    train_docs=train_docs,
+                    supervision_ref=document_label_supervision_ref,
+                    control_ref=audit_control_ref,
+                    artifact_refs=(f"{split_name}_score_report_jsonl", "final_stats_json", *llm_trace_refs),
+                ),
+                metrics=split_metrics,
+                allowed_keys=(
+                    "mae",
+                    "mse",
+                    "rmse",
+                    "pearson_r",
+                    "spearman_r",
+                    "within_5pct",
+                    "within_10pct",
+                    "same_side_of_neutral_pct",
+                    "n_evaluated",
+                    "n_examples",
+                    "n_failures",
+                ),
+                metadata={"method_family": "llm_prompt_optimization"},
+            )
+        )
+    method_status = dict(stats.get("method_status") or {})
+    for method_name, payload in method_status.items():
+        if not isinstance(payload, dict):
+            continue
+        family = (
+            "generator_finetune"
+            if method_name == "generator_finetune"
+            else "embedding_proxy"
+            if method_name == "embedding_proxy"
+            else "ctreepo"
+            if method_name == "neural_operators"
+            else "llm_prompt_optimization"
+        )
+        method_ref = method_ref_from_parts(
+            family=family,
+            variant="training_pipeline",
+            adapter="treepo_training",
+            supervision=(
+                document_label_supervision_ref
+                if family in {"llm_prompt_optimization", "embedding_proxy", "generator_finetune"}
+                else None
+            ),
+            control_ref=ctreepo_control_ref if family == "ctreepo" else audit_control_ref if family == "llm_prompt_optimization" else None,
+        )
+        if family == "llm_prompt_optimization":
+            method_artifact_refs = ("final_stats_json", *llm_trace_refs)
+        elif family == "embedding_proxy":
+            method_artifact_refs = tuple(
+                ref
+                for ref in (
+                    "final_stats_json",
+                    "embedding_proxy_training_spec_json",
+                    "embedding_proxy_training_results_json",
+                    "embedding_proxy_artifact_json",
+                    "embedding_proxy_finetune_dataset_jsonl",
+                )
+                if ref in artifact_map
+            )
+        elif family == "generator_finetune":
+            method_artifact_refs = tuple(
+                ref
+                for ref in (
+                    "final_stats_json",
+                    "generator_training_spec_json",
+                    "generator_training_results_json",
+                    "generator_model_path",
+                )
+                if ref in artifact_map
+            )
+        else:
+            method_artifact_refs = ("final_stats_json",)
+        rows.extend(
+            result_rows_from_scalar_metrics(
+                base_row=ResultRow(
+                    experiment_id=str(experiment_spec.experiment_id),
+                    phase="aggregate",
+                    benchmark_ref=benchmark_ref,
+                    method_ref=method_ref,
+                    train_docs=train_docs,
+                    supervision_ref=(
+                        document_label_supervision_ref
+                        if family in {"llm_prompt_optimization", "embedding_proxy", "generator_finetune"}
+                        else None
+                    ),
+                    control_ref=ctreepo_control_ref if family == "ctreepo" else audit_control_ref if family == "llm_prompt_optimization" else None,
+                    artifact_refs=method_artifact_refs,
+                ),
+                metrics=payload,
+                allowed_keys=("enabled", "attempted", "completed", "skipped", "duration_seconds"),
+                metadata={"method_key": str(method_name)},
+            )
+        )
+    treepo_audit_stats = dict(stats.get("treepo_audit") or {})
+    if treepo_audit_stats:
+        rows.extend(
+            result_rows_from_scalar_metrics(
+                base_row=ResultRow(
+                    experiment_id=str(experiment_spec.experiment_id),
+                    phase="eval",
+                    benchmark_ref=benchmark_ref,
+                    method_ref=llm_method_ref,
+                    split="validation",
+                    train_docs=train_docs,
+                    supervision_ref=document_label_supervision_ref,
+                    control_ref=audit_control_ref,
+                    artifact_refs=("final_stats_json",),
+                ),
+                metrics=dict(treepo_audit_stats.get("aggregate") or {}),
+                allowed_keys=("n_trees", "nodes_audited", "nodes_failed", "failure_rate"),
+                metadata={"control_family": "tree_audit"},
+            )
+        )
+        pooled = dict(treepo_audit_stats.get("pooled_ipw") or {})
+        rows.extend(
+            result_rows_from_scalar_metrics(
+                base_row=ResultRow(
+                    experiment_id=str(experiment_spec.experiment_id),
+                    phase="eval",
+                    benchmark_ref=benchmark_ref,
+                    method_ref=llm_method_ref,
+                    split="validation",
+                    train_docs=train_docs,
+                    supervision_ref=document_label_supervision_ref,
+                    control_ref=audit_control_ref,
+                    artifact_refs=("final_stats_json",),
+                ),
+                metrics=pooled,
+                allowed_keys=("violation_rate",),
+                metadata={"control_family": "tree_audit", "stat_group": "pooled_ipw"},
+            )
+        )
+    if neural_output_dir and neural_output_dir.exists():
+        try:
+            nested_rows = load_canonical_result_rows(neural_output_dir)
+        except Exception:
+            nested_rows = []
+        for nested_row in nested_rows:
+            nested_payload = nested_row.to_dict()
+            nested_payload["experiment_id"] = str(experiment_spec.experiment_id)
+            if train_docs is not None:
+                nested_payload["train_docs"] = train_docs
+            nested_payload["artifact_refs"] = _rewrite_neural_operator_artifact_refs(
+                tuple(nested_payload.get("artifact_refs") or ()),
+                available_refs=tuple(artifact_map.keys()),
+            )
+            nested_metadata = dict(nested_payload.get("metadata", {}) or {})
+            nested_metadata["imported_from_output_root"] = str(neural_output_dir)
+            nested_metadata["imported_via"] = "run_pipeline"
+            nested_payload["metadata"] = nested_metadata
+            rows.append(ResultRow.from_dict(nested_payload))
+    append_result_rows(output_dir, rows)
+
+    state = "completed" if bool(stats.get("success", True)) else "failed"
+    write_experiment_status(
+        output_dir,
+        ProgressSnapshot(
+            experiment_id=str(experiment_spec.experiment_id),
+            state=state,
+            active_phase="aggregate",
+            items_total=len(method_refs),
+            completed_items=sum(
+                1
+                for payload in method_status.values()
+                if isinstance(payload, dict) and bool(payload.get("completed"))
+            ) or len(method_refs if state == "completed" else []),
+            failed_items=sum(
+                1
+                for payload in method_status.values()
+                if isinstance(payload, dict) and bool(payload.get("attempted")) and not bool(payload.get("completed")) and not bool(payload.get("skipped"))
+            ),
+            active_items=0,
+            pending_items=0,
+            percent_complete=100.0,
+            artifact_targets=tuple(artifact_map.keys()),
+            metadata={"adapter": "treepo_training"},
+        ),
+    )
 
 
 def train_comparison_module(
     preference_dataset: Any,
     args: argparse.Namespace,
     output_dir: Path,
-) -> Any:
+) -> Tuple[Any, Optional[Dict[str, Any]]]:
     """
     Train OPSComparisonModule from collected preferences.
 
@@ -13278,10 +14931,18 @@ def train_comparison_module(
         output_dir: Output directory
 
     Returns:
-        Trained OPSComparisonModule
+        Tuple of (trained OPSComparisonModule, optimizer audit payload)
     """
     from datetime import datetime
     from src.training.comparison import OPSComparisonModule
+    from src.training.config import OptimizationConfig
+    from src.training.optimization.performance import (
+        COMPILE_STATUS_COMPLETED,
+        COMPILE_STATUS_FAILED,
+        COMPILE_STATUS_SKIPPED,
+        OptimizerRunRecord,
+        dataset_regime_label,
+    )
 
     logger.info("\n" + "-" * 60)
     logger.info("Training OPSComparisonModule from preferences")
@@ -13315,7 +14976,18 @@ def train_comparison_module(
 
     if len(train_examples) < 10:
         logger.warning(f"  Only {len(train_examples)} examples, skipping comparison module training")
-        return None
+        return None, OptimizerRunRecord(
+            optimizer_requested="gepa",
+            optimizer_used="gepa",
+            component="comparison_module",
+            dataset_size=len(train_examples),
+            dataset_regime=dataset_regime_label(len(train_examples), OptimizationConfig()),
+            budget_mode=str(getattr(args, "optimizer_budget", "unknown")),
+            seed=int(getattr(args, "data_seed", 0) or 0),
+            compile_status=COMPILE_STATUS_SKIPPED,
+            skip_reason="insufficient_training_data",
+            comparison_control_flag=True,
+        ).to_dict()
 
     # Create comparison module
     comparison_module = OPSComparisonModule(use_cot=True)
@@ -13332,6 +15004,8 @@ def train_comparison_module(
         reflection_lm=dspy.settings.lm,
         log_dir=str(gepa_log_dir),
         track_stats=True,
+        use_wandb=False,
+        use_mlflow=False,
         seed=int(getattr(args, "data_seed", 0) or 0),
     )
 
@@ -13353,7 +15027,18 @@ def train_comparison_module(
         )
     except Exception as e:
         logger.error(f"  Optimization failed: {e}")
-        return None
+        return None, OptimizerRunRecord(
+            optimizer_requested="gepa",
+            optimizer_used="gepa",
+            component="comparison_module",
+            dataset_size=len(train_examples),
+            dataset_regime=dataset_regime_label(len(train_examples), OptimizationConfig()),
+            budget_mode=str(getattr(args, "optimizer_budget", "unknown")),
+            seed=int(getattr(args, "data_seed", 0) or 0),
+            compile_status=COMPILE_STATUS_FAILED,
+            exception_summary=str(e),
+            comparison_control_flag=True,
+        ).to_dict()
 
     # Save trained module
     module_dir = output_dir / 'comparison_module'
@@ -13384,7 +15069,17 @@ def train_comparison_module(
 
     logger.info(f"  Saved trained module to {model_path}")
 
-    return trained_module
+    return trained_module, OptimizerRunRecord(
+        optimizer_requested="gepa",
+        optimizer_used="gepa",
+        component="comparison_module",
+        dataset_size=len(train_examples),
+        dataset_regime=dataset_regime_label(len(train_examples), OptimizationConfig()),
+        budget_mode=str(getattr(args, "optimizer_budget", "unknown")),
+        seed=int(getattr(args, "data_seed", 0) or 0),
+        compile_status=COMPILE_STATUS_COMPLETED,
+        comparison_control_flag=True,
+    ).to_dict()
 
 
 def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
@@ -13403,11 +15098,29 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
     checkpoint_dir = output_dir / 'checkpoints'
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     pipeline_runtime_state_path = checkpoint_dir / "pipeline_runtime_state.json"
+    applied_reproducibility = configure_reproducibility(
+        int(getattr(args, "data_seed", 42) or 42)
+    )
     pipeline_runtime_state, pipeline_runtime_resumed = _initialize_pipeline_runtime_state(
         state_path=pipeline_runtime_state_path,
         output_dir=output_dir,
         args=args,
     )
+
+    def _merge_optimizer_diagnostics(into_stats: Dict[str, Any], new_stats: Optional[Dict[str, Any]]) -> None:
+        if not isinstance(new_stats, dict):
+            return
+        new_diag = new_stats.get("optimizer_diagnostics")
+        if not isinstance(new_diag, dict):
+            return
+        dest = into_stats.setdefault("optimizer_diagnostics", {})
+        for key in ("runs", "cell_summaries", "comparison_control_runs"):
+            values = new_diag.get(key)
+            if isinstance(values, list):
+                if dest is new_diag or dest.get(key) is values:
+                    continue
+                dest.setdefault(key, [])
+                dest[key].extend(values)
 
     def _update_pipeline_runtime(
         phase: str,
@@ -13625,6 +15338,14 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         or neural_operator_settings.get("mergeable_args")
         or ""
     ).strip() or None
+    neural_operator_ctreepo_search_spec = _resolve_optional_str(
+        getattr(args, "neural_operators_ctreepo_search_spec", None),
+        neural_operator_settings.get("ctreepo_search_spec"),
+    )
+    neural_operator_mergeable_search_spec = _resolve_optional_str(
+        getattr(args, "neural_operators_mergeable_search_spec", None),
+        neural_operator_settings.get("mergeable_search_spec"),
+    )
     neural_operator_ctreepo_root_weight = _resolve_optional_float(
         getattr(args, "neural_operators_ctreepo_root_weight", None),
         neural_operator_local_law_settings.get("root_weight"),
@@ -13768,6 +15489,8 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
     args.neural_operators_output_dir = neural_operator_output_dir_override
     args.neural_operators_ctreepo_args = neural_operator_ctreepo_args
     args.neural_operators_mergeable_args = neural_operator_mergeable_args
+    args.neural_operators_ctreepo_search_spec = neural_operator_ctreepo_search_spec
+    args.neural_operators_mergeable_search_spec = neural_operator_mergeable_search_spec
     args.neural_operators_ctreepo_root_weight = neural_operator_ctreepo_root_weight
     args.neural_operators_ctreepo_leaf_audit_weight = neural_operator_ctreepo_leaf_audit_weight
     args.neural_operators_ctreepo_merge_audit_weight = neural_operator_ctreepo_merge_audit_weight
@@ -13856,7 +15579,7 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         generator_policy.rerun_on_resume,
     )
     logger.info(
-        "Neural-operator training: enabled=%s which=%s output_dir=%s fail_fast=%s fail_on_error=%s rerun_on_resume=%s auto_wire=%s embedding_url=%s embedding_model=%s",
+        "Neural-operator training: enabled=%s which=%s output_dir=%s fail_fast=%s fail_on_error=%s rerun_on_resume=%s auto_wire=%s embedding_url=%s embedding_model=%s ctreepo_search=%s mergeable_search=%s",
         neural_operator_training_enabled,
         neural_operator_which,
         neural_operator_output_dir_override or str(output_dir / "neural_operators"),
@@ -13866,6 +15589,8 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         neural_operator_auto_wire_representation,
         neural_operator_embedding_url or "none",
         neural_operator_embedding_model or "none",
+        neural_operator_ctreepo_search_spec or "fixed",
+        neural_operator_mergeable_search_spec or "fixed",
     )
     logger.info(
         "Representation hybrid: enabled=%s llm_weight=[%.3f, %.3f] operator_boost=%.3f ctreepo_model=%s mergeable_model=%s",
@@ -13892,6 +15617,64 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         parser_router_config.vlm_endpoint or "none",
         parser_router_config.vision_embedding_endpoint or "none",
     )
+
+    reproducibility_manifest_path = write_reproducibility_manifest(
+        output_dir,
+        seed=int(getattr(args, "data_seed", 42) or 42),
+        cli_args=vars(args),
+        config={
+            "task": task.name,
+            "dataset": dataset.name,
+            "chunking_policy": {
+                "adaptive_enabled": adaptive_chunking_config.enabled,
+                "adaptive_min_chars": adaptive_chunking_config.min_chars,
+                "adaptive_max_chars": adaptive_chunking_config.max_chars,
+                "adaptive_crossfit_folds": adaptive_chunking_config.crossfit_folds,
+                "honest_enabled": honest_chunking_policy.enabled,
+                "honest_boundary_fraction": honest_chunking_policy.boundary_fraction,
+                "honest_split_seed": honest_chunking_policy.split_seed,
+            },
+            "three_layer_honesty": {
+                "enabled": three_layer_honesty.enabled,
+                "split_seed": three_layer_honesty.split_seed,
+                "chunk_train_fraction": three_layer_honesty.chunk_train_fraction,
+                "summarizer_train_fraction": three_layer_honesty.summarizer_train_fraction,
+                "oracle_train_fraction": three_layer_honesty.oracle_train_fraction,
+            },
+            "oracle_views": {
+                "online_view_name": oracle_views.online_view_name,
+                "eval_view_name": oracle_views.eval_view_name,
+            },
+            "neural_operators": {
+                "enabled": neural_operator_training_enabled,
+                "which": neural_operator_which,
+                "output_dir": neural_operator_output_dir_override or str(output_dir / "neural_operators"),
+                "ctreepo_args": neural_operator_ctreepo_args,
+                "mergeable_args": neural_operator_mergeable_args,
+                "ctreepo_search_spec": neural_operator_ctreepo_search_spec,
+                "mergeable_search_spec": neural_operator_mergeable_search_spec,
+                "embedding_url": neural_operator_embedding_url,
+                "embedding_model": neural_operator_embedding_model,
+            },
+            "generator": {
+                "enabled": generator_policy.enabled,
+                "method": generator_policy.method,
+                "model": generator_policy.model,
+                "use_lora": generator_policy.use_lora,
+                "learning_rate": generator_policy.learning_rate,
+                "epochs": generator_policy.epochs,
+                "batch_size": generator_policy.batch_size,
+            },
+        },
+        applied=applied_reproducibility,
+        extra={
+            "resume": bool(args.resume),
+            "output_dir": str(output_dir),
+            "checkpoint_dir": str(checkpoint_dir),
+            "pipeline_runtime_state_path": str(pipeline_runtime_state_path),
+        },
+    )
+    logger.info("Reproducibility manifest: %s", reproducibility_manifest_path)
 
     # Save config
     config_path = output_dir / 'config.json'
@@ -13963,6 +15746,8 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         'config': vars(args),
         'task': task.name,
         'dataset': dataset.name,
+        'reproducibility': dict(applied_reproducibility),
+        'reproducibility_manifest_path': str(reproducibility_manifest_path),
         'pipeline_runtime_state_path': str(pipeline_runtime_state_path),
         'pipeline_runtime_resumed': bool(pipeline_runtime_resumed),
         'chunking_policy': {
@@ -14043,6 +15828,8 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
             'output_dir': neural_operator_output_dir_override or str(output_dir / "neural_operators"),
             'ctreepo_args': neural_operator_ctreepo_args,
             'mergeable_args': neural_operator_mergeable_args,
+            'ctreepo_search_spec': neural_operator_ctreepo_search_spec,
+            'mergeable_search_spec': neural_operator_mergeable_search_spec,
             'ctreepo_local_law': {
                 'root_weight': neural_operator_ctreepo_root_weight,
                 'leaf_audit_weight': neural_operator_ctreepo_leaf_audit_weight,
@@ -14198,17 +15985,7 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         except Exception:
             return False
 
-    sglang_settings = configs["settings"].get("sglang", {}) if isinstance(configs.get("settings"), dict) else {}
-
-    def _backend_default_port(backend: str, *, role: str) -> int:
-        backend_name = str(backend or "").strip().lower()
-        if backend_name == "sglang":
-            base_port = int(sglang_settings.get("port", 30000) or 30000)
-            if role == "genrm":
-                return int(sglang_settings.get("genrm_port", base_port + 1) or (base_port + 1))
-            return base_port
-        # vLLM defaults
-        return 8001 if role == "genrm" else 8000
+    from src.core.engines import default_engine_port, normalize_engine_name, normalize_fallback_engine_name
 
     def _parse_representation_backends(raw_value: Any) -> set[str]:
         """Parse representation backend names from CLI/settings values."""
@@ -14231,7 +16008,11 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         """
         Best-effort guard for phases that can trigger embedding calls inside process_docs.
         """
-        backends = _parse_representation_backends(getattr(args, "representation_backends", None))
+        backends = _parse_representation_backends(
+            getattr(args, "program_families", None)
+            if getattr(args, "program_families", None) is not None
+            else getattr(args, "representation_backends", None)
+        )
         embedding_backends_requested = bool(
             backends
             & {
@@ -14241,6 +16022,9 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 "mergeable_sketch",
                 "mergeable_embedding_sketch",
                 "ensemble",
+                "embedding_sequence__linear_head__linear_head",
+                "embedding_sequence__mlp__mlp",
+                "numeric_sequence__mlp__linear_head",
             }
         )
         return bool(
@@ -14319,8 +16103,8 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
 
     if getattr(args, "dynamic_gpu", False):
         non_vllm_backends = {
-            str(getattr(args, "task_backend", "vllm")).strip().lower(),
-            str(getattr(args, "genrm_backend", "vllm")).strip().lower(),
+            normalize_engine_name(getattr(args, "task_backend", "vllm"), default="vllm") or "vllm",
+            normalize_engine_name(getattr(args, "genrm_backend", "vllm"), default="vllm") or "vllm",
         } - {"vllm"}
         if non_vllm_backends:
             logger.info(
@@ -14360,8 +16144,8 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 orchestration_settings.get("auto_manage_embedding_server", embedding_runtime_needed)
             )
 
-            task_backend = str(getattr(args, "task_backend", "vllm") or "vllm").strip().lower()
-            genrm_backend = str(getattr(args, "genrm_backend", "vllm") or "vllm").strip().lower()
+            task_backend = normalize_engine_name(getattr(args, "task_backend", "vllm"), default="vllm") or "vllm"
+            genrm_backend = normalize_engine_name(getattr(args, "genrm_backend", "vllm"), default="vllm") or "vllm"
             task_port = int(getattr(args, "port", orchestrator_config.task_primary.port))
             genrm_port = int(getattr(args, "genrm_port", orchestrator_config.genrm.port))
             auto_reserve_embedding_gpu = bool(
@@ -14557,7 +16341,10 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 orchestrator_config.task_replica,
                 orchestrator_config.genrm,
             ):
-                backend_name = str(getattr(server_cfg, "backend", "vllm") or "vllm").strip().lower()
+                backend_name = normalize_engine_name(
+                    getattr(server_cfg, "backend", "vllm"),
+                    default="vllm",
+                ) or "vllm"
                 if backend_name != "vllm":
                     server_cfg.supports_sleep_mode = False
                     server_cfg.enable_sleep_mode = False
@@ -14703,13 +16490,22 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 "No train/val/test samples loaded; skipping static task endpoint precheck."
             )
         elif not _is_model_endpoint_ready_on_port(int(args.port), timeout_seconds=2.0):
-            fallback_backend = str(getattr(args, "backend_fallback", "none") or "none").strip().lower()
+            fallback_backend = normalize_fallback_engine_name(
+                getattr(args, "backend_fallback", "none"),
+                default=None,
+            )
             switched_to_fallback = False
             if (
                 fallback_backend in {"vllm", "sglang"}
-                and fallback_backend != str(getattr(args, "task_backend", "vllm")).strip().lower()
+                and fallback_backend != (normalize_engine_name(getattr(args, "task_backend", "vllm"), default="vllm") or "vllm")
             ):
-                fallback_port = _backend_default_port(fallback_backend, role="task")
+                fallback_port = int(
+                    default_engine_port(
+                        fallback_backend,
+                        role="task",
+                        settings=configs.get("settings"),
+                    ) or 0
+                )
                 if _is_model_endpoint_ready_on_port(int(fallback_port), timeout_seconds=2.0):
                     logger.warning(
                         "Task backend %s unavailable on port %d; falling back to %s on port %d",
@@ -14733,13 +16529,22 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
             int(args.genrm_port), timeout_seconds=2.0
             )
         ):
-            fallback_backend = str(getattr(args, "backend_fallback", "none") or "none").strip().lower()
+            fallback_backend = normalize_fallback_engine_name(
+                getattr(args, "backend_fallback", "none"),
+                default=None,
+            )
             switched_genrm_fallback = False
             if (
                 fallback_backend in {"vllm", "sglang"}
-                and fallback_backend != str(getattr(args, "genrm_backend", "vllm")).strip().lower()
+                and fallback_backend != (normalize_engine_name(getattr(args, "genrm_backend", "vllm"), default="vllm") or "vllm")
             ):
-                fallback_genrm_port = _backend_default_port(fallback_backend, role="genrm")
+                fallback_genrm_port = int(
+                    default_engine_port(
+                        fallback_backend,
+                        role="genrm",
+                        settings=configs.get("settings"),
+                    ) or 0
+                )
                 if _is_model_endpoint_ready_on_port(int(fallback_genrm_port), timeout_seconds=2.0):
                     logger.warning(
                         "GenRM backend %s unavailable on port %d; falling back to %s on port %d",
@@ -14874,7 +16679,7 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
 
         def _result_cache_row(split_name: str, result: Any) -> Dict[str, Any]:
             metadata = dict(getattr(result, "metadata", {}) or {})
-            selected_score = metadata.get("representation_selected_score")
+            selected_score = metadata.get("selected_program_score")
             if selected_score is None:
                 selected_score = getattr(result, "estimated_score", None)
             row = {
@@ -14890,8 +16695,8 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 "tree_height": getattr(result, "tree_height", None),
                 "tree_leaves": getattr(result, "tree_leaves", None),
                 "error": getattr(result, "error", None),
-                "representation_selected_backend": metadata.get("representation_selected_backend"),
-                "representation_backend_scores": metadata.get("representation_backend_scores"),
+                "selected_program_family": metadata.get("selected_program_family"),
+                "program_family_scores": metadata.get("program_family_scores"),
                 "cached_tree_path": metadata.get("cached_tree_path"),
                 "metadata": metadata,
             }
@@ -15428,6 +17233,8 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 "fail_fast": neural_operator_fail_fast,
                 "ctreepo_args": neural_operator_ctreepo_args,
                 "mergeable_args": neural_operator_mergeable_args,
+                "ctreepo_search_spec": neural_operator_ctreepo_search_spec,
+                "mergeable_search_spec": neural_operator_mergeable_search_spec,
                 "ctreepo_local_law": {
                     "root_weight": neural_operator_ctreepo_root_weight,
                     "leaf_audit_weight": neural_operator_ctreepo_leaf_audit_weight,
@@ -15487,6 +17294,10 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 cmd.extend(["--ctreepo-args", str(neural_operator_ctreepo_args)])
             if neural_operator_mergeable_args:
                 cmd.extend(["--mergeable-args", str(neural_operator_mergeable_args)])
+            if neural_operator_ctreepo_search_spec:
+                cmd.extend(["--ctreepo-search-spec", str(neural_operator_ctreepo_search_spec)])
+            if neural_operator_mergeable_search_spec:
+                cmd.extend(["--mergeable-search-spec", str(neural_operator_mergeable_search_spec)])
             if neural_operator_ctreepo_root_weight is not None:
                 cmd.extend([
                     "--ctreepo-root-weight",
@@ -15553,6 +17364,9 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
             stderr_text = process.stderr or ""
             summary_path = run_output_dir / "summary.json"
             summary_payload = _read_json_if_exists(summary_path)
+            search_spec_path = run_output_dir / "search_spec.json"
+            search_results_path = run_output_dir / "search_results.json"
+            reproducibility_path = run_output_dir / "reproducibility_manifest.json"
 
             result.update(
                 {
@@ -15564,6 +17378,11 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                     "stdout_tail": stdout_text[-4000:],
                     "stderr_tail": stderr_text[-4000:],
                     "summary_path": str(summary_path) if summary_path.exists() else None,
+                    "search_spec_path": str(search_spec_path) if search_spec_path.exists() else None,
+                    "search_results_path": str(search_results_path) if search_results_path.exists() else None,
+                    "reproducibility_manifest_path": (
+                        str(reproducibility_path) if reproducibility_path.exists() else None
+                    ),
                     "summary": summary_payload,
                 }
             )
@@ -15637,15 +17456,41 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
 
             return artifacts
 
+        def _collect_neural_operator_control_plane_artifacts(
+            phase1_3_stats: Dict[str, Any],
+        ) -> List[str]:
+            collected: List[str] = []
+            for candidate in (
+                phase1_3_stats.get("summary_path"),
+                phase1_3_stats.get("search_spec_path"),
+                phase1_3_stats.get("search_results_path"),
+                phase1_3_stats.get("reproducibility_manifest_path"),
+            ):
+                resolved = _first_existing_path([candidate])
+                if resolved and resolved not in collected:
+                    collected.append(resolved)
+            output_dir_path = _first_existing_path([phase1_3_stats.get("output_dir")])
+            if output_dir_path:
+                for fallback in (
+                    Path(output_dir_path) / "summary.json",
+                    Path(output_dir_path) / "search_spec.json",
+                    Path(output_dir_path) / "search_results.json",
+                    Path(output_dir_path) / "reproducibility_manifest.json",
+                ):
+                    resolved = _first_existing_path([fallback])
+                    if resolved and resolved not in collected:
+                        collected.append(resolved)
+            return collected
+
         def _auto_wire_hybrid_representation(phase1_3_stats: Dict[str, Any]) -> Dict[str, Any]:
             artifacts = _extract_neural_operator_artifacts(phase1_3_stats)
             updates: Dict[str, Any] = {
                 "ctreepo_model_path": artifacts.get("ctreepo_model_path"),
                 "mergeable_sketch_model_path": artifacts.get("mergeable_sketch_model_path"),
                 "auto_wire_applied": False,
-                "representation_backends": getattr(args, "representation_backends", None),
-                "primary_representation_backend": getattr(args, "primary_representation_backend", None),
-                "representation_weights": getattr(args, "representation_weights", None),
+                "program_families": getattr(args, "program_families", None),
+                "primary_program_family": getattr(args, "primary_program_family", None),
+                "program_weights": getattr(args, "program_weights", None),
                 "hybrid_oracle_seeded_ensemble": bool(getattr(args, "hybrid_oracle_seeded_ensemble", False)),
                 "semantic_memory": bool(getattr(args, "semantic_memory", False)),
             }
@@ -15659,24 +17504,32 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 and (artifacts.get("ctreepo_model_path") or artifacts.get("mergeable_sketch_model_path"))
             ):
                 updates["auto_wire_applied"] = True
-                if not str(getattr(args, "representation_backends", "") or "").strip():
-                    args.representation_backends = "llm,embedding,ctreepo,mergeable_sketch,ensemble"
-                if str(getattr(args, "primary_representation_backend", "") or "").strip().lower() in {"", "auto"}:
-                    args.primary_representation_backend = "ensemble"
-                if not str(getattr(args, "representation_weights", "") or "").strip():
-                    args.representation_weights = "llm=0.35,embedding=0.20,ctreepo=0.25,mergeable_sketch=0.20"
+                if not str(getattr(args, "program_families", "") or getattr(args, "representation_backends", "") or "").strip():
+                    args.program_families = "text__llm__llm,embedding_sequence__linear_head__linear_head,embedding_sequence__mlp__mlp,numeric_sequence__mlp__linear_head,ensemble"
+                if str(getattr(args, "primary_program_family", "") or getattr(args, "primary_representation_backend", "") or "").strip().lower() in {"", "auto"}:
+                    args.primary_program_family = "ensemble"
+                if not str(getattr(args, "program_weights", "") or getattr(args, "representation_weights", "") or "").strip():
+                    args.program_weights = (
+                        "text__llm__llm=0.35,"
+                        "embedding_sequence__linear_head__linear_head=0.20,"
+                        "embedding_sequence__mlp__mlp=0.25,"
+                        "numeric_sequence__mlp__linear_head=0.20"
+                    )
                 if "--no-hybrid-oracle-seeded-ensemble" not in set(sys.argv):
                     args.hybrid_oracle_seeded_ensemble = True
                 if "--no-semantic-memory" not in set(sys.argv):
                     args.semantic_memory = True
                 if "--no-semantic-memory-model-features" not in set(sys.argv):
                     args.semantic_memory_model_features = True
+                args.representation_backends = args.program_families
+                args.primary_representation_backend = args.primary_program_family
+                args.representation_weights = args.program_weights
 
             updates.update(
                 {
-                    "representation_backends": getattr(args, "representation_backends", None),
-                    "primary_representation_backend": getattr(args, "primary_representation_backend", None),
-                    "representation_weights": getattr(args, "representation_weights", None),
+                    "program_families": getattr(args, "program_families", None),
+                    "primary_program_family": getattr(args, "primary_program_family", None),
+                    "program_weights": getattr(args, "program_weights", None),
                     "hybrid_oracle_seeded_ensemble": bool(getattr(args, "hybrid_oracle_seeded_ensemble", False)),
                     "semantic_memory": bool(getattr(args, "semantic_memory", False)),
                 }
@@ -16457,6 +18310,9 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 neural_operator_artifacts.append(str(auto_wire_stats.get("ctreepo_model_path")))
             if auto_wire_stats.get("mergeable_sketch_model_path"):
                 neural_operator_artifacts.append(str(auto_wire_stats.get("mergeable_sketch_model_path")))
+            for candidate in _collect_neural_operator_control_plane_artifacts(phase1_3_stats):
+                if candidate not in neural_operator_artifacts:
+                    neural_operator_artifacts.append(candidate)
             neural_operator_artifacts.append(str(phase1_3_checkpoint))
             _set_method_status(
                 "neural_operators",
@@ -16479,9 +18335,9 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
             )
             if auto_wire_stats.get("auto_wire_applied"):
                 logger.info(
-                    "Phase 1.3 resume: auto-wired hybrid representation (backends=%s primary=%s ctreepo=%s mergeable=%s)",
-                    auto_wire_stats.get("representation_backends"),
-                    auto_wire_stats.get("primary_representation_backend"),
+                    "Phase 1.3 resume: auto-wired hybrid program families (families=%s primary=%s ctreepo=%s mergeable=%s)",
+                    auto_wire_stats.get("program_families"),
+                    auto_wire_stats.get("primary_program_family"),
                     auto_wire_stats.get("ctreepo_model_path"),
                     auto_wire_stats.get("mergeable_sketch_model_path"),
                 )
@@ -16526,6 +18382,9 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 neural_operator_artifacts.append(str(auto_wire_stats.get("ctreepo_model_path")))
             if auto_wire_stats.get("mergeable_sketch_model_path"):
                 neural_operator_artifacts.append(str(auto_wire_stats.get("mergeable_sketch_model_path")))
+            for candidate in _collect_neural_operator_control_plane_artifacts(phase1_3_stats):
+                if candidate not in neural_operator_artifacts:
+                    neural_operator_artifacts.append(candidate)
             neural_operator_artifacts.append(str(phase1_3_checkpoint))
             _set_method_status(
                 "neural_operators",
@@ -16553,9 +18412,9 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 )
                 if auto_wire_stats.get("auto_wire_applied"):
                     logger.info(
-                        "Phase 1.3: auto-wired hybrid representation (backends=%s primary=%s ctreepo=%s mergeable=%s hybrid=%s semantic_memory=%s)",
-                        auto_wire_stats.get("representation_backends"),
-                        auto_wire_stats.get("primary_representation_backend"),
+                        "Phase 1.3: auto-wired hybrid program families (families=%s primary=%s ctreepo=%s mergeable=%s hybrid=%s semantic_memory=%s)",
+                        auto_wire_stats.get("program_families"),
+                        auto_wire_stats.get("primary_program_family"),
                         auto_wire_stats.get("ctreepo_model_path"),
                         auto_wire_stats.get("mergeable_sketch_model_path"),
                         auto_wire_stats.get("hybrid_oracle_seeded_ensemble"),
@@ -16871,9 +18730,15 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                     ),
                 }
 
-                comparison_module = train_comparison_module(
+                comparison_module, comparison_optimizer_audit = train_comparison_module(
                     comparison_training_dataset, args, output_dir
                 )
+                if comparison_optimizer_audit is not None:
+                    stats.setdefault("optimizer_diagnostics", {})
+                    stats["optimizer_diagnostics"].setdefault("comparison_control_runs", [])
+                    stats["optimizer_diagnostics"]["comparison_control_runs"].append(
+                        comparison_optimizer_audit
+                    )
                 if comparison_module is not None:
                     stats['comparison_module_trained'] = True
         else:
@@ -16912,7 +18777,7 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 ToTConfig,
                 load_optimized_judge as load_tot_judge,
             )
-            from src.training.preference import GenRMJudge
+            from src.training.judges import GenRMJudge
             from src.config.settings import load_settings
             from src.core.model_detection import detect_model_from_port
 
@@ -16955,6 +18820,7 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 api_key="EMPTY",
                 temperature=summarizer_cfg.get('temperature', 0.5),
                 max_tokens=tot_summarizer_manager.max_output_tokens,
+                cache=_dspy_request_cache_enabled(),
                 context_window=tot_summarizer_context,
                 num_retries=tot_summarizer_num_retries,
                 timeout=tot_summarizer_timeout_seconds,
@@ -17080,11 +18946,34 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                     include_ties=False,
                 ),
             }
-            if hasattr(trainer, "get_all_preferences"):
+            tot_pref_dataset = None
+            if hasattr(trainer, "get_all_supervision_dataset"):
                 try:
-                    tot_preferences = trainer.get_all_preferences()
-                    from src.training.preference.types import PreferenceDataset
-                    tot_pref_dataset = PreferenceDataset(tot_preferences)
+                    tot_pref_dataset = trainer.get_all_supervision_dataset().project_binary(
+                        projection="adjacent"
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not load ToT supervision dataset: {e}")
+                    tot_pref_dataset = None
+            elif hasattr(trainer, "get_all_binary_projection_dataset"):
+                try:
+                    tot_pref_dataset = trainer.get_all_binary_projection_dataset()
+                except Exception as e:
+                    logger.warning(f"Could not load ToT binary projection dataset: {e}")
+                    tot_pref_dataset = None
+            elif hasattr(trainer, "get_all_binary_projection"):
+                try:
+                    from src.training.supervision import BinaryProjectionDataset
+
+                    tot_preferences = trainer.get_all_binary_projection()
+                    tot_pref_dataset = BinaryProjectionDataset(tot_preferences)
+                except Exception as e:
+                    logger.warning(f"Could not compute ToT propensity diagnostics: {e}")
+                    tot_pref_diagnostics = {'error': str(e)}
+                    tot_pref_dataset = None
+
+            if tot_pref_dataset is not None:
+                try:
                     tot_weighted_dataset = tot_pref_dataset
                     if hasattr(tot_pref_dataset, "resample_by_propensity"):
                         tot_weighted_dataset = tot_pref_dataset.resample_by_propensity(
@@ -17115,6 +19004,10 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 'improvement_history': tot_result.improvement_history,
                 'optimized_judge_path': str(tot_result.optimized_judge_path) if tot_result.optimized_judge_path else None,
                 'training_subset_propensity': tot_pref_diagnostics,
+                'n_binary_projection_records': len(tot_pref_dataset) if tot_pref_dataset is not None else 0,
+                'n_comparative_records': len(getattr(tot_pref_dataset, "comparative_judgments", []) or [])
+                if tot_pref_dataset is not None
+                else 0,
             }
 
             if tot_result.optimized_judge_path:
@@ -17248,11 +19141,8 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
 
                 judge_optimizer = JudgeOptimizer(config=judge_config)
 
-                # Convert PreferenceDataset to list if needed
-                pref_list = list(preference_dataset) if hasattr(preference_dataset, '__iter__') else []
-                from src.training.preference.types import PreferenceDataset
-                pref_dataset = PreferenceDataset(pref_list)
-                from src.training.preference.genrm_dspy import GenRMComparisonModule
+                pref_dataset = preference_dataset
+                from src.training.judges.genrm_dspy import GenRMComparisonModule
                 prompt_lm, prompt_model_name = create_prompt_lm(args)
                 if prompt_lm is not None:
                     logger.info(f"  Prompt optimization model: {prompt_model_name} (port {args.opt_model_port})")
@@ -17264,12 +19154,12 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 if prompt_lm is not None:
                     with dspy.context(lm=prompt_lm):
                         optimized_judge, judge_results = judge_optimizer.optimize(
-                            pref_list,
+                            pref_dataset,
                             initial_judge=prompt_tuned_judge,
                         )
                 else:
                     optimized_judge, judge_results = judge_optimizer.optimize(
-                        pref_list,
+                        pref_dataset,
                         initial_judge=prompt_tuned_judge,
                     )
 
@@ -17440,7 +19330,12 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                     last_stats = interleaved_stats[-1].get("opt_stats")
                     if isinstance(last_stats, dict):
                         opt_stats = last_stats
+                        existing_optimizer_diag = dict(stats.get("optimizer_diagnostics") or {})
                         stats.update(last_stats)
+                        _merge_optimizer_diagnostics(
+                            stats,
+                            {"optimizer_diagnostics": existing_optimizer_diag},
+                        )
             else:
                 if args.resume and not getattr(args, "rerun_optimization", False):
                     if phase2_checkpoint.exists():
@@ -17461,7 +19356,12 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                         stats.update(loaded_paths)
                         prior_opt_stats = phase2_resume_meta.get('opt_stats')
                         if isinstance(prior_opt_stats, dict):
+                            existing_optimizer_diag = dict(stats.get("optimizer_diagnostics") or {})
                             stats.update(prior_opt_stats)
+                            _merge_optimizer_diagnostics(
+                                stats,
+                                {"optimizer_diagnostics": existing_optimizer_diag},
+                            )
                             opt_stats = prior_opt_stats
                         stats['phase2_resumed'] = True
                         phase2_resumed = True
@@ -17483,7 +19383,12 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                         task_ports=task_ports,
                         lm_port_recovery_callback=lm_port_recovery_callback,
                     )
+                    existing_optimizer_diag = dict(stats.get("optimizer_diagnostics") or {})
                     stats.update(opt_stats)
+                    _merge_optimizer_diagnostics(
+                        stats,
+                        {"optimizer_diagnostics": existing_optimizer_diag},
+                    )
 
                     saved_paths = save_phase2_artifacts(
                         output_dir=output_dir,
@@ -18061,6 +19966,13 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                     }
                 phase3_25_data.setdefault("resumed", True)
                 phase3_25_data.setdefault("checkpoint", str(phase3_25_checkpoint))
+                if not str(phase3_25_data.get("output_dir", "") or "").strip():
+                    resumed_model_path = str(phase3_25_data.get("model_path", "") or "").strip()
+                    if resumed_model_path:
+                        try:
+                            phase3_25_data["output_dir"] = str(Path(resumed_model_path).expanduser().resolve().parent)
+                        except Exception:
+                            phase3_25_data["output_dir"] = str(Path(resumed_model_path).parent)
                 stats['generator_training'] = phase3_25_data
                 model_path = str(phase3_25_data.get("model_path", "") or "").strip()
                 if model_path:
@@ -18191,6 +20103,7 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                             'learning_rate': generator_policy.learning_rate,
                             'epochs': generator_policy.epochs,
                             'batch_size': generator_policy.batch_size,
+                            'output_dir': str(gen_output_dir),
                             'model_path': model_path,
                             'n_preferences': len(training_prefs),
                             'min_preferences_required': min_prefs,
@@ -18210,6 +20123,7 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                             'learning_rate': generator_policy.learning_rate,
                             'epochs': generator_policy.epochs,
                             'batch_size': generator_policy.batch_size,
+                            'output_dir': str(gen_output_dir),
                             'min_preferences_required': min_prefs,
                             'error': str(e),
                             'training_subset_propensity': generator_subset_propensity,
@@ -18229,6 +20143,7 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                         'learning_rate': generator_policy.learning_rate,
                         'epochs': generator_policy.epochs,
                         'batch_size': generator_policy.batch_size,
+                        'output_dir': str(getattr(args, 'generator_output_dir', None) or (output_dir / 'generator')),
                         'n_preferences': n_prefs,
                         'min_preferences_required': min_prefs,
                         'training_subset_propensity': generator_subset_propensity,
@@ -18334,7 +20249,7 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                     logger.info("  Using optimized judge from Tournament of Tournaments")
                 else:
                     # Create new GenRM judge
-                    from src.training.preference.genrm import GenRMJudge
+                    from src.training.judges import GenRMJudge
                     initial_judge = GenRMJudge(
                         base_url=f"http://localhost:{args.genrm_port}/v1",
                         temperature=0.6,
@@ -18417,18 +20332,18 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                         output_dir=output_dir / 'unified_training',
                         summarizer=summarizer_fn,
                     )
-                    from src.training.preference.types import PreferenceDataset
+                    from src.training.supervision import BinaryProjectionDataset
 
                     try:
                         unified_result = unified_trainer.train(unified_samples, rubric)
                         unified_preferences = []
-                        if hasattr(unified_trainer, "all_preferences"):
+                        if hasattr(unified_trainer, "all_binary_projection"):
                             try:
-                                unified_preferences = unified_trainer.all_preferences
+                                unified_preferences = unified_trainer.all_binary_projection
                             except Exception:
                                 unified_preferences = []
 
-                        unified_pref_dataset = PreferenceDataset(unified_preferences)
+                        unified_pref_dataset = BinaryProjectionDataset(unified_preferences)
                         unified_weighted_dataset = unified_pref_dataset
                         if hasattr(unified_pref_dataset, "resample_by_propensity"):
                             unified_weighted_dataset = unified_pref_dataset.resample_by_propensity(
@@ -18476,13 +20391,13 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                     except Exception as e:
                         logger.error(f"  Unified training failed: {e}")
                         partial_preferences = []
-                        if hasattr(unified_trainer, "all_preferences"):
+                        if hasattr(unified_trainer, "all_binary_projection"):
                             try:
-                                partial_preferences = unified_trainer.all_preferences
+                                partial_preferences = unified_trainer.all_binary_projection
                             except Exception:
                                 partial_preferences = []
 
-                        partial_pref_dataset = PreferenceDataset(partial_preferences)
+                        partial_pref_dataset = BinaryProjectionDataset(partial_preferences)
                         partial_weighted_dataset = partial_pref_dataset
                         if hasattr(partial_pref_dataset, "resample_by_propensity"):
                             partial_weighted_dataset = partial_pref_dataset.resample_by_propensity(
@@ -18699,11 +20614,20 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 row["duration_seconds"] = 0.0
 
     # Save results (first pass)
-    save_results(stats, output_dir)
+    save_results(stats, output_dir, args=args)
 
     pdf_requested = bool(getattr(args, "generate_pdf_report", False)) and bool(stats.get("success"))
     stats["score_report_pdf_requested"] = bool(pdf_requested)
     if pdf_requested:
+        fd_before_close = _safe_open_fd_count()
+        close_dspy_cache(reset_memory_cache=True)
+        fd_after_close = _safe_open_fd_count()
+        if fd_before_close is not None or fd_after_close is not None:
+            logger.info(
+                "Released DSPy cache resources before PDF generation: open_fds_before=%s open_fds_after=%s",
+                fd_before_close,
+                fd_after_close,
+            )
         expected_pdf_path = (
             Path(str(getattr(args, "pdf_report_path")))
             if getattr(args, "pdf_report_path", None)
@@ -18765,13 +20689,14 @@ def run_training_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
                 stats["score_report_pdf_error"] = f"exception:{type(e).__name__}"
 
     # Save results again to persist PDF-generation metadata.
-    save_results(stats, output_dir)
+    save_results(stats, output_dir, args=args)
 
     return stats
 
 
 def main() -> int:
     """CLI entry point."""
+    _apply_training_runtime_safety_defaults()
     args = parse_args()
     args = normalize_judge_optimization_args(args)
     try:
