@@ -7,6 +7,24 @@
 - Use `docs/ctreepo_python_code_map_for_llms.md` as the detailed Python code
   map for C-TreePO, Semantic Forests, optimizer behavior, token-budget handling,
   and flagged audit issues.
+- Use `docs/local_law_sampling_contract.md` before touching sampled local-law
+  supervision, IPW weighting, node-query rates, or root/leaf/internal sampling.
+  The canonical implementation is `treepo.training.local_law` in the official
+  standalone repo at `/home/mlinegar/treepo` (this venv's `treepo` editable
+  install points there; the old in-repo copies are archived at `OLD_treepo/`
+  and `OLD_treepo_cld/`). Experiment-specific runners should pass observed
+  masks, propensities, and node weights into that master objective rather
+  than implementing bespoke IPW.
+- `treepo` also ships shared research surfaces TT workflows should reuse:
+  `treepo.viz.write_tree_visualization_html` (standalone expandable-tree HTML
+  with sampling markers, gold/prediction labels, per-node `f` readouts,
+  local-law losses, audit/certificate/tradeoff panels — see
+  `~/treepo/docs/visualization.md` and `~/treepo/docs/tree_and_sampling.md`),
+  `treepo.sampling.sample_node_audit`/`apply_node_audit` (uniform node-audit
+  designs with logged `q/N` propensities), and
+  `treepo.methods.TradeoffCurve` (the named error-vs-`leaf_unit_count`
+  artifact). Prefer these over ad hoc HTML dumps, bespoke node sampling, or
+  one-off leaf-grid CSVs.
 - Treat that code map as source-audit documentation. Do not duplicate or
   overwrite it without re-running a source inventory, AST parse sweep, and
   targeted searches over the relevant pipeline/optimizer/token-budget paths.
@@ -41,6 +59,7 @@ python3
 ./scripts/download_hf_model.sh Qwen/Qwen3-Embedding-8B  # Optional pre-download
 ./scripts/start_embedding_server.sh           # Multilingual embedding server (port from settings)
 ./scripts/start_vllm.sh qwen3-embedding-8b --port 8003  # (Legacy) embedding server launch
+./scripts/start_vllm.sh diffusiongemma-26b-a4b-it-nvfp4 --port 8004 --cuda-devices 0 --gpu-mem 0.85
 ```
 
 ### Stop Servers
@@ -190,6 +209,111 @@ python scripts/run_markov_optimization_tradeoff_pipeline.py \
   --output-root outputs/markov_tradeoff_$(date +%Y%m%d_%H%M%S)
 ```
 
+## Common Workflow: Markov Contextual-Sufficiency Exact-Zero
+
+```bash
+source venv/bin/activate
+python -m pip install -e ".[contextual_sbi]"
+
+XLA_PYTHON_CLIENT_PREALLOCATE=false ctreepo sim run contextual-sbijax \
+  --data-source markov \
+  --load-data-bundle outputs/_bundles/markov_hazard_panels/paper_hazard_panel_v1_t128/seed_0/base_bundle.json \
+  --sbijax-trainer learned_local_laws \
+  --sbijax-method nasss \
+  --sbijax-package-theta markov_exact_sketch \
+  --sbijax-input-encoding markov_exact_sketch \
+  --train-docs 1024 \
+  --val-docs 256 \
+  --test-docs 256 \
+  --fragment-len 1 \
+  --context-samples-per-doc 1 \
+  --response-signature-contexts 16 \
+  --response-signature-slices 8 \
+  --embedding-dim 32 \
+  --state-dim 25 \
+  --hidden-dim 128 \
+  --learning-rate 0.0003 \
+  --n-iter 1000 \
+  --batch-size 128 \
+  --local-law-weight 1.0 \
+  --local-law-leaf-weight 1.0 \
+  --local-law-merge-weight 1.0 \
+  --local-law-idempotence-weight 1.0 \
+  --local-law-contextual-weight 1.0 \
+  --seed 0 \
+  --output-root outputs/optimize_to_zero_demo
+```
+
+Current status (2026-05-05): `learned_local_laws` is the exact-zero path.
+Package NASS/NASSS are approximate baselines; report `theta_mae`,
+`theta_first_regime_accuracy`, `theta_last_regime_accuracy`, and law eps metrics
+alongside contextual MAE. See
+`docs/contextual_sbijax_optimize_to_zero_resolved_2026-05-05.md`.
+
+Post-resolution ablations (2026-05-05) are summarized in
+`docs/markov_contextual_sufficiency_ablation_handoff_2026-05-05.md` with the
+full table artifact at `outputs/markov_contextual_ablation_grid_report_20260505.md`.
+Key result: NASSS can help as a low-weight auxiliary, learned merge/decoder
+variants work inside the local-law lane, and standalone `CleanUnifiedNO`
+general f/g does not yet discover the exact Markov law. Relevant runners:
+
+```bash
+scripts/run_optimize_to_zero_fg_architecture_ablation.sh 0
+scripts/run_optimize_to_zero_laws_hybrid_grid.sh 3
+scripts/run_clean_unified_fg_contextual_ablation.sh 2
+```
+
+Data-scaling + g-ablation (2026-05-06) extended the picture: 100× more train
+docs (102400 vs 1024) closes most of the count_mae gap for the flexible
+learner (0.82 → 0.027 at leaf=64 / regime_one_hot / count_only). The
+architectural ceiling (`regime_transition_sum`) hits 0.0005 at 102400. The
+g-side is *not* the bottleneck — across 20 g-axis cells (merge_family ×
+merge_loss × decoder_head, plus rep_dim × FNO-as-g), count_mae stayed within
+~2× of the best result. `decoder_head=linear` is a free 19% improvement.
+Engineering: training step now mini-batches merge supervision (was OOMing at
+102400), eval is chunked, N²-collision diagnostic subsamples to 4096 rows.
+New flags: `--merge-family {mlp,fno_rep}`, `--decoder-head {mlp,linear}`,
+`--local-law-merge-loss {mse,nass_jsd,nasss_jsd}`. Full handoff:
+`docs/markov_data_scaling_g_ablation_handoff_2026-05-06.md`. Runners:
+
+```bash
+# Generate the 102400-doc bundle (one-time)
+./venv/bin/python scripts/prepare_markov_hazard_panel_data.py \
+  --panel-ids paper_hazard_panel_v1_t128 --train-docs 102400 --seed 0 \
+  --bundle-root outputs/_bundles/markov_hazard_panels_train102400 \
+  --skip-prepared-cache
+
+# Sweeps
+N_ITER=200 GPUS=0,2,3 bash scripts/run_markov_fno_round5_data_scaling.sh
+GPUS=0,2,3 bash scripts/run_markov_fno_round6_g_ablation.sh
+GPUS=0,2,3 bash scripts/run_markov_fno_round7_repdim_fno_g.sh
+```
+
+Per-rung batch sizes for leaf-token grid sweeps (added 2026-05-02): if you
+set `supervision_recovery_leaf_token_ladder = [1024, 256, 64, 16]`, you can
+also set `supervision_recovery_leaf_token_batch_sizes = "16=128;64=256;..."`
+to override `supervision_batch_size` per leaf-tokens rung. Keys are
+`fixed_leaf_tokens`, values are batch sizes in docs. Useful when smaller
+leaves want larger doc batches to keep GPU saturated.
+
+Performance rule (2026-05-02): `FNOCountSketch.forward_doc_unified` defaults
+to `collect_full_trace=False` for the training/eval hot path. Telemetry
+consumers must pass `collect_full_trace=True` explicitly. Do not add per-node
+`.cpu()`/`.item()` calls inside the per-doc forward path - they re-serialize
+GPU work and tank throughput on long merge chains (~9x speedup measured at
+recoverable_v5_t2048 leaf=16). See "Performance: forward_doc_unified
+collect_full_trace" subsection in `docs/ctreepo_python_code_map_for_llms.md`.
+
+Head capacity (2026-05-03 conservative default): `unified_g_full_local_laws_v1`
+and `comparison_grid_v3` use `state_dim=128, hidden_dim=512`. A bigger model
+(`state_dim=2048, hidden_dim=2048, tree_merge_hidden_dim=4096`) was tested
+and failed to crack the zero-merge ~2.14 root_mae floor on
+`recoverable_v5_t2048`, plus made several composition cells worse
+(full100 @ leaf=256: 1.06 -> 3.72). Don't bump state_dim/hidden_dim above
+128/512 without re-validating; head capacity isn't the bottleneck for that
+floor. See `docs/ctreepo_python_code_map_for_llms.md` "Head Capacity"
+subsection.
+
 ## Long-Running Jobs
 
 ```bash
@@ -274,9 +398,9 @@ src/
 │   ├── preference/                        # [SF] PreferencePair, collection, GenRM
 │   └── judge_optimization.py              # Judge model optimization
 │
-├── feedback/                              # [SF] Feedback infrastructure
-│   ├── types.py, collector.py             # Feedback collection
-│   └── server.py, store.py               # Feedback service
+├── preference_collection/                 # [SF] Preference collection
+│   ├── types.py, collector.py             # Preference request/response + collector protocol
+│   └── server.py, store.py                # Preference API and durable store
 │
 ├── stats/                                 # Shared
 │   └── sampling.py                        # PPS, systematic sampling
@@ -339,7 +463,7 @@ Learned/adaptive chunking, multi-tree orchestration, runtime evaluation, prefere
 | Batch orchestration | `src/core/batch_orchestrator.py`, `src/core/batch_processor.py` |
 | Runtime evaluation | `src/runtime/` |
 | Training pipeline | `src/training/run_pipeline.py`, `src/training/trl_training.py`, `src/training/preference/` |
-| Feedback infra | `src/feedback/` |
+| Preference collection | `src/preference_collection/` |
 | SFM comparison | `src/tree/private_sfm_comparison.py` |
 | Benchmarks | `scripts/run_runtime_eval.py`, `scripts/run_training_pipeline.sh` |
 
@@ -353,6 +477,10 @@ Tree builder (`src/tree/builder.py`), data models (`src/core/data_models.py`), s
 
 - `docs/ctreepo_python_code_map_for_llms.md` # Python code map, optimizer/token-budget matrix, and audit findings for LLM handoff
 - `docs/treepo_preference_optimization.md` # TreePO formalization map (DPO/GRPO/PPO, sampling, DSL/IPW links)
+- `docs/markov_sim_status.md` # Current Markov simulation status page: JAX local-law control, regime-one-hot recovery, CleanUnifiedNO/FNO bridge state, current artifacts, and recommended next runs.
+- `docs/contextual_sbijax_optimize_to_zero_resolved_2026-05-05.md` # Markov contextual-sufficiency resolution: `learned_local_laws` hits numerical zero; NASSS plateaus on its objective, not iterations. Judge sufficiency by `theta_first/last_regime_accuracy`, not contextual MAE alone.
+- `docs/markov_contextual_sufficiency_ablation_handoff_2026-05-05.md` # Post-resolution ablation handoff: JAX f/g architecture grid (`--law-architecture {analytic, learned_merge, learned_decoder, fully_learned}`, `--c2-merge-target {theta, self_consistency}`), NASSS+laws hybrid, CleanUnifiedNO general f/g. Includes Lean crosswalk and cross-architecture parity matrix.
+- `docs/markov_fno_local_law_bridge.md` # Bridge-experiment design: tests whether the JAX `learned_local_laws` result transfers to the PyTorch CleanUnifiedNO FNO surface. PyTorch already exposes `markov_node_witness` (↔ JAX `c2_theta`) and `markov_local_laws_fno` (↔ JAX `c2_self_consistency`); experiment runs them on matched bundle/seeds with unified metric schema. Round 1 multi-leaf bridge campaign (8h, 48/52 cells) confirmed the bridge is not solved at root_mae≈1.94 best. Round 2 Stage 1 single-leaf diagnostic confirms FNO encoder is fine (boundary BCE F1≥0.99 at doc=32–64); pooling calibration and merge composition are the next suspects.
 
 ---
 
@@ -401,6 +529,7 @@ predictor = task.predictor_factory()
 | Qwen3-Next-80B-A3B-Instruct | `qwen-80b` | 2 | ~22 GiB | Mid-size inference |
 | Qwen3.5-397B-A17B | `qwen3.5-397b-a17b-nvfp4` | 4 | ~95 GiB/GPU | Large teacher/scorer |
 | GLM-4.6 | `glm-4.6` | 4 | ~47 GiB | Alternative large model |
+| DiffusionGemma-26B-A4B-IT | `diffusiongemma-26b-a4b-it-nvfp4` | 1 | ~88 GiB at 262K context | Diffusion LLM smoke/evaluation; see `docs/diffusiongemma_vllm.md` |
 
 ---
 
@@ -412,6 +541,7 @@ predictor = task.predictor_factory()
 curl http://localhost:8000/v1/models  # Small model
 curl http://localhost:8001/v1/models  # Large model (teacher/scorer)
 curl http://localhost:8003/v1/models  # Tiny embedding model (optional)
+curl http://localhost:8004/v1/models  # DiffusionGemma (optional)
 ```
 
 ### View server logs
