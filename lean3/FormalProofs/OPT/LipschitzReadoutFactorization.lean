@@ -1,4 +1,4 @@
-import FormalProofs.OPT.ReadoutAlignment
+import FormalProofs.OPT.OracleFibers
 import FormalProofs.OPT.ApproxOracleRecovery
 
 /-!

@@ -1,5 +1,5 @@
 import FormalProofs.ML.NeuralOperatorApproximation
-import FormalProofs.OPT.TheoremBackingAssumptions
+import FormalProofs.OPT.TheoremBackingConsequences
 
 /-!
 # FormalProofs/OPT/NeuralOperatorTheoremBridge.lean

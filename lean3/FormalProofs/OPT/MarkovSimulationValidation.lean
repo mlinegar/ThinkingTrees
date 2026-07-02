@@ -1,5 +1,5 @@
 import FormalProofs.OPT.MarkovPathDGP
-import FormalProofs.OPT.TheoremBackingAssumptions
+import FormalProofs.OPT.TheoremBackingConsequences
 import FormalProofs.OPT.AdaptiveChunkingBridge
 import FormalProofs.DSL.RuntimeCertificates
 

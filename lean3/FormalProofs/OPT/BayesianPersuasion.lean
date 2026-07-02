@@ -1,5 +1,6 @@
 import Mathlib.Algebra.BigOperators.Ring.Finset
 import FormalProofs.OPT.FiniteBayesOnState
+import FormalProofs.OPT.PreferenceScope
 
 /-!
 # FormalProofs/OPT/BayesianPersuasion.lean
@@ -518,3 +519,738 @@ theorem concavificationWitness_iff_optimalPersuasionValue
   rfl
 
 end FormalProofs.OPT
+
+/-! ## From FormalProofs/OPT/BayesianPersuasionEconomics.lean (consolidated 2026-07-02) -/
+
+section
+
+/-!
+# FormalProofs/OPT/BayesianPersuasionEconomics.lean
+
+Economic companion layer for the finite Bayesian-persuasion surface.
+
+`BayesianPersuasion.lean` carries the Bayes algebra: signal experiments,
+posterior beliefs, Bayes plausibility, splitting, Bayes actions, and symbolic
+concavification.  This file connects those objects to the repo's existing
+economic/formal-preference vocabulary:
+
+* posterior beliefs are the economic state induced by a signal experiment;
+* receiver posterior loss and sender indirect value factor through that belief
+  state;
+* direct recommendation obedience is receiver best-response optimality at the
+  induced posterior, equivalently finite Bayes-action optimality for negative
+  utility loss;
+* sender experiment value is the weighted expected utility from induced
+  posteriors and chosen receiver actions; and
+* two experiments with the same induced posterior distribution have the same
+  indirect persuasion value.
+
+This remains the finite, assumption-backed persuasion layer.  It does not prove
+the infinite-state direct-revelation principle, measurable selection,
+compact-action existence, geometric concavification, or equilibrium existence.
+-/
+
+set_option linter.mathlibStandardSet false
+
+open scoped BigOperators Classical
+
+set_option maxHeartbeats 0
+set_option maxRecDepth 4000
+set_option relaxedAutoImplicit false
+set_option autoImplicit false
+
+noncomputable section
+
+namespace FormalProofs.OPT
+
+variable {State Signal Action : Type*}
+
+/-! ## Posterior beliefs as economic states -/
+
+/-- The posterior-belief state induced by a persuasion experiment. -/
+def PersuasionBeliefState
+    [Fintype State]
+    [Fintype Signal]
+    (prior : State → ℝ)
+    (experiment : State → Signal → ℝ) :
+    Signal → (State → ℝ) :=
+  fun σ => PosteriorAfterSignal prior experiment σ
+
+/-- Receiver posterior loss at a belief is negative expected utility. -/
+def ReceiverPosteriorLoss
+    [Fintype State]
+    (receiverUtility : Action → State → ℝ)
+    (belief : State → ℝ)
+    (action : Action) : ℝ :=
+  - ReceiverExpectedUtility receiverUtility belief action
+
+/-- Receiver posterior loss, viewed as a signal-indexed decision loss, factors
+through the posterior-belief state of the experiment. -/
+theorem receiverPosteriorLoss_factorsThroughBeliefState
+    [Fintype State]
+    [Fintype Signal]
+    (prior : State → ℝ)
+    (experiment : State → Signal → ℝ)
+    (receiverUtility : Action → State → ℝ) :
+    LossFactorsThroughState
+      (PersuasionBeliefState prior experiment)
+      (fun σ action =>
+        ReceiverPosteriorLoss
+          receiverUtility
+          (PosteriorAfterSignal prior experiment σ)
+          action) := by
+  refine ⟨fun belief action => ReceiverPosteriorLoss receiverUtility belief action, ?_⟩
+  intro σ action
+  rfl
+
+/-! ## Receiver best-response selectors and sender indirect value -/
+
+/-- A belief-indexed action selector that always returns a receiver best
+response. -/
+def ReceiverBestResponseSelector
+    [Fintype State]
+    (receiverUtility : Action → State → ℝ)
+    (actionOfBelief : (State → ℝ) → Action) : Prop :=
+  ∀ belief : State → ℝ,
+    ReceiverOptimalAction receiverUtility belief (actionOfBelief belief)
+
+/-- A belief-indexed action selector that implements optimistic tie-breaking
+for the sender among receiver best responses. -/
+def SenderTieBreakingSelector
+    [Fintype State]
+    (receiverUtility : Action → State → ℝ)
+    (senderUtility : Action → State → ℝ)
+    (actionOfBelief : (State → ℝ) → Action) : Prop :=
+  ∀ belief : State → ℝ,
+    SenderPreferredReceiverBestResponse
+      receiverUtility
+      senderUtility
+      belief
+      (actionOfBelief belief)
+
+/-- Sender-preferred tie-breaking is in particular a receiver best-response
+selector. -/
+theorem senderTieBreakingSelector_receiverBestResponseSelector
+    [Fintype State]
+    {receiverUtility : Action → State → ℝ}
+    {senderUtility : Action → State → ℝ}
+    {actionOfBelief : (State → ℝ) → Action}
+    (hTie :
+      SenderTieBreakingSelector
+        receiverUtility
+        senderUtility
+        actionOfBelief) :
+    ReceiverBestResponseSelector receiverUtility actionOfBelief := by
+  intro belief
+  exact (hTie belief).1
+
+/-- Sender indirect value induced by a belief-indexed receiver-action
+selector. -/
+def SenderIndirectValueOfSelector
+    [Fintype State]
+    (senderUtility : Action → State → ℝ)
+    (actionOfBelief : (State → ℝ) → Action)
+    (belief : State → ℝ) : ℝ :=
+  SenderExpectedUtility senderUtility belief (actionOfBelief belief)
+
+/-- Sender indirect value at signals factors through the posterior-belief state
+whenever the receiver action is selected from the posterior belief. -/
+theorem senderIndirectValue_factorsThroughBeliefState
+    [Fintype State]
+    [Fintype Signal]
+    (prior : State → ℝ)
+    (experiment : State → Signal → ℝ)
+    (senderUtility : Action → State → ℝ)
+    (actionOfBelief : (State → ℝ) → Action) :
+    PreferenceFactorsThroughState
+      (PersuasionBeliefState prior experiment)
+      (fun σ =>
+        SenderIndirectValueOfSelector
+          senderUtility
+          actionOfBelief
+          (PosteriorAfterSignal prior experiment σ)) := by
+  refine
+    ⟨fun belief =>
+      SenderIndirectValueOfSelector senderUtility actionOfBelief belief, ?_⟩
+  intro σ
+  rfl
+
+/-! ## Experiment value and persuasion-scheme value -/
+
+/-- Sender value of a concrete signal experiment and signal-indexed receiver
+action rule. -/
+def SignalExperimentSenderValue
+    [Fintype State]
+    [Fintype Signal]
+    (prior : State → ℝ)
+    (experiment : State → Signal → ℝ)
+    (actionOfSignal : Signal → Action)
+    (senderUtility : Action → State → ℝ) : ℝ :=
+  ∑ σ : Signal,
+    SignalDistribution prior experiment σ *
+      SenderExpectedUtility
+        senderUtility
+        (PosteriorAfterSignal prior experiment σ)
+        (actionOfSignal σ)
+
+/-- Sender value of a signal experiment when receiver actions are selected as a
+function of the induced posterior belief. -/
+def SignalExperimentIndirectValue
+    [Fintype State]
+    [Fintype Signal]
+    (prior : State → ℝ)
+    (experiment : State → Signal → ℝ)
+    (senderUtility : Action → State → ℝ)
+    (actionOfBelief : (State → ℝ) → Action) : ℝ :=
+  PersuasionSchemeValue
+    (SignalDistribution prior experiment)
+    (PosteriorAfterSignal prior experiment)
+    (SenderIndirectValueOfSelector senderUtility actionOfBelief)
+
+/-- The indirect experiment value is exactly the persuasion-scheme value of the
+experiment-induced distribution over posterior beliefs. -/
+theorem signalExperimentIndirectValue_eq_persuasionSchemeValue
+    [Fintype State]
+    [Fintype Signal]
+    (prior : State → ℝ)
+    (experiment : State → Signal → ℝ)
+    (senderUtility : Action → State → ℝ)
+    (actionOfBelief : (State → ℝ) → Action) :
+    SignalExperimentIndirectValue
+        prior experiment senderUtility actionOfBelief =
+      PersuasionSchemeValue
+        (SignalDistribution prior experiment)
+        (PosteriorAfterSignal prior experiment)
+        (SenderIndirectValueOfSelector senderUtility actionOfBelief) := by
+  rfl
+
+/-- If a signal-indexed action rule is generated by a belief-indexed selector,
+then concrete experiment value equals indirect experiment value. -/
+theorem signalExperimentSenderValue_eq_indirectValue_of_selector
+    [Fintype State]
+    [Fintype Signal]
+    (prior : State → ℝ)
+    (experiment : State → Signal → ℝ)
+    (senderUtility : Action → State → ℝ)
+    (actionOfSignal : Signal → Action)
+    (actionOfBelief : (State → ℝ) → Action)
+    (hAction :
+      ∀ σ : Signal,
+        actionOfSignal σ =
+          actionOfBelief (PosteriorAfterSignal prior experiment σ)) :
+    SignalExperimentSenderValue
+        prior experiment actionOfSignal senderUtility =
+      SignalExperimentIndirectValue
+        prior experiment senderUtility actionOfBelief := by
+  unfold SignalExperimentSenderValue SignalExperimentIndirectValue
+  unfold PersuasionSchemeValue SenderIndirectValueOfSelector
+  refine Finset.sum_congr rfl ?_
+  intro σ _
+  rw [hAction σ]
+
+/-! ## Direct recommendations / obedience -/
+
+/-- Direct recommendation obedience for a recommendation experiment whose
+signals are receiver actions: every positive-probability recommendation is a
+receiver best response at the posterior induced by that recommendation. -/
+def ReceiverObedientRecommendation
+    [Fintype State]
+    [Fintype Action]
+    (prior : State → ℝ)
+    (recommendation : State → Action → ℝ)
+    (receiverUtility : Action → State → ℝ) : Prop :=
+  ∀ a : Action,
+    SignalDistribution prior recommendation a ≠ 0 →
+      ReceiverOptimalAction
+        receiverUtility
+        (PosteriorAfterSignal prior recommendation a)
+        a
+
+/-- Direct recommendation obedience is exactly finite Bayes-action optimality
+for negative receiver utility loss on every positive-probability
+recommendation. -/
+theorem receiverObedientRecommendation_iff_bayesAction_negativeUtility
+    [Fintype State]
+    [Fintype Action]
+    (prior : State → ℝ)
+    (recommendation : State → Action → ℝ)
+    (receiverUtility : Action → State → ℝ) :
+    ReceiverObedientRecommendation prior recommendation receiverUtility ↔
+      ∀ a : Action,
+        SignalDistribution prior recommendation a ≠ 0 →
+          BayesAction
+            prior
+            recommendation
+            a
+            (fun act θ => - receiverUtility act θ)
+            a := by
+  constructor
+  · intro hObed a hMass
+    have hOpt :
+        ReceiverOptimalAction
+          receiverUtility
+          (BayesPosterior prior recommendation a)
+          a := by
+      simpa [posteriorAfterSignal_eq_bayesPosterior prior recommendation a]
+        using hObed a hMass
+    exact
+      (bayesAction_negativeReceiverUtility_iff_receiverOptimalAction
+        (prior := prior)
+        (likelihood := recommendation)
+        (obs := a)
+        (receiverUtility := receiverUtility)
+        (action := a)).mpr hOpt
+  · intro hBayes a hMass
+    have hOpt :
+        ReceiverOptimalAction
+          receiverUtility
+          (BayesPosterior prior recommendation a)
+          a :=
+      (bayesAction_negativeReceiverUtility_iff_receiverOptimalAction
+        (prior := prior)
+        (likelihood := recommendation)
+        (obs := a)
+        (receiverUtility := receiverUtility)
+        (action := a)).mp (hBayes a hMass)
+    simpa [posteriorAfterSignal_eq_bayesPosterior prior recommendation a]
+      using hOpt
+
+/-- Sender value of an obedient/direct-recommendation experiment, before
+imposing obedience.  The obedience constraint is carried separately by
+`ReceiverObedientRecommendation`. -/
+def DirectRecommendationSenderValue
+    [Fintype State]
+    [Fintype Action]
+    (prior : State → ℝ)
+    (recommendation : State → Action → ℝ)
+    (senderUtility : Action → State → ℝ) : ℝ :=
+  SignalExperimentSenderValue
+    prior
+    recommendation
+    (fun a : Action => a)
+    senderUtility
+
+/-- Direct recommendation value is the concrete signal-experiment value with
+the identity action rule on action-valued signals. -/
+theorem directRecommendationSenderValue_eq_signalExperimentSenderValue
+    [Fintype State]
+    [Fintype Action]
+    (prior : State → ℝ)
+    (recommendation : State → Action → ℝ)
+    (senderUtility : Action → State → ℝ) :
+    DirectRecommendationSenderValue prior recommendation senderUtility =
+      SignalExperimentSenderValue
+        prior
+        recommendation
+        (fun a : Action => a)
+        senderUtility := by
+  rfl
+
+/-! ## Posterior-distribution equivalence of experiments -/
+
+/-- Two experiments are economically equivalent for belief-based persuasion
+value when they induce the same signal probabilities and posterior beliefs
+signal by signal.  This is a same-index finite version of equality of
+distributions over posterior beliefs. -/
+def SamePosteriorDistribution
+    [Fintype State]
+    [Fintype Signal]
+    (prior : State → ℝ)
+    (experiment₁ experiment₂ : State → Signal → ℝ) : Prop :=
+  ∀ σ : Signal,
+    SignalDistribution prior experiment₁ σ =
+        SignalDistribution prior experiment₂ σ ∧
+      PosteriorAfterSignal prior experiment₁ σ =
+        PosteriorAfterSignal prior experiment₂ σ
+
+/-- Same posterior distribution is reflexive. -/
+theorem samePosteriorDistribution_refl
+    [Fintype State]
+    [Fintype Signal]
+    (prior : State → ℝ)
+    (experiment : State → Signal → ℝ) :
+    SamePosteriorDistribution prior experiment experiment := by
+  intro σ
+  exact ⟨rfl, rfl⟩
+
+/-- Belief-based indirect persuasion value depends only on the induced
+posterior distribution, not on the experiment's internal kernel once the
+signal-indexed weights and posteriors agree. -/
+theorem signalExperimentIndirectValue_eq_of_samePosteriorDistribution
+    [Fintype State]
+    [Fintype Signal]
+    {prior : State → ℝ}
+    {experiment₁ experiment₂ : State → Signal → ℝ}
+    (senderUtility : Action → State → ℝ)
+    (actionOfBelief : (State → ℝ) → Action)
+    (hSame : SamePosteriorDistribution prior experiment₁ experiment₂) :
+    SignalExperimentIndirectValue
+        prior experiment₁ senderUtility actionOfBelief =
+      SignalExperimentIndirectValue
+        prior experiment₂ senderUtility actionOfBelief := by
+  unfold SignalExperimentIndirectValue PersuasionSchemeValue
+  unfold SenderIndirectValueOfSelector
+  refine Finset.sum_congr rfl ?_
+  intro σ _
+  rcases hSame σ with ⟨hWeight, hPosterior⟩
+  rw [hWeight, hPosterior]
+
+/-- Concrete signal-experiment sender value is also invariant under same
+signal-indexed posterior distribution when the action rule is the same on both
+experiments. -/
+theorem signalExperimentSenderValue_eq_of_samePosteriorDistribution
+    [Fintype State]
+    [Fintype Signal]
+    {prior : State → ℝ}
+    {experiment₁ experiment₂ : State → Signal → ℝ}
+    (senderUtility : Action → State → ℝ)
+    (actionOfSignal : Signal → Action)
+    (hSame : SamePosteriorDistribution prior experiment₁ experiment₂) :
+    SignalExperimentSenderValue
+        prior experiment₁ actionOfSignal senderUtility =
+      SignalExperimentSenderValue
+        prior experiment₂ actionOfSignal senderUtility := by
+  unfold SignalExperimentSenderValue
+  refine Finset.sum_congr rfl ?_
+  intro σ _
+  rcases hSame σ with ⟨hWeight, hPosterior⟩
+  rw [hWeight, hPosterior]
+
+end FormalProofs.OPT
+
+end -- noncomputable section (Economics chunk)
+end -- anonymous section (Economics chunk)
+
+/-! ## From FormalProofs/OPT/BayesianPersuasionDirect.lean (consolidated 2026-07-02) -/
+
+section
+
+/-!
+# FormalProofs/OPT/BayesianPersuasionDirect.lean
+
+Finite direct-recommendation layer for Bayesian persuasion.
+
+Given a finite signal experiment and a deterministic receiver action rule, this
+module constructs the action-valued direct recommendation experiment obtained by
+pooling all signals that recommend the same action:
+
+`rec(theta, a) = sum_{sigma : actionOfSignal sigma = a} experiment(theta, sigma)`.
+
+The formalized claims are intentionally finite:
+
+* the pooled recommendation kernel is a valid signal experiment whenever the
+  original experiment is valid;
+* ex-ante sender value is preserved exactly by the pooling construction; and
+* when the original and pooled experiments have full support, the posterior
+  value formulation agrees with the ex-ante value formulation, so posterior
+  sender value is preserved too.
+
+Obedience itself remains a receiver-optimality condition on the direct
+recommendation posterior.  The stronger theorem that signalwise optimality
+survives arbitrary pooling is not asserted here; it needs the usual finite
+convexity/nonnegativity argument and tie-handling hypotheses.  This file
+provides the direct-revelation accounting surface used by that next lemma.
+-/
+
+set_option linter.mathlibStandardSet false
+
+open scoped BigOperators Classical
+
+set_option maxHeartbeats 0
+set_option maxRecDepth 4000
+set_option relaxedAutoImplicit false
+set_option autoImplicit false
+
+noncomputable section
+
+namespace FormalProofs.OPT
+
+variable {State Signal Action : Type*}
+
+/-- Pool an arbitrary finite signal experiment through a deterministic
+signal-to-action rule to obtain an action-valued direct recommendation
+experiment. -/
+def DirectRecommendationFromExperiment
+    [Fintype Signal]
+    [DecidableEq Action]
+    (experiment : State → Signal → ℝ)
+    (actionOfSignal : Signal → Action)
+    (θ : State)
+    (a : Action) : ℝ :=
+  ∑ σ : Signal,
+    if a = actionOfSignal σ then experiment θ σ else 0
+
+/-- Pooled direct recommendations are valid finite experiments whenever the
+original signal experiment is valid. -/
+theorem directRecommendationFromExperiment_valid
+    [Fintype Signal]
+    [Fintype Action]
+    [DecidableEq Action]
+    {experiment : State → Signal → ℝ}
+    (actionOfSignal : Signal → Action)
+    (hExp : SignalExperimentValid State Signal experiment) :
+    SignalExperimentValid State Action
+      (DirectRecommendationFromExperiment experiment actionOfSignal) where
+  nonneg := by
+    intro θ a
+    unfold DirectRecommendationFromExperiment
+    refine Finset.sum_nonneg ?_
+    intro σ _
+    by_cases h : a = actionOfSignal σ
+    · simp [h, hExp.nonneg θ σ]
+    · simp [h]
+  sum_one := by
+    intro θ
+    unfold DirectRecommendationFromExperiment
+    calc
+      (∑ a : Action,
+          ∑ σ : Signal,
+            if a = actionOfSignal σ then experiment θ σ else 0)
+          =
+        ∑ σ : Signal,
+          ∑ a : Action,
+            if a = actionOfSignal σ then experiment θ σ else 0 := by
+            rw [Finset.sum_comm]
+      _ = ∑ σ : Signal, experiment θ σ := by
+            refine Finset.sum_congr rfl ?_
+            intro σ _
+            simp
+      _ = 1 := hExp.sum_one θ
+
+/-! ## Ex-ante sender value and pooling preservation -/
+
+/-- Ex-ante sender value of a signal experiment and deterministic
+signal-indexed action rule, written before posterior normalization. -/
+def SignalExperimentExAnteSenderValue
+    [Fintype State]
+    [Fintype Signal]
+    (prior : State → ℝ)
+    (experiment : State → Signal → ℝ)
+    (actionOfSignal : Signal → Action)
+    (senderUtility : Action → State → ℝ) : ℝ :=
+  ∑ θ : State,
+    prior θ *
+      (∑ σ : Signal,
+        experiment θ σ * senderUtility (actionOfSignal σ) θ)
+
+/-- Ex-ante sender value of a direct recommendation experiment. -/
+def DirectRecommendationExAnteSenderValue
+    [Fintype State]
+    [Fintype Action]
+    (prior : State → ℝ)
+    (recommendation : State → Action → ℝ)
+    (senderUtility : Action → State → ℝ) : ℝ :=
+  ∑ θ : State,
+    prior θ *
+      (∑ a : Action,
+        recommendation θ a * senderUtility a θ)
+
+/-- Inner finite regrouping identity behind direct-recommendation value
+preservation. -/
+theorem directRecommendationFromExperiment_inner_senderValue_eq
+    [Fintype Signal]
+    [Fintype Action]
+    [DecidableEq Action]
+    (experiment : State → Signal → ℝ)
+    (actionOfSignal : Signal → Action)
+    (senderUtility : Action → State → ℝ)
+    (θ : State) :
+    (∑ a : Action,
+        DirectRecommendationFromExperiment experiment actionOfSignal θ a *
+          senderUtility a θ) =
+      ∑ σ : Signal,
+        experiment θ σ * senderUtility (actionOfSignal σ) θ := by
+  unfold DirectRecommendationFromExperiment
+  calc
+    (∑ a : Action,
+        (∑ σ : Signal,
+          if a = actionOfSignal σ then experiment θ σ else 0) *
+          senderUtility a θ)
+        =
+      ∑ a : Action,
+        ∑ σ : Signal,
+          (if a = actionOfSignal σ then experiment θ σ else 0) *
+            senderUtility a θ := by
+          refine Finset.sum_congr rfl ?_
+          intro a _
+          rw [Finset.sum_mul]
+    _ =
+      ∑ σ : Signal,
+        ∑ a : Action,
+          (if a = actionOfSignal σ then experiment θ σ else 0) *
+            senderUtility a θ := by
+          rw [Finset.sum_comm]
+    _ =
+      ∑ σ : Signal,
+        experiment θ σ * senderUtility (actionOfSignal σ) θ := by
+          refine Finset.sum_congr rfl ?_
+          intro σ _
+          simp
+
+/-- Pooling a finite signal experiment through its induced action rule preserves
+ex-ante sender value exactly. -/
+theorem directRecommendationFromExperiment_exAnte_senderValue_eq
+    [Fintype State]
+    [Fintype Signal]
+    [Fintype Action]
+    [DecidableEq Action]
+    (prior : State → ℝ)
+    (experiment : State → Signal → ℝ)
+    (actionOfSignal : Signal → Action)
+    (senderUtility : Action → State → ℝ) :
+    DirectRecommendationExAnteSenderValue
+        prior
+        (DirectRecommendationFromExperiment experiment actionOfSignal)
+        senderUtility =
+      SignalExperimentExAnteSenderValue
+        prior
+        experiment
+        actionOfSignal
+        senderUtility := by
+  unfold DirectRecommendationExAnteSenderValue SignalExperimentExAnteSenderValue
+  refine Finset.sum_congr rfl ?_
+  intro θ _
+  rw [directRecommendationFromExperiment_inner_senderValue_eq]
+
+/-! ## Posterior-value agreement under full support -/
+
+/-- Posterior sender value equals ex-ante sender value when every signal has
+nonzero induced probability. -/
+theorem signalExperimentSenderValue_eq_exAnteSenderValue
+    [Fintype State]
+    [Fintype Signal]
+    (prior : State → ℝ)
+    (experiment : State → Signal → ℝ)
+    (actionOfSignal : Signal → Action)
+    (senderUtility : Action → State → ℝ)
+    (hFull : SignalDistributionFullSupport prior experiment) :
+    SignalExperimentSenderValue
+        prior
+        experiment
+        actionOfSignal
+        senderUtility =
+      SignalExperimentExAnteSenderValue
+        prior
+        experiment
+        actionOfSignal
+        senderUtility := by
+  unfold SignalExperimentSenderValue SignalExperimentExAnteSenderValue
+  unfold SenderExpectedUtility PosteriorAfterSignal
+  calc
+    (∑ σ : Signal,
+        SignalDistribution prior experiment σ *
+          ∑ θ : State,
+            (prior θ * experiment θ σ /
+              SignalDistribution prior experiment σ) *
+              senderUtility (actionOfSignal σ) θ)
+        =
+      ∑ σ : Signal,
+        ∑ θ : State,
+          SignalDistribution prior experiment σ *
+            ((prior θ * experiment θ σ /
+              SignalDistribution prior experiment σ) *
+              senderUtility (actionOfSignal σ) θ) := by
+          refine Finset.sum_congr rfl ?_
+          intro σ _
+          rw [Finset.mul_sum]
+    _ =
+      ∑ σ : Signal,
+        ∑ θ : State,
+          prior θ * experiment θ σ *
+            senderUtility (actionOfSignal σ) θ := by
+          refine Finset.sum_congr rfl ?_
+          intro σ _
+          refine Finset.sum_congr rfl ?_
+          intro θ _
+          field_simp [hFull σ]
+    _ =
+      ∑ θ : State,
+        ∑ σ : Signal,
+          prior θ * experiment θ σ *
+            senderUtility (actionOfSignal σ) θ := by
+          rw [Finset.sum_comm]
+    _ =
+      ∑ θ : State,
+        prior θ *
+          ∑ σ : Signal,
+            experiment θ σ *
+              senderUtility (actionOfSignal σ) θ := by
+          refine Finset.sum_congr rfl ?_
+          intro θ _
+          rw [Finset.mul_sum]
+          refine Finset.sum_congr rfl ?_
+          intro σ _
+          ring
+
+/-- Posterior sender value of a direct recommendation experiment equals its
+ex-ante sender value under full support of recommendation probabilities. -/
+theorem directRecommendationSenderValue_eq_exAnteSenderValue
+    [Fintype State]
+    [Fintype Action]
+    (prior : State → ℝ)
+    (recommendation : State → Action → ℝ)
+    (senderUtility : Action → State → ℝ)
+    (hFull : SignalDistributionFullSupport prior recommendation) :
+    DirectRecommendationSenderValue prior recommendation senderUtility =
+      DirectRecommendationExAnteSenderValue
+        prior
+        recommendation
+        senderUtility := by
+  unfold DirectRecommendationSenderValue
+  exact
+    signalExperimentSenderValue_eq_exAnteSenderValue
+      (prior := prior)
+      (experiment := recommendation)
+      (actionOfSignal := fun a : Action => a)
+      (senderUtility := senderUtility)
+      hFull
+
+/-- Full-support posterior-value version of direct-recommendation value
+preservation. -/
+theorem directRecommendationFromExperiment_senderValue_eq
+    [Fintype State]
+    [Fintype Signal]
+    [Fintype Action]
+    [DecidableEq Action]
+    (prior : State → ℝ)
+    (experiment : State → Signal → ℝ)
+    (actionOfSignal : Signal → Action)
+    (senderUtility : Action → State → ℝ)
+    (hSignalFull : SignalDistributionFullSupport prior experiment)
+    (hRecommendationFull :
+      SignalDistributionFullSupport
+        prior
+        (DirectRecommendationFromExperiment experiment actionOfSignal)) :
+    DirectRecommendationSenderValue
+        prior
+        (DirectRecommendationFromExperiment experiment actionOfSignal)
+        senderUtility =
+      SignalExperimentSenderValue
+        prior
+        experiment
+        actionOfSignal
+        senderUtility := by
+  rw [
+    directRecommendationSenderValue_eq_exAnteSenderValue
+      (prior := prior)
+      (recommendation :=
+        DirectRecommendationFromExperiment experiment actionOfSignal)
+      (senderUtility := senderUtility)
+      hRecommendationFull,
+    signalExperimentSenderValue_eq_exAnteSenderValue
+      (prior := prior)
+      (experiment := experiment)
+      (actionOfSignal := actionOfSignal)
+      (senderUtility := senderUtility)
+      hSignalFull,
+    directRecommendationFromExperiment_exAnte_senderValue_eq
+      (prior := prior)
+      (experiment := experiment)
+      (actionOfSignal := actionOfSignal)
+      (senderUtility := senderUtility)
+  ]
+
+end FormalProofs.OPT
+
+end -- noncomputable section (Direct chunk)
+end -- anonymous section (Direct chunk)

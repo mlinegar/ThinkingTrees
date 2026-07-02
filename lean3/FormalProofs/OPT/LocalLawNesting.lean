@@ -4,7 +4,7 @@ import FormalProofs.OPT.MergeableReduction
 import FormalProofs.OPT.NeuralOperatorSpaces
 import FormalProofs.OPT.NeuralOperatorPreferenceBridge
 import FormalProofs.OPT.PreservationTheorems
-import FormalProofs.OPT.TheoremBackingStructure
+import FormalProofs.OPT.TheoremBackingConsequences
 import FormalProofs.OPT.TwoStageOracleSurrogate
 import FormalProofs.DSL.TreeIPW
 import FormalProofs.DSL.LabelRateBounds

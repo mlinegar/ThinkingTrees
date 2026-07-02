@@ -1,5 +1,4 @@
-import FormalProofs.OPT.ApproxFiberTransport
-import FormalProofs.OPT.SharedFeatureMultihead
+import FormalProofs.OPT.OracleFiberObjectives
 import FormalProofs.OPT.MarkovPathDGP
 
 /-!

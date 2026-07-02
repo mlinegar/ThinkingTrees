@@ -1449,14 +1449,15 @@ def ctreepo_feldman2008_public_randomness_seedwise_extension_statement : Prop :=
   Feldman2008.public_randomness_seedwise_extension_statement
 
 /-- Feldman et al. Theorem 3, typed citation schema for the private-randomness
-separation, parameterized by the (not-yet-formalized) randomized computability
-predicates; the earlier existential form was trivially satisfiable. See the
+separation, stated with the concrete computability predicates
+`Feldman2008.RandomStreamingPolylogComputable` (existing
+public-randomness streaming success layer) and
+`Feldman2008.PrivateRandomMUDPolylogComputable` (per-node private-seed
+counting MUD model); earlier forms existentially quantified or merely
+parameterized the predicates and could be instantiated vacuously. See the
 docstring in `FormalProbability/ML/MergeableSummaries/Feldman2008.lean`. -/
-def ctreepo_feldman2008_theorem3_private_randomness_separation_statement
-    (RandomStreamingComputable PrivateRandomMUDComputable :
-      ∀ (α Q : Type), (Stream α → Q) → Prop) : Prop :=
+def ctreepo_feldman2008_theorem3_private_randomness_separation_statement : Prop :=
   Feldman2008.theorem3_private_randomness_separation_statement
-    RandomStreamingComputable PrivateRandomMUDComputable
 
 /-- Feldman et al. Symmetric Index canonical promised streams inhabit the
 promise domain. -/

@@ -1,8 +1,7 @@
 import FormalProofs.OPT.LocalLaws
-import FormalProofs.OPT.TheoremBackingAssumptions
+import FormalProofs.OPT.TheoremBackingConsequences
 import FormalProofs.OPT.OracleMeasurable
-import FormalProofs.OPT.OracleFiberRelations
-import FormalProofs.OPT.FiberPreservingObjective
+import FormalProofs.OPT.OracleFiberObjectives
 
 /-!
 # FormalProofs/OPT/OracleSufficientCompression.lean

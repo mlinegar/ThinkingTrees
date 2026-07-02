@@ -27,7 +27,7 @@ FormalProofs/CLT/CLT.lean to derive asymptotic normality.
 -/
 
 import Mathlib
-import FormalProofs.CLT.Core
+import FormalProbability.CLT.Core
 import FormalProofs.DSL.AsymptoticTheory
 import FormalProofs.DSL.ConcreteCoverage
 import FormalProofs.Econometrics.OLS.GaussMarkov

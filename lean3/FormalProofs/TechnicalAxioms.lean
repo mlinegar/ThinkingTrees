@@ -206,7 +206,10 @@ abbrev deviation_measurable := @deviationSet_nullMeasurable
 For n iid random variables X_i ∈ [0,1] with mean p:
   P(|p̂ - p| ≥ ε) ≤ 2 * exp(-2nε²)
 
-**Location**: MeasureTheoreticAudit.lean:357
+**Location**: `hoeffding_iid_bounded` in MeasureTheoreticAudit.lean
+(fully proved on mathlib's sub-Gaussian machinery; the legacy
+`hoeffding_iid_bounded_axiom` alias was removed 2026-07-02 — the term was
+always a theorem, never an axiom)
 
 **Mathematical justification**: Classical result. Proof via:
 1. Center: Y_i = X_i - p has E[Y_i] = 0
@@ -215,7 +218,7 @@ For n iid random variables X_i ∈ [0,1] with mean p:
 
 **Reference**: Hoeffding (1963), "Probability Inequalities for Sums of Bounded
 Random Variables", JASA 58(301):13-30 -/
-abbrev hoeffding_inequality := @hoeffding_iid_bounded_axiom
+abbrev hoeffding_inequality := @hoeffding_iid_bounded
 
 /-!
 ## Summary

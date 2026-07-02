@@ -1,5 +1,5 @@
-import FormalProofs.OPT.SharedFeatureMultihead
-import FormalProofs.OPT.TwoStageLabelScoreObjectives
+import FormalProofs.OPT.OracleFiberObjectives
+import FormalProofs.OPT.UnifiedOracleRoute
 
 /-!
 # FormalProofs/OPT/ProductScoreFiber.lean

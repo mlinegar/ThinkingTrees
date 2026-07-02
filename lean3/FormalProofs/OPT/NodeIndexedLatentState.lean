@@ -1,5 +1,5 @@
 import FormalProofs.OPT.ExactUtilityTransport
-import FormalProofs.OPT.ApproxFiberTransport
+import FormalProofs.OPT.OracleFiberObjectives
 
 /-!
 # FormalProofs/OPT/NodeIndexedLatentState.lean

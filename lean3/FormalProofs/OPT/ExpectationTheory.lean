@@ -51,6 +51,77 @@ lemma Exp_pure {α : Type*} (f : α → ℝ) (x : α) :
     simp [hz]
 
 /-!
+## Mathlib Integral Bridges (`PMF.toMeasure`)
+
+The mathlib-native notion of PMF expectation is the Bochner integral against
+`PMF.toMeasure`. These lemmas identify the repo's tsum-based expectations
+(`Exp`, `Eg`, `Egu`) with that integral via `PMF.integral_eq_tsum`
+(and `PMF.integral_eq_sum` in the `Fintype` case, where no integrability
+hypothesis is needed).
+-/
+
+section MathlibIntegralBridges
+
+open MeasureTheory
+
+variable {α : Type*} [MeasurableSpace α] [MeasurableSingletonClass α]
+
+/-- mathlib bridge: identifies the repo's tsum expectation with the mathlib
+Bochner integral against `PMF.toMeasure` (via `PMF.integral_eq_tsum`). -/
+lemma Exp_eq_integral (p : PMF α) (f : α → ℝ) (hf : Integrable f p.toMeasure) :
+    Exp p f = ∫ z, f z ∂p.toMeasure := by
+  unfold Exp
+  rw [PMF.integral_eq_tsum p f hf]
+  -- For ℝ, smul is multiplication, so tsum matches
+  simp only [smul_eq_mul]
+
+/-- mathlib bridge, `Fintype` case: no integrability hypothesis needed
+(via `PMF.integral_eq_sum`). -/
+lemma Exp_eq_integral_of_fintype [Fintype α] (p : PMF α) (f : α → ℝ) :
+    Exp p f = ∫ z, f z ∂p.toMeasure := by
+  unfold Exp
+  rw [PMF.integral_eq_sum p f, tsum_fintype]
+  simp only [smul_eq_mul]
+
+/-- mathlib bridge: identifies the repo's tsum expectation `Eg` with the mathlib
+Bochner integral against `(g x).toMeasure` (via `PMF.integral_eq_tsum`). -/
+lemma Eg_eq_integral (g : Summarizer α) (f : α → ℝ) (x : α)
+    (hf : Integrable f (g x).toMeasure) :
+    Eg g f x = ∫ z, f z ∂(g x).toMeasure := by
+  unfold Eg
+  rw [PMF.integral_eq_tsum (g x) f hf]
+  simp only [smul_eq_mul]
+
+/-- mathlib bridge, `Fintype` case of `Eg_eq_integral`. -/
+lemma Eg_eq_integral_of_fintype [Fintype α] (g : Summarizer α) (f : α → ℝ) (x : α) :
+    Eg g f x = ∫ z, f z ∂(g x).toMeasure := by
+  unfold Eg
+  rw [PMF.integral_eq_sum (g x) f, tsum_fintype]
+  simp only [smul_eq_mul]
+
+/-- mathlib bridge: identifies the repo's tsum expectation `Egu` (expectation
+under the hierarchical reduction of a tree) with the mathlib Bochner integral
+against `(reduce g T).toMeasure` (via `PMF.integral_eq_tsum`). -/
+lemma Egu_eq_integral [MeasurableSpace Strings] [MeasurableSingletonClass Strings]
+    (g : Summarizer Strings) (T : BinTree Strings) (f : Strings → ℝ)
+    (hf : Integrable f (reduce g T).toMeasure) :
+    Egu g T f = ∫ z, f z ∂(reduce g T).toMeasure := by
+  unfold Egu
+  rw [PMF.integral_eq_tsum (reduce g T) f hf]
+  simp only [smul_eq_mul]
+
+/-- mathlib bridge, `Fintype` case of `Egu_eq_integral`. -/
+lemma Egu_eq_integral_of_fintype [MeasurableSpace Strings]
+    [MeasurableSingletonClass Strings] [Fintype Strings]
+    (g : Summarizer Strings) (T : BinTree Strings) (f : Strings → ℝ) :
+    Egu g T f = ∫ z, f z ∂(reduce g T).toMeasure := by
+  unfold Egu
+  rw [PMF.integral_eq_sum (reduce g T) f, tsum_fintype]
+  simp only [smul_eq_mul]
+
+end MathlibIntegralBridges
+
+/-!
 ## ExpENN Properties
 -/
 
@@ -164,11 +235,15 @@ lemma Exp_eq_ExpENN_toReal {α : Type*} (p : PMF α) (f : α → ℝ) (hf : ∀ 
 ## tsum Lemmas
 -/
 
-/-- If a summable series of non-negative real numbers sums to 0, then each term is 0 -/
+/-- If a summable series of non-negative real numbers sums to 0, then each term is 0.
+
+mathlib bridge: derived from mathlib's `hasSum_zero_iff_of_nonneg`
+(`Mathlib/Topology/Algebra/InfiniteSum/Order.lean`); kept under the repo-facing
+name (pointwise conclusion) used across the OPT files. -/
 lemma tsum_eq_zero_of_nonneg {α : Type*} (f : α → ℝ) (hf : ∀ x, 0 ≤ f x) (h_summable : Summable f) (h_sum : ∑' x, f x = 0) :
   ∀ x, f x = 0 := by
-    contrapose! h_sum;
-    exact ne_of_gt ( lt_of_lt_of_le ( lt_of_le_of_ne ( hf _ ) ( Ne.symm h_sum.choose_spec ) ) ( Summable.le_tsum h_summable _ fun x _ => hf x ) )
+    have h0 : HasSum f 0 := h_sum ▸ h_summable.hasSum
+    exact fun x => congrFun ((hasSum_zero_iff_of_nonneg hf).mp h0) x
 
 /-!
 ## L1 Implications

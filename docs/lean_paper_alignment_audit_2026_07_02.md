@@ -24,11 +24,152 @@
 > are canonical; L1/L2/L3 retained as legacy. `lake build` green (7,975 jobs);
 > v13 compiles with zero undefined references; all 281 crosswalk names verify.
 >
-> **Still open:** F7 (thm:e2e glue theorem + realized-μ̂ variant), F9-partial
-> (B-appendix Lipschitz lemmas, `prop:m_lt_k` finite counterexample), M1
-> (MainTheorems split into PaperTheorems/ExtendedExports), M6/M7 (archiving and
-> cluster consolidation), instantiating or discharging the KLL/GK/MG obligation
-> bundles, and a concrete private-coin MUD model for Feldman Theorem 3.
+> **RESOLUTION STATUS (third pass, same day — "built and used" sweep).**
+> Newly resolved:
+> - **M6 (orphans) DONE.** Every on-disk module now either builds or is
+>   explicitly archived. Re-imported + repaired: `OPT/AnalysisPartitionMismatch`
+>   (broken `Decidable` elaboration was silently generating a `sorry`),
+>   `OPT/AnalysisSummaryLocalLaws` (`abs_add` → `abs_add_le`, dead `ring`),
+>   `OPT/WorkedExampleCMSTree` (claims written for an additive merge were
+>   FALSE under the monoid `(· * ·)` on `Nat` — corrected 10 → 24, comments
+>   fixed; plus a dead `decide`), `OPT/ContextualStateRecovery` (clean).
+>   READMEs (CLT/ML/OPT/DSL) now imported ⇒ type-checked. Econometrics subtree
+>   fully built via two new lake targets split along the namespace fault line:
+>   `FormalProofsEconometrics` (local `Econometrics.Core` route) and
+>   `FormalProofsEconometricsSemiparametric` (`AsymptoticOLS`+dependents and
+>   `Overidentification`, which reach `FormalProbability.Econometrics.*` via
+>   `DSL/AsymptoticTheory`). Archived per `OLD_` convention:
+>   `DSL/OLD_MEstimationCore`, `DSL/OLD_SectionIPWTwoStage`;
+>   `Deprecated/PointwiseLipschitz` stays folder-quarantined.
+>   Full build green: 8,021 jobs (was 7,972 with 32 unbuilt orphans).
+> - **F9-partial DONE.** `OPT/PaperSupportingLemmas.lean`: the five B-appendix
+>   lemmas turned out to be mostly re-exports of results the repo already had
+>   (`sigmoid_lipschitz`, `neg_log_sigmoid_lipschitz`,
+>   `dpo_loss_pointwise_lipschitz`, `dpo_loss_oracle_measurable`,
+>   `dist_zero_on_support_of_Exp_zero`) — the gap was crosswalk visibility, not
+>   missing math. Genuinely new: `paper_m_lt_k_sketch_state_collision` /
+>   `paper_m_lt_k_no_estimator` (prop:m_lt_k, general-n, no `decide`).
+>   Crosswalk rows added; the "No dedicated Lean theorem" row is gone.
+> - **F7 DONE.** `DSL/TreePOEndToEndGlue.lean` (897 lines):
+>   `dpo_treepo_realized_estimator_certificate` — the paper's actual display,
+>   gap ≤ C_meth·(realized μ̂_HT + t) w.p. ≥ 1 − 2·exp(−t²/(8N(D_max/π_min)²))
+>   via the in-repo Hoeffding bound (sharper than the planned Chebyshev);
+>   `dpoTreePOErrorStack` + `dpo_treepo_certificate_instantiates_error_stack`
+>   genuinely instantiate the abstract `PaperErrorStack` with the concrete
+>   Bernoulli-design HT estimator; GRPO-PL analogues included. Disclosed
+>   caveats (in-file + new B_proofs "Formalization" paragraph): judge leg
+>   degenerate (f = f*), unclipped estimator (B_clip = 0 case), stack legs in
+>   estimator units; GRPO-RL analogue mechanical but not yet added.
+>
+> - **M1 DONE.** `OPT/MainTheorems.lean` (5,547 lines, 91 imports, 73/1,051
+>   declarations paper-cited) split into `OPT/PaperTheorems.lean` (595 lines,
+>   **14 imports**, the 73 crosswalk names + the `PaperPreferenceStack` helper
+>   block; fully-qualified names unchanged via the same inner namespace) and
+>   `OPT/ExtendedExports.lean` (5,139 lines, everything else verbatim);
+>   MainTheorems is now a 21-line back-compat shim. Paper-relevant import
+>   closure: **140 → 69 modules**. Line-multiset check confirms a lossless
+>   partition. Crosswalk file columns updated (10 rows → PaperTheorems; the
+>   calibrated-objective row corrected to `OPT/NeuralOperatorPreferenceBridge.lean`
+>   where that name actually lives); REPRODUCIBILITY.md gained
+>   `lake build FormalProofs.OPT.PaperTheorems` as the paper-surface build.
+>   Note: the crosswalk's `paper_error_budget_union_bound` in this surface is
+>   the primed alias `paper_error_budget_union_bound'`; the unprimed original
+>   is in `OPT/MergeTriangle.lean`.
+>
+> **RESOLUTION STATUS (fourth pass, same day — M7 consolidation executed).**
+> Six parallel agents merged the accreted clusters via a shim protocol (old
+> module paths kept as one-line import shims until a central retarget pass),
+> then a single integration pass repointed 24 importer files and deleted 39
+> shims. Result: **218 → 184 modules on disk**, everything builds, paper
+> closure 69 → **66**. New consolidated modules:
+> - `OPT/TheoremBacking.lean` (MeasurementError + ApproxMeasurementError) atop
+>   `OPT/TheoremBackingConsequences.lean` (which absorbed Assumptions +
+>   Structure — kept at its crosswalk-cited path; 5 files → 2)
+> - `OPT/UnifiedOracleRoute.lean` (+ TwoStageDecomposition,
+>   TwoStageLabelScoreObjectives; 1,263 lines)
+> - `OPT/OracleFibers.lean` (laws: ReadoutAlignment, FeatureFiberLaws,
+>   LabelScoreObjectives) + `OPT/OracleFiberObjectives.lean` (objectives:
+>   OracleFiberRelations, FiberPreservingObjective, FeatureClassObjectives,
+>   SharedFeatureMultihead, ApproxFiberTransport)
+> - `OPT/LocalLawObjectives.lean` (the ten-file objective ladder, 2,430 lines,
+>   terminal section = the ACTIVE `drMinimizationValue` surface matching
+>   Python ObjectiveSpec v1)
+> - `OPT/AuditBounds.lean` (+ AuditCore, AuditSizes),
+>   `OPT/ExactUtilityTransport.lean` (+ Instances),
+>   `OPT/BayesianPersuasion.lean` (+ Economics, Direct; 1,256 lines),
+>   `FormalProofs/CLT.lean` (absorbed all 9 re-export stubs)
+> DAG-forced live survivors (each sits between or above its cluster's target;
+> merging would create import cycles): `OPT/TwoStageOracleSurrogate.lean`,
+> `OPT/Audit.lean`, `OPT/NodeIndexedLatentState.lean`,
+> `OPT/ProductScoreFiber.lean`. One content deviation across the whole pass:
+> a byte-identical duplicated `private theorem discountedTreeMetaLoss_congr_all`
+> was elided once in `LocalLawObjectives` (module-scoped `private` collision).
+> All chunks otherwise machine-verified byte-identical to their sources.
+> Post-integration: build green 7,989 jobs across 3 targets; 313 crosswalk
+> names verify; all 32 crosswalk-cited files exist; unbuilt = the 3 archives.
+>
+> **RESOLUTION STATUS (fifth pass, same day — mathlib alignment + obligation
+> discharge).** Four parallel agents closed the remaining roadmap:
+> - **Mathlib alignment** (plan + implementation log in
+>   `docs/lean_mathlib_alignment_plan.md`): `expit` is now
+>   `abbrev expit := Real.sigmoid` in both repos (mathlib v4.27 gained a full
+>   sigmoid API); the proved lemma misnamed `hoeffding_iid_bounded_axiom` is
+>   deleted (only a wrapper — the real `hoeffding_iid_bounded` already
+>   existed); ~230 lines of conditional-Hoeffding/Azuma proofs deduped out of
+>   TT (`SerflingAudit` now delegates to FormalProbability's
+>   `SamplingConcentration`); PMF tsum expectations gained mathlib Bochner
+>   bridges (`Exp/Eg/Egu_eq_integral` + Fintype corollaries, promoted into
+>   `ExpectationTheory.lean`); `innerProduct` → `dotProduct` abbrev;
+>   `IsPosDef' ↔ Matrix.PosDef` bridge. Verdicts kept: PMF stack = BRIDGE not
+>   replace (34-file blast radius); custom CLT stays (mathlib v4.27 has no
+>   CLT/Lévy continuity); `BoundedPseudoMetricSpace` full replace not worth it.
+> - **GRPO-RL glue leg** (F7 completion): `grpo_rl_treepo_realized_estimator_certificate`,
+>   `grpoRLTreePOErrorStack` + instantiation + high-prob corollary in
+>   `DSL/TreePOEndToEndGlue.lean`; all three methods (DPO/GRPO-PL/GRPO-RL) now
+>   have realized-μ̂ certificates; crosswalk + B_proofs updated.
+> - **Misra–Gries Theorem 1 FULLY DISCHARGED** (was an undisclosed external
+>   obligation at audit time): new undercount bound
+>   `estimateCount_ge_frequency_sub` (n/(k+1) debt accounting), size bounds,
+>   and — the real content — an executable merge with a checked Lemma-2.1
+>   envelope invariant (`mergeClosed_mgValid`), packaged as
+>   `executableMGAlgorithm` / `theorem1_executable` with ZERO caller-supplied
+>   fields. SpaceSaving remains the disclosed-external bundle (min-counter
+>   overcount + Corollary-1 transfer unformalized). Appendix E boundary text
+>   updated in both directions; `Literature.externalObligationSurface` synced.
+> - **Feldman Theorem 3 schema now non-vacuous**: concrete per-node private-seed
+>   MUD model (`PrivateRandomGeneralMUDFamily`, seeding tree, uniform
+>   seed-counting success ≥ 2/3) + reuse of the existing public-random
+>   streaming success layer; both predicate classes proved inhabited and the
+>   deterministic classes proved to embed; still an external obligation, but
+>   no longer trivially satisfiable.
+> End state: FP build green (8,212 jobs), TT build green (7,989 jobs, all
+> three targets), `main_v13_triangle.pdf` compiles with zero undefined
+> references, 334 crosswalk names verify (2 dotted-name scripted false
+> positives only).
+>
+> **Remaining roadmap (research-grade, unscheduled):** SpaceSaving
+> frequency-error/merge discharge + Corollary-1 MG↔SS transfer; GK/KLL
+> quantitative bounds (disclosed obligations); proving the Feldman Thm-3
+> separation itself; deferred mathlib items (shared two-sided tail lemma,
+> Bayes posterior equivalence theorem, BoundedSpace instances); upstream-PR
+> candidates: `sigmoid_lipschitz`, `neg_log_sigmoid_lipschitz`.
+>
+> **Historical (superseded by the passes above):**
+> 2. **Phase F (feasibility confirmed for MG):** `HeavyHitters.lean` already
+>    proves `size_le_capacity` (structural half of `MGAlgorithm.size_bound`);
+>    the overcount direction of the frequency invariant is also proved. A
+>    concrete `MGAlgorithm` instance discharging the bundle is a realistic
+>    next FormalProbability task; GK/KLL quantitative bounds stay disclosed
+>    obligations; Feldman Thm 3 needs a concrete private-coin MUD model
+>    (research-grade, unscheduled).
+> 3. GRPO-RL realized-estimator analogue in TreePOEndToEndGlue (mechanical).
+>
+> **End-of-day state:** all three lake targets green, 8,023 jobs; the only
+> unbuilt modules on disk are the three explicit archives
+> (`DSL/OLD_MEstimationCore`, `DSL/OLD_SectionIPWTwoStage`,
+> `Deprecated/PointwiseLipschitz`); 313 crosswalk names verify (the single
+> scripted "miss", `MarkovCountSketch.mul`, is the known dotted-name false
+> positive — it is `def mul` inside the namespace).
 
 Scope: `lean3/FormalProofs` (+ `~/FormalProbability` MergeableSummaries layer) audited
 against `paper/ctreepo/main_v12_external.tex` for (a) fidelity in both directions,

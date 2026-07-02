@@ -30,7 +30,7 @@ Under MLR.1-5: OLS is the Best Linear Unbiased Estimator (BLUE)
 -/
 
 import Mathlib
-import FormalProofs.CLT.Core
+import FormalProbability.CLT.Core
 
 set_option linter.mathlibStandardSet false
 

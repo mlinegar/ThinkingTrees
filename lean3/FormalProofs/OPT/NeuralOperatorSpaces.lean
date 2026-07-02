@@ -2,7 +2,7 @@ import FormalProofs.ML.TransformerAsNeuralOperator
 import FormalProofs.OPT.GlobalAssumptions
 import FormalProofs.OPT.MergeableReduction
 import FormalProofs.OPT.SketchSummaryOperators
-import FormalProofs.OPT.TheoremBackingAssumptions
+import FormalProofs.OPT.TheoremBackingConsequences
 import FormalProofs.OPT.ApproximateLocalLaws
 
 /-!

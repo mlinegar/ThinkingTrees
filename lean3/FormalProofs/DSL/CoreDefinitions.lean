@@ -221,35 +221,40 @@ def CovariateSpec.X {Obs Mis : Type*} {d : ℕ} (spec : CovariateSpec Obs Mis d)
 ## Inner Product and Basic Operations
 -/
 
-/-- Inner product of two vectors -/
-def innerProduct {d : ℕ} (x : Fin d → ℝ) (β : Fin d → ℝ) : ℝ :=
-  ∑ i : Fin d, x i * β i
+/-- Inner product of two vectors.
 
-/-- Standard logistic (sigmoid) function -/
-def expit (x : ℝ) : ℝ := 1 / (1 + Real.exp (-x))
+mathlib bridge: this IS mathlib's `dotProduct` (notation `⬝ᵥ`,
+`Mathlib/Data/Matrix/Mul.lean`), kept under the DSL-facing name `innerProduct`. -/
+abbrev innerProduct {d : ℕ} (x : Fin d → ℝ) (β : Fin d → ℝ) : ℝ :=
+  dotProduct x β
 
-/-- Logit function (inverse of expit) -/
+/-- `innerProduct` is definitionally mathlib's `dotProduct`. -/
+theorem innerProduct_eq_dotProduct {d : ℕ} (x β : Fin d → ℝ) :
+    innerProduct x β = dotProduct x β := rfl
+
+/-- Standard logistic (sigmoid) function.
+
+mathlib bridge: this IS mathlib's `Real.sigmoid`
+(`Mathlib/Analysis/SpecialFunctions/Sigmoid.lean`), kept under the DSL-facing
+name `expit`. -/
+abbrev expit := Real.sigmoid
+
+/-- `expit` is definitionally mathlib's `Real.sigmoid`. -/
+theorem expit_eq_sigmoid : expit = Real.sigmoid := rfl
+
+/-- Logit function (inverse of expit; mathlib has no `logit`, so this stays custom) -/
 def logit (p : ℝ) : ℝ := Real.log (p / (1 - p))
 
 /-!
 ## Helper Lemmas
 -/
 
-lemma expit_range (x : ℝ) : 0 < expit x ∧ expit x < 1 := by
-  unfold expit
-  constructor
-  · apply div_pos one_pos
-    linarith [Real.exp_pos (-x)]
-  · rw [div_lt_one]
-    · linarith [Real.exp_pos (-x)]
-    · linarith [Real.exp_pos (-x)]
+lemma expit_range (x : ℝ) : 0 < expit x ∧ expit x < 1 :=
+  ⟨Real.sigmoid_pos x, Real.sigmoid_lt_one x⟩
 
 lemma innerProduct_comm {d : ℕ} (x β : Fin d → ℝ) :
-    innerProduct x β = innerProduct β x := by
-  unfold innerProduct
-  congr 1
-  ext i
-  ring
+    innerProduct x β = innerProduct β x :=
+  dotProduct_comm x β
 
 end DSL
 

@@ -1,5 +1,5 @@
-import FormalProofs.OPT.TheoremBackingMeasurementError
-import FormalProofs.OPT.ReadoutAlignment
+import FormalProofs.OPT.TheoremBacking
+import FormalProofs.OPT.OracleFibers
 
 /-!
 # FormalProofs/OPT/ApproxOracleRecovery.lean

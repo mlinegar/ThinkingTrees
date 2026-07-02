@@ -33,7 +33,6 @@ of the true rate.
 * Sub-Gaussian random variables (Mathlib: `HasSubgaussianMGF`)
 -/
 
-import FormalProofs.OPT.AuditCore
 import FormalProofs.OPT.AuditBounds
 import FormalProofs.OPT.PreferenceBounds
 import FormalProofs.OPT.MeasureTheoreticAudit

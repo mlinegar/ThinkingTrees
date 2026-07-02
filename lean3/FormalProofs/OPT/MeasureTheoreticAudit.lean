@@ -21,7 +21,6 @@ empirical audit framework, connecting to Mathlib's Hoeffding inequality.
 * Mathlib.Probability.ProbabilityMassFunction for PMF infrastructure
 -/
 
-import FormalProofs.OPT.AuditCore
 import FormalProofs.OPT.AuditBounds
 import Mathlib.Probability.Moments.SubGaussian
 import Mathlib.Probability.Independence.Basic
@@ -46,20 +45,10 @@ variable {Y : Type*} [PseudoMetricSpace Y]
 ## Section 1: PMF to Measure Bridge
 
 Mathlib already provides `PMF.toMeasure` and `PMF.toMeasure.isProbabilityMeasure`.
-We just need to connect our `Exp` and `ViolationProb` to integrals.
+The `Exp`↔integral bridge (`Exp_eq_integral`, together with `Eg_eq_integral` /
+`Egu_eq_integral`) lives next to the `Exp` definition in
+`FormalProofs.OPT.ExpectationTheory`; here we only connect `ViolationProb`.
 -/
-
-/-- Connection between discrete expectation Exp and measure-theoretic integral.
-
-For a PMF p and bounded measurable function f, the discrete expectation
-equals the integral with respect to p.toMeasure. -/
-lemma Exp_eq_integral [MeasurableSpace Strings] [MeasurableSingletonClass Strings]
-    (p : PMF Strings) (f : Strings → ℝ) (hf : Integrable f p.toMeasure) :
-    Exp p f = ∫ z, f z ∂p.toMeasure := by
-  unfold Exp
-  rw [PMF.integral_eq_tsum p f hf]
-  -- For ℝ, smul is multiplication, so tsum matches
-  simp only [smul_eq_mul]
 
 /-- ViolationProb equals the integral of violationInd -/
 lemma ViolationProb_eq_integral [MeasurableSpace Strings] [MeasurableSingletonClass Strings]
@@ -528,20 +517,6 @@ lemma hoeffding_iid_bounded {Ω : Type*} [MeasurableSpace Ω]
     _ ≤ Real.exp (-2 * n * ε^2) + Real.exp (-2 * n * ε^2) := by
         gcongr
     _ = 2 * Real.exp (-2 * n * ε^2) := by ring
-
-/-- Backward-compatible alias for older imports. -/
-lemma hoeffding_iid_bounded_axiom {Ω : Type*} [MeasurableSpace Ω]
-    (μ : Measure Ω) [IsProbabilityMeasure μ]
-    (n : ℕ) (hn : 0 < n)
-    (X : Fin n → Ω → ℝ)
-    (p : ℝ)
-    (hX_bound : ∀ i ω, X i ω ∈ Set.Icc 0 1)
-    (hX_mean : ∀ i, ∫ ω, X i ω ∂μ = p)
-    (hX_meas : ∀ i, AEMeasurable (X i) μ)
-    (hX_indep : iIndepFun X μ)
-    (ε : ℝ) (hε : 0 < ε) :
-    μ.real {ω | |((∑ i : Fin n, X i ω) / n) - p| ≥ ε} ≤ 2 * Real.exp (-2 * n * ε^2) := by
-  exact hoeffding_iid_bounded μ n hn X p hX_bound hX_mean hX_meas hX_indep ε hε
 
 /-- Hoeffding bound on empirical violation rate deviation.
 

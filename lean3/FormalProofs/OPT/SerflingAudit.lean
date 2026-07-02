@@ -23,6 +23,7 @@ centered increment process.
 
 import Mathlib.Probability.Moments.SubGaussian
 import Mathlib.Probability.Kernel.Condexp
+import FormalProbability.DSL.SamplingConcentration
 
 set_option linter.mathlibStandardSet false
 
@@ -64,48 +65,18 @@ If `X` is (a.e.) bounded in `[a,b]` and has conditional mean zero given `m`,
 then `X` is conditionally sub-Gaussian with parameter `((b-a)/2)^2`, i.e.
 `HasCondSubgaussianMGF m hm X ((‖b-a‖₊/2)^2) μ`.
 
-This is the main tool needed to feed bounded martingale differences into Azuma. -/
+This is the main tool needed to feed bounded martingale differences into Azuma.
+
+Deduplicated 2026-07-02: the proof lives in `FormalProbability.DSL.SamplingConcentration`
+(`DSL.hasCondSubgaussianMGF_of_mem_Icc_of_condExp_eq_zero`); this is a re-export
+under the OPT name. -/
 lemma hasCondSubgaussianMGF_of_mem_Icc_of_condExp_eq_zero
     {X : Ω → ℝ} {a b : ℝ}
     (hX : Measurable X)
     (hb : ∀ᵐ ω ∂μ, X ω ∈ Set.Icc a b)
     (hcond : μ[X|m] =ᵐ[μ.trim hm] 0) :
-    HasCondSubgaussianMGF m hm X ((‖b - a‖₊ / 2) ^ 2) μ := by
-  have hX_ae : AEMeasurable X μ := hX.aemeasurable
-  -- Unfolding `HasCondSubgaussianMGF` reduces this to a `Kernel.HasSubgaussianMGF` goal.
-  -- We build it directly: integrability is global (since `condExpKernel ∘ trim = μ`),
-  -- while the mgf bound is proved fiberwise by Hoeffding's lemma.
-  refine (ProbabilityTheory.Kernel.HasSubgaussianMGF.mk ?_ ?_)
-  · intro t
-    -- Integrability under `(condExpKernel ∘ μ.trim hm)` is integrability under `μ`.
-    simpa [HasCondSubgaussianMGF, condExpKernel_comp_trim (μ := μ) hm] using
-      (ProbabilityTheory.integrable_exp_mul_of_mem_Icc (μ := μ) (X := X) (a := a) (b := b) (t := t)
-        hX_ae hb)
-  · -- mgf bound fiberwise (conditional measures)
-    have hb_comp : ∀ᵐ ω ∂(condExpKernel μ m ∘ₘ μ.trim hm), X ω ∈ Set.Icc a b := by
-      simpa [condExpKernel_comp_trim (μ := μ) hm] using hb
-    have hb_fiber :
-        ∀ᵐ ω' ∂(μ.trim hm), ∀ᵐ ω ∂condExpKernel μ m ω', X ω ∈ Set.Icc a b :=
-      Measure.ae_ae_of_ae_comp hb_comp
-    have hint : Integrable X μ := Integrable.of_mem_Icc a b hX_ae hb
-    have hce :=
-      condExp_ae_eq_trim_integral_condExpKernel (μ := μ) (m := m) hm hint
-    have hzero_int :
-        ∀ᵐ ω' ∂(μ.trim hm), (∫ ω, X ω ∂condExpKernel μ m ω') = 0 := by
-      filter_upwards [hcond, hce] with ω' h0 hce'
-      -- h0 : μ[X|m] ω' = 0, hce' : μ[X|m] ω' = integral
-      simpa [hce'] using h0
-    filter_upwards [hb_fiber, hzero_int] with ω' hbω' hInt0
-    intro t
-    -- Each conditional measure is a probability measure (Markov kernel).
-    haveI : IsProbabilityMeasure (condExpKernel μ m ω') := by infer_instance
-    have hX_ae' : AEMeasurable X (condExpKernel μ m ω') := hX.aemeasurable
-    -- Apply Hoeffding lemma under the conditional measure.
-    have hsub :
-        HasSubgaussianMGF X ((‖b - a‖₊ / 2) ^ 2) (condExpKernel μ m ω') :=
-      hasSubgaussianMGF_of_mem_Icc_of_integral_eq_zero (μ := condExpKernel μ m ω')
-        (X := X) (a := a) (b := b) hX_ae' hbω' hInt0
-    exact hsub.mgf_le t
+    HasCondSubgaussianMGF m hm X ((‖b - a‖₊ / 2) ^ 2) μ :=
+  DSL.hasCondSubgaussianMGF_of_mem_Icc_of_condExp_eq_zero hX hb hcond
 
 end ConditionalHoeffding
 
@@ -134,7 +105,11 @@ This is a convenience wrapper around
 `hasCondSubgaussianMGF_of_mem_Icc_of_condExp_eq_zero` to build the required
 conditional sub-Gaussian hypotheses.
 
-The result is stated for the one-sided tail `P(ε ≤ ∑ Y_i)`. -/
+The result is stated for the one-sided tail `P(ε ≤ ∑ Y_i)`.
+
+Deduplicated 2026-07-02: re-export of
+`DSL.azuma_hoeffding_of_mem_Icc_of_condExp_eq_zero`
+(`FormalProbability.DSL.SamplingConcentration`). -/
 theorem azuma_hoeffding_of_mem_Icc_of_condExp_eq_zero
     (a b : ℕ → ℝ)
     (h_meas : ∀ i, Measurable (Y i))
@@ -147,39 +122,9 @@ theorem azuma_hoeffding_of_mem_Icc_of_condExp_eq_zero
     μ.real {ω | ε ≤ ∑ i ∈ Finset.range n, Y i ω}
       ≤ Real.exp
         (-ε ^ 2 /
-          (2 * ∑ i ∈ Finset.range n, (if i = 0 then (0 : ℝ≥0) else (‖b i - a i‖₊ / 2) ^ 2))) := by
-  classical
-  -- Define the variance proxy sequence `cY`.
-  let cY : ℕ → ℝ≥0 := fun i => if i = 0 then 0 else (‖b i - a i‖₊ / 2) ^ 2
-
-  -- Base case: Y 0 = 0 is sub-Gaussian with parameter 0, hence also with parameter cY 0.
-  have h0 : HasSubgaussianMGF (Y 0) (cY 0) μ := by
-    simp [cY, hY0]
-
-  -- Conditional sub-Gaussianity for each increment from boundedness + conditional mean zero.
-  have h_subG :
-      ∀ i < n - 1, HasCondSubgaussianMGF (ℱ i) (ℱ.le i) (Y (i + 1)) (cY (i + 1)) μ := by
-    intro i hi
-    -- Convert the conditional mean-zero hypothesis from `μ`-a.e. to `μ.trim`-a.e.
-    have hcond_trim :
-        μ[Y (i + 1)|ℱ i] =ᵐ[μ.trim (ℱ.le i)] 0 := by
-      have hsm : StronglyMeasurable[ℱ i] (μ[Y (i + 1)|ℱ i]) :=
-        stronglyMeasurable_condExp (μ := μ) (m := ℱ i) (f := Y (i + 1))
-      have hsm0 : StronglyMeasurable[ℱ i] (fun _ : Ω => (0 : ℝ)) := stronglyMeasurable_const
-      -- `ae_eq_trim_iff` gives equivalence since both sides are strongly measurable.
-      exact (hsm.ae_eq_trim_iff (μ := μ) (hm := ℱ.le i) hsm0).mpr (h_cond i hi)
-    -- Apply conditional Hoeffding with the interval bounds.
-    refine hasCondSubgaussianMGF_of_mem_Icc_of_condExp_eq_zero
-      (m := ℱ i) (mΩ := mΩ) (hm := ℱ.le i) (μ := μ) (X := Y (i + 1))
-      (a := a (i + 1)) (b := b (i + 1)) (h_meas (i + 1)) (h_bound i hi) hcond_trim
-
-  -- Apply Mathlib Azuma-Hoeffding.
-  have h_azuma :=
-    ProbabilityTheory.measure_sum_ge_le_of_HasCondSubgaussianMGF
-      (μ := μ) (ℱ := ℱ) (Y := Y) (cY := cY) h_adapted h0 n h_subG hε
-  -- Unfold `cY`.
-  -- Also rewrite the bound back into the explicit `Finset.range` sum form.
-  simpa [cY] using h_azuma
+          (2 * ∑ i ∈ Finset.range n, (if i = 0 then (0 : ℝ≥0) else (‖b i - a i‖₊ / 2) ^ 2))) :=
+  DSL.azuma_hoeffding_of_mem_Icc_of_condExp_eq_zero
+    a b h_meas hY0 n h_adapted h_bound h_cond hε
 
 /-!
 ### Two-sided Tail (Absolute Value)
@@ -201,115 +146,12 @@ theorem azuma_hoeffding_abs_of_mem_Icc_of_condExp_eq_zero
     μ.real {ω | ε ≤ |∑ i ∈ Finset.range n, Y i ω|}
       ≤ 2 * Real.exp
         (-ε ^ 2 /
-          (2 * ∑ i ∈ Finset.range n, (if i = 0 then (0 : ℝ≥0) else (‖b i - a i‖₊ / 2) ^ 2))) := by
-  classical
-  -- Abbreviate the partial sum.
-  let S : Ω → ℝ := fun ω => ∑ i ∈ Finset.range n, Y i ω
-
-  -- `ε ≤ |S|` iff `ε ≤ S` or `ε ≤ -S`.
-  have hset₁ :
-      {ω | ε ≤ |S ω|} =
-        {ω | ε ≤ S ω} ∪ {ω | ε ≤ -S ω} := by
-    ext ω
-    simp [S, le_abs] -- `le_abs : ε ≤ |x| ↔ ε ≤ x ∨ ε ≤ -x`
-
-  -- Rewrite `-S` as the sum of `-Y`.
-  have hset₂ :
-      {ω | ε ≤ -S ω} = {ω | ε ≤ ∑ i ∈ Finset.range n, (-Y i) ω} := by
-    ext ω
-    simp [S, Finset.sum_neg_distrib]
-
-  -- One-sided bound for `Y`.
-  have h_pos :
-      μ.real {ω | ε ≤ S ω}
-        ≤ Real.exp
-          (-ε ^ 2 /
-            (2 * ∑ i ∈ Finset.range n,
-              (if i = 0 then (0 : ℝ≥0) else (‖b i - a i‖₊ / 2) ^ 2))) :=
-    (azuma_hoeffding_of_mem_Icc_of_condExp_eq_zero
-      (a := a) (b := b) (h_meas := h_meas) (hY0 := hY0) (n := n)
-      (h_adapted := h_adapted) (h_bound := h_bound) (h_cond := h_cond) (hε := hε))
-
-  -- One-sided bound for `-Y`.
-  have h_meas_neg : ∀ i, Measurable (-Y i) := fun i => (h_meas i).neg
-  have hY0_neg : (-Y 0) = 0 := by simp [hY0]
-  have h_adapted_neg : Adapted ℱ (-Y) := fun i => (h_adapted i).neg
-  have h_bound_neg :
-      ∀ i, i < n - 1 → ∀ᵐ ω ∂μ, (-Y (i + 1)) ω ∈ Set.Icc (-b (i + 1)) (-a (i + 1)) := by
-    intro i hi
-    filter_upwards [h_bound i hi] with ω hω
-    rcases hω with ⟨hlo, hhi⟩
-    constructor
-    · -- `Y ≤ b` implies `-b ≤ -Y`
-      exact neg_le_neg hhi
-    · -- `a ≤ Y` implies `-Y ≤ -a`
-      exact neg_le_neg hlo
-  have h_cond_neg : ∀ i, i < n - 1 → μ[(-Y (i + 1))|ℱ i] =ᵐ[μ] 0 := by
-    intro i hi
-    -- `condExp` is linear.
-    filter_upwards [MeasureTheory.condExp_neg (μ := μ) (f := Y (i + 1)) (m := ℱ i),
-      h_cond i hi] with ω hneg hzero
-    -- hneg : μ[-Y|ℱ i] ω = - μ[Y|ℱ i] ω
-    -- hzero : μ[Y|ℱ i] ω = 0
-    simp [hneg, hzero]
-  have h_neg :
-      μ.real {ω | ε ≤ ∑ i ∈ Finset.range n, (-Y i) ω}
-        ≤ Real.exp
-          (-ε ^ 2 /
-            (2 * ∑ i ∈ Finset.range n,
-              (if i = 0 then (0 : ℝ≥0) else (‖b i - a i‖₊ / 2) ^ 2))) := by
-    -- Apply the one-sided bound and simplify the parameter.
-    have h' :=
-      (azuma_hoeffding_of_mem_Icc_of_condExp_eq_zero
-        (a := fun i => -b i) (b := fun i => -a i) (h_meas := h_meas_neg) (hY0 := hY0_neg)
-        (n := n) (h_adapted := h_adapted_neg) (h_bound := h_bound_neg) (h_cond := h_cond_neg)
-        (hε := hε))
-    -- `‖(-a)-(-b)‖₊ = ‖b-a‖₊`.
-    simpa [sub_eq_add_neg, add_comm, add_left_comm, add_assoc] using h'
-
-  -- Union bound + factor out `2 * exp(...)`.
-  have hunion :
-      μ.real ({ω | ε ≤ S ω} ∪ {ω | ε ≤ ∑ i ∈ Finset.range n, (-Y i) ω})
-        ≤ Real.exp
-            (-ε ^ 2 /
-              (2 * ∑ i ∈ Finset.range n,
-                (if i = 0 then (0 : ℝ≥0) else (‖b i - a i‖₊ / 2) ^ 2))) +
-          Real.exp
-            (-ε ^ 2 /
-              (2 * ∑ i ∈ Finset.range n,
-                (if i = 0 then (0 : ℝ≥0) else (‖b i - a i‖₊ / 2) ^ 2))) := by
-    have := MeasureTheory.measureReal_union_le (μ := μ)
-      {ω | ε ≤ S ω} {ω | ε ≤ ∑ i ∈ Finset.range n, (-Y i) ω}
-    exact this.trans (by gcongr)
-
-  have hunion' :
-      μ.real {ω | ε ≤ |S ω|}
-        ≤ Real.exp
-            (-ε ^ 2 /
-              (2 * ∑ i ∈ Finset.range n,
-                (if i = 0 then (0 : ℝ≥0) else (‖b i - a i‖₊ / 2) ^ 2))) +
-          Real.exp
-            (-ε ^ 2 /
-              (2 * ∑ i ∈ Finset.range n,
-                (if i = 0 then (0 : ℝ≥0) else (‖b i - a i‖₊ / 2) ^ 2))) := by
-    simpa [hset₁, hset₂, S] using hunion
-
-  -- Factor out `2 * exp(...)`.
-  calc
-    μ.real {ω | ε ≤ |S ω|}
-        ≤ Real.exp
-            (-ε ^ 2 /
-              (2 * ∑ i ∈ Finset.range n,
-                (if i = 0 then (0 : ℝ≥0) else (‖b i - a i‖₊ / 2) ^ 2))) +
-          Real.exp
-            (-ε ^ 2 /
-              (2 * ∑ i ∈ Finset.range n,
-                (if i = 0 then (0 : ℝ≥0) else (‖b i - a i‖₊ / 2) ^ 2))) := hunion'
-    _ = 2 * Real.exp
-          (-ε ^ 2 /
-            (2 * ∑ i ∈ Finset.range n,
-              (if i = 0 then (0 : ℝ≥0) else (‖b i - a i‖₊ / 2) ^ 2))) := by
-          ring
+          (2 * ∑ i ∈ Finset.range n, (if i = 0 then (0 : ℝ≥0) else (‖b i - a i‖₊ / 2) ^ 2))) :=
+  -- Deduplicated 2026-07-02: re-export of
+  -- `DSL.azuma_hoeffding_abs_of_mem_Icc_of_condExp_eq_zero`
+  -- (`FormalProbability.DSL.SamplingConcentration`).
+  DSL.azuma_hoeffding_abs_of_mem_Icc_of_condExp_eq_zero
+    a b h_meas hY0 n h_adapted h_bound h_cond hε
 
 end AzumaFromBounds
 

@@ -1,5 +1,5 @@
 import Mathlib
-import FormalProofs.CLT.Core
+import FormalProbability.CLT.Core
 
 /-!
 # FormalProofs/Econometrics/Core.lean

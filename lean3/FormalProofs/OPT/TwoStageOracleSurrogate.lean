@@ -1,4 +1,4 @@
-import FormalProofs.OPT.TheoremBackingApproxMeasurementError
+import FormalProofs.OPT.TheoremBacking
 import FormalProofs.OPT.OracleUtility
 
 /-!

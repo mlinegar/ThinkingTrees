@@ -1,12 +1,12 @@
-import FormalProofs.OPT.TheoremBackingMeasurementError
-import FormalProofs.OPT.ReadoutAlignment
-import FormalProofs.OPT.ExactUtilityTransportInstances
+import FormalProofs.OPT.TheoremBacking
+import FormalProofs.OPT.OracleFibers
+import FormalProofs.OPT.ExactUtilityTransport
 import FormalProofs.OPT.MergeablePreference
 import FormalProofs.OPT.MergeableReduction
 import FormalProofs.OPT.ClassicalSketchLocalLaws
 import FormalProofs.OPT.MarkovSimulationValidation
 import FormalProofs.OPT.CounterexampleExistence
-import FormalProofs.OPT.OracleFiberRelations
+import FormalProofs.OPT.OracleFiberObjectives
 import FormalProofs.OPT.OracleSufficientCompression
 import FormalProbability.ML.MergeableSummaries
 
