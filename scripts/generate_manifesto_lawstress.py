@@ -13,12 +13,12 @@ import re
 import sys
 from typing import Any, Dict, List, Optional
 
-import requests
 
 # Add project root for direct script execution.
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
+from src.tasks.manifesto.openai_chat import OpenAIChatClient
 from src.tasks.manifesto.lawstress_generator import (
     LawStressSpec,
     build_reference_summary_rows,
@@ -29,68 +29,21 @@ from src.tasks.manifesto.lawstress_generator import (
     write_jsonl,
     write_lawstress_records_jsonl,
 )
+from src.experiments import (
+    ResultRow,
+    benchmark_ref_from_parts,
+    chat_role_ref,
+    metadata_with_roles,
+    method_ref_from_parts,
+    oracle_ref,
+    write_canonical_sidecars,
+)
 
 
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_MAIN_MODEL = "/mnt/data/models/nvidia/Qwen3.5-397B-A17B-NVFP4"
 
-
-class OpenAIChatClient:
-    """Minimal OpenAI-compatible client for local vLLM endpoints."""
-
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        model: str,
-        api_key: str,
-        timeout_seconds: float = 120.0,
-        enable_thinking: bool = False,
-    ):
-        self.base_url = str(base_url).rstrip("/")
-        self.model = str(model)
-        self.api_key = str(api_key)
-        self.timeout_seconds = float(timeout_seconds)
-        self.enable_thinking = bool(enable_thinking)
-
-    def chat(
-        self,
-        *,
-        system: str,
-        user: str,
-        temperature: float,
-        max_tokens: int,
-    ) -> str:
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": float(temperature),
-            "max_tokens": int(max_tokens),
-            "chat_template_kwargs": {
-                "enable_thinking": bool(self.enable_thinking),
-            },
-        }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        response = requests.post(
-            f"{self.base_url}/chat/completions",
-            json=payload,
-            headers=headers,
-            timeout=self.timeout_seconds,
-        )
-        response.raise_for_status()
-        data = response.json()
-        choices = data.get("choices") or []
-        if not choices:
-            return ""
-        message = choices[0].get("message") or {}
-        return str(message.get("content") or "").strip()
 
 
 _NUMERIC_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
@@ -420,6 +373,59 @@ def main(argv: Optional[List[str]] = None) -> int:
         },
     }
     (output_dir / "manifest.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    benchmark_ref = benchmark_ref_from_parts(
+        family="manifesto_lawstress",
+        scope="generation",
+        name="manifesto_lawstress",
+        dataset_id=str(output_dir),
+        metadata={"split_sizes": split_sizes, "balance": balance},
+    )
+    method_ref = method_ref_from_parts(
+        family="benchmark_generation",
+        variant="lawstress_teacher",
+        adapter="lawstress_generation",
+        metadata=metadata_with_roles(
+            {"teacher_model": str(args.teacher_model)},
+            roles={
+                "summarizer": chat_role_ref(
+                    role="summarizer",
+                    model=str(args.teacher_model),
+                    base_url=str(args.teacher_base_url),
+                )
+            },
+            oracle=oracle_ref(kind="teacher_generated_labels", source=str(args.teacher_model)),
+        ),
+    )
+    write_canonical_sidecars(
+        output_dir,
+        title="generate_manifesto_lawstress",
+        adapter_id="lawstress_generation",
+        benchmark_refs=(benchmark_ref,),
+        method_refs=(method_ref,),
+        phases=("generate",),
+        artifacts={
+            "manifest_json": str(output_dir / "manifest.json"),
+            "records_jsonl": str(records_path),
+            "benchmark_docs_jsonl": str(benchmark_path),
+            "reference_summaries_jsonl": str(refs_path),
+        },
+        result_rows=(
+            ResultRow(
+                experiment_id="",
+                phase="generate",
+                benchmark_ref=benchmark_ref,
+                method_ref=method_ref,
+                metric_name="generated_records",
+                metric_value=len(records),
+                artifact_refs=("manifest_json", "records_jsonl"),
+                metadata={"requested": len(specs), "dropped": len(specs) - len(records)},
+            ),
+        ),
+        state="completed",
+        metadata={"teacher_model": str(args.teacher_model)},
+        launch_command=sys.argv,
+        report_profiles=("runtime_eval_summary",),
+    )
 
     LOGGER.info("Generated %d/%d records", len(records), len(specs))
     LOGGER.info("Output directory: %s", output_dir)

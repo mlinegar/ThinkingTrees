@@ -267,7 +267,7 @@ if [[ "$START_EMBEDDING" == "true" ]]; then
 fi
 echo ""
 echo "Run OPS tree test:"
-echo "  python main.py --input data/raw/manifesto_project_full/texts/33220_199603.txt --port ${SMALL_PORT} -v"
+echo "  python main.py --input data/raw/manifesto_corpus_benoit/texts/33220_199603.txt --port ${SMALL_PORT} -v"
 echo ""
 echo "To stop servers:"
 if [[ "$START_SMALL" == "true" ]]; then

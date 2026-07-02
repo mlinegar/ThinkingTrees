@@ -1,3 +1,4 @@
+# OLD_: archived 2026-07-02; driver for OLD_hll_merge_learning_simulation.py. Kept for reference; do not import or run.
 #!/usr/bin/env python3
 """Run embarrassingly-parallel HLL merge-learning sweeps (multi-seed).
 

@@ -7,11 +7,6 @@ import pytest
 
 from src.tree.segmented_lda_ctreepo_simulation import (
     SegmentedLDACtreePOConfig,
-    _counts_to_freq_rows,
-    _fit_leaf_theta_mlp,
-    _fit_leaf_theta_rf,
-    _normalize_simplex_rows,
-    _predict_leaf_theta_model,
     run_segmented_lda_ctreepo_simulation,
 )
 from src.tree.markov_changepoint_ops_count_simulation import (
@@ -86,63 +81,6 @@ def test_ctree_bag_of_words_test_set_signature_stable_across_train_docs() -> Non
     assert sig_small, "missing corpus_signature_test"
     assert sig_large, "missing corpus_signature_test"
     assert sig_small == sig_large
-
-
-def test_leaf_theta_mlp_predictor_output_simplex() -> None:
-    rng = np.random.default_rng(0)
-    n = 128
-    v = 32
-    k = 4
-
-    counts = rng.poisson(lam=3.0, size=(n, v)).astype(np.float64)
-    x = _counts_to_freq_rows(counts)
-    y = _normalize_simplex_rows(rng.random(size=(n, k)).astype(np.float64))
-
-    # MLP (torch) always available in this repo's default environments; if not, skip.
-    try:
-        import torch  # noqa: F401
-    except Exception:
-        pytest.skip("torch not available")
-
-    mlp, _meta = _fit_leaf_theta_mlp(
-        x,
-        y,
-        seed=0,
-        hidden_dim=16,
-        epochs=2,
-        batch_size=32,
-        lr=1e-2,
-        weight_decay=0.0,
-    )
-    pred = _predict_leaf_theta_model(mlp, counts[:17])
-    assert pred.shape == (17, k)
-    assert np.all(np.isfinite(pred))
-    assert np.min(pred) >= -1e-12
-    sums = np.sum(pred, axis=1)
-    assert np.all(np.isfinite(sums))
-    assert np.max(np.abs(sums - 1.0)) <= 1e-6
-
-
-def test_leaf_theta_rf_predictor_output_simplex() -> None:
-    pytest.importorskip("sklearn")
-    rng = np.random.default_rng(0)
-    n = 128
-    v = 32
-    k = 4
-
-    counts = rng.poisson(lam=3.0, size=(n, v)).astype(np.float64)
-    x = _counts_to_freq_rows(counts)
-    y = _normalize_simplex_rows(rng.random(size=(n, k)).astype(np.float64))
-
-    rf, _rf_meta = _fit_leaf_theta_rf(x, y, seed=0, n_estimators=10, max_depth=4, min_samples_leaf=2)
-    pred_rf = _predict_leaf_theta_model(rf, counts[:19])
-    assert pred_rf.shape == (19, k)
-    assert np.all(np.isfinite(pred_rf))
-    assert np.min(pred_rf) >= -1e-12
-    sums_rf = np.sum(pred_rf, axis=1)
-    assert np.max(np.abs(sums_rf - 1.0)) <= 1e-6
-
-    assert math.isfinite(float(np.mean(pred_rf)))
 
 
 def test_markov_ops_count_smoke_runs() -> None:

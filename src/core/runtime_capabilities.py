@@ -66,14 +66,15 @@ def default_family_runtime_capability(
 
     claim_status = {
         EngineSurface.CHAT_OPENAI: RuntimeClaimStatus.RESEARCH_ONLY,
-        EngineSurface.DIFFUSION_GENERATE: RuntimeClaimStatus.INFRASTRUCTURE_ONLY,
+        EngineSurface.EMBEDDING: RuntimeClaimStatus.RESEARCH_ONLY,
+        EngineSurface.OPERATOR: RuntimeClaimStatus.RESEARCH_ONLY,
         EngineSurface.SYMBOLIC_EXACT: (
             RuntimeClaimStatus.CLAIM_BEARING
             if theorem_backed_symbolic
             else RuntimeClaimStatus.NOT_APPLICABLE
         ),
     }
-    supported = [EngineSurface.CHAT_OPENAI]
+    supported = [EngineSurface.CHAT_OPENAI, EngineSurface.EMBEDDING, EngineSurface.OPERATOR]
     if theorem_backed_symbolic:
         supported.append(EngineSurface.SYMBOLIC_EXACT)
     return FamilyRuntimeCapability(
@@ -85,7 +86,8 @@ def default_family_runtime_capability(
         notes=tuple(notes)
         + (
             "General-family defaults keep chat engines available for empirical work.",
-            "Diffusion surfaces remain non-claim-bearing unless a theorem-backed operator is supplied explicitly.",
+            "Embedding and operator surfaces are method-routing surfaces; they are not standalone scorers by default.",
+            "The diffusion surface is compatibility-only; new text generation should use CHAT_OPENAI with a generate transport adapter when needed.",
         ),
     )
 
@@ -98,8 +100,14 @@ def markov_family_runtime_capability(
 ) -> FamilyRuntimeCapability:
     """Runtime support matrix for Markov families and exact counterexample lanes."""
 
-    symbolic_claim = RuntimeClaimStatus.CLAIM_BEARING if exact_family else RuntimeClaimStatus.NOT_APPLICABLE
-    supported = [EngineSurface.CHAT_OPENAI, EngineSurface.DIFFUSION_GENERATE]
+    symbolic_claim = (
+        RuntimeClaimStatus.CLAIM_BEARING if exact_family else RuntimeClaimStatus.NOT_APPLICABLE
+    )
+    supported = [
+        EngineSurface.CHAT_OPENAI,
+        EngineSurface.EMBEDDING,
+        EngineSurface.OPERATOR,
+    ]
     if exact_family:
         supported.append(EngineSurface.SYMBOLIC_EXACT)
     return FamilyRuntimeCapability(
@@ -112,14 +120,15 @@ def markov_family_runtime_capability(
         ),
         claim_status_by_surface={
             EngineSurface.CHAT_OPENAI: RuntimeClaimStatus.RESEARCH_ONLY,
-            EngineSurface.DIFFUSION_GENERATE: RuntimeClaimStatus.INFRASTRUCTURE_ONLY,
+            EngineSurface.EMBEDDING: RuntimeClaimStatus.RESEARCH_ONLY,
+            EngineSurface.OPERATOR: RuntimeClaimStatus.RESEARCH_ONLY,
             EngineSurface.SYMBOLIC_EXACT: symbolic_claim,
         },
         requires_external_engine=not bool(exact_family),
         notes=tuple(notes)
         + (
             "Markov exact/symbolic families remain the only claim-bearing runtime lane in the first pass.",
-            "Off-the-shelf diffusion endpoints are tracked as orchestration or infrastructure surfaces unless a theorem-backed operator is supplied.",
+            "Off-the-shelf diffusion endpoints are tracked as compatibility transport infrastructure under the chat/text surface.",
         ),
     )
 

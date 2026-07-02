@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-import importlib.util
 import math
-from pathlib import Path
-import sys
 
 from src.ctreepo.sim.core.run_config import (
     JobSpec,
@@ -12,6 +9,10 @@ from src.ctreepo.sim.core.run_config import (
     config_mapping_for_run_config,
     run_config_from_mapping,
     with_run_intent_overrides,
+)
+from src.ctreepo.sim.core.tree_neural_facade import (
+    config_mapping_for_run_config as tree_neural_config_mapping_for_run_config,
+    run_config_from_mapping as tree_neural_run_config_from_mapping,
 )
 
 
@@ -28,17 +29,6 @@ def _base_config(**overrides) -> RunConfigSpec:
     )
     defaults.update(overrides)
     return RunConfigSpec(**defaults)
-
-
-def _load_mig_module():
-    root = Path(__file__).resolve().parents[2]
-    mod_path = root / "scripts" / "run_tree_neural_full_doc_mig.py"
-    spec = importlib.util.spec_from_file_location("run_tree_neural_full_doc_mig_for_run_config", str(mod_path))
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def test_run_config_spec_has_topology_field() -> None:
@@ -111,16 +101,14 @@ def test_job_spec_rejects_family_mismatch() -> None:
         )
 
 
-def test_shared_run_config_from_mapping_matches_mig_mapper() -> None:
-    mig = _load_mig_module()
+def test_tree_neural_facade_run_config_from_mapping_matches_canonical_mapper() -> None:
     mapping = {
         "label": " parity/full_doc ",
         "baseline_family": "official_fno",
         "topology": "full_doc",
         "fixed_leaf_tokens": 128,
         "comparison_mode": "comparable",
-        "tree_local_law_weight": 0.25,
-        "task_objective_weight": 0.75,
+        "local_law_weight": 0.25,
         "c1_relative_weight": 0.0,
         "c2_relative_weight": 1.0,
         "c3_relative_weight": 0.0,
@@ -132,14 +120,14 @@ def test_shared_run_config_from_mapping_matches_mig_mapper() -> None:
     }
 
     shared = run_config_from_mapping(mapping)
-    mig_cfg = mig._run_config_from_mapping(mapping)
+    facade_cfg = tree_neural_run_config_from_mapping(mapping)
 
     shared_dict = asdict(shared)
-    mig_dict = asdict(mig_cfg)
+    facade_dict = asdict(facade_cfg)
 
-    assert shared_dict.keys() == mig_dict.keys()
+    assert shared_dict.keys() == facade_dict.keys()
     for key, shared_value in shared_dict.items():
-        mig_value = mig_dict[key]
+        mig_value = facade_dict[key]
         if (
             isinstance(shared_value, float)
             and isinstance(mig_value, float)
@@ -150,8 +138,7 @@ def test_shared_run_config_from_mapping_matches_mig_mapper() -> None:
         assert shared_value == mig_value, key
 
 
-def test_shared_config_mapping_matches_mig_config_mapping() -> None:
-    mig = _load_mig_module()
+def test_tree_neural_facade_config_mapping_matches_canonical_config_mapping() -> None:
     cfg = run_config_from_mapping(
         {
             "label": "tree_v3",
@@ -165,6 +152,26 @@ def test_shared_config_mapping_matches_mig_config_mapping() -> None:
         }
     )
 
-    assert config_mapping_for_run_config(cfg) == mig._config_mapping_for_run_config(
-        mig._RunConfigSpec(**asdict(cfg))
+    assert config_mapping_for_run_config(cfg) == tree_neural_config_mapping_for_run_config(
+        RunConfigSpec(**asdict(cfg))
     )
+
+
+def test_tree_neural_facade_accepts_legacy_objective_field_names() -> None:
+    local_cfg = tree_neural_run_config_from_mapping(
+        {
+            "label": "legacy_local",
+            "baseline_family": "tree_neural",
+            "tree_local_law_weight": 0.25,
+        }
+    )
+    root_cfg = tree_neural_run_config_from_mapping(
+        {
+            "label": "legacy_root",
+            "baseline_family": "tree_neural",
+            "tree_task_objective_weight": 0.75,
+        }
+    )
+
+    assert local_cfg.tree_local_law_weight == 0.25
+    assert root_cfg.tree_task_objective_weight == 0.75

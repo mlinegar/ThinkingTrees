@@ -10,6 +10,7 @@ from src.training.gepa_sampling import (
     sample_two_stage_pps_bernoulli,
 )
 from src.training.run_pipeline import (
+    _apply_gepa_corrected_local_law_score,
     _apply_gepa_sampling_weight,
     _dispatch_gepa_sampling_examples,
     resolve_gepa_sampling_design,
@@ -247,6 +248,32 @@ def test_apply_gepa_sampling_weight_handles_hajek_and_ht():
     delattr(example, "sampling_ht_weight")
     # fallback path computes HT-style scaling from ipw * (n/N)
     assert _apply_gepa_sampling_weight(example, 0.8, estimator="horvitz_thompson") == pytest.approx(0.32)
+
+
+def test_gepa_corrected_local_law_score_uses_loss_level_adjustment():
+    example = SimpleNamespace(
+        sampling_design="two_stage_pps_bernoulli",
+        sampling_hajek_weight=10.0,
+        sampling_joint_inclusion_prob=0.5,
+        local_law_adjustment={
+            "enabled": True,
+            "proxy_loss": 0.4,
+            "oracle_loss": 0.1,
+            "observed": True,
+            "propensity": 0.5,
+        },
+    )
+
+    # corrected loss = .4 + (.1-.4)/.5 = -.2, converted back to score and
+    # not multiplied by the legacy Hajek score weight.
+    assert _apply_gepa_corrected_local_law_score(example, 0.6) == pytest.approx(1.2)
+
+
+def test_gepa_corrected_local_law_score_missing_payload_keeps_legacy_fallback():
+    example = SimpleNamespace(sampling_hajek_weight=2.0)
+
+    assert _apply_gepa_corrected_local_law_score(example, 0.6) is None
+    assert _apply_gepa_sampling_weight(example, 0.6, estimator="hajek") == pytest.approx(0.6)
 
 
 def test_ipw_estimators_track_population_mean_in_aggregate():

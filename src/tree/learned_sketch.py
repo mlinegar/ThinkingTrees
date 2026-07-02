@@ -118,27 +118,10 @@ class LearnedSketchTrainingConfig:
 
 
 # ---------------------------------------------------------------------------
-# Oracle: k-type spike counts
+# Oracle: k-type spike counts (re-exported from src.ctreepo.oracles registry)
 # ---------------------------------------------------------------------------
 
-
-def type_oracle(
-    indicators: Sequence[float],
-    positions: Sequence[int],
-    n_types: int,
-    threshold: float = SPIKE_THRESHOLD,
-) -> List[float]:
-    """Oracle: per-type spike counts.
-
-    Each position is assigned type = position % n_types.
-    Returns a list of n_types floats (count of spikes per type).
-    """
-    counts = [0.0] * n_types
-    for val, pos in zip(indicators, positions):
-        if val >= threshold:
-            t = pos % n_types
-            counts[t] += 1.0
-    return counts
+from src.ctreepo.oracles.sketches import type_oracle  # noqa: F401  (public re-export)
 
 
 # ---------------------------------------------------------------------------

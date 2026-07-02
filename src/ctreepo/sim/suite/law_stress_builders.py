@@ -7,6 +7,19 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 from src.ctreepo.sim.cli.sweep_markov_changepoint_ops_count import _iter_runs as _iter_markov_runs
+from src.ctreepo.contracts import (
+    LAW_ID_LEAF_PRESERVATION,
+    LAW_ID_MERGE_PRESERVATION,
+    LAW_ID_ON_RANGE_IDEMPOTENCE,
+    LAW_SET_ALL,
+    LAW_SET_LEAF_AND_MERGE_PRESERVATION,
+    LAW_SET_LEAF_PRESERVATION_ONLY,
+    LAW_SET_MERGE_PRESERVATION_ONLY,
+    LAW_SET_ON_RANGE_IDEMPOTENCE_ONLY,
+    assert_public_contract_clean,
+    canonical_law_set_id,
+)
+from src.ctreepo.sim.composite_objective import resolve_root_local_objective_weights
 from src.ctreepo.sim.manifest import RunSpec, write_manifest_jsonl
 from src.ctreepo.sim.suite.common import write_text
 from src.ctreepo.sim.suite.law_stress_policy import (
@@ -26,6 +39,70 @@ from src.ctreepo.sim.suite.law_stress_policy import (
 )
 
 LDA_CLI_SCRIPT = "scripts/run_leaf_local_mixture_utility_simulation.py"
+
+_LDA_LEGACY_LAW_SET_MAP = {
+    "root_only": (LAW_SET_ALL, 0.0, {}),
+    "c1_only": (LAW_SET_LEAF_PRESERVATION_ONLY, 0.5, {}),
+    "c3_only": (LAW_SET_MERGE_PRESERVATION_ONLY, 0.5, {}),
+    "c1c3": (LAW_SET_LEAF_AND_MERGE_PRESERVATION, 0.5, {}),
+    "c2_only": (LAW_SET_ON_RANGE_IDEMPOTENCE_ONLY, 0.5, {}),
+    "all_laws": (LAW_SET_ALL, 0.5, {}),
+    "all_laws_plus_sched": (
+        LAW_SET_ALL,
+        0.5,
+        {"auxiliary_schedule_diagnostics": True},
+    ),
+}
+
+_LDA_LAW_SET_ACTIVE_LAWS = {
+    LAW_SET_ALL: (
+        LAW_ID_LEAF_PRESERVATION,
+        LAW_ID_ON_RANGE_IDEMPOTENCE,
+        LAW_ID_MERGE_PRESERVATION,
+    ),
+    LAW_SET_LEAF_PRESERVATION_ONLY: (LAW_ID_LEAF_PRESERVATION,),
+    LAW_SET_MERGE_PRESERVATION_ONLY: (LAW_ID_MERGE_PRESERVATION,),
+    LAW_SET_ON_RANGE_IDEMPOTENCE_ONLY: (LAW_ID_ON_RANGE_IDEMPOTENCE,),
+    LAW_SET_LEAF_AND_MERGE_PRESERVATION: (
+        LAW_ID_LEAF_PRESERVATION,
+        LAW_ID_MERGE_PRESERVATION,
+    ),
+}
+
+
+def _lda_canonical_axis_fields(
+    *,
+    law_set_id: str,
+    local_law_weight: float,
+) -> Dict[str, object]:
+    canonical_law_set = canonical_law_set_id(str(law_set_id), allow_aliases=False)
+    resolved = resolve_root_local_objective_weights(
+        local_law_weight=float(local_law_weight),
+        active_laws=_LDA_LAW_SET_ACTIVE_LAWS.get(
+            canonical_law_set,
+            _LDA_LAW_SET_ACTIVE_LAWS[LAW_SET_ALL],
+        ),
+        objective_context="LDA law-stress builder",
+    )
+    return {
+        "problem_id": "leaf_local_mixture_utility",
+        "method_id": "tree_relevant_lda_local_law",
+        "law_set_id": canonical_law_set,
+        "root_share": float(resolved.root_share),
+        "local_law_weight": float(resolved.local_law_weight),
+        "local_law_component_weights": {
+            str(k): float(v) for k, v in resolved.local_law_shares.items()
+        },
+    }
+
+
+def _resolve_lda_public_law_axis(raw_value: str) -> tuple[str, float, Dict[str, object]]:
+    key = str(raw_value or LAW_SET_ALL).strip().lower()
+    law_set_id, local_law_weight, aux = _LDA_LEGACY_LAW_SET_MAP.get(
+        key,
+        (key, 0.5, {}),
+    )
+    return str(law_set_id), float(local_law_weight), dict(aux)
 
 
 @dataclass(frozen=True)
@@ -105,9 +182,21 @@ def _markov_base_runs(
         eval_guidance_include_root=True,
         include_rf_root_baseline=False,
         include_doc_level_baseline=False,
+        include_doc_level_ridge_baseline=False,
+        include_leaf_ridge_tree_baseline=False,
+        include_leaf_endpoint_table_tree_baseline=False,
+        include_leaf_dt_tree_baseline=False,
+        include_leaf_knn_tree_baseline=False,
+        include_leaf_rf_tree_baseline=False,
         rf_n_estimators=200,
         rf_max_depth=16,
         rf_min_samples_leaf=5,
+        doc_level_ridge_alpha=1.0,
+        leaf_knn_neighbors=8,
+        include_sampled_leaf_pool_ridge_baseline=False,
+        include_sampled_leaf_pool_rf_baseline=False,
+        sampled_leaf_pool_leaf_counts=[],
+        sampled_leaf_pool_seed_offset=300_000,
         data_seeds=list(data_seeds),
         seeds=list(model_seeds),
         output_root=output_root,
@@ -608,10 +697,10 @@ def _build_lda_cmd(
     python_bin: str,
     output_root: Path,
     tau: float,
-    lam: float,
+    quadratic_utility_weight: float,
     train_docs: int,
     test_docs: int,
-    law_package: str,
+    law_set_id: str,
     exact_family: str,
     local_law_mode: str,
     law_leaf_query_rate: float,
@@ -620,7 +709,12 @@ def _build_lda_cmd(
     seed: int,
     suite_role: str,
 ) -> LDALawStressCommand:
-    slug = f"tau{tau:g}_lam{lam:g}_pkg_{law_package}_mode_{analysis_partition_mode}_s{seed}"
+    resolved_law_set_id, local_law_weight, auxiliary = _resolve_lda_public_law_axis(law_set_id)
+    axis_fields = _lda_canonical_axis_fields(
+        law_set_id=str(resolved_law_set_id),
+        local_law_weight=float(local_law_weight),
+    )
+    slug = f"tau{tau:g}_qweight{quadratic_utility_weight:g}_law_{resolved_law_set_id}_llw_{local_law_weight:g}_mode_{analysis_partition_mode}_s{seed}"
     if exact_family:
         slug = f"fam_{exact_family}_{slug}"
     json_path = output_root / "results" / suite_role / f"{slug}.json"
@@ -630,11 +724,12 @@ def _build_lda_cmd(
         python_bin,
         LDA_CLI_SCRIPT,
         f"--local-mixture-concentration {tau}",
-        f"--lambda-multiplier {lam}",
+        f"--quadratic-utility-weight {quadratic_utility_weight}",
         f"--train-docs {train_docs}",
         f"--test-docs {test_docs}",
         f"--local-law-mode {local_law_mode}",
-        f"--law-package {law_package}",
+        f"--law-set-id {resolved_law_set_id}",
+        f"--local-law-weight {local_law_weight}",
         f"--law-leaf-query-rate {law_leaf_query_rate}",
         f"--law-internal-query-rate {law_internal_query_rate}",
         f"--analysis-partition-mode {analysis_partition_mode}",
@@ -651,11 +746,12 @@ def _build_lda_cmd(
         csv_path=csv_path,
         artifact_dir=artifact_dir,
         config={
+            **axis_fields,
             "tau": float(tau),
-            "lambda_multiplier": float(lam),
+            "quadratic_utility_weight": float(quadratic_utility_weight),
             "train_docs": int(train_docs),
             "test_docs": int(test_docs),
-            "law_package": str(law_package),
+            "auxiliary_diagnostics": dict(auxiliary),
             "exact_family": str(exact_family),
             "local_law_mode": str(local_law_mode),
             "law_leaf_query_rate": float(law_leaf_query_rate),
@@ -686,10 +782,10 @@ def _build_lda_sanity_suite(
     skip_existing: bool,
 ) -> List[LDALawStressCommand]:
     learned_cmds: List[LDALawStressCommand] = []
-    for tau, lam, pkg, seed in itertools.product(
+    for tau, qweight, pkg, seed in itertools.product(
         policy.taus,
-        policy.lambda_multipliers,
-        policy.learned_law_packages,
+        policy.quadratic_utility_weights,
+        policy.learned_law_set_ids,
         policy.seeds,
     ):
         _append_lda_if_needed(
@@ -698,10 +794,10 @@ def _build_lda_sanity_suite(
                 python_bin=python_bin,
                 output_root=suite_root,
                 tau=tau,
-                lam=lam,
+                quadratic_utility_weight=qweight,
                 train_docs=int(policy.train_docs),
                 test_docs=int(policy.test_docs),
-                law_package=pkg,
+                law_set_id=pkg,
                 exact_family="",
                 local_law_mode="diagnostics_and_learned",
                 law_leaf_query_rate=float(policy.law_leaf_query_rate),
@@ -714,9 +810,9 @@ def _build_lda_sanity_suite(
         )
 
     exact_cmds: List[LDALawStressCommand] = []
-    for tau, lam, fam, seed in itertools.product(
+    for tau, qweight, fam, seed in itertools.product(
         policy.taus,
-        policy.lambda_multipliers,
+        policy.quadratic_utility_weights,
         policy.exact_families,
         policy.seeds,
     ):
@@ -726,10 +822,10 @@ def _build_lda_sanity_suite(
                 python_bin=python_bin,
                 output_root=suite_root,
                 tau=tau,
-                lam=lam,
+                quadratic_utility_weight=qweight,
                 train_docs=int(policy.train_docs),
                 test_docs=int(policy.test_docs),
-                law_package="all_laws",
+                law_set_id=LAW_SET_ALL,
                 exact_family=fam,
                 local_law_mode="diagnostics",
                 law_leaf_query_rate=float(policy.law_leaf_query_rate),
@@ -752,10 +848,10 @@ def _build_lda_transition_map_suite(
     skip_existing: bool,
 ) -> List[LDALawStressCommand]:
     commands: List[LDALawStressCommand] = []
-    for tau, lam, pkg, seed in itertools.product(
+    for tau, qweight, pkg, seed in itertools.product(
         policy.taus,
-        policy.lambda_multipliers,
-        policy.law_packages,
+        policy.quadratic_utility_weights,
+        policy.law_set_ids,
         policy.seeds,
     ):
         _append_lda_if_needed(
@@ -764,10 +860,10 @@ def _build_lda_transition_map_suite(
                 python_bin=python_bin,
                 output_root=suite_root,
                 tau=tau,
-                lam=lam,
+                quadratic_utility_weight=qweight,
                 train_docs=int(policy.train_docs),
                 test_docs=int(policy.test_docs),
-                law_package=pkg,
+                law_set_id=pkg,
                 exact_family="",
                 local_law_mode="diagnostics_and_learned",
                 law_leaf_query_rate=float(policy.law_leaf_query_rate),
@@ -789,11 +885,11 @@ def _build_lda_mechanism_suite(
     skip_existing: bool,
 ) -> List[LDALawStressCommand]:
     commands: List[LDALawStressCommand] = []
-    for tau, lam, mode, pkg, seed in itertools.product(
+    for tau, qweight, mode, pkg, seed in itertools.product(
         policy.taus,
-        policy.lambda_multipliers,
+        policy.quadratic_utility_weights,
         policy.analysis_partition_modes,
-        policy.law_packages,
+        policy.law_set_ids,
         policy.seeds,
     ):
         _append_lda_if_needed(
@@ -802,10 +898,10 @@ def _build_lda_mechanism_suite(
                 python_bin=python_bin,
                 output_root=suite_root,
                 tau=tau,
-                lam=lam,
+                quadratic_utility_weight=qweight,
                 train_docs=int(policy.train_docs),
                 test_docs=int(policy.test_docs),
-                law_package=pkg,
+                law_set_id=pkg,
                 exact_family="",
                 local_law_mode="diagnostics_and_learned",
                 law_leaf_query_rate=float(policy.law_leaf_query_rate),
@@ -820,19 +916,23 @@ def _build_lda_mechanism_suite(
 
 
 def _lda_runspecs(commands: Sequence[LDALawStressCommand]) -> List[RunSpec]:
-    return [
-        RunSpec.create(
-            family="lda-law-stress",
-            config=dict(item.config),
-            outputs={
-                "json_summary": str(item.json_path),
-                "csv_summary": str(item.csv_path),
-                "artifact_dir": str(item.artifact_dir),
-            },
-            command=str(item.command),
+    runs: List[RunSpec] = []
+    for item in commands:
+        config = dict(item.config)
+        assert_public_contract_clean(config, surface="LDA law-stress run config")
+        runs.append(
+            RunSpec.create(
+                family="leaf_local_mixture_utility",
+                config=config,
+                outputs={
+                    "json_summary": str(item.json_path),
+                    "csv_summary": str(item.csv_path),
+                    "artifact_dir": str(item.artifact_dir),
+                },
+                command=str(item.command),
+            )
         )
-        for item in commands
-    ]
+    return runs
 
 
 def build_lda_law_stress_suites(

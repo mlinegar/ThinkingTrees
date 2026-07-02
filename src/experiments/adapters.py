@@ -14,6 +14,16 @@ from src.experiments.contracts import (
 from src.experiments.legacy import ctreepo_runs_to_experiment, runtime_run_spec_to_experiment
 from src.experiments.markov_full_doc import method_ref_from_markov_full_doc_run
 from src.experiments.registry import register_method_adapter
+from src.experiments.roles import (
+    ROLE_SCORER,
+    ROLE_STATE_MODEL,
+    chat_role_ref,
+    embedder_role_ref,
+    metadata_with_roles,
+    oracle_ref,
+    state_model_role_ref,
+)
+from src.experiments.sidecars import sidecar_root_for_output_file
 from src.runtime.contracts import RunPhaseSpec, RunSpec
 
 
@@ -155,12 +165,12 @@ class RuntimeEvalAdapter:
             raise ValueError("runtime_eval adapter expects the init subcommand")
         config_path = _flag_value(argv[1:], "--config")
         output_dir = _flag_value(argv[1:], "--output-dir") or "outputs/evals"
-        run_id = _flag_value(argv[1:], "--run-id") or ""
+        experiment_id = _flag_value(argv[1:], "--experiment-id") or ""
         mod = importlib.import_module("scripts.run_runtime_eval")
         spec = mod._load_run_spec(
             Path(config_path).resolve(),
             output_dir=(cwd / output_dir).resolve() if not Path(output_dir).is_absolute() else Path(output_dir).resolve(),
-            run_id=(run_id or None),
+            experiment_id=(experiment_id or None),
         )
         return runtime_run_spec_to_experiment(
             spec,
@@ -173,6 +183,7 @@ class RuntimeEvalAdapter:
             "metrics_json": output_root / "metrics.json",
             "merged_steps_jsonl": output_root / "steps.jsonl",
             "merged_predictions_jsonl": output_root / "predictions.jsonl",
+            "merged_calls_jsonl": output_root / "calls.jsonl",
             "units_jsonl": output_root / "units.jsonl",
         }
         return {key: str(path) for key, path in candidates.items() if path.exists()}
@@ -232,6 +243,14 @@ class TreePOTrainingAdapter:
             scope=str(task_name),
             name=str(task_name),
         )
+        model_name = _flag_value(argv, "--model") or _flag_value(argv, "--scorer-model")
+        base_roles = {
+            ROLE_SCORER: chat_role_ref(
+                role=ROLE_SCORER,
+                model=model_name,
+                metadata={"task": task_name, "script": script_basename},
+            )
+        }
         method_refs = []
         if script_basename in {"train_neural_operators.py"}:
             method_refs.extend(
@@ -240,11 +259,39 @@ class TreePOTrainingAdapter:
                         family="ctreepo",
                         variant="local_law_training",
                         adapter=self.adapter_id,
+                        metadata=metadata_with_roles(
+                            {"task": task_name},
+                            roles={
+                                **base_roles,
+                                ROLE_STATE_MODEL: state_model_role_ref(
+                                    engine="pytorch",
+                                    model="ctreepo",
+                                    execution_mode="training",
+                                ),
+                            },
+                            oracle=oracle_ref(kind="training_labels", source=task_name),
+                        ),
                     ),
                     method_ref_from_parts(
                         family="mergeable_sketch",
                         variant="embedding_sketch_training",
                         adapter=self.adapter_id,
+                        metadata=metadata_with_roles(
+                            {"task": task_name},
+                            roles={
+                                **base_roles,
+                                "embedder": embedder_role_ref(
+                                    engine="local",
+                                    model="embedding_proxy",
+                                ),
+                                ROLE_STATE_MODEL: state_model_role_ref(
+                                    engine="pytorch",
+                                    model="mergeable_sketch",
+                                    execution_mode="training",
+                                ),
+                            },
+                            oracle=oracle_ref(kind="training_labels", source=task_name),
+                        ),
                     ),
                 ]
             )
@@ -254,6 +301,18 @@ class TreePOTrainingAdapter:
                     family="ctreepo",
                     variant="local_law_training",
                     adapter=self.adapter_id,
+                    metadata=metadata_with_roles(
+                        {"task": task_name},
+                        roles={
+                            **base_roles,
+                            ROLE_STATE_MODEL: state_model_role_ref(
+                                engine="pytorch",
+                                model="ctreepo",
+                                execution_mode="training",
+                            ),
+                        },
+                        oracle=oracle_ref(kind="training_labels", source=task_name),
+                    ),
                 )
             )
         else:
@@ -263,26 +322,82 @@ class TreePOTrainingAdapter:
                         family="llm_prompt_optimization",
                         variant="training_pipeline",
                         adapter=self.adapter_id,
+                        metadata=metadata_with_roles(
+                            {"task": task_name},
+                            roles={
+                                **base_roles,
+                                "summarizer": chat_role_ref(
+                                    role="summarizer",
+                                    model=model_name,
+                                    defaulted_from="scorer",
+                                ),
+                            },
+                            oracle=oracle_ref(kind="training_labels", source=task_name),
+                        ),
                     ),
                     method_ref_from_parts(
                         family="embedding_proxy",
                         variant="training_pipeline",
                         adapter=self.adapter_id,
+                        metadata=metadata_with_roles(
+                            {"task": task_name},
+                            roles={
+                                **base_roles,
+                                "embedder": embedder_role_ref(
+                                    engine="local",
+                                    model="embedding_proxy",
+                                ),
+                            },
+                            oracle=oracle_ref(kind="training_labels", source=task_name),
+                        ),
                     ),
                     method_ref_from_parts(
                         family="ctreepo",
                         variant="training_pipeline",
                         adapter=self.adapter_id,
+                        metadata=metadata_with_roles(
+                            {"task": task_name},
+                            roles={
+                                **base_roles,
+                                ROLE_STATE_MODEL: state_model_role_ref(
+                                    engine="pytorch",
+                                    model="ctreepo",
+                                    execution_mode="training",
+                                ),
+                            },
+                            oracle=oracle_ref(kind="training_labels", source=task_name),
+                        ),
                     ),
                     method_ref_from_parts(
                         family="mergeable_sketch",
                         variant="training_pipeline",
                         adapter=self.adapter_id,
+                        metadata=metadata_with_roles(
+                            {"task": task_name},
+                            roles={
+                                **base_roles,
+                                "embedder": embedder_role_ref(
+                                    engine="local",
+                                    model="embedding_proxy",
+                                ),
+                                ROLE_STATE_MODEL: state_model_role_ref(
+                                    engine="pytorch",
+                                    model="mergeable_sketch",
+                                    execution_mode="training",
+                                ),
+                            },
+                            oracle=oracle_ref(kind="training_labels", source=task_name),
+                        ),
                     ),
                     method_ref_from_parts(
                         family="generator_finetune",
                         variant="training_pipeline",
                         adapter=self.adapter_id,
+                        metadata=metadata_with_roles(
+                            {"task": task_name},
+                            roles=base_roles,
+                            oracle=oracle_ref(kind="training_labels", source=task_name),
+                        ),
                     ),
                 ]
             )
@@ -308,6 +423,225 @@ class TreePOTrainingAdapter:
             "ctreepo_training_result_json": output_root / "ctreepo" / "training_result.json",
             "ctreepo_best_model": output_root / "ctreepo" / "best.pt",
             "mergeable_metrics_json": output_root / "mergeable_sketch" / "metrics.json",
+        }
+        return {key: str(path) for key, path in candidates.items() if path.exists()}
+
+
+def _path_from_flag(args: Sequence[str], flag: str, *, cwd: Path) -> Path | None:
+    value = _flag_value(args, flag)
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    return path.resolve() if path.is_absolute() else (cwd / path).resolve()
+
+
+def _script_family(script_basename: str) -> tuple[str, str, str]:
+    if script_basename == "run_longbench_batched_example.py":
+        return "longbench_v2", "longbench_batched_tree", "batched_doc_pipeline"
+    if script_basename == "run_manifesto_batched_example.py":
+        return "manifesto_rile", "manifesto_batched_tree", "batched_doc_pipeline"
+    if script_basename == "build_manifesto_coverage_split.py":
+        return "manifesto_rile", "coverage_split", "coverage_split_builder"
+    if script_basename == "run_manifesto_full_doc_gemma4_benchmark.py":
+        return "manifesto_rile", "full_doc_direct_scorer", "manifesto_full_doc_direct"
+    if script_basename == "run_manifesto_full_doc_dspy_global_f.py":
+        return "manifesto_rile", "full_doc_dspy_global_f", "manifesto_full_doc_dspy_global_f"
+    if script_basename == "run_method_compare.py":
+        return "method_compare", "method_compare", "method_compare"
+    if script_basename == "run_method_compare_lbv2.py":
+        return "longbench_v2", "method_compare_lbv2", "method_compare_lbv2"
+    if script_basename in {"generate_manifesto_lawstress.py", "eval_manifesto_lawstress.py"}:
+        return "manifesto_lawstress", script_basename.replace(".py", ""), "lawstress"
+    if script_basename == "generate_manifesto_teacher_traces.py":
+        return "manifesto_teacher_traces", "teacher_trace_generation", "teacher_trace_generation"
+    if script_basename == "run_tree_batching_benchmark.py":
+        return "tree_batching", "tree_batching_benchmark", "tree_batching"
+    if script_basename == "run_classical_parity_benchmark.py":
+        return "hll_parity", "classical_parity_benchmark", "classical_parity_benchmark"
+    if script_basename == "report_runtime_v1_results.py":
+        return "runtime_v1", "runtime_v1_report", "runtime_v1_report"
+    if script_basename in {"run_treepo_stack_generate_demo.py", "run_treepo_stack_markov_demo.py"}:
+        return "treepo_stack_demo", script_basename.replace(".py", ""), "treepo_stack_demo"
+    return "runtime_umbrella_script", script_basename.replace(".py", ""), "runtime_umbrella_script"
+
+
+def _inferred_role_refs(script_basename: str, argv: Sequence[str]) -> dict[str, Any]:
+    model = _flag_value(argv, "--model") or _flag_value(argv, "--scorer-model")
+    base_url = _flag_value(argv, "--base-url") or _flag_value(argv, "--scorer-base-url")
+    teacher_model = _flag_value(argv, "--teacher-model")
+    teacher_base_url = _flag_value(argv, "--teacher-base-url")
+    summarizer_model = _flag_value(argv, "--summarizer-model") or teacher_model or model
+    summarizer_base_url = _flag_value(argv, "--summarizer-base-url") or teacher_base_url or base_url
+    roles: dict[str, Any] = {}
+    if script_basename in {
+        "run_longbench_batched_example.py",
+        "run_manifesto_batched_example.py",
+        "run_method_compare.py",
+        "run_method_compare_lbv2.py",
+        "eval_manifesto_lawstress.py",
+        "run_manifesto_full_doc_gemma4_benchmark.py",
+        "run_manifesto_full_doc_dspy_global_f.py",
+    }:
+        roles[ROLE_SCORER] = chat_role_ref(
+            role=ROLE_SCORER,
+            model=model,
+            base_url=base_url,
+        )
+    if script_basename in {
+        "run_longbench_batched_example.py",
+        "run_manifesto_batched_example.py",
+        "generate_manifesto_lawstress.py",
+        "eval_manifesto_lawstress.py",
+        "generate_manifesto_teacher_traces.py",
+        "run_tree_batching_benchmark.py",
+        "run_treepo_stack_generate_demo.py",
+    }:
+        roles["summarizer"] = chat_role_ref(
+            role="summarizer",
+            model=summarizer_model,
+            base_url=summarizer_base_url,
+            defaulted_from="scorer" if summarizer_model == model and summarizer_base_url == base_url else "",
+        )
+    if script_basename in {"run_treepo_stack_markov_demo.py", "run_treepo_stack_generate_demo.py"}:
+        roles[ROLE_STATE_MODEL] = state_model_role_ref(
+            engine="treepo_stack",
+            model=script_basename.replace(".py", ""),
+        )
+    if script_basename == "run_classical_parity_benchmark.py":
+        roles[ROLE_SCORER] = {
+            "role": ROLE_SCORER,
+            "surface": "native",
+            "engine": "python",
+            "model": "classical_or_learned_hll",
+        }
+        roles[ROLE_STATE_MODEL] = state_model_role_ref(
+            engine="pytorch",
+            model="learned_hll_state",
+            execution_mode="fit",
+        )
+    if script_basename == "report_runtime_v1_results.py":
+        roles[ROLE_SCORER] = {
+            "role": ROLE_SCORER,
+            "surface": "report",
+            "engine": "python",
+            "model": "runtime_v1_results",
+        }
+    return roles
+
+
+@register_method_adapter
+class RuntimeUmbrellaScriptAdapter:
+    adapter_id = "runtime_umbrella_script"
+    aliases = (
+        "umbrella",
+        "batched_doc_pipeline",
+        "method_compare",
+        "method_compare_lbv2",
+        "lawstress",
+        "teacher_trace_generation",
+        "tree_batching",
+        "treepo_stack_demo",
+        "classical_parity_benchmark",
+        "runtime_v1_report",
+        "coverage_split_builder",
+        "manifesto_full_doc_direct",
+    )
+
+    def build_experiment_spec(
+        self,
+        command: Sequence[str],
+        *,
+        cwd: Path,
+    ) -> ExperimentSpec:
+        script_name, argv = _strip_python(command)
+        script_basename = Path(script_name).name
+        explicit_root = (
+            _path_from_flag(argv, "--output-root", cwd=cwd)
+            or _path_from_flag(argv, "--output-dir", cwd=cwd)
+            or _path_from_flag(argv, "--out", cwd=cwd)
+        )
+        experiment_dir = _path_from_flag(argv, "--experiment-dir", cwd=cwd)
+        output_file = (
+            _path_from_flag(argv, "--output", cwd=cwd)
+            or _path_from_flag(argv, "--output-json", cwd=cwd)
+            or _path_from_flag(argv, "--output-jsonl", cwd=cwd)
+        )
+        if explicit_root is not None:
+            output_root = (
+                explicit_root / "hll"
+                if script_basename == "run_classical_parity_benchmark.py"
+                else explicit_root
+            )
+        elif script_basename == "report_runtime_v1_results.py" and experiment_dir is not None:
+            output_root = experiment_dir / "paper_summary"
+        elif output_file is not None:
+            output_root = sidecar_root_for_output_file(output_file)
+        else:
+            output_root = (cwd / "outputs" / f"{script_basename.replace('.py', '')}_experiment").resolve()
+
+        benchmark_family, method_family, adapter_name = _script_family(script_basename)
+        benchmark_ref = benchmark_ref_from_parts(
+            family=benchmark_family,
+            scope=script_basename.replace(".py", ""),
+            dataset_id=(
+                _flag_value(argv, "--dataset-path")
+                or _flag_value(argv, "--records")
+                or _flag_value(argv, "--dataset")
+                or ""
+            ),
+            name=benchmark_family,
+            metadata={"script": script_basename},
+        )
+        roles = _inferred_role_refs(script_basename, argv)
+        method_ref = method_ref_from_parts(
+            family=method_family,
+            variant="dry_run" if "--dry-run" in set(str(item) for item in argv) else "run",
+            adapter=adapter_name,
+            metadata=metadata_with_roles(
+                {"legacy_script": script_basename},
+                roles=roles,
+                oracle=oracle_ref(
+                    kind=(
+                        "benchmark_labels"
+                        if benchmark_family in {"longbench_v2", "manifesto_rile", "manifesto_lawstress"}
+                        else "task_provenance"
+                    ),
+                    source=benchmark_family,
+                ),
+            ),
+        )
+        phase = (
+            "dry_run"
+            if "--dry-run" in set(str(item) for item in argv)
+            else "generate"
+            if script_basename.startswith("generate_")
+            else "eval"
+            if script_basename.startswith("eval_")
+            else "run"
+        )
+        return ExperimentSpec.create(
+            adapter_id=self.adapter_id,
+            output_root=str(output_root),
+            title=script_basename.replace(".py", ""),
+            benchmark_refs=(benchmark_ref,),
+            method_refs=(method_ref,),
+            phases=default_phase_specs((phase,)),
+            report_profiles=("runtime_eval_summary",),
+            launch_command=command,
+            resume_command=command,
+            metadata={
+                "legacy_script": script_basename,
+                "inferred_adapter": adapter_name,
+            },
+        )
+
+    def collect_artifacts(self, output_root: Path) -> Mapping[str, Any]:
+        candidates = {
+            "experiment_manifest_json": output_root / "experiment_manifest.json",
+            "experiment_status_json": output_root / "experiment_status.json",
+            "artifacts_json": output_root / "artifacts.json",
+            "results_jsonl": output_root / "results.jsonl",
+            "calls_jsonl": output_root / "calls.jsonl",
         }
         return {key: str(path) for key, path in candidates.items() if path.exists()}
 

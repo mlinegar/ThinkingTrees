@@ -23,7 +23,8 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from src.config.settings import load_settings
-from src.config.dspy_config import configure_dspy, create_vllm_lm, create_vllm_lm_multi
+from src.config.dspy_config import configure_dspy, create_local_engine_lm
+from src.config.local_inference import resolve_local_inference_config
 from src.core.documents import DocumentSample
 from src.core.strategy import DSPyStrategy
 from src.preprocessing.chunker import chunk_for_ops
@@ -151,19 +152,15 @@ def main() -> int:
     g_path = _load_module_path(args)
     logger.info("Using unified-g module: %s", g_path)
 
-    ports = list(dict.fromkeys(args.ports)) if args.ports else [int(args.port)]
-    if len(ports) > 1:
-        lm = create_vllm_lm_multi(
-            ports=ports,
-            temperature=float(args.dspy_temperature),
-            max_tokens=int(args.dspy_max_tokens),
-        )
-    else:
-        lm = create_vllm_lm(
-            port=int(ports[0]),
-            temperature=float(args.dspy_temperature),
-            max_tokens=int(args.dspy_max_tokens),
-        )
+    local_inference = resolve_local_inference_config(
+        {
+            "port": int(args.port),
+            "ports": args.ports,
+            "temperature": float(args.dspy_temperature),
+            "max_tokens": int(args.dspy_max_tokens),
+        }
+    )
+    lm = create_local_engine_lm(**local_inference.dspy_kwargs())
     configure_dspy(lm=lm)
 
     dataset = ManifestoDataset(countries=None, min_year=1900, require_text=True)
@@ -245,7 +242,7 @@ def main() -> int:
             "final_summary_chars": len(final_summary),
         },
         "generation": {
-            "ports": ports,
+            "ports": list(local_inference.ports),
             "dspy_temperature": float(args.dspy_temperature),
             "dspy_max_tokens": int(args.dspy_max_tokens),
         },

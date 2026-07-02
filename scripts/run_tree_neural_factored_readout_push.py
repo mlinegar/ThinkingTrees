@@ -21,7 +21,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts import run_tree_neural_learning_push as lp  # noqa: E402
-from scripts import run_tree_neural_full_doc_mig as mig  # noqa: E402
+from src.ctreepo.sim.core.tree_neural_execution import write_summary_outputs  # noqa: E402
+from src.ctreepo.sim.core.tree_neural_exact_sanity import (  # noqa: E402
+    EXACT_SANITY_FAMILY,
+    render_exact_sanity_summary_markdown,
+    tree_neural_exact_sanity_summary,
+)
+from src.ctreepo.sim.core.tree_neural_facade import RunConfigSpec  # noqa: E402
 
 
 def _parser():
@@ -49,7 +55,7 @@ def _make_factored_config(
     leaf_supervision_kind: str,
     internal_supervision_kind: str,
     internal_label_rate: float,
-) -> mig._RunConfigSpec:
+) -> RunConfigSpec:
     base = lp._make_slot_config(
         args,
         train_doc_count=int(train_doc_count),
@@ -70,10 +76,10 @@ def _make_factored_config(
     )
 
 
-def _phase1_configs(args) -> List[tuple[int, mig._RunConfigSpec]]:
+def _phase1_configs(args) -> List[tuple[int, RunConfigSpec]]:
     small = int(args.phase1_train_small)
     large = int(args.phase1_train_large)
-    specs: List[tuple[int, mig._RunConfigSpec]] = []
+    specs: List[tuple[int, RunConfigSpec]] = []
 
     def add(
         train_doc_count: int,
@@ -193,7 +199,7 @@ def _select_promotions(
         run
         for run in runs
         if int(run.get("train_doc_count", 0)) == int(train_doc_count)
-        and str(run.get("baseline_family", "")) == mig.EXACT_SANITY_FAMILY
+        and str(run.get("baseline_family", "")) == EXACT_SANITY_FAMILY
     ]
     best_by_label: Dict[str, Dict[str, Any]] = {}
     for run in candidates:
@@ -215,8 +221,8 @@ def _select_promotions(
 def _promotion_configs(
     args,
     phase1_runs: Sequence[Mapping[str, Any]],
-) -> List[tuple[int, mig._RunConfigSpec]]:
-    label_to_config: Dict[str, mig._RunConfigSpec] = {
+) -> List[tuple[int, RunConfigSpec]]:
+    label_to_config: Dict[str, RunConfigSpec] = {
         config.label: config for _, config in _phase1_configs(args)
     }
     promoted_small = _select_promotions(
@@ -234,7 +240,7 @@ def _promotion_configs(
         if label not in unique_labels:
             unique_labels.append(label)
 
-    promotions: List[tuple[int, mig._RunConfigSpec]] = []
+    promotions: List[tuple[int, RunConfigSpec]] = []
     for label in unique_labels:
         base = label_to_config.get(label)
         if base is None:

@@ -23,11 +23,8 @@ from src.core.doc_metadata import DocMetadata, format_doc_meta_embedding_text
 from src.preprocessing.adaptive_windows import AxisWindow, uniform_axis_windows
 
 
-class EmbeddingClient(Protocol):
-    """Minimal protocol for embedding endpoints."""
-
-    def embed_texts(self, texts: Sequence[str]) -> List[List[float]]:  # pragma: no cover - protocol
-        ...
+# Canonical embedding interface lives in treepo.llm (single source of truth).
+from treepo.llm import EmbeddingClient  # noqa: E402,F401  (re-export for back-compat)
 
 
 def _l2_normalize(vec: np.ndarray) -> np.ndarray:

@@ -6231,7 +6231,7 @@ def build_trees(
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         supervision_dataset = all_preferences.to_supervision_dataset()
         supervision_file = prefs_dir / f"supervision_ops_tree_{timestamp}.json"
-        save_supervision_artifact_bundle(
+        supervision_paths = save_supervision_artifact_bundle(
             supervision_dataset,
             supervision_path=supervision_file,
             prompt_builder=prompt_builders.summarize,
@@ -6323,8 +6323,10 @@ def build_trees(
             json.dump(tree_stats, f, indent=2)
 
         logger.info(f"  Saved primary supervision to: {supervision_file}")
-        logger.info(f"  Saved binary projection to: {pref_file}")
-        logger.info(f"  Saved comparative judgments to: {comparative_file}")
+        if supervision_paths.binary_projection_path is not None:
+            logger.info(f"  Saved binary projection to: {supervision_paths.binary_projection_path}")
+        if supervision_paths.comparative_path is not None:
+            logger.info(f"  Saved comparative judgments to: {supervision_paths.comparative_path}")
 
     logger.info(f"\nOPS Tree Building Complete:")
     logger.info(f"  Trees built: {len(trees)}")
@@ -8889,6 +8891,78 @@ def _apply_gepa_sampling_weight(
         return score_value
 
 
+def _example_field(example: Any, key: str, default: Any = None) -> Any:
+    if isinstance(example, Mapping):
+        return example.get(key, default)
+    return getattr(example, key, default)
+
+
+def _example_local_law_adjustment_payload(example: Any) -> Optional[Mapping[str, Any]]:
+    payload = _example_field(example, "local_law_adjustment", None)
+    if isinstance(payload, Mapping):
+        return payload
+    metadata = _example_field(example, "metadata", None)
+    if isinstance(metadata, Mapping):
+        nested = metadata.get("local_law_adjustment")
+        if isinstance(nested, Mapping):
+            return nested
+        treepo = metadata.get("treepo")
+        if isinstance(treepo, Mapping):
+            nested = treepo.get("local_law_adjustment")
+            if isinstance(nested, Mapping):
+                return nested
+    return None
+
+
+def _apply_gepa_corrected_local_law_score(
+    example: Any,
+    score: float,
+    *,
+    min_propensity: float = 1e-6,
+) -> Optional[float]:
+    """Apply structured corrected-local-law metadata to a GEPA metric score.
+
+    Returns ``None`` when no structured local-law block is present, in which
+    case callers should keep the legacy sampling-weight path.
+    """
+
+    payload = _example_local_law_adjustment_payload(example)
+    if payload is None or not bool(payload.get("enabled", True)):
+        return None
+    try:
+        score_value = float(score)
+    except (TypeError, ValueError):
+        return 0.0
+
+    from treepo.training.local_law import corrected_local_law_loss
+
+    proxy_loss = payload.get("proxy_loss", None)
+    if proxy_loss is None:
+        proxy_loss = max(0.0, 1.0 - score_value)
+    oracle_loss = payload.get("oracle_loss", None)
+    observed = bool(payload.get("observed", oracle_loss is not None))
+    propensity = payload.get(
+        "propensity",
+        payload.get(
+            "joint_propensity",
+            _example_field(example, "sampling_joint_inclusion_prob", 1.0),
+        ),
+    )
+    try:
+        corrected_loss = corrected_local_law_loss(
+            proxy_loss=float(proxy_loss),
+            oracle_loss=(None if oracle_loss is None else float(oracle_loss)),
+            observed=bool(observed),
+            propensity=float(propensity),
+            min_propensity=float(min_propensity),
+        )
+    except (TypeError, ValueError):
+        return None
+    # GEPA metrics are score-maximization boundaries. The objective is adjusted
+    # at loss level and converted back only at this boundary.
+    return float(max(0.0, 1.0 - corrected_loss))
+
+
 def _create_leaf_preservation_metric(
     oracle_predict: Any,
     *,
@@ -8974,12 +9048,20 @@ def _create_leaf_preservation_metric(
                         feedback_parts.append("Summary too long; be more concise.")
                 score *= verbosity
 
-            score = _apply_gepa_sampling_weight(
+            adjusted_score = _apply_gepa_corrected_local_law_score(
                 example,
                 score,
-                estimator=gepa_ipw_estimator,
                 min_propensity=gepa_ipw_min_propensity,
             )
+            if adjusted_score is None:
+                score = _apply_gepa_sampling_weight(
+                    example,
+                    score,
+                    estimator=gepa_ipw_estimator,
+                    min_propensity=gepa_ipw_min_propensity,
+                )
+            else:
+                score = adjusted_score
 
             if feedback_parts:
                 return {"score": float(score), "feedback": " ".join(feedback_parts)}
@@ -9078,12 +9160,20 @@ def _create_merge_preservation_metric(
                         feedback_parts.append("Merged summary too long; be more concise.")
                 score *= verbosity
 
-            score = _apply_gepa_sampling_weight(
+            adjusted_score = _apply_gepa_corrected_local_law_score(
                 example,
                 score,
-                estimator=gepa_ipw_estimator,
                 min_propensity=gepa_ipw_min_propensity,
             )
+            if adjusted_score is None:
+                score = _apply_gepa_sampling_weight(
+                    example,
+                    score,
+                    estimator=gepa_ipw_estimator,
+                    min_propensity=gepa_ipw_min_propensity,
+                )
+            else:
+                score = adjusted_score
 
             if feedback_parts:
                 return {"score": float(score), "feedback": " ".join(feedback_parts)}
@@ -12902,6 +12992,7 @@ def save_phase2_artifacts(
     scorer_dir.mkdir(parents=True, exist_ok=True)
 
     scorer_path: Optional[Path] = None
+    unified_g_path: Optional[Path] = None
     leaf_path: Optional[Path] = None
     merge_path: Optional[Path] = None
 
@@ -12919,19 +13010,28 @@ def save_phase2_artifacts(
 
     if optimized_summarizers is not None:
         try:
+            unified_g_path = scorer_dir / 'unified_g_final.json'
             leaf_path = scorer_dir / 'leaf_summarizer_final.json'
             merge_path = scorer_dir / 'merge_summarizer_final.json'
             if bool(getattr(args, "sanitize_optimized_instructions", True)):
                 sanitize_dspy_module_instructions(optimized_summarizers["leaf"], label="leaf_summarizer(save)")
                 sanitize_dspy_module_instructions(optimized_summarizers["merge"], label="merge_summarizer(save)")
+            # Active batched runtime uses one unified g(content, rubric) module for
+            # leaves and merges. Persist the leaf-optimized unified module under
+            # the canonical runtime artifact name, while keeping split artifacts
+            # for older training/resume tooling.
+            optimized_summarizers["leaf"].save(str(unified_g_path))
             optimized_summarizers["leaf"].save(str(leaf_path))
             optimized_summarizers["merge"].save(str(merge_path))
+            saved['unified_g_module_path'] = str(unified_g_path)
             saved['leaf_summarizer_module_path'] = str(leaf_path)
             saved['merge_summarizer_module_path'] = str(merge_path)
+            logger.info(f"Saved trained unified-g summarizer to {unified_g_path}")
             logger.info(f"Saved trained leaf summarizer to {leaf_path}")
             logger.info(f"Saved trained merge summarizer to {merge_path}")
         except Exception as e:
             logger.warning(f"Failed to save trained summarizers: {e}")
+            unified_g_path = None
             leaf_path = None
             merge_path = None
 
@@ -12939,6 +13039,7 @@ def save_phase2_artifacts(
         phase2_payload = {
             'completed_at': datetime.now().isoformat(),
             'scorer_module_path': str(scorer_path),
+            'unified_g_module_path': str(unified_g_path) if unified_g_path is not None else None,
             'leaf_summarizer_module_path': str(leaf_path) if leaf_path is not None else None,
             'merge_summarizer_module_path': str(merge_path) if merge_path is not None else None,
             'opt_stats': opt_stats if isinstance(opt_stats, dict) else {},
@@ -14542,6 +14643,8 @@ def _write_canonical_training_outputs(
     args: argparse.Namespace | None = None,
 ) -> None:
     from src.experiments import (
+        ARTIFACT_FINAL_STATS_JSON,
+        ARTIFACT_REPRODUCIBILITY_MANIFEST_JSON,
         ExperimentSpec,
         ProgressSnapshot,
         ResultRow,
@@ -14549,15 +14652,22 @@ def _write_canonical_training_outputs(
         append_result_rows,
         benchmark_ref_from_parts,
         canonical_artifact_refs_from_paths,
-        control_ref_from_ctreepo_local_law_config,
-        control_ref_from_treepo_audit_config,
         default_phase_specs,
         load_canonical_result_rows,
         merge_artifacts,
         method_ref_from_parts,
-        result_rows_from_scalar_metrics,
+        metadata_with_roles,
+        chat_role_ref,
+        embedder_role_ref,
+        oracle_ref,
+        state_model_role_ref,
         write_experiment_manifest,
         write_experiment_status,
+    )
+    from src.experiments.normalization import (
+        control_ref_from_ctreepo_local_law_config,
+        control_ref_from_treepo_audit_config,
+        result_rows_from_scalar_metrics,
     )
 
     task_name = str(
@@ -14601,12 +14711,43 @@ def _write_canonical_training_outputs(
         coverage_label="100% labeled docs",
         metadata={"task": task_name},
     )
+
+    def _method_metadata(family: str) -> Dict[str, Any]:
+        model_name = str(getattr(args, "model", "") or "") if args is not None else ""
+        roles: Dict[str, Any] = {
+            "scorer": chat_role_ref(
+                role="scorer",
+                model=model_name,
+                metadata={"task": task_name, "family": family},
+            )
+        }
+        if family in {"llm_prompt_optimization", "generator_finetune"}:
+            roles["summarizer"] = chat_role_ref(
+                role="summarizer",
+                model=model_name,
+                defaulted_from="scorer",
+            )
+        if family == "embedding_proxy":
+            roles["embedder"] = embedder_role_ref(engine="local", model="embedding_proxy")
+        if family in {"ctreepo", "mergeable_sketch"}:
+            roles["state_model"] = state_model_role_ref(
+                engine="pytorch",
+                model=family,
+                execution_mode="training",
+            )
+        return metadata_with_roles(
+            {"task": task_name, "method_family": family},
+            roles=roles,
+            oracle=oracle_ref(kind="dataset_labels", source=task_name),
+        )
+
     llm_method_ref = method_ref_from_parts(
         family="llm_prompt_optimization",
         variant="training_pipeline",
         adapter="treepo_training",
         supervision=document_label_supervision_ref,
         control_ref=audit_control_ref,
+        metadata=_method_metadata("llm_prompt_optimization"),
     )
     method_refs = [llm_method_ref]
     neural_operator_training = (
@@ -14630,6 +14771,7 @@ def _write_canonical_training_outputs(
                 variant="training_pipeline",
                 adapter="treepo_training",
                 control_ref=ctreepo_control_ref,
+                metadata=_method_metadata("ctreepo"),
             )
         )
         method_refs.append(
@@ -14637,6 +14779,7 @@ def _write_canonical_training_outputs(
                 family="mergeable_sketch",
                 variant="training_pipeline",
                 adapter="treepo_training",
+                metadata=_method_metadata("mergeable_sketch"),
             )
         )
     if isinstance(stats.get("method_status"), dict) and "embedding_proxy" in dict(stats.get("method_status") or {}):
@@ -14645,6 +14788,7 @@ def _write_canonical_training_outputs(
                 family="embedding_proxy",
                 variant="training_pipeline",
                 adapter="treepo_training",
+                metadata=_method_metadata("embedding_proxy"),
             )
         )
     if isinstance(stats.get("method_status"), dict) and "generator_finetune" in dict(stats.get("method_status") or {}):
@@ -14653,6 +14797,7 @@ def _write_canonical_training_outputs(
                 family="generator_finetune",
                 variant="training_pipeline",
                 adapter="treepo_training",
+                metadata=_method_metadata("generator_finetune"),
             )
         )
     experiment_spec = ExperimentSpec.create(
@@ -14670,11 +14815,11 @@ def _write_canonical_training_outputs(
     write_experiment_manifest(output_dir, experiment_spec)
 
     artifact_map: Dict[str, str] = {
-        "final_stats_json": str(output_dir / "final_stats.json"),
+        ARTIFACT_FINAL_STATS_JSON: str(output_dir / "final_stats.json"),
     }
     reproducibility_manifest_path = output_dir / "reproducibility_manifest.json"
     if reproducibility_manifest_path.exists():
-        artifact_map["reproducibility_manifest_json"] = str(reproducibility_manifest_path)
+        artifact_map[ARTIFACT_REPRODUCIBILITY_MANIFEST_JSON] = str(reproducibility_manifest_path)
     optimizer_manifest_path = output_dir / "optimizer_audit_manifest.json"
     if optimizer_manifest_path.exists():
         artifact_map["optimizer_audit_manifest_json"] = str(optimizer_manifest_path)
@@ -14776,6 +14921,7 @@ def _write_canonical_training_outputs(
                 else None
             ),
             control_ref=ctreepo_control_ref if family == "ctreepo" else audit_control_ref if family == "llm_prompt_optimization" else None,
+            metadata=_method_metadata(family),
         )
         if family == "llm_prompt_optimization":
             method_artifact_refs = ("final_stats_json", *llm_trace_refs)

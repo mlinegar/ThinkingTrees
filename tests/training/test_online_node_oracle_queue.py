@@ -4,8 +4,8 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 
-from src.feedback.store import FeedbackStore
-from src.feedback.types import FeedbackDimension, FeedbackRequest, FeedbackResponse
+from src.preference_collection.store import PreferenceStore
+from src.preference_collection.types import PreferenceDimension, PreferenceRequest, PreferenceResponse
 from src.training.config_sections import RuntimeConfig, TrainConfig, ValidationConfig
 from src.training.ctreepo_trainer import (
     CTreePOTrainer,
@@ -74,37 +74,37 @@ def _training_config(*, epochs: int, batch_size: int = 1) -> CTreePOTrainingConf
     )
 
 
-def test_feedback_store_file_backed_duplicate_and_reload(tmp_path: Path):
-    path = tmp_path / "feedback_store.json"
-    store = FeedbackStore(storage_path=path, autosave=True)
-    request = FeedbackRequest(
+def test_preference_store_file_backed_duplicate_and_reload(tmp_path: Path):
+    path = tmp_path / "preference_store.json"
+    store = PreferenceStore(storage_path=path, autosave=True)
+    request = PreferenceRequest(
         request_id="req1",
         text_a="abc",
-        dimensions=[FeedbackDimension(kind="scalar", name="score")],
+        dimensions=[PreferenceDimension(kind="scalar", name="score")],
     )
 
     assert store.enqueue(request) == "req1"
     assert store.enqueue(request) == "req1"
     assert len(store.get_pending(limit=10)) == 1
 
-    reloaded = FeedbackStore(storage_path=path, autosave=True)
+    reloaded = PreferenceStore(storage_path=path, autosave=True)
     assert len(reloaded.get_pending(limit=10)) == 1
     assert reloaded.submit(
         "req1",
-        FeedbackResponse(request_id="req1", scores={"score": 3.0}, source="oracle"),
+        PreferenceResponse(request_id="req1", scores={"score": 3.0}, source="oracle"),
     )
     assert reloaded.submit(
         "req1",
-        FeedbackResponse(request_id="req1", scores={"score": 3.0}, source="oracle"),
+        PreferenceResponse(request_id="req1", scores={"score": 3.0}, source="oracle"),
     )
 
-    final = FeedbackStore(storage_path=path, autosave=True)
+    final = PreferenceStore(storage_path=path, autosave=True)
     assert final.get_statistics()["pending"] == 0
     assert final.get_statistics()["completed"] == 1
 
 
 def test_online_node_oracle_queue_samples_requests_and_attaches_completed(tmp_path: Path):
-    store = FeedbackStore(storage_path=tmp_path / "feedback_store.json", autosave=True)
+    store = PreferenceStore(storage_path=tmp_path / "preference_store.json", autosave=True)
     queue = OnlineNodeOracleQueue(
         store=store,
         config=OnlineNodeOracleQueueConfig(
@@ -127,12 +127,12 @@ def test_online_node_oracle_queue_samples_requests_and_attaches_completed(tmp_pa
         req.context["supervision_timing"]["activation_barrier"] == "epoch_boundary"
         for req in pending
     )
-    assert all(req.sampling.policy_name == "budgeted_random_node_feedback" for req in pending)
+    assert all(req.sampling.policy_name == "budgeted_random_node_preference" for req in pending)
 
     for request in pending:
         store.submit(
             request.request_id,
-            FeedbackResponse(
+            PreferenceResponse(
                 request_id=request.request_id,
                 scores={"score": float(len(request.text_a))},
                 source="oracle",
@@ -149,7 +149,7 @@ def test_online_node_oracle_queue_samples_requests_and_attaches_completed(tmp_pa
 
 
 def test_ctreepo_trainer_online_mode_without_worker_does_not_block(tmp_path: Path):
-    store = FeedbackStore(storage_path=tmp_path / "feedback_store.json", autosave=True)
+    store = PreferenceStore(storage_path=tmp_path / "preference_store.json", autosave=True)
     queue = OnlineNodeOracleQueue(
         store=store,
         config=OnlineNodeOracleQueueConfig(leaf_budget_per_epoch=1, merge_budget_per_epoch=1),
@@ -172,13 +172,13 @@ def test_ctreepo_trainer_online_mode_without_worker_does_not_block(tmp_path: Pat
     payload = json.loads((tmp_path / "train" / "training_result.json").read_text())
     assert payload["local_law_summary"]["online_node_oracle_queue"]["enabled"] is True
     timing = payload["local_law_summary"]["supervision_timing"]
-    assert timing["acquisition_policy"] == "async_feedback_queue"
+    assert timing["acquisition_policy"] == "async_preference_queue"
     assert timing["activation_barrier"] == "epoch_boundary"
     assert timing["blocking"] is False
 
 
 def test_ctreepo_trainer_online_teacher_worker_attaches_at_epoch_boundary(tmp_path: Path):
-    store = FeedbackStore(storage_path=tmp_path / "feedback_store.json", autosave=True)
+    store = PreferenceStore(storage_path=tmp_path / "preference_store.json", autosave=True)
     queue = OnlineNodeOracleQueue(
         store=store,
         config=OnlineNodeOracleQueueConfig(leaf_budget_per_epoch=2, merge_budget_per_epoch=1),

@@ -8,18 +8,18 @@ from datetime import datetime, timezone
 import inspect
 import json
 import logging
-from requests.adapters import HTTPAdapter
 from pathlib import Path
 import re
 import sys
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-import requests
 import yaml
 
 # Add project root for direct script execution.
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
+
+from src.tasks.manifesto.openai_chat import OpenAIChatClient
 
 from src.training.preference.oracle_reward import create_local_law_summary_reward_func
 
@@ -101,72 +101,6 @@ def _parse_last_number(text: str) -> Optional[float]:
         return float(matches[-1])
     except (TypeError, ValueError):
         return None
-
-
-class OpenAIChatClient:
-    """Minimal OpenAI-compatible chat client."""
-
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        model: str,
-        api_key: str,
-        timeout_seconds: float = 120.0,
-        enable_thinking: bool = False,
-        max_connections: int = 256,
-    ):
-        self.base_url = str(base_url).rstrip("/")
-        self.model = str(model)
-        self.api_key = str(api_key)
-        self.timeout_seconds = float(timeout_seconds)
-        self.enable_thinking = bool(enable_thinking)
-        self._session = requests.Session()
-        adapter = HTTPAdapter(
-            pool_connections=max(1, int(max_connections)),
-            pool_maxsize=max(1, int(max_connections)),
-            max_retries=0,
-        )
-        self._session.mount("http://", adapter)
-        self._session.mount("https://", adapter)
-
-    def chat(
-        self,
-        *,
-        system: str,
-        user: str,
-        temperature: float,
-        max_tokens: int,
-    ) -> str:
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": float(temperature),
-            "max_tokens": int(max_tokens),
-            "chat_template_kwargs": {
-                "enable_thinking": bool(self.enable_thinking),
-            },
-        }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        response = self._session.post(
-            f"{self.base_url}/chat/completions",
-            json=payload,
-            headers=headers,
-            timeout=self.timeout_seconds,
-        )
-        response.raise_for_status()
-        data = response.json()
-        choices = data.get("choices") or []
-        if not choices:
-            return ""
-        message = choices[0].get("message") or {}
-        return str(message.get("content") or "").strip()
 
 
 def build_summary_prompt(

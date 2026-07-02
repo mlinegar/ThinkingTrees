@@ -191,7 +191,7 @@ def _validate_config(config: LDATreeRecoveryConfig) -> None:
 
 def _world_signature(config: LDATreeRecoveryConfig) -> Dict[str, object]:
     return {
-        "family": "lda_tree_recovery",
+        "problem_id": "lda_tree_recovery",
         "n_topics": int(config.n_topics),
         "vocab_size": int(config.vocab_size),
         "min_tokens": int(config.min_tokens),
@@ -789,11 +789,12 @@ def run_lda_tree_recovery_experiment_from_world(
         "theta_true": [float(x) for x in theta_true.tolist()],
         "W_base": [[float(x) for x in row] for row in W_base.tolist()],
         "quadratic_utility_weight": float(config.lambda_multiplier),
-        "lambda_multiplier": float(config.lambda_multiplier),
     }
+    public_config = {**asdict(config), "quadratic_utility_weight": float(config.lambda_multiplier)}
+    public_config.pop("lambda_multiplier", None)
 
     return LDATreeRecoverySummary(
-        config={**asdict(config), "quadratic_utility_weight": float(config.lambda_multiplier)},
+        config=public_config,
         topic_meta=dict(world.topic_meta),
         utility_truth=utility_truth,
         world_stats=world_stats,
@@ -806,7 +807,7 @@ def run_lda_tree_recovery_experiment_from_world(
             linear_component_name="topic_mixture_linear_term",
             interaction_component_name="topic_mixture_quadratic_term",
             weighting_scheme="linear_plus_quadratic_utility",
-            metadata={"family": "lda_tree_recovery"},
+            metadata={"problem_id": "lda_tree_recovery"},
         ),
     )
 

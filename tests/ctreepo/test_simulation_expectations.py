@@ -38,12 +38,22 @@ def _resolved_objective_payload(
     c2_relative_weight: float,
     c3_relative_weight: float,
 ) -> dict:
+    active = (
+        float(c1_relative_weight) > 0.0,
+        float(c2_relative_weight) > 0.0,
+        float(c3_relative_weight) > 0.0,
+    )
+    law_package = {
+        (True, False, False): "c1_only",
+        (False, True, False): "c2_only",
+        (False, False, True): "c3_only",
+        (True, False, True): "c1c3",
+        (True, True, True): "all_laws",
+    }.get(active, "root_only")
     summary = _build_objective_summary(
         OPSCountConfig(
             local_law_weight=float(local_law_weight),
-            c1_relative_weight=float(c1_relative_weight),
-            c2_relative_weight=float(c2_relative_weight),
-            c3_relative_weight=float(c3_relative_weight),
+            law_package=law_package,
             schedule_consistency_weight=0.0,
         )
     )

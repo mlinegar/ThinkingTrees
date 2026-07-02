@@ -6,7 +6,7 @@ MetricScore pattern from src.core.signatures for political text scoring.
 
 Signatures:
 - RILEScore: Score political text on the left-right RILE scale
-- SimpleScore: Simplified scorer for model reliability
+- SimpleScore: Simplified scorer for model agreement checks
 - PairwiseSummaryComparison: Compare summaries for preference generation
 - RILEComparison: Audit whether summarization preserves political position
 

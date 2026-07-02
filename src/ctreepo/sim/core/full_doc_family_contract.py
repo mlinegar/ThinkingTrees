@@ -49,7 +49,10 @@ FULL_DOC_BUDGET_SUBSET_FAMILIES = frozenset(
 def _mapping_from_config_like(
     config_like: Mapping[str, Any] | OPSCountConfig | None,
 ) -> Dict[str, Any]:
-    return canonicalize_full_doc_config_mapping(config_like)
+    return canonicalize_full_doc_config_mapping(
+        config_like,
+        allow_private_tree_aliases=True,
+    )
 
 
 def _clean_float(value: Any, *, default: float) -> float:

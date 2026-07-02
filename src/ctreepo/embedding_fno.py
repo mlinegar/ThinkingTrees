@@ -43,6 +43,14 @@ from src.training.config_sections import (
     config_to_dict,
 )
 from src.tree.labeled import LabeledNode, LabeledTree
+from src.tree.state_tree import (
+    explicit_oracle_trace_kwargs,
+    local_law_trace_metadata,
+    state_tree_skeleton_from_labeled_tree,
+    state_tree_trace_metrics,
+    update_state_tree_node,
+    write_state_trees_jsonl,
+)
 
 import logging as _logging
 _LOGGER = _logging.getLogger(__name__)
@@ -56,6 +64,27 @@ class EmbeddingFNOModelConfig:
     head_hidden_dim: int = 64
     target_min: float = 1.0
     target_max: float = 7.0
+    # Merge baseline mode. "mean" (default, backward-compatible) anchors g to
+    # 0.5*(left+right) + FNO residual. "gated" replaces the fixed mean with a
+    # learned per-dimension gate alpha(left,right) so the baseline is
+    # alpha*left + (1-alpha)*right + FNO residual. The gate lets g ROUTE signal
+    # from the on-topic child instead of averaging it away — targeted at the
+    # eu-style learned-merge failure where a sparse on-topic minority gets
+    # diluted by mean composition. Invariant preserved: merge(a,a)=a for any
+    # alpha, and the gate is symmetric (see EmbeddingCoordinateFNOTreeRegressor).
+    # "maxpool" uses a non-convex per-dim max(left,right) baseline (no extra
+    # params) so the strongest child signal survives to the root — for dims
+    # whose doc label tracks the MAX on-topic leaf, not the mean.
+    merge_mode: str = "mean"
+    merge_gate_hidden_dim: int = 64
+    # Root readout: how the DOC-level prediction is read off. "mean_root"
+    # (default) = predict_normalized(composed root state). "topk" = mean of the k
+    # highest LEAF scores. "softmax" = temperature softmax pool over leaf scores.
+    # The non-default modes bypass the mean-composed root for dims whose doc label
+    # tracks the MAX on-topic leaf (eu: top1-leaf r=0.79 ~= ceiling).
+    root_readout: str = "mean_root"
+    root_readout_k: int = 1
+    root_readout_attn_temp: float = 0.2
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -122,6 +151,13 @@ class EmbeddingCoordinateFNOTreeRegressor(nn.Module):
         head_hidden_dim: int,
         target_min: float,
         target_max: float,
+        merge_mode: str = "mean",
+        merge_gate_hidden_dim: int = 64,
+        root_readout: str = "mean_root",
+        root_readout_k: int = 1,
+        root_readout_attn_temp: float = 0.2,
+        extent_enabled: bool = False,
+        extent_merge_init: str = "neutral",
     ) -> None:
         super().__init__()
         from neuralop.models import FNO
@@ -129,6 +165,10 @@ class EmbeddingCoordinateFNOTreeRegressor(nn.Module):
         self.embedding_dim = int(embedding_dim)
         self.target_min = float(target_min)
         self.target_max = float(target_max)
+        self.merge_mode = str(merge_mode)
+        self.root_readout = str(root_readout)
+        self.root_readout_k = int(root_readout_k)
+        self.root_readout_attn_temp = float(root_readout_attn_temp)
         modes = max(1, min(int(n_modes), int(embedding_dim)))
         self.leaf_norm = nn.LayerNorm(int(embedding_dim))
         # f operator: (B, 1, embedding_dim) -> (B, 1, embedding_dim).
@@ -152,11 +192,125 @@ class EmbeddingCoordinateFNOTreeRegressor(nn.Module):
             nn.GELU(),
             nn.Linear(int(head_hidden_dim), 1),
         )
+        # A3-literal readout merge M(a,b)=sigmoid(logit a + logit b + offset): the
+        # single learned offset of the associative+commutative phi-form (see
+        # readout_merge). Always present (tiny); only used when the A2 readout mode
+        # is active. Init 0 -> M(a,b)=sigmoid(logit a + logit b) (a sum-in-logit
+        # baseline), which the loss moves.
+        self.readout_merge_offset = nn.Parameter(torch.zeros(()))
+        # Gated merge baseline (merge_mode="gated"): a per-dimension gate
+        # alpha(left,right) in [0,1] replaces the fixed 0.5 mean. Built from
+        # symmetric features [left+right, |left-right|] so the gate magnitude is
+        # order-stable; the final logit is anti-symmetrized so that swapping
+        # left<->right maps alpha -> 1-alpha (the baseline alpha*l+(1-alpha)*r is
+        # then permutation-consistent). merge(a,a)=a holds for ANY alpha. At init
+        # the final layer is zeroed so alpha=0.5 (recovers the mean baseline).
+        # Learned "extent" latent (mass-aware general g). When enabled, every node
+        # state carries an EXTRA scalar coordinate at index ``embedding_dim`` (the
+        # stored state is width D+1). The extent is a FREE latent: the leaf encoder
+        # emits it from leaf content; the merge propagates it; NOTHING supervises it
+        # against the true text mass. Its only purpose is to let the state-blend gate
+        # weight children by "how much" (information density), which the two child
+        # state vectors alone cannot encode (the correct merge weight is the mass
+        # ratio N_l/(N_l+N_r), not a function of (s_l,s_r)). CRITICAL: the extent is
+        # EXCISED before every FNO/score op and re-injected only as a gate feature +
+        # a propagated scalar, so leaf_fno/merge_fno/score_head/merge_gate-output all
+        # stay width-D (channel invariant intact; old checkpoints load when off).
+        self.extent_enabled = bool(extent_enabled)
+        self.extent_merge_init = str(extent_merge_init)
+        # Per-merge gate sees 2*D state features (+2 child extents when enabled).
+        gate_in = 2 * int(embedding_dim) + (2 if self.extent_enabled else 0)
+        self.merge_gate = None
+        if self.merge_mode == "gated":
+            self.merge_gate = nn.Sequential(
+                nn.Linear(gate_in, int(merge_gate_hidden_dim)),
+                nn.GELU(),
+                nn.Linear(int(merge_gate_hidden_dim), int(embedding_dim)),
+            )
+        elif self.merge_mode == "maxpool":
+            # No extra params: baseline = per-dim max(left,right) + FNO residual.
+            # NON-convex, NON-additive composition — the strongest child's signal
+            # on each embedding dim survives all the way to the root instead of
+            # being averaged down. Motivated by the eu leaf diagnostic: the doc
+            # signal lives in the MAX / top-k on-topic q-sentence (max-leaf r=0.79
+            # ~= the 0.78 ceiling), while sum/count rolls up WORSE. Convex gating
+            # (above) cannot express this — its output is bounded between the two
+            # children, so a single strong leaf decays toward the mean up the tree.
+            pass
+        elif self.merge_mode == "mlp":
+            # EXPERIMENTAL — intentionally BREAKS the FNO channel invariant for g.
+            # A free, high-capacity learnable merge: concat([l,r]) (B,2D) -> MLP ->
+            # (B,D). No mean/max/gated prior; the FNO merge_fno is UNUSED in this
+            # mode. Tests whether a general learnable function (the "neural-operator
+            # is universal" hypothesis) can find the eu composition that the
+            # hand-picked baselines (mean/gated/maxpool all failed) cannot — or
+            # whether the signal is already gone from the learned leaf STATES
+            # (vs the LLM leaf scores, which roll up to 0.78). Init makes the MLP
+            # output the mean baseline 0.5*(l+r) (residual final layer zeroed +
+            # explicit averaging skip), so it WARM-STARTS exactly where the working
+            # 'mean' merge starts and learns away from there. Only enabled when a
+            # caller opts in; default stays 'mean' so the invariant holds elsewhere.
+            self.merge_mlp = nn.Sequential(
+                nn.Linear(2 * int(embedding_dim), int(merge_gate_hidden_dim)),
+                nn.GELU(),
+                nn.Linear(int(merge_gate_hidden_dim), int(merge_gate_hidden_dim)),
+                nn.GELU(),
+                nn.Linear(int(merge_gate_hidden_dim), int(embedding_dim)),
+            )
+        elif self.merge_mode != "mean":
+            raise ValueError(
+                f"unknown merge_mode {self.merge_mode!r}; expected "
+                "'mean', 'gated', 'maxpool', or 'mlp'"
+            )
+        if not hasattr(self, "merge_mlp"):
+            self.merge_mlp = None
+        # Extent heads (only built when enabled). The extent rides the gate, so the
+        # gate must exist — extent is meaningful only with the per-dim gated merge,
+        # which is where "how much each child weighs" can steer the blend.
+        self.leaf_extent_head = None
+        self.extent_merge_head = None
+        if self.extent_enabled:
+            if self.merge_gate is None:
+                raise ValueError(
+                    "extent_enabled=True requires merge_mode='gated' (the extent "
+                    "latent steers the per-dim gate; mean/maxpool/mlp have no gate "
+                    "to read it). Pass --fno-merge-mode gated."
+                )
+            # Leaf extent: a scalar emitted from the raw leaf embedding. Learned, not
+            # fed the true mass. tanh-bounded so the latent stays O(1) and the gate
+            # features are well-scaled.
+            self.leaf_extent_head = nn.Sequential(
+                nn.Linear(int(embedding_dim), int(merge_gate_hidden_dim)),
+                nn.GELU(),
+                nn.Linear(int(merge_gate_hidden_dim), 1),
+            )
+            # Extent merge: parent extent from the two child extents + a summary of
+            # the two child states. init='additive' warm-starts the parent extent at
+            # m_l+m_r (the mass-weighted prior basin) by zeroing the residual MLP and
+            # adding an explicit sum skip; init='neutral' zeroes the head so the
+            # untrained parent extent is 0 everywhere (the constant-extent basin that
+            # collapses to equal-averaging — the pure-laws arm A control).
+            self.extent_merge_head = nn.Sequential(
+                nn.Linear(2 + 2 * int(embedding_dim), int(merge_gate_hidden_dim)),
+                nn.GELU(),
+                nn.Linear(int(merge_gate_hidden_dim), 1),
+            )
+            # Both inits zero the final residual layer; 'additive' adds m_l+m_r via an
+            # explicit skip in extent_merge() (see below), 'neutral' does not.
+            with torch.no_grad():
+                final = self.extent_merge_head[-1]
+                final.weight.zero_()
+                final.bias.zero_()
+            if self.extent_merge_init not in ("neutral", "additive"):
+                raise ValueError(
+                    f"unknown extent_merge_init {self.extent_merge_init!r}; "
+                    "expected 'neutral' or 'additive'"
+                )
         _LOGGER.info(
             "FNO invariant: embedding_dim=%d, leaf_fno 1->1, merge_fno 2->1, "
-            "hidden_channels=%d, n_modes=%d, n_layers=%d, head_hidden_dim=%d",
+            "hidden_channels=%d, n_modes=%d, n_layers=%d, head_hidden_dim=%d, merge_mode=%s",
             int(embedding_dim), int(hidden_channels), int(n_modes),
-            int(n_layers), int(head_hidden_dim),
+            int(n_layers), int(head_hidden_dim), self.merge_mode,
         )
 
     def encode_leaves(self, embeddings: torch.Tensor) -> torch.Tensor:
@@ -165,23 +319,176 @@ class EmbeddingCoordinateFNOTreeRegressor(nn.Module):
         # embedding. Trained, the FNO learns a residual on top of the embedding.
         raw = embeddings.unsqueeze(1)
         normalized = self.leaf_norm(embeddings).unsqueeze(1)
-        return raw + self.leaf_fno(normalized)
+        state = raw + self.leaf_fno(normalized)  # (B, 1, D)
+        if not self.extent_enabled:
+            return state
+        # Append the learned extent scalar as the (D+1)-th coordinate. The FNO above
+        # only ever sees the D state coords; the extent is computed separately from
+        # the leaf embedding and never enters the spectral conv.
+        extent = self.leaf_extent_head(embeddings).unsqueeze(1)  # (B, 1, 1)
+        return torch.cat([state, extent], dim=-1)  # (B, 1, D+1)
+
+    def _split_extent(
+        self, state: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Split a stored node state into (D state coords, extent scalar | None).
+
+        When extent is disabled the state is width D and extent is None.
+        """
+        if not self.extent_enabled:
+            return state, None
+        d = self.embedding_dim
+        return state[..., :d], state[..., d : d + 1]
+
+    def extent_merge(
+        self,
+        m_left: torch.Tensor,
+        m_right: torch.Tensor,
+        s_left: torch.Tensor,
+        s_right: torch.Tensor,
+    ) -> torch.Tensor:
+        """Combine two child extents into the parent extent (B, 1, 1).
+
+        Reads both child extents and a summary of the two child STATES (so extent
+        propagation can depend on content). 'additive' init adds an explicit
+        m_l+m_r skip so the untrained parent extent is the mass-weighted prior;
+        'neutral' has no skip (untrained parent extent = 0, the collapse basin).
+        """
+        feats = torch.cat(
+            [
+                m_left.squeeze(1),
+                m_right.squeeze(1),
+                s_left.squeeze(1),
+                s_right.squeeze(1),
+            ],
+            dim=-1,
+        )  # (B, 2 + 2D)
+        resid = self.extent_merge_head(feats).unsqueeze(1)  # (B, 1, 1)
+        if self.extent_merge_init == "additive":
+            return m_left + m_right + resid
+        return resid
 
     def merge(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
-        # Residual bypass around the merge FNO: at identity init the output is
-        # 0.5 * (left + right); the FNO learns a residual correction.
-        avg = 0.5 * (left + right)
-        residual = self.merge_fno(torch.cat([left, right], dim=1))
-        return avg + residual
+        # Residual bypass around the merge FNO. The FNO (2->1) always learns a
+        # residual on top of a content-independent-or-gated baseline.
+        #
+        # When the extent latent is on, split it off FIRST so every op below
+        # (gate, merge_fno) operates only on the D state coords; the extent is fed
+        # to the gate as a feature and propagated by extent_merge(), then the parent
+        # extent is concatenated back. The FNO never sees the extent coordinate.
+        left_s, m_left = self._split_extent(left)
+        right_s, m_right = self._split_extent(right)
+        if self.merge_gate is not None:
+            # Gated baseline: alpha*left + (1-alpha)*right, per embedding dim.
+            # left/right are (B, 1, D); flatten the singleton channel for the gate.
+            l = left_s.squeeze(1)
+            r = right_s.squeeze(1)
+            # Symmetric state features; anti-symmetrize so swap(l,r)->alpha->1-alpha.
+            sym = [l + r, (l - r).abs()]
+            if self.extent_enabled:
+                # Extent features: append (m_l, m_r) to feats_lr and (m_r, m_l) to
+                # feats_rl so the anti-symmetrization still maps swap -> 1-alpha
+                # while letting alpha depend on which child has more extent.
+                ml = m_left.squeeze(1)
+                mr = m_right.squeeze(1)
+                feats_lr = torch.cat(sym + [ml, mr], dim=-1)
+                feats_rl = torch.cat([r + l, (r - l).abs(), mr, ml], dim=-1)
+            else:
+                feats_lr = torch.cat(sym, dim=-1)
+                feats_rl = torch.cat([r + l, (r - l).abs()], dim=-1)
+            logit = self.merge_gate(feats_lr) - self.merge_gate(feats_rl)
+            alpha = torch.sigmoid(logit).unsqueeze(1)  # (B, 1, D), alpha(a,a)->0.5
+            avg = alpha * left_s + (1.0 - alpha) * right_s
+        elif self.merge_mode == "maxpool":
+            # Per-dim elementwise max baseline (non-convex; preserves the strongest
+            # child signal up the tree). Commutative -> permutation-symmetric;
+            # max(a,a)=a -> invariant holds.
+            avg = torch.maximum(left_s, right_s)
+        elif self.merge_mlp is not None:
+            # Free learnable merge: mean warm-start + MLP residual over concat.
+            # The merge_fno is UNUSED here. At init the MLP final layer is zeroed
+            # so this equals 0.5*(l+r); merge(a,a)=a holds at init. NOT symmetric
+            # by construction once trained (the model can learn order-sensitivity
+            # — acceptable for this probe; trees have a fixed child order).
+            l = left_s.squeeze(1)
+            r = right_s.squeeze(1)
+            resid = self.merge_mlp(torch.cat([l, r], dim=-1)).unsqueeze(1)
+            return 0.5 * (left_s + right_s) + resid
+        else:
+            # Fixed mean baseline (backward-compatible default).
+            avg = 0.5 * (left_s + right_s)
+        residual = self.merge_fno(torch.cat([left_s, right_s], dim=1))
+        merged_state = avg + residual  # (B, 1, D)
+        if not self.extent_enabled:
+            return merged_state
+        m_parent = self.extent_merge(m_left, m_right, left_s, right_s)  # (B,1,1)
+        return torch.cat([merged_state, m_parent], dim=-1)  # (B, 1, D+1)
 
     def predict_normalized(self, state: torch.Tensor) -> torch.Tensor:
-        flat = state.squeeze(1)
+        # Score reads only the D state coords; the extent latent (if present) is a
+        # routing variable for the merge gate and is never scored.
+        state_s, _ = self._split_extent(state)
+        flat = state_s.squeeze(1)
         logits = self.score_head(flat).reshape(-1)
         return torch.sigmoid(logits)
+
+    def readout_merge(self, y_left: torch.Tensor, y_right: torch.Tensor) -> torch.Tensor:
+        """A3-literal merge on the SCALAR readouts: M(a,b) = phi^{-1}(phi(a)+phi(b)).
+
+        By Aczel's theorem every continuous, associative, commutative, strictly
+        monotone operator on an interval has this form for a homeomorphism phi, so
+        this M is ASSOCIATIVE + COMMUTATIVE BY CONSTRUCTION (the proven Lean
+        merge_assoc / merge_comm). We parameterize phi in logit space so it is
+        exactly invertible on (0,1): phi(y) = w * logit(y) + b (w>0), hence
+            M(a,b) = sigmoid( logit(a) + logit(b) + b/w ).
+        The single learned offset c = b/w spans the family from sum-like (c<0, two
+        mid values reinforce downward) to a learned neutral; w cancels in M but
+        keeps phi a proper homeomorphism. Inputs/outputs in (0,1). Only enabled when
+        a2_readout_merge is on; otherwise this method is unused.
+        """
+        eps = 1e-6
+        a = y_left.clamp(eps, 1.0 - eps)
+        b = y_right.clamp(eps, 1.0 - eps)
+        la = torch.log(a) - torch.log1p(-a)
+        lb = torch.log(b) - torch.log1p(-b)
+        return torch.sigmoid(la + lb + self.readout_merge_offset)
 
     def predict_raw(self, state: torch.Tensor) -> torch.Tensor:
         norm = self.predict_normalized(state)
         return self.target_min + norm * (self.target_max - self.target_min)
+
+    def predict_root_topk(
+        self,
+        leaf_states: torch.Tensor,
+        *,
+        mode: str = "mean_root",
+        k: int = 1,
+        attn_temp: float = 1.0,
+    ) -> torch.Tensor:
+        """Read a DOC-level normalized prediction from the LEAF score distribution.
+
+        The mean-composed root state averages a peaked signal away (the eu
+        diagnostic: top1-leaf score r=0.79 ~= ceiling, top-k DECREASING). These
+        readouts use the leaf SCORES directly instead of the composed root state:
+        - "topk":    mean of the k highest leaf scores (k=1 -> the single max leaf)
+        - "softmax": temperature-weighted softmax pool over leaf scores
+                     (attn_temp->0 approximates max; ->inf approximates mean).
+        ``leaf_states`` is (n_leaves, 1, D). Differentiable; trains the f leaf head
+        to make the top leaves accurate. ``mode="mean_root"`` is handled by the
+        caller (uses the composed root state, not this method).
+        """
+        scores = self.predict_normalized(leaf_states)  # (n_leaves,)
+        if scores.numel() == 0:
+            return scores.new_zeros(())
+        if mode == "topk":
+            kk = max(1, min(int(k), int(scores.numel())))
+            top = torch.topk(scores, kk, largest=True).values
+            return top.mean()
+        if mode == "softmax":
+            temp = max(1e-4, float(attn_temp))
+            weights = torch.softmax(scores / temp, dim=0)
+            return (weights * scores).sum()
+        raise ValueError(f"unknown root_readout mode {mode!r}; expected 'topk' or 'softmax'")
 
     @torch.no_grad()
     def initialize_as_identity(self) -> None:
@@ -195,35 +502,120 @@ class EmbeddingCoordinateFNOTreeRegressor(nn.Module):
 
         Subsequent training lets the FNOs learn residual corrections on top
         of these baselines, and the score head to move away from 0.5.
+
+        Only the FINAL layer of each module is zeroed; hidden layers keep
+        their default random init (zero-init-last-layer trick). Zeroing every
+        parameter — the previous behavior — created a mutual gradient
+        deadlock (zero hidden activations x zero downstream weights), so f
+        and g could only ever learn constants: observed empirically as root
+        predictions exactly equal across documents, drifting from 0.5 to the
+        target mean via the sole trainable final bias.
         """
-        for p in self.leaf_fno.parameters():
-            p.zero_()
-        for p in self.merge_fno.parameters():
-            p.zero_()
+
+        def _zero_fno_output_layer(fno: nn.Module) -> None:
+            # neuralop FNO: output = projection (ChannelMLP) over block
+            # features; zeroing its last conv makes the FNO output exactly 0
+            # while leaving every other parameter trainable from step 1.
+            last = fno.projection.fcs[-1]
+            nn.init.zeros_(last.weight)
+            if last.bias is not None:
+                nn.init.zeros_(last.bias)
+
+        _zero_fno_output_layer(self.leaf_fno)
+        _zero_fno_output_layer(self.merge_fno)
+        if self.merge_gate is not None:
+            # Zero the gate's final layer so its logit (and the anti-symmetrized
+            # difference) is 0 -> alpha=0.5 -> the gated baseline reduces to the
+            # mean baseline at init. The gate learns to route away from 0.5.
+            gate_final = self.merge_gate[-1]
+            assert isinstance(gate_final, nn.Linear)
+            if self.extent_enabled:
+                # Extent path must stay differentiable at init. If we fully zero the
+                # gate's final layer, alpha=0.5 exactly but d(alpha)/d(extent)=0, so
+                # the leaf-extent head NEVER receives gradient during g-training and
+                # the extent collapses to a constant (= equal-averaging) — a
+                # permanent deadlock confirmed empirically. Fix: seed the final
+                # layer's EXTENT input columns (the last 2 hidden units are NOT
+                # extent-specific, so instead we keep the final weights tiny-random
+                # rather than zero). Tiny so alpha stays ~0.5 at init (mean warm
+                # start preserved to ~1e-3), but the extent gradient path is live
+                # from step 1. The STATE columns of the gate's FIRST layer dominate
+                # alpha once leaf extents are still ~0, so this does not bias routing.
+                nn.init.normal_(gate_final.weight, std=1e-3)
+                nn.init.zeros_(gate_final.bias)
+            else:
+                nn.init.zeros_(gate_final.weight)
+                nn.init.zeros_(gate_final.bias)
+        if self.merge_mlp is not None:
+            # Zero the MLP residual's final layer so merge = 0.5*(l+r) at init
+            # (warm-start = the working mean baseline); learns away from there.
+            mlp_final = self.merge_mlp[-1]
+            assert isinstance(mlp_final, nn.Linear)
+            nn.init.zeros_(mlp_final.weight)
+            nn.init.zeros_(mlp_final.bias)
         nn.init.ones_(self.leaf_norm.weight)
         nn.init.zeros_(self.leaf_norm.bias)
-        for m in self.score_head:
-            if isinstance(m, nn.Linear):
-                nn.init.zeros_(m.weight)
-                nn.init.zeros_(m.bias)
+        final = self.score_head[-1]
+        assert isinstance(final, nn.Linear)
+        nn.init.zeros_(final.weight)
+        nn.init.zeros_(final.bias)
+        if self.leaf_extent_head is not None:
+            # Seed the leaf extent head's final layer TINY-random (not zero) so leaf
+            # extents start slightly nonzero. With exactly-zero extents the gate's
+            # extent-input columns receive no gradient (0 input -> 0 weight grad),
+            # reinforcing the deadlock; a tiny nonzero extent keeps that path live.
+            # The extent never enters the score (predict_normalized slices it off),
+            # so a nonzero init does not perturb the doc-level warm start; it only
+            # gives the merge gate a usable extent signal to learn from.
+            le_final = self.leaf_extent_head[-1]
+            assert isinstance(le_final, nn.Linear)
+            nn.init.normal_(le_final.weight, std=1e-2)
+            nn.init.zeros_(le_final.bias)
 
     def _set_requires_grad(self, module: nn.Module, flag: bool) -> None:
         for p in module.parameters():
             p.requires_grad = bool(flag)
 
     def freeze_for_f_training(self) -> None:
-        """Train f-path params (leaf_fno + leaf_norm + score_head); freeze merge_fno."""
+        """Train f-path params (leaf_fno + leaf_norm + score_head); freeze g (merge_fno + gate)."""
         self._set_requires_grad(self.leaf_fno, True)
         self._set_requires_grad(self.leaf_norm, True)
         self._set_requires_grad(self.score_head, True)
         self._set_requires_grad(self.merge_fno, False)
+        if self.merge_gate is not None:
+            self._set_requires_grad(self.merge_gate, False)
+        if self.merge_mlp is not None:
+            self._set_requires_grad(self.merge_mlp, False)
+        # The leaf extent is part of the leaf STATE (emitted at encode time), so it
+        # trains with f; the merge-side extent head is frozen during f.
+        if self.leaf_extent_head is not None:
+            self._set_requires_grad(self.leaf_extent_head, True)
+        if self.extent_merge_head is not None:
+            self._set_requires_grad(self.extent_merge_head, False)
+        # A3 readout-merge offset is a merge param -> frozen during f.
+        self.readout_merge_offset.requires_grad = False
 
     def freeze_for_g_training(self) -> None:
-        """Train g-path params (merge_fno only); freeze leaf_fno, leaf_norm, score_head."""
+        """Train g-path params (merge_fno + gate + mlp); freeze leaf_fno, leaf_norm, score_head."""
         self._set_requires_grad(self.leaf_fno, False)
         self._set_requires_grad(self.leaf_norm, False)
         self._set_requires_grad(self.score_head, False)
         self._set_requires_grad(self.merge_fno, True)
+        if self.merge_gate is not None:
+            self._set_requires_grad(self.merge_gate, True)
+        if self.merge_mlp is not None:
+            self._set_requires_grad(self.merge_mlp, True)
+        # g learns BOTH how to combine extents (extent_merge_head) AND how to shape
+        # the leaf extents it consumes (leaf_extent_head) — if the leaf extent were
+        # frozen at its identity-init 0, every child would have extent 0 and the gate
+        # would see no extent signal (the collapse the A/B is built to detect). So
+        # the leaf extent head trains in g too.
+        if self.leaf_extent_head is not None:
+            self._set_requires_grad(self.leaf_extent_head, True)
+        if self.extent_merge_head is not None:
+            self._set_requires_grad(self.extent_merge_head, True)
+        # A3 readout-merge offset is a merge param -> trains with g.
+        self.readout_merge_offset.requires_grad = True
 
     def unfreeze_all(self) -> None:
         self._set_requires_grad(self, True)
@@ -419,15 +811,41 @@ def _forward_tree_states(
     states: Dict[str, torch.Tensor] = {}
     for idx, node_id in enumerate(leaf_ids):
         states[str(node_id)] = leaf_states[idx : idx + 1]
+    # Merge per LEVEL: every merge node at level L depends only on children at
+    # levels < L, so all merges at a level can be evaluated in ONE batched
+    # ``merge`` call. The trees are balanced (depth ~log(leaves)), so this turns
+    # O(nodes) sequential tiny GPU ops into O(depth) batched ops — identical math
+    # (merge is per-node independent given children), just vectorized.
+    levels = list(item.tree.levels or [])
+    for level in levels[1:]:
+        merge_nodes = []
+        lefts: List[torch.Tensor] = []
+        rights: List[torch.Tensor] = []
+        for node_id in level:
+            if str(node_id) in states:
+                continue
+            node = item.tree.get_node(node_id)
+            if node is None:
+                continue
+            merge_nodes.append(str(node_id))
+            lefts.append(states[str(node.left_child_id)])
+            rights.append(states[str(node.right_child_id or node.left_child_id)])
+        if not merge_nodes:
+            continue
+        merged = model.merge(torch.cat(lefts, dim=0), torch.cat(rights, dim=0))
+        for offset, node_id in enumerate(merge_nodes):
+            states[node_id] = merged[offset : offset + 1]
+    # Fallback for any node not covered by `levels` (defensive; preserves the
+    # original topological pass so behavior is unchanged on irregular trees).
     for node_id in item.node_order:
-        if node_id in states:
+        if str(node_id) in states:
             continue
         node = item.tree.get_node(node_id)
         if node is None:
             continue
         left = states[str(node.left_child_id)]
         right = states[str(node.right_child_id or node.left_child_id)]
-        states[node_id] = model.merge(left, right)
+        states[str(node_id)] = model.merge(left, right)
     return states
 
 
@@ -483,6 +901,7 @@ def _evaluate_split(
     device: torch.device,
     cfg: EmbeddingFNOTrainConfig,
     output_path: Optional[Path] = None,
+    full_tree_trace_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     model.eval()
     target_min = float(cfg.model.target_min)
@@ -495,9 +914,16 @@ def _evaluate_split(
     leaf_errors: List[float] = []
     merge_errors: List[float] = []
     root_errors: List[float] = []
+    full_tree_traces = []
 
     for item in items:
         states = _forward_tree_states(model, item, device=device)
+        trace = state_tree_skeleton_from_labeled_tree(
+            item.tree,
+            method_family="embedding_fno",
+            state_kind="embedding_fno_state",
+            split=item.split,
+        )
         expert_score = (item.tree.metadata or {}).get("expert_score_1_7")
         try:
             expert_value = float(expert_score)
@@ -507,12 +933,43 @@ def _evaluate_split(
             node = item.tree.get_node(node_id)
             if node is None:
                 continue
-            pred_norm = float(model.predict_normalized(states[node_id]).detach().cpu().reshape(()).item())
+            is_root = str(node_id) == str(item.root_node_id)
+            is_leaf = int(node.level) == 0
+            readout = str(getattr(cfg.model, "root_readout", "mean_root"))
+            if is_root and readout != "mean_root":
+                # Read the doc prediction from the LEAF score distribution (must
+                # MATCH the training-time root readout, else train/eval mismatch).
+                leaf_ids = list(item.tree.levels[0] if item.tree.levels else [])
+                leaf_states = torch.cat([states[str(lid)] for lid in leaf_ids], dim=0)
+                pred_norm = float(
+                    model.predict_root_topk(
+                        leaf_states,
+                        mode=readout,
+                        k=int(getattr(cfg.model, "root_readout_k", 1)),
+                        attn_temp=float(getattr(cfg.model, "root_readout_attn_temp", 0.2)),
+                    ).detach().cpu().reshape(()).item()
+                )
+            else:
+                pred_norm = float(model.predict_normalized(states[node_id]).detach().cpu().reshape(()).item())
             pred_raw = _denormalize_score(pred_norm, target_min=target_min, target_max=target_max)
             target_raw = float(node.score)
             error = abs(float(pred_raw) - float(target_raw))
-            is_root = str(node_id) == str(item.root_node_id)
-            is_leaf = int(node.level) == 0
+            proxy_loss = float((pred_raw - target_raw) ** 2)
+            oracle_kwargs = explicit_oracle_trace_kwargs(getattr(node, "metadata", {}) or {})
+            law_metadata = local_law_trace_metadata(
+                prediction=float(pred_raw),
+                proxy_target=float(target_raw),
+                proxy_loss=float(proxy_loss),
+                oracle_target=oracle_kwargs["oracle_target"],
+                oracle_loss=oracle_kwargs["oracle_loss"],
+                observed=bool(oracle_kwargs["observed"]),
+                sampled=bool(oracle_kwargs["sampled"]),
+                propensity=oracle_kwargs["propensity"],
+                node_weight=float(_node_weight(node, root_node_id=item.root_node_id, objective=cfg.objective)),
+                law_channel="root" if is_root else ("leaf" if is_leaf else "merge"),
+                state_kind="embedding_fno_state",
+                label_source=str(oracle_kwargs["label_source"] or "proxy_score"),
+            )
             node_errors.append(error)
             if is_root:
                 root_errors.append(error)
@@ -525,6 +982,22 @@ def _evaluate_split(
             else:
                 merge_errors.append(error)
             lo, hi = item.leaf_ranges.get(str(node_id), (0, 0))
+            update_state_tree_node(
+                trace,
+                str(node_id),
+                rendered=str(node.text or ""),
+                state=states[node_id].detach().cpu(),
+                metadata={
+                    "prediction": float(pred_raw),
+                    "readout_prediction": float(pred_raw),
+                    "prediction_normalized": float(pred_norm),
+                    "target": float(target_raw),
+                    "target_1_7": float(target_raw),
+                    **law_metadata,
+                    "leaf_range": [int(lo), int(hi)],
+                    "expert_score_1_7": expert_value if math.isfinite(expert_value) else None,
+                },
+            )
             rows.append(
                 {
                     "doc_id": item.tree.doc_id,
@@ -540,12 +1013,15 @@ def _evaluate_split(
                     "expert_score_1_7": expert_value if math.isfinite(expert_value) else None,
                 }
             )
+        full_tree_traces.append(trace)
 
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with output_path.open("w", encoding="utf-8") as handle:
             for row in rows:
                 handle.write(json.dumps(config_to_dict(row), sort_keys=True) + "\n")
+    if full_tree_trace_path is not None:
+        write_state_trees_jsonl(full_tree_traces, full_tree_trace_path)
 
     def _mae(values: Sequence[float]) -> Optional[float]:
         return float(np.mean(values)) if values else None
@@ -571,6 +1047,10 @@ def _evaluate_split(
         "root_teacher_report": root_report,
         "root_expert_report": expert_report,
         "prediction_path": str(output_path) if output_path is not None else None,
+        "full_tree_trace_path": (
+            str(full_tree_trace_path) if full_tree_trace_path is not None else None
+        ),
+        "full_tree_trace_metrics": state_tree_trace_metrics(full_tree_traces),
     }
 
 
@@ -614,6 +1094,11 @@ def fit_embedding_fno_node_regressor(
         head_hidden_dim=int(cfg.model.head_hidden_dim),
         target_min=float(cfg.model.target_min),
         target_max=float(cfg.model.target_max),
+        merge_mode=str(cfg.model.merge_mode),
+        merge_gate_hidden_dim=int(cfg.model.merge_gate_hidden_dim),
+        root_readout=str(cfg.model.root_readout),
+        root_readout_k=int(cfg.model.root_readout_k),
+        root_readout_attn_temp=float(cfg.model.root_readout_attn_temp),
     ).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -660,21 +1145,52 @@ def fit_embedding_fno_node_regressor(
     torch.save(model.state_dict(), output_dir / "embedding_fno_final.pt")
 
     metrics = {
-        "train": _evaluate_split(model, train_items, device=device, cfg=cfg, output_path=output_dir / "node_predictions_train.jsonl"),
-        "val": _evaluate_split(model, val_items, device=device, cfg=cfg, output_path=output_dir / "node_predictions_val.jsonl") if val_items else {},
-        "test": _evaluate_split(model, test_items, device=device, cfg=cfg, output_path=output_dir / "node_predictions_test.jsonl") if test_items else {},
+        "train": _evaluate_split(
+            model,
+            train_items,
+            device=device,
+            cfg=cfg,
+            output_path=output_dir / "node_predictions_train.jsonl",
+            full_tree_trace_path=output_dir / "full_tree_traces_train.jsonl",
+        ),
+        "val": _evaluate_split(
+            model,
+            val_items,
+            device=device,
+            cfg=cfg,
+            output_path=output_dir / "node_predictions_val.jsonl",
+            full_tree_trace_path=output_dir / "full_tree_traces_val.jsonl",
+        ) if val_items else {},
+        "test": _evaluate_split(
+            model,
+            test_items,
+            device=device,
+            cfg=cfg,
+            output_path=output_dir / "node_predictions_test.jsonl",
+            full_tree_trace_path=output_dir / "full_tree_traces_test.jsonl",
+        ) if test_items else {},
         "losses": losses,
         "best_epoch": int(best_epoch),
         "best_val_node_mae_1_7": None if not math.isfinite(best_val) else float(best_val),
         "training_time_seconds": float(time.time() - start),
     }
+    canonical_trace_path = output_dir / "full_tree_traces_test.jsonl"
+    if not test_items and val_items:
+        canonical_trace_path = output_dir / "full_tree_traces_val.jsonl"
+    if not test_items and not val_items:
+        canonical_trace_path = output_dir / "full_tree_traces_train.jsonl"
     artifacts = {
         "best_checkpoint": str(output_dir / "embedding_fno_best.pt"),
         "final_checkpoint": str(output_dir / "embedding_fno_final.pt"),
         "train_predictions": str(output_dir / "node_predictions_train.jsonl"),
         "val_predictions": str(output_dir / "node_predictions_val.jsonl"),
         "test_predictions": str(output_dir / "node_predictions_test.jsonl"),
+        "train_full_tree_traces": str(output_dir / "full_tree_traces_train.jsonl"),
+        "val_full_tree_traces": str(output_dir / "full_tree_traces_val.jsonl"),
+        "test_full_tree_traces": str(output_dir / "full_tree_traces_test.jsonl"),
+        "full_tree_traces_jsonl": str(canonical_trace_path),
         "metrics": str(output_dir / "embedding_fno_metrics.json"),
+        "full_tree_metrics_json": str(output_dir / "embedding_fno_metrics.json"),
     }
     result = EmbeddingFNOFitResult(
         output_dir=str(output_dir),

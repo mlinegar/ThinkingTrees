@@ -11,7 +11,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts import run_markov_optimization_tradeoff_pipeline as pipeline
-from scripts.markov_gpu_scheduler import (
+from src.experiments.scheduler import (
     SchedulerConfig,
     SchedulerItem,
     SchedulerRunError,

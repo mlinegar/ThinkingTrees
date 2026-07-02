@@ -11,13 +11,14 @@ import re
 import sys
 from typing import List, Optional, Sequence
 
-import requests
 
 # Add project root for direct script execution.
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.config.dspy_config import configure_dspy, create_vllm_lm
+from src.tasks.manifesto.openai_chat import OpenAIChatClient
+from src.config.dspy_config import configure_dspy, create_local_engine_lm
+from src.config.local_inference import resolve_local_inference_config
 from src.core.protocols import format_merge_input
 from src.tasks.manifesto.teacher_trace_eval import (
     TeacherTraceEvalConfig,
@@ -40,63 +41,6 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_MAIN_MODEL = "/mnt/data/models/nvidia/Qwen3.5-397B-A17B-NVFP4"
 DEFAULT_STUDENT_MODEL = "/mnt/data/models/AxionML/Qwen3.5-35B-A3B-NVFP4"
 _NUMERIC_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
-
-
-class OpenAIChatClient:
-    """Minimal OpenAI-compatible chat client."""
-
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        model: str,
-        api_key: str,
-        timeout_seconds: float = 120.0,
-        enable_thinking: bool = False,
-    ):
-        self.base_url = str(base_url).rstrip("/")
-        self.model = str(model)
-        self.api_key = str(api_key)
-        self.timeout_seconds = float(timeout_seconds)
-        self.enable_thinking = bool(enable_thinking)
-
-    def chat(
-        self,
-        *,
-        system: str,
-        user: str,
-        temperature: float,
-        max_tokens: int,
-    ) -> str:
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": float(temperature),
-            "max_tokens": int(max_tokens),
-            "chat_template_kwargs": {
-                "enable_thinking": bool(self.enable_thinking),
-            },
-        }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        response = requests.post(
-            f"{self.base_url}/chat/completions",
-            json=payload,
-            headers=headers,
-            timeout=self.timeout_seconds,
-        )
-        response.raise_for_status()
-        data = response.json()
-        choices = data.get("choices") or []
-        if not choices:
-            return ""
-        message = choices[0].get("message") or {}
-        return str(message.get("content") or "").strip()
 
 
 def _parse_score(text: str) -> Optional[float]:
@@ -255,7 +199,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         choices=["summarize_only", "score_only", "full"],
     )
     parser.add_argument("--predictions-path", type=Path, default=None)
-    parser.add_argument("--splits", nargs="*", default=["test"]) 
+    parser.add_argument("--splits", nargs="*", default=["test"])
 
     parser.add_argument("--dspy-module", type=Path, default=None, help="Optional unified_g_final.json path")
     parser.add_argument("--student-port", type=int, default=8000)
@@ -343,13 +287,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     predictions = None
     if args.mode in {"summarize_only", "full"}:
         if args.dspy_module is not None:
-            lm = create_vllm_lm(
-                port=int(args.student_port),
-                model=args.student_model,
-                temperature=float(args.student_temperature),
-                max_tokens=int(args.student_max_tokens),
-                cache=True,
+            local_inference = resolve_local_inference_config(
+                {
+                    "port": int(args.student_port),
+                    "model": args.student_model,
+                    "temperature": float(args.student_temperature),
+                    "max_tokens": int(args.student_max_tokens),
+                }
             )
+            lm = create_local_engine_lm(**local_inference.dspy_kwargs(cache=True))
             configure_dspy(lm=lm)
             g_module = UnifiedG()
             g_module.load(str(args.dspy_module))

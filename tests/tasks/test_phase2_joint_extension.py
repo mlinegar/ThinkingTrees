@@ -26,28 +26,24 @@ def test_combined_pipeline_summarize_uses_chunk_text(monkeypatch) -> None:
     chunks = [SimpleNamespace(text="alpha"), SimpleNamespace(text="beta")]
     seen_texts: list[str] = []
 
-    class FakeSummarizer:
-        def __call__(self, *, text: str, rubric: str) -> str:
-            seen_texts.append(text)
-            return f"S[{text}]"
-
-    class FakeMerger:
-        def __call__(self, *, summary1: str, summary2: str, rubric: str) -> str:
-            return f"{summary1}|{summary2}"
+    class FakeG:
+        def __call__(self, *, content: str, rubric: str) -> str:
+            seen_texts.append(content)
+            return f"S[{content}]"
 
     monkeypatch.setattr(mod, "chunk_for_ops", lambda text, max_chars, strategy: chunks)
 
     summary = mod._summarize(
         "ignored",
-        FakeSummarizer(),
-        FakeMerger(),
+        FakeG(),
         "joint-rubric",
         chunk_chars=24000,
         max_workers=2,
     )
 
-    assert seen_texts == ["alpha", "beta"]
-    assert summary == "S[alpha]|S[beta]"
+    assert seen_texts[:2] == ["alpha", "beta"]
+    assert "S[alpha]" in summary
+    assert "S[beta]" in summary
 
 
 def test_combined_pipeline_main_does_not_force_max_tokens(tmp_path: Path, monkeypatch) -> None:
@@ -61,14 +57,14 @@ def test_combined_pipeline_main_does_not_force_max_tokens(tmp_path: Path, monkey
         def get_all_ids(self) -> list[str]:
             return []
 
-    def _fake_create_vllm_lm(**kwargs):
+    def _fake_create_local_engine_lm(**kwargs):
         recorded_kwargs.update(kwargs)
         return SimpleNamespace(model="fake-model")
 
     empty_experts = pd.DataFrame(columns=["manifesto", "expert_mean"])
     empty_crosswalk = pd.DataFrame(columns=["manifesto", "party", "year"])
 
-    monkeypatch.setattr(mod, "create_vllm_lm", _fake_create_vllm_lm)
+    monkeypatch.setattr(mod, "create_local_engine_lm", _fake_create_local_engine_lm)
     monkeypatch.setattr(mod, "configure_dspy", lambda lm: None)
     monkeypatch.setattr(mod, "ManifestoDataset", FakeDataset)
     monkeypatch.setattr(mod, "load_benoit_expert_means", lambda dim: empty_experts.copy())
@@ -133,7 +129,7 @@ def test_joint_optimize_main_omits_max_tokens_by_default(tmp_path: Path, monkeyp
     mod = _load_script_module("phase2_joint_optimize.py")
     recorded_kwargs = {}
 
-    def _fake_create_vllm_lm(**kwargs):
+    def _fake_create_local_engine_lm(**kwargs):
         recorded_kwargs.update(kwargs)
         return SimpleNamespace(model="fake-model")
 
@@ -163,7 +159,7 @@ def test_joint_optimize_main_omits_max_tokens_by_default(tmp_path: Path, monkeyp
         def __init__(self, use_cot: bool = False) -> None:
             self.use_cot = use_cot
 
-    monkeypatch.setattr(mod, "create_vllm_lm", _fake_create_vllm_lm)
+    monkeypatch.setattr(mod, "create_local_engine_lm", _fake_create_local_engine_lm)
     monkeypatch.setattr(mod, "configure_dspy", lambda lm: None)
     monkeypatch.setattr(mod, "_load_test_examples", _fake_test_examples)
     monkeypatch.setattr(mod, "load_joint_train_pairs", lambda *args, **kwargs: train_rows.copy())

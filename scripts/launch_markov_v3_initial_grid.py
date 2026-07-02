@@ -17,7 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.structured_config import load_structured_config, write_structured_config
+from src.experiments.structured_config import load_structured_config, write_structured_config
 
 
 PIPELINE_SCRIPT = REPO_ROOT / "scripts" / "run_markov_optimization_tradeoff_pipeline.py"

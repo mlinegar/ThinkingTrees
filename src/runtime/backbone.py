@@ -53,6 +53,7 @@ class BackboneAdapter:
 
         self.config = replace(config, model=resolved_model)
         self._engine_name = self._infer_engine(self.config.base_url, self.config.engine)
+        self.supports_logprobs = (not bool(mock)) and self._engine_name in {"vllm", "sglang", "openai", "custom_http"}
         self.engine = build_inference_engine(
             self._engine_name,
             surface=EngineSurface.CHAT_OPENAI,
@@ -107,5 +108,5 @@ class BackboneAdapter:
             prompt_tokens=model_response.prompt_tokens,
             completion_tokens=model_response.completion_tokens,
             latency_ms=latency_ms,
-            raw=None,
+            raw=model_response.raw,
         )

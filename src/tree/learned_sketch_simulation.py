@@ -1,24 +1,22 @@
-"""Compatibility wrapper for the TreePO cardinality recovery module."""
+"""Compatibility wrapper for the cardinality recovery module.
+
+The cardinality simulation now lives in ThinkingTrees
+(``src.tree.cardinality_recovery``), mirroring how the Markov generators are
+owned here rather than in the minimal ``treepo`` package. The HLL primitives
+come from ``treepo.common`` and the vendored ``src.tree.hll``.
+"""
 
 from __future__ import annotations
 
-from pathlib import Path
-import sys
-
-
-TREEPO_SRC = Path(__file__).resolve().parents[2] / "treepo" / "src"
-if str(TREEPO_SRC) not in sys.path:
-    sys.path.insert(0, str(TREEPO_SRC))
-
 from treepo.common import VALID_AUDIT_POLICIES, VALID_SCHEDULES, audit_sample_count
-from treepo.hll import (
+from src.tree.hll import (
     HLLConfig,
     HyperLogLogSketch,
     hll_relative_standard_error,
     match_hll_precision_for_bits,
     reduce_hll_sketches,
 )
-from treepo.bench.cardinality_recovery import (  # noqa: F401,F403
+from src.tree.cardinality_recovery import (  # noqa: F401,F403
     APPROX_AUDITED_EVIDENCE,
     DEFAULT_REGULARIZER_WEIGHT,
     DEFAULT_SUMMARY_SHARE,

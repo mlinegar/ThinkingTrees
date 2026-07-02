@@ -41,7 +41,8 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from src.config.dspy_config import configure_dspy, create_vllm_lm, create_vllm_lm_multi
+from src.config.dspy_config import configure_dspy, create_local_engine_lm
+from src.config.local_inference import resolve_local_inference_config
 from src.tasks.manifesto.corpus_metrics import compute_corpus_pearson_r
 from src.tasks.manifesto.dimensions import BENOIT_DIMENSIONS, PolicyDimension
 from src.tasks.manifesto.expert_benchmarks import (
@@ -83,7 +84,7 @@ def parse_args() -> argparse.Namespace:
         "--max-tokens",
         type=int,
         default=None,
-        help="Optional explicit generation cap. Default uses create_vllm_lm() auto-sizing.",
+        help="Optional explicit generation cap. Default uses local-engine LM auto-sizing.",
     )
     p.add_argument("--output-dir", type=Path,
                    default=project_root / "outputs" / "phase2" /
@@ -96,7 +97,7 @@ def _load_test_examples(dim: PolicyDimension) -> pd.DataFrame:
     summaries = load_benoit_masked_summaries(dimension=dim)
     experts = load_benoit_expert_means(dim)
     lookup = {
-        str(r.manifesto).removesuffix(".txt"): float(r.expert_mean)
+        str(r.manifesto).removesuffix(".txt"): float(r.expert_mean_1_7)
         for r in experts.itertuples()
     }
     summaries["label"] = summaries["manifesto_stem"].map(lookup)
@@ -227,19 +228,9 @@ def main() -> int:
     trainset = [_example(r) for r in train_df.itertuples()]
     devset = [_example(r) for r in dev_df.itertuples()]
 
-    lm_kwargs = {
-        "model": args.model,
-        "temperature": args.temperature,
-        "cache": True,
-    }
-    if args.max_tokens is not None:
-        lm_kwargs["max_tokens"] = args.max_tokens
-    if args.ports:
-        logger.info("Load-balancing LM across ports %s (T=%g)", args.ports, args.temperature)
-        lm = create_vllm_lm_multi(ports=args.ports, **lm_kwargs)
-    else:
-        logger.info("Configuring LM on port %d (T=%g)", args.port, args.temperature)
-        lm = create_vllm_lm(port=args.port, **lm_kwargs)
+    local_inference = resolve_local_inference_config(args)
+    logger.info("Configuring LM on %s port(s) %s (T=%g)", local_inference.engine, list(local_inference.ports), args.temperature)
+    lm = create_local_engine_lm(**local_inference.dspy_kwargs(cache=True))
     configure_dspy(lm=lm)
 
     baseline = JointDimensionScorer(use_cot=False)

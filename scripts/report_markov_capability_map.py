@@ -465,7 +465,7 @@ def _selected_row_payload(
         "feature_mode": str(row.feature_mode),
         "effective_data_seed": int(row.effective_data_seed),
         "effective_model_seed": int(row.effective_model_seed),
-        "selected_lambda_local": float(row.local_law_weight),
+        "selected_local_law_weight": float(row.local_law_weight),
         "selected_lambda_sched": float(row.schedule_consistency_weight),
         "condition": str(condition),
         "val_selection_metric_name": str(row.val_selection_metric_name),
@@ -482,7 +482,7 @@ def _selected_row_payload(
         "test_merge_mae_n": float(row.test_merge_mae_n),
         "test_spread_n": float(row.test_spread_n),
         "test_root_mae_n": float(row.test_root_mae_n),
-        "baseline_lambda_local": float(baseline.local_law_weight),
+        "baseline_local_law_weight": float(baseline.local_law_weight),
         "baseline_lambda_sched": float(baseline.schedule_consistency_weight),
         "baseline_test_objective_for_report": float(baseline.test_objective_for_report),
         "baseline_test_theorem_score_n": float(baseline.test_theorem_score_n),
@@ -577,7 +577,9 @@ def _aggregate_selected_rows(
                 "selection_metric": selection_metric_names[0]
                 if len(selection_metric_names) == 1
                 else "mixed",
-                "selected_lambda_local": float(_reduce([row["selected_lambda_local"] for row in group], agg=agg)),
+                "selected_local_law_weight": float(
+                    _reduce([row["selected_local_law_weight"] for row in group], agg=agg)
+                ),
                 "selected_lambda_sched": float(_reduce([row["selected_lambda_sched"] for row in group], agg=agg)),
                 "val_selection_metric_value": float(
                     _reduce([row["val_selection_metric_value"] for row in group], agg=agg)
@@ -1061,7 +1063,7 @@ def main() -> int:
         f"- Theorem score: `leaf_mae + merge_mae + 0.25 * merge_order_sensitivity`",
         (
             "- Journal claim rule: theorem gain >= 10%, sensitivity gain >= 10%, root ratio <= 1.05 "
-            "relative to the matched `lambda_local=0` baseline."
+            "relative to the matched `local_law_weight=0` baseline."
         ),
         "",
         "## Notes",

@@ -22,6 +22,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from src.experiments import (
+    ARTIFACT_BEST_CHECKPOINT_PATH,
+    ARTIFACT_FINAL_CHECKPOINT_PATH,
+    ARTIFACT_METRICS_JSON,
+    ARTIFACT_PREDICTIONS_CSV,
+    ARTIFACT_REPRODUCIBILITY_MANIFEST_JSON,
+    ARTIFACT_SUMMARY_JSON,
+    ARTIFACT_TRAINING_RESULT_JSON,
     ExperimentSpec,
     ProgressSnapshot,
     ResultRow,
@@ -30,12 +37,18 @@ from src.experiments import (
     canonical_artifact_refs_from_paths,
     default_phase_specs,
     merge_artifacts,
+    metadata_with_roles,
     method_ref_from_parts,
-    result_rows_from_scalar_metrics,
-    supervision_ref_from_treepo_supervision_spec,
-    control_ref_from_ctreepo_local_law_config,
+    oracle_ref,
+    prefixed_artifact_key,
+    state_model_role_ref,
     write_experiment_manifest,
     write_experiment_status,
+)
+from src.experiments.normalization import (
+    control_ref_from_ctreepo_local_law_config,
+    result_rows_from_scalar_metrics,
+    supervision_ref_from_treepo_supervision_spec,
 )
 from src.training.reproducibility import (
     configure_reproducibility,
@@ -53,6 +66,26 @@ from src.training.search_trace import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
+
+
+def _operator_method_metadata(family: str, *, task: str) -> Dict[str, Any]:
+    return metadata_with_roles(
+        {"task": str(task), "method_family": str(family)},
+        roles={
+            "scorer": {
+                "role": "scorer",
+                "surface": "native",
+                "engine": "pytorch",
+                "model": str(family),
+            },
+            "state_model": state_model_role_ref(
+                engine="pytorch",
+                model=str(family),
+                execution_mode="training",
+            ),
+        },
+        oracle=oracle_ref(kind="training_labels", source=str(task)),
+    )
 
 
 def _read_json_if_exists(path: Path) -> Dict[str, Any] | None:
@@ -141,9 +174,13 @@ def _detect_artifacts(label: str, run_dir: Path) -> Dict[str, Any]:
         return {
             "primary_model_path": str(best_path) if best_path.exists() else (str(final_path) if final_path.exists() else None),
             "best_model_path": str(best_path) if best_path.exists() else None,
+            ARTIFACT_BEST_CHECKPOINT_PATH: str(best_path) if best_path.exists() else None,
             "final_model_path": str(final_path) if final_path.exists() else None,
+            ARTIFACT_FINAL_CHECKPOINT_PATH: str(final_path) if final_path.exists() else None,
             "training_result_path": str(training_result) if training_result.exists() else None,
+            ARTIFACT_TRAINING_RESULT_JSON: str(training_result) if training_result.exists() else None,
             "reproducibility_manifest_path": str(repro_manifest) if repro_manifest.exists() else None,
+            ARTIFACT_REPRODUCIBILITY_MANIFEST_JSON: str(repro_manifest) if repro_manifest.exists() else None,
             "local_law_summary": local_law_summary,
             "compositional_learning_problem": compositional_learning_problem,
         }
@@ -155,9 +192,13 @@ def _detect_artifacts(label: str, run_dir: Path) -> Dict[str, Any]:
         return {
             "primary_model_path": str(best_path) if best_path.exists() else None,
             "best_model_path": str(best_path) if best_path.exists() else None,
+            ARTIFACT_BEST_CHECKPOINT_PATH: str(best_path) if best_path.exists() else None,
             "metrics_path": str(metrics_path) if metrics_path.exists() else None,
+            ARTIFACT_METRICS_JSON: str(metrics_path) if metrics_path.exists() else None,
             "predictions_path": str(predictions_path) if predictions_path.exists() else None,
+            ARTIFACT_PREDICTIONS_CSV: str(predictions_path) if predictions_path.exists() else None,
             "reproducibility_manifest_path": str(repro_manifest) if repro_manifest.exists() else None,
+            ARTIFACT_REPRODUCIBILITY_MANIFEST_JSON: str(repro_manifest) if repro_manifest.exists() else None,
         }
     return {
         "primary_model_path": None,
@@ -280,6 +321,7 @@ def _treepo_experiment_spec(
                 adapter="treepo_training",
                 supervision=supervision_ref,
                 control_ref=control_ref,
+                metadata=_operator_method_metadata("ctreepo", task=str(args.task)),
             )
         )
     if args.which in {"both", "mergeable_sketch"}:
@@ -288,6 +330,7 @@ def _treepo_experiment_spec(
                 family="mergeable_sketch",
                 variant="embedding_sketch_training",
                 adapter="treepo_training",
+                metadata=_operator_method_metadata("mergeable_sketch", task=str(args.task)),
             )
         )
     return ExperimentSpec.create(
@@ -330,9 +373,9 @@ def _write_treepo_status(
             pending_items=int(pending_items),
             percent_complete=percent_complete,
             artifact_targets=(
-                "summary_json",
-                "ctreepo_training_result_json",
-                "mergeable_metrics_json",
+                ARTIFACT_SUMMARY_JSON,
+                prefixed_artifact_key("ctreepo", ARTIFACT_TRAINING_RESULT_JSON),
+                prefixed_artifact_key("mergeable", ARTIFACT_METRICS_JSON),
                 "search_spec_json",
                 "search_results_json",
             ),
@@ -343,11 +386,11 @@ def _write_treepo_status(
 
 def _treepo_artifacts(output_dir: Path, summary: Mapping[str, Any]) -> list[object]:
     path_map: Dict[str, str] = {
-        "summary_json": str(output_dir / "summary.json"),
+        ARTIFACT_SUMMARY_JSON: str(output_dir / "summary.json"),
     }
     top_level_repro = output_dir / "reproducibility_manifest.json"
     if top_level_repro.exists():
-        path_map["reproducibility_manifest_json"] = str(top_level_repro)
+        path_map[ARTIFACT_REPRODUCIBILITY_MANIFEST_JSON] = str(top_level_repro)
     for search_name in ("search_spec.json", "search_results.json"):
         candidate = output_dir / search_name
         if candidate.exists():
@@ -362,21 +405,39 @@ def _treepo_artifacts(output_dir: Path, summary: Mapping[str, Any]) -> list[obje
                 "best_model_path",
                 "final_model_path",
                 "training_result_path",
+                ARTIFACT_TRAINING_RESULT_JSON,
+                ARTIFACT_BEST_CHECKPOINT_PATH,
+                ARTIFACT_FINAL_CHECKPOINT_PATH,
                 "reproducibility_manifest_path",
+                ARTIFACT_REPRODUCIBILITY_MANIFEST_JSON,
             ):
                 value = str(artifacts.get(key, "") or "").strip()
                 if value:
                     path_map[f"ctreepo_{key}"] = value
+                    if key == ARTIFACT_TRAINING_RESULT_JSON:
+                        path_map[prefixed_artifact_key("ctreepo", ARTIFACT_TRAINING_RESULT_JSON)] = value
+                    if key == ARTIFACT_REPRODUCIBILITY_MANIFEST_JSON:
+                        path_map[prefixed_artifact_key("ctreepo", ARTIFACT_REPRODUCIBILITY_MANIFEST_JSON)] = value
         elif label == "mergeable_sketch":
             for key in (
                 "metrics_path",
+                ARTIFACT_METRICS_JSON,
                 "predictions_path",
+                ARTIFACT_PREDICTIONS_CSV,
                 "best_model_path",
+                ARTIFACT_BEST_CHECKPOINT_PATH,
                 "reproducibility_manifest_path",
+                ARTIFACT_REPRODUCIBILITY_MANIFEST_JSON,
             ):
                 value = str(artifacts.get(key, "") or "").strip()
                 if value:
                     path_map[f"mergeable_{key}"] = value
+                    if key == ARTIFACT_METRICS_JSON:
+                        path_map[prefixed_artifact_key("mergeable", ARTIFACT_METRICS_JSON)] = value
+                    if key == ARTIFACT_PREDICTIONS_CSV:
+                        path_map[prefixed_artifact_key("mergeable", ARTIFACT_PREDICTIONS_CSV)] = value
+                    if key == ARTIFACT_REPRODUCIBILITY_MANIFEST_JSON:
+                        path_map[prefixed_artifact_key("mergeable", ARTIFACT_REPRODUCIBILITY_MANIFEST_JSON)] = value
     return canonical_artifact_refs_from_paths(path_map, phase_id="aggregate", required=False)
 
 
@@ -584,6 +645,10 @@ def _treepo_result_rows(
             adapter="treepo_training",
             supervision=supervision_ref if family == "ctreepo" else None,
             control_ref=control_ref if family == "ctreepo" else None,
+            metadata=_operator_method_metadata(
+                family,
+                task=str(summary.get("task", "manifesto_rile") or "manifesto_rile"),
+            ),
         )
         rows.append(
             {

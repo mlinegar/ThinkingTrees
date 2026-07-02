@@ -125,15 +125,19 @@ class ManifestoRILETask(ScoringTask):
         temperature: float = 0.0,
         strict_parse: bool = True,
     ) -> Callable[[str], float]:
-        from src.config.dspy_config import configure_dspy, create_vllm_lm
+        from src.config.dspy_config import configure_dspy, create_local_engine_lm
+        from src.config.local_inference import resolve_local_inference_config
 
         if port is not None or model:
-            scorer_lm = create_vllm_lm(
-                port=int(port) if port is not None else 8000,
-                model=model,
-                temperature=float(temperature),
-                max_tokens=max(1, int(max_tokens)),
+            local_inference = resolve_local_inference_config(
+                {
+                    "port": int(port) if port is not None else None,
+                    "model": model,
+                    "temperature": float(temperature),
+                    "max_tokens": max(1, int(max_tokens)),
+                }
             )
+            scorer_lm = create_local_engine_lm(**local_inference.dspy_kwargs())
             configure_dspy(lm=scorer_lm)
 
         scorer = RILEScorer(

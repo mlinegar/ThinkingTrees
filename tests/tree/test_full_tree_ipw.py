@@ -29,6 +29,7 @@ def _node(
     propensity: float,
     is_root: bool = False,
 ) -> FullTreeNodeRecord:
+    oracle_loss = float((float(prediction) - float(target)) ** 2)
     return FullTreeNodeRecord(
         doc_id=doc_id,
         node_id=node_id,
@@ -39,6 +40,7 @@ def _node(
         target=target,
         sampled=sampled,
         propensity=propensity,
+        oracle_loss=oracle_loss,
     )
 
 
@@ -241,6 +243,7 @@ def test_summary_reports_document_vs_root_node_gap() -> None:
             sampled=True,
             propensity=1.0,
             is_root=True,
+            oracle_loss=0.01,
         )
     ]
     document_records = [

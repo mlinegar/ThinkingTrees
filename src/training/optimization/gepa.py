@@ -28,6 +28,30 @@ except Exception:  # pragma: no cover
     ScoreWithFeedback = None  # type: ignore[assignment]
 
 
+# ---------------------------------------------------------------------------
+# Strong GEPA defaults — single source of truth.
+#
+# These are the kwargs the paper relies on for every GEPA optimization run.
+# Both ``OptimizationConfig.gepa_kwargs`` and
+# ``DSPyFamilyConfig.gepa_kwargs`` use this dict as their field-default
+# factory, so the two configs cannot drift apart. The official treepo repo's
+# drift test (~/treepo tests/methods/test_canonical_defaults_drift.py) pins
+# ``canonical_defaults.GEPA_STRONG_DEFAULTS`` against this dict.
+#
+# Kwargs that change per-run (metric, reflection_lm, auto/max_metric_calls,
+# num_threads) are layered on top imperatively by the optimizer builder.
+# ---------------------------------------------------------------------------
+GEPA_STRONG_DEFAULT_KWARGS: Dict[str, Any] = {
+    "use_merge": True,
+    "max_merge_invocations": 5,
+    "track_stats": True,
+    "add_format_failure_as_feedback": True,
+    "reflection_minibatch_size": 8,
+    "use_wandb": False,
+    "use_mlflow": False,
+}
+
+
 @register_optimizer("gepa")
 class GEPAOptimizer(AbstractOptimizer):
     """
@@ -214,24 +238,30 @@ class GEPAOptimizer(AbstractOptimizer):
         )
 
     def _build_gepa_kwargs(self, metric: Optional[Callable]) -> Dict[str, Any]:
-        """Build kwargs for GEPA constructor."""
-        kwargs: Dict[str, Any] = {
-            'metric': metric,
-            'reflection_lm': dspy.settings.lm,  # Use current LM for reflection
-            'use_wandb': False,
-            'use_mlflow': False,
-        }
+        """Build kwargs for GEPA constructor.
+
+        Seeds from ``GEPA_STRONG_DEFAULT_KWARGS`` (the single source of truth
+        for paper-canonical GEPA kwargs) and layers per-call / per-config
+        overrides on top. The seed keeps strong defaults consistent across
+        ``OptimizationConfig`` and ``DSPyFamilyConfig`` users.
+        """
+        kwargs: Dict[str, Any] = dict(GEPA_STRONG_DEFAULT_KWARGS)
+        kwargs['metric'] = metric
+        kwargs['reflection_lm'] = dspy.settings.lm  # bound at call time
 
         if self.config is None:
-            # Default configuration
-            kwargs['auto'] = 'medium'
-            kwargs['num_threads'] = 16
-            kwargs['add_format_failure_as_feedback'] = True
+            kwargs['auto'] = 'heavy'  # paper canonical (was 'medium')
+            kwargs['num_threads'] = GEPA_STRONG_DEFAULT_KWARGS.get('num_threads', 64) if 'num_threads' in GEPA_STRONG_DEFAULT_KWARGS else 64
             return kwargs
 
-        # Configure from config
-        kwargs['use_merge'] = getattr(self.config, 'enable_merge', True)
-        kwargs['max_merge_invocations'] = getattr(self.config, 'max_merge_invocations', 5)
+        # Per-field overrides from OptimizationConfig (config wins over strong defaults).
+        kwargs['use_merge'] = getattr(self.config, 'enable_merge', kwargs['use_merge'])
+        kwargs['max_merge_invocations'] = getattr(self.config, 'max_merge_invocations', kwargs['max_merge_invocations'])
+        kwargs['track_stats'] = getattr(self.config, 'track_stats', kwargs['track_stats'])
+        kwargs['add_format_failure_as_feedback'] = bool(
+            getattr(self.config, 'gepa_add_format_failure_as_feedback', kwargs['add_format_failure_as_feedback'])
+        )
+
         requested_threads = max(1, int(getattr(self.config, 'num_threads', 64)))
         raw_thread_cap = getattr(self.config, 'gepa_max_threads', None)
         if raw_thread_cap is None:
@@ -245,10 +275,6 @@ class GEPAOptimizer(AbstractOptimizer):
                     requested_threads,
                     kwargs['num_threads'],
                 )
-        kwargs['track_stats'] = getattr(self.config, 'track_stats', True)
-        kwargs['add_format_failure_as_feedback'] = bool(
-            getattr(self.config, 'gepa_add_format_failure_as_feedback', True)
-        )
 
         # Log directory
         log_dir = getattr(self.config, 'log_dir', None)

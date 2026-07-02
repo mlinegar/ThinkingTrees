@@ -128,7 +128,6 @@ TREE_REFERENCE_OVERRIDE_KEYS: tuple[str, ...] = (
     "tree_theorem_count_ordinal_weight",
     "tree_theorem_count_scalar_aux_weight",
     "tree_theorem_count_threshold_balance",
-    "tree_score_merge_mode",
     "tree_phi_compose_weight",
     "tree_phi_contrastive_weight",
     "tree_phi_alignment_loss",
@@ -201,13 +200,23 @@ TREE_REFERENCE_DENY_KEYS: frozenset[str] = frozenset({
 
 _COMMON_FACTORIZED_SKETCH: dict[str, Any] = {
     "n_epochs": 52,
-    "batch_size": 64,
+    "batch_size": 128,
     "lr": 5e-4,
     "weight_decay": 0.0,
+    # Conservative defaults (reverted 2026-05-03 after the wide-heads
+    # experiment was empirically refuted). The hypothesis was that head
+    # capacity was the bottleneck for the ~2.14 zero-merge root_mae floor on
+    # `recoverable_v5_t2048`. Tested by bumping to (state=2048, hid=2048,
+    # merge=4096): the floor moved 2.14 -> 2.13 (noise) and SEVERAL
+    # composition cells got worse (full100 @ leaf=256 went 1.06 -> 3.72,
+    # converging to a bad local min by best_epoch=10). So head capacity is
+    # NOT the bottleneck for that floor; the limit is somewhere else
+    # (FNO encoder width, leaf-pooling info loss, or DGP irreducible noise).
+    # See `outputs/markov_t2048_full_grid_wide_heads_20260503_003820/` for
+    # the experiment that refuted it.
     "state_dim": 128,
     "hidden_dim": 512,
     "fixed_leaf_tokens": 16,
-    "task_objective_weight": 1.0,
     "local_law_weight": 0.8,
     "c1_relative_weight": 1.0,
     "c2_relative_weight": 1.0,
@@ -379,10 +388,79 @@ TREE_REFERENCE_PRESET_CONFIGS[UNIFIED_G_FULL_LOCAL_LAWS_PRESET] = {
     **TREE_REFERENCE_PRESET_CONFIGS[SUPERVISION_RECOVERY_COMMON_TREE_REFERENCE_PRESET],
     "n_epochs": 40,
     "tree_model_version": "unified_g",
-    "tree_score_merge_mode": "exact_projected_sketch",
     "tree_stage1_epochs": 10,
     "tree_stage2_epochs": 30,
 }
+
+# Small-model variant of unified_g_full_local_laws_v1: half state/hidden/fno
+# dimensions to test whether per-node forward compute scales linearly with
+# model size in the long-merge-chain regime (recoverable_v5_t2048 leaf=16).
+UNIFIED_G_FULL_LOCAL_LAWS_SMALL_PRESET = "unified_g_full_local_laws_small_v1"
+TREE_REFERENCE_PRESET_CONFIGS[UNIFIED_G_FULL_LOCAL_LAWS_SMALL_PRESET] = {
+    **TREE_REFERENCE_PRESET_CONFIGS[UNIFIED_G_FULL_LOCAL_LAWS_PRESET],
+    "state_dim": 64,
+    "hidden_dim": 256,
+    "tree_leaf_fno_width": 64,
+    "tree_leaf_fno_n_modes": 4,
+    "tree_leaf_fno_n_layers": 2,
+}
+
+# Single-stage variant of unified_g_full_local_laws_v1: skip stage1 entirely
+# (stage1 was burning ~47 min/cell at leaf=16 in the t2048 sweep, vs ~14 min
+# for stage2). Tests whether stage1 theorem-feature alignment is necessary
+# for composition recovery or whether stage2's end-to-end training suffices.
+UNIFIED_G_FULL_LOCAL_LAWS_SINGLE_STAGE_PRESET = "unified_g_full_local_laws_single_stage_v1"
+TREE_REFERENCE_PRESET_CONFIGS[UNIFIED_G_FULL_LOCAL_LAWS_SINGLE_STAGE_PRESET] = {
+    **TREE_REFERENCE_PRESET_CONFIGS[UNIFIED_G_FULL_LOCAL_LAWS_PRESET],
+    "tree_training_schedule": "single_stage",
+    "tree_stage1_epochs": 0,
+    "tree_stage2_epochs": 0,
+    "n_epochs": 40,
+}
+
+# Wide-head variant of unified_g_full_local_laws_v1: 2048 hidden dim for the
+# count head (f), 4096 hidden dim for the merge head (g). Tested 2026-05-03
+# and refuted - did not crack the ~2.14 root_mae floor at zero merges and
+# regressed several composition cells. Kept for explicit ablations only.
+# See `feedback_head_capacity_was_not_the_bottleneck.md`.
+UNIFIED_G_FULL_LOCAL_LAWS_WIDE_HEADS_PRESET = "unified_g_full_local_laws_wide_heads_v1"
+TREE_REFERENCE_PRESET_CONFIGS[UNIFIED_G_FULL_LOCAL_LAWS_WIDE_HEADS_PRESET] = {
+    **TREE_REFERENCE_PRESET_CONFIGS[UNIFIED_G_FULL_LOCAL_LAWS_PRESET],
+    "hidden_dim": 2048,
+    "tree_merge_hidden_dim": 4096,
+}
+
+# FNO modes ablation presets (2026-05-03). The leaf encoder uses an FNO
+# with `tree_leaf_fno_n_modes` Fourier modes. On `recoverable_v5_t2048`
+# with mean segment length ~128 tokens, the boundary signal has period
+# ~128 -> Nyquist mode index = 16. The default n_modes=8 is sub-Nyquist.
+# These presets test whether bumping n_modes cracks the ~2.14 zero-merge
+# root_mae floor on t2048.
+for _modes in (16, 32, 64, 128, 256, 512, 1024, 2048):
+    _name = f"unified_g_full_local_laws_modes{_modes}_v1"
+    TREE_REFERENCE_PRESET_CONFIGS[_name] = {
+        **TREE_REFERENCE_PRESET_CONFIGS[UNIFIED_G_FULL_LOCAL_LAWS_PRESET],
+        "tree_leaf_fno_n_modes": _modes,
+    }
+del _modes, _name
+
+# Sum-pool variants of the unified-g and modes-ablation presets (2026-05-03).
+# Theory: for boundary counting, sum-pool preserves count-additivity (each
+# per-token boundary signal contributes additively), while mean-pool dilutes
+# by L. The ~1.08 floor at modes=1024 (full Nyquist) suggests the bottleneck
+# is downstream of the FNO; sum-pool tests the pooling step directly.
+TREE_REFERENCE_PRESET_CONFIGS["unified_g_full_local_laws_sumpool_v1"] = {
+    **TREE_REFERENCE_PRESET_CONFIGS[UNIFIED_G_FULL_LOCAL_LAWS_PRESET],
+    "tree_leaf_fno_pooling": "sum",
+}
+for _modes in (32, 128, 512, 1024):
+    _name = f"unified_g_full_local_laws_modes{_modes}_sumpool_v1"
+    TREE_REFERENCE_PRESET_CONFIGS[_name] = {
+        **TREE_REFERENCE_PRESET_CONFIGS[UNIFIED_G_FULL_LOCAL_LAWS_PRESET],
+        "tree_leaf_fno_n_modes": _modes,
+        "tree_leaf_fno_pooling": "sum",
+    }
+del _modes, _name
 
 # Stable alias for the current comparison-grid default tree surface.
 # This decouples the public comparison-grid profile from the underlying

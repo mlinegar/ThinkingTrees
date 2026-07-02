@@ -100,15 +100,14 @@ for chunk_size in "${LLM_CHUNK_SIZES_ARR[@]}"; do
       --concurrent-docs 1 \
       --concurrent-requests 4 \
       --batch-size 4 \
-      --dspy-temperature 0.0 \
-      --dspy-max-tokens 128 \
+      --temperature 0.0 \
+      --max-tokens 128 \
       --no-baseline \
       --no-use-published-modules \
       --output "${OUTPUT_ROOT}/llm_baseline_chunk_${chunk_size}.json"
 done
 
-if [[ -f "${PROJECT_ROOT}/outputs/latest/manifesto_rile/trained_modules/leaf_summarizer_final.json" \
-   && -f "${PROJECT_ROOT}/outputs/latest/manifesto_rile/trained_modules/merge_summarizer_final.json" ]]; then
+if [[ -f "${PROJECT_ROOT}/outputs/latest/manifesto_rile/trained_modules/unified_g_final.json" ]]; then
   for chunk_size in "${LLM_CHUNK_SIZES_ARR[@]}"; do
     run_step \
       "llm_published_chunk_${chunk_size}" \
@@ -120,8 +119,8 @@ if [[ -f "${PROJECT_ROOT}/outputs/latest/manifesto_rile/trained_modules/leaf_sum
         --concurrent-docs 1 \
         --concurrent-requests 4 \
         --batch-size 4 \
-        --dspy-temperature 0.0 \
-        --dspy-max-tokens 128 \
+        --temperature 0.0 \
+        --max-tokens 128 \
         --no-baseline \
         --use-published-modules \
         --output "${OUTPUT_ROOT}/llm_published_chunk_${chunk_size}.json"

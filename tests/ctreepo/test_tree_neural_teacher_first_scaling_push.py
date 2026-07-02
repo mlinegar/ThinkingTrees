@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 
-from scripts import run_tree_neural_full_doc_mig as mig
+from src.ctreepo.sim.core.tree_neural_facade import JobSpec, RunConfigSpec
 from scripts import run_tree_neural_teacher_first_push as tfpush
 from scripts import run_tree_neural_teacher_first_scaling_push as scaling
 
@@ -380,7 +380,7 @@ def test_async_scaling_finalizes_grouped_worker_from_summary_file(
     )
 
     def _fake_make_stage1_config(_count_args, *, train_doc_count, variant):
-        return mig._RunConfigSpec(
+        return RunConfigSpec(
             label=str(variant["label"]),
             state_dim=8,
             hidden_dim=16,
@@ -390,15 +390,15 @@ def test_async_scaling_finalizes_grouped_worker_from_summary_file(
             weight_decay=0.0,
         )
 
-    def _fake_stage1_job(label: str) -> mig._JobSpec:
-        return mig._JobSpec(
+    def _fake_stage1_job(label: str) -> JobSpec:
+        return JobSpec(
             family="tree_neural",
             train_doc_count=128,
             benchmark="smoke",
             hardness_grid="",
             grid_cell_ids=(),
             seeds=(0,),
-            config=mig._RunConfigSpec(
+            config=RunConfigSpec(
                 label=label,
                 state_dim=8,
                 hidden_dim=16,
@@ -414,15 +414,15 @@ def test_async_scaling_finalizes_grouped_worker_from_summary_file(
             selection_metric="teacher_first_total_bound",
         )
 
-    def _fake_stage2_job(label: str) -> mig._JobSpec:
-        return mig._JobSpec(
+    def _fake_stage2_job(label: str) -> JobSpec:
+        return JobSpec(
             family="tree_neural",
             train_doc_count=128,
             benchmark="smoke",
             hardness_grid="",
             grid_cell_ids=(),
             seeds=(0,),
-            config=mig._RunConfigSpec(
+            config=RunConfigSpec(
                 label=f"{label}__leaf_dense__judge_t128",
                 state_dim=8,
                 hidden_dim=16,
@@ -509,9 +509,9 @@ def test_async_scaling_finalizes_grouped_worker_from_summary_file(
             }
         ],
     )
-    monkeypatch.setattr(mig, "_load_completed_run_keys", lambda _root: set())
-    monkeypatch.setattr(mig, "_worker_command_for_job", lambda *_, **__: ["fake-stage1"])
-    monkeypatch.setattr(mig, "_worker_env_for_token", lambda _token, **__: {})
+    monkeypatch.setattr(scaling, "load_completed_run_keys", lambda _root: set())
+    monkeypatch.setattr(scaling, "worker_command_for_job", lambda *_, **__: ["fake-stage1"])
+    monkeypatch.setattr(scaling, "worker_env_for_token", lambda _token, **__: {})
     monkeypatch.setattr(scaling.subprocess, "Popen", _FakePopen)
     monkeypatch.setattr(scaling.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(tfpush, "GROUPED_STAGE2_COMPLETION_GRACE_S", 0.0)
@@ -551,7 +551,7 @@ def test_async_scaling_finalizes_grouped_worker_from_summary_file(
             ]
         }
 
-    monkeypatch.setattr(mig, "_write_summary_outputs", _fake_write_summary_outputs)
+    monkeypatch.setattr(scaling, "write_summary_outputs", _fake_write_summary_outputs)
 
     result = scaling._run_async_scaling(
         args=args,

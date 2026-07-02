@@ -38,8 +38,7 @@ COMMON=(
   --n-epochs 40
   --tree-training-schedule two_stage
   --tree-stage1-epochs 10 --tree-stage2-epochs 30
-  --tree-local-law-weight 0.8
-  --tree-task-objective-weight 1.0
+  --local-law-weight 0.8
   # Supervision
   --tree-root-supervision-kind mse
   --internal-supervision-kind full_sketch                  # default: none
@@ -116,7 +115,7 @@ CUDA_VISIBLE_DEVICES=1 python scripts/run_tree_neural_full_doc_mig.py worker \
 CUDA_VISIBLE_DEVICES=2 python scripts/run_tree_neural_full_doc_mig.py worker \
   --job-name B3_leaf32_s0_highlaw --output-dir "$OUT_ROOT/B3_leaf32_s0_highlaw" \
   "${COMMON[@]}" --fixed-leaf-tokens 32 --seeds 0 \
-  --tree-local-law-weight 1.2 \
+  --local-law-weight 1.0 \
   > "$OUT_ROOT/B3_leaf32_s0_highlaw.log" 2>&1 &
 
 # B4: 4-leaf seed 1 (variance check)

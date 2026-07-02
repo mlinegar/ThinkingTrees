@@ -8,6 +8,7 @@ import os
 import re
 import sys
 from collections import defaultdict
+from collections.abc import Mapping as MappingABC
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
@@ -6507,6 +6508,129 @@ def _plot_supervision_sweep(supervision: Mapping[str, Any], output_path: Path) -
     return True
 
 
+def _hazard_panel_diag_from_mapping(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    for key in (
+        "test_target_diagnostics",
+        "target_diagnostics",
+        "root_target_diagnostics",
+    ):
+        candidate = dict(payload.get(key) or {})
+        if candidate.get("condition_diagnostics"):
+            return candidate
+    config = dict(payload.get("config") or {})
+    for key in ("test_target_diagnostics", "target_diagnostics"):
+        candidate = dict(config.get(key) or {})
+        if candidate.get("condition_diagnostics"):
+            return candidate
+    return {}
+
+
+def _hazard_panel_id_from_mapping(payload: Mapping[str, Any]) -> str:
+    for key in ("hazard_panel_id", "panel_id"):
+        text = str(payload.get(key, "") or "").strip()
+        if text:
+            return text
+    config = dict(payload.get("config") or {})
+    text = str(config.get("hazard_panel_id", "") or "").strip()
+    if text:
+        return text
+    metadata = dict(config.get("data_bundle_metadata") or payload.get("data_bundle_metadata") or {})
+    return str(metadata.get("hazard_panel_id", "") or "").strip()
+
+
+def _build_hazard_panel_mean_guess_check(summary: Mapping[str, Any]) -> Dict[str, Any]:
+    direct = dict(summary.get("hazard_panel_mean_guess_check") or {})
+    if direct.get("rows"):
+        return direct
+    recovery = dict(summary.get("supervision_recovery") or summary)
+    rows: List[Dict[str, Any]] = []
+
+    def add_candidate(payload: Mapping[str, Any], *, source: str) -> None:
+        diag = _hazard_panel_diag_from_mapping(payload)
+        if not diag:
+            return
+        condition_diag = dict(diag.get("condition_diagnostics") or {})
+        rows.append(
+            {
+                "source": str(source),
+                "hazard_panel_id": _hazard_panel_id_from_mapping(payload),
+                "n_docs": int(_safe_int(diag.get("n_docs"), 0)),
+                "n_conditions": int(len(condition_diag)),
+                "global_mean_baseline_mae": _safe_float(
+                    diag.get("global_mean_baseline_mae"),
+                    float("nan"),
+                ),
+                "condition_mean_baseline_mae": _safe_float(
+                    diag.get("condition_mean_baseline_mae"),
+                    float("nan"),
+                ),
+                "mean_guess_gap": _safe_float(diag.get("mean_guess_gap"), float("nan")),
+            }
+        )
+
+    for idx, row in enumerate(list(recovery.get("family_rows") or [])):
+        if isinstance(row, MappingABC):
+            add_candidate(dict(row), source=f"family_rows[{idx}]")
+    for scope_key, scope in sorted((recovery.get("scopes") or {}).items()):
+        if not isinstance(scope, MappingABC):
+            continue
+        scope_mapping = dict(scope)
+        for idx, row in enumerate(list(scope_mapping.get("family_rows") or [])):
+            if isinstance(row, MappingABC):
+                add_candidate(dict(row), source=f"{scope_key}.family_rows[{idx}]")
+        for group in list(scope_mapping.get("rows_by_train_docs") or []):
+            if not isinstance(group, MappingABC):
+                continue
+            group_mapping = dict(group)
+            for row in list(group_mapping.get("rows") or []):
+                if not isinstance(row, MappingABC):
+                    continue
+                add_candidate(
+                    dict(row),
+                    source=(
+                        f"{scope_key}.train_docs="
+                        f"{_safe_int(group_mapping.get('train_doc_count'), 0)}"
+                    ),
+                )
+    dedup: Dict[tuple[str, str, int], Dict[str, Any]] = {}
+    for row in rows:
+        key = (
+            str(row.get("hazard_panel_id", "")),
+            str(row.get("source", "")),
+            int(_safe_int(row.get("n_docs"), 0)),
+        )
+        dedup.setdefault(key, row)
+    rows = list(dedup.values())
+    rows.sort(key=lambda row: (str(row.get("hazard_panel_id", "")), str(row.get("source", ""))))
+    return {
+        "status": "ready" if rows else "missing",
+        "rows": rows,
+    }
+
+
+def _hazard_panel_mean_guess_lines(summary: Mapping[str, Any]) -> List[str]:
+    check = _build_hazard_panel_mean_guess_check(summary)
+    rows = [dict(row) for row in list(check.get("rows") or [])]
+    if not rows:
+        return []
+    lines = [
+        "| source | panel | docs | conditions | global mean MAE | condition mean MAE | gap |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in rows[:12]:
+        lines.append(
+            "| "
+            f"`{row.get('source', '')}` | "
+            f"`{row.get('hazard_panel_id', '')}` | "
+            f"{_safe_int(row.get('n_docs'), 0)} | "
+            f"{_safe_int(row.get('n_conditions'), 0)} | "
+            f"{_format_unavailable(row.get('global_mean_baseline_mae'))} | "
+            f"{_format_unavailable(row.get('condition_mean_baseline_mae'))} | "
+            f"{_format_unavailable(row.get('mean_guess_gap'))} |"
+        )
+    return lines
+
+
 def _render_pdf(summary: Mapping[str, Any], output_path: Path, figure_paths: Mapping[str, str]) -> None:
     batch_timing = summary.get("batch_timing", {}) or {}
     batch_quality = summary.get("batch_quality_tradeoff", {}) or {}
@@ -6517,6 +6641,7 @@ def _render_pdf(summary: Mapping[str, Any], output_path: Path, figure_paths: Map
     fno_upper_bound = summary.get("fno_upper_bound", {}) or {}
     identifiable_zero = summary.get("identifiable_zero_reference", {}) or {}
     oracle_budget = summary.get("oracle_budget_frontier", {}) or {}
+    hazard_lines = _hazard_panel_mean_guess_lines(summary)
     doc_equivalent_frontiers = summary.get("doc_equivalent_frontiers", {}) or {}
     efficiency_target_table = summary.get("efficiency_target_table", {}) or {}
     solved_flags = summary.get("solved_benchmark_flags", {}) or {}
@@ -6707,6 +6832,8 @@ def _render_pdf(summary: Mapping[str, Any], output_path: Path, figure_paths: Map
         write_text_page(pdf, title="Tree Geometry And Support", lines=geometry_lines)
         write_text_page(pdf, title="Supervision Level Sweep", lines=supervision_lines)
         write_text_page(pdf, title="Runtime Efficiency", lines=runtime_lines)
+        if hazard_lines:
+            write_text_page(pdf, title="Hazard Panel Mean-Guess Check", lines=hazard_lines)
         write_text_page(pdf, title="FNO Upper Bound And Large Batches", lines=reference_lines)
         write_text_page(pdf, title="Oracle Budget Frontier", lines=oracle_budget_lines)
         for title, path in figure_paths.items():
@@ -6741,6 +6868,12 @@ def _write_markdown(summary: Mapping[str, Any], output_path: Path) -> None:
     if summary.get("pdf"):
         lines.append(f"- `pdf`: `{summary['pdf']}`")
     lines.append("")
+
+    hazard_lines = _hazard_panel_mean_guess_lines(summary)
+    if hazard_lines:
+        lines.append("## Hazard Panel / Mean-Guess Check")
+        lines.extend(hazard_lines)
+        lines.append("")
 
     batch_timing = summary.get("batch_timing", {}) or {}
     batch_quality = summary.get("batch_quality_tradeoff", {}) or {}
@@ -7161,13 +7294,16 @@ def _visible_supervision_title(title: str) -> str:
 
 
 def _recoverable_scope_key(recovery: Mapping[str, Any]) -> str:
-    return str(
-        recovery.get(
-            "recoverable_scope_key",
-            SUPERVISION_RECOVERY_RECOVERABLE_BENCHMARK,
-        )
-        or SUPERVISION_RECOVERY_RECOVERABLE_BENCHMARK
-    )
+    explicit = str(recovery.get("recoverable_scope_key", "") or "").strip()
+    if explicit:
+        return explicit
+    scopes = dict(recovery.get("scopes") or {})
+    if SUPERVISION_RECOVERY_RECOVERABLE_BENCHMARK in scopes:
+        return SUPERVISION_RECOVERY_RECOVERABLE_BENCHMARK
+    for scope_key in scopes:
+        if str(scope_key).strip().lower().startswith("recoverable"):
+            return str(scope_key)
+    return SUPERVISION_RECOVERY_RECOVERABLE_BENCHMARK
 
 
 def _structural_scope_key(recovery: Mapping[str, Any]) -> str:
@@ -9223,6 +9359,9 @@ def main() -> int:
     structural_scope = _structural_scope_key(recovery_summary)
     structural_label = _scope_label_from_recovery(recovery_summary, structural_scope)
     summary["supervision_recovery"] = recovery_summary
+    summary["hazard_panel_mean_guess_check"] = _build_hazard_panel_mean_guess_check(
+        {"supervision_recovery": recovery_summary}
+    )
     summary["contract_gate_status"] = str(
         recovery_summary.get("contract_gate_status", "pass") or "pass"
     )

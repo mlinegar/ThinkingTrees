@@ -76,7 +76,7 @@ class UnifiedTrainingExample:
     human_reasoning: Optional[str] = None
 
     # Metadata
-    confidence: float = 1.0  # Source reliability (human=1.0, auto=0.6-0.9)
+    confidence: float = 1.0  # Source trust score (human=1.0, auto=0.6-0.9)
     timestamp: Optional[str] = None
 
     def __post_init__(self):

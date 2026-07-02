@@ -15,14 +15,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.experiments import (  # noqa: E402
-    append_result_rows,
-    benchmark_ref_from_parts,
-    canonical_artifact_refs_from_paths,
-    merge_artifacts,
-    method_ref_from_markov_full_doc_run,
+from src.ctreepo.sim.core.markov_parity_grid_io import (  # noqa: E402
+    load_parity_grid_root,
+    write_materialized_outputs as _write_materialized_outputs,
 )
-from src.experiments.contracts import ResultRow  # noqa: E402
 from src.ctreepo.sim.core.tree_reference_presets import (  # noqa: E402
     ROOT_ONLY_PARITY_CAPACITY_FIX_PRESET,
     ROOT_ONLY_PARITY_HISTORICAL_REPLAY_PRESET,
@@ -33,17 +29,19 @@ from src.ctreepo.sim.core.tree_reference_presets import (  # noqa: E402
     UNIFIED_G_FULL_LOCAL_LAWS_PRESET,
     resolve_tree_reference_preset_config,
 )
-from scripts.run_tree_neural_full_doc_mig import (  # noqa: E402
-    _JobSpec,
-    _RunConfigSpec,
-    _discover_scheduler_devices,
-    _job_output_dir_name,
-    _run_config_from_mapping,
-    _run_scheduler_bundle,
-    _scheduler_cli_payload,
-    _scheduler_item_for_job,
-    _with_run_intent_overrides,
-    _write_combined_runs_output,
+from src.ctreepo.sim.core.tree_neural_facade import (  # noqa: E402
+    JobSpec as _JobSpec,
+    RunConfigSpec as _RunConfigSpec,
+    discover_scheduler_devices as _discover_scheduler_devices,
+    job_output_dir_name as _job_output_dir_name,
+    run_config_from_mapping as _run_config_from_mapping,
+    with_run_intent_overrides as _with_run_intent_overrides,
+)
+from src.ctreepo.sim.core.tree_neural_execution import (  # noqa: E402
+    run_scheduler_bundle as _run_scheduler_bundle,
+    scheduler_cli_payload as _scheduler_cli_payload,
+    scheduler_item_for_job as _scheduler_item_for_job,
+    write_combined_runs_output as _write_combined_runs_output,
 )
 from src.ctreepo.sim.core.full_doc_anchor_diagnostics import (  # noqa: E402
     _ensure_prepared_markov_tree_data,
@@ -60,9 +58,6 @@ from src.ctreepo.sim.core.markov_comparison_surface import (  # noqa: E402
 from src.ctreepo.sim.core.markov_changepoint_ops_count import (  # noqa: E402
     MarkovOPSDataBundle,
     OPSCountConfig,
-)
-from src.ctreepo.sim.core.markov_v3_row_contract import (  # noqa: E402
-    annotate_downstream_v3_row,
 )
 from src.ctreepo.sim.suite.markov_observed_token_policy import (  # noqa: E402
     resolve_markov_observed_token_policy,
@@ -163,7 +158,6 @@ OFFICIAL_FNO_REFERENCE_FIELDS: tuple[str, ...] = (
     "tree_theorem_score_dim",
     "tree_theorem_fiber_dim",
     "tree_theorem_aux_dim",
-    "tree_score_merge_mode",
     "tree_theorem_count_dim",
     "tree_theorem_first_dim",
     "tree_theorem_last_dim",
@@ -258,6 +252,7 @@ def _lean_faithful_local_diagnostic_specs() -> List[Dict[str, Any]]:
                             else str(target_kind)
                         ),
                         "leaf_exact_supervision": False,
+                        "tree_local_law_weight": 0.8,
                     }
                 )
     return specs
@@ -267,7 +262,6 @@ def _lean_faithful_weight_balance_specs() -> List[Dict[str, Any]]:
     specs: List[Dict[str, Any]] = []
     for local_law_weight in (0.10, 0.25, 0.50):
         for c1_relative_weight in (1.0, 2.0):
-            task_objective_weight = max(0.0, 1.0 - float(local_law_weight))
             specs.append(
                 {
                     "recipe_id": "r20_local_50",
@@ -284,7 +278,6 @@ def _lean_faithful_weight_balance_specs() -> List[Dict[str, Any]]:
                     "internal_supervision_kind": "bounded_full_sketch",
                     "leaf_exact_supervision": False,
                     "tree_local_law_weight": float(local_law_weight),
-                    "tree_task_objective_weight": float(task_objective_weight),
                     "tree_c1_relative_weight": float(c1_relative_weight),
                     "tree_c2_relative_weight": 1.0,
                     "tree_c3_relative_weight": 1.0,
@@ -906,7 +899,6 @@ def _legacy_exact_collapse_reference_surface(
         "leaf_label_rate": 0.0,
         "internal_supervision_kind": "none",
         "internal_label_rate": 0.0,
-        "task_objective_weight": 1.0,
         "doc_sequence_train_fraction": 0.0,
         **_fairfno_leaf_defaults(
             state_dim=state_dim,
@@ -967,16 +959,19 @@ def _official_fno_reference_run_config(
         "official_fno_preserve_requested_leaf_tokens": bool(
             preserve_requested_leaf_tokens
         ),
-        "tree_local_law_weight": float(
-            max(0.0, float(locked_ops_config.local_law_weight or 0.0))
-        ),
-        "tree_task_objective_weight": float(
-            max(0.0, float(locked_ops_config.task_objective_weight or 1.0))
-        ),
         "tree_c1_relative_weight": float(locked_ops_config.c1_relative_weight),
         "tree_c2_relative_weight": float(locked_ops_config.c2_relative_weight),
         "tree_c3_relative_weight": float(locked_ops_config.c3_relative_weight),
     }
+    if locked_ops_config.local_law_weight is not None:
+        mapping["tree_local_law_weight"] = float(
+            max(0.0, float(locked_ops_config.local_law_weight))
+        )
+        mapping.pop("tree_task_objective_weight", None)
+    else:
+        mapping["tree_task_objective_weight"] = float(
+            max(0.0, float(locked_ops_config.task_objective_weight or 1.0))
+        )
     return _run_config_from_mapping(mapping)
 
 
@@ -1026,14 +1021,17 @@ def _topology_tree_run_config(
         ),
         **_runtime_config_overrides(args),
         "slot_count": int(base.get("slot_count", 4) or 4),
-        "tree_local_law_weight": float(base.get("local_law_weight", 0.8) or 0.8),
-        "tree_task_objective_weight": float(
-            base.get("task_objective_weight", 1.0) or 1.0
-        ),
         "tree_c1_relative_weight": float(base.get("c1_relative_weight", 1.0) or 1.0),
         "tree_c2_relative_weight": float(base.get("c2_relative_weight", 1.0) or 1.0),
         "tree_c3_relative_weight": float(base.get("c3_relative_weight", 1.0) or 1.0),
     }
+    if base.get("local_law_weight") is not None:
+        overrides["tree_local_law_weight"] = float(base.get("local_law_weight"))
+        overrides.pop("tree_task_objective_weight", None)
+    else:
+        overrides["tree_task_objective_weight"] = float(
+            base.get("task_objective_weight", 1.0) or 1.0
+        )
     mapping = _apply_epoch_cap_to_mapping(
         {**base, **overrides, **dict(extra_overrides or {})},
         epoch_cap=_effective_epoch_cap(args),
@@ -1086,6 +1084,13 @@ def _config_diff_vs_official_fno(
     reference_surface: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     reference = dict(reference_surface or {})
+    reference_lambda = reference.get("local_law_weight", float("nan"))
+    actual_lambda = dict(config_mapping).get("local_law_weight", float("nan"))
+    if (
+        float(reference_lambda or 0.0) == 0.0
+        or float(actual_lambda or 0.0) == 0.0
+    ):
+        reference.pop("task_objective_weight", None)
     diff: Dict[str, Any] = {}
     for field_name, expected in reference.items():
         actual = config_mapping.get(field_name)
@@ -1105,54 +1110,6 @@ def _config_diff_vs_official_fno(
             diff[field_name] = {"expected": expected, "actual": actual}
     return diff
 
-
-def _load_prepared_metadata(config_mapping: Mapping[str, Any]) -> Dict[str, Any]:
-    prepared_root = str(config_mapping.get("prepared_data_root", "") or "").strip()
-    prepared_signature = str(config_mapping.get("prepared_data_signature", "") or "").strip()
-    if not prepared_root or not prepared_signature:
-        return {}
-    metadata_path = (
-        Path(prepared_root).expanduser()
-        / f"prepared_{prepared_signature}"
-        / "metadata.json"
-    )
-    payload = _load_json(metadata_path)
-    if not payload:
-        return {}
-    return {
-        "metadata_json": str(metadata_path),
-        "train_prefix_counts": [
-            int(value) for value in list(payload.get("train_prefix_counts") or [])
-        ],
-        "train_prefix_signatures": {
-            str(key): str(value)
-            for key, value in dict(payload.get("train_prefix_signatures") or {}).items()
-            if str(key).strip() and str(value).strip()
-        },
-        "train_corpus_signature": str(payload.get("train_corpus_signature", "") or ""),
-        "val_corpus_signature": str(payload.get("val_corpus_signature", "") or ""),
-        "test_corpus_signature": str(payload.get("test_corpus_signature", "") or ""),
-    }
-
-
-def _infer_root_evidence_status(
-    *,
-    output_root: Path,
-    state: str,
-    rows: Sequence[Mapping[str, Any]],
-) -> str:
-    root_text = str(output_root).lower()
-    state_text = str(state or "").strip().lower()
-    if state_text in {"stopped", "stop_requested", "cancelled", "canceled", "aborted"}:
-        return EVIDENCE_STATUS_STOPPED
-    if any(token in root_text for token in ("exploratory", "diagnostic", "smoke", "check")):
-        return EVIDENCE_STATUS_EXPLORATORY
-    if state_text == "completed" and rows and all(
-        str((row or {}).get("state", "")).strip().lower() == "completed"
-        for row in rows
-    ):
-        return EVIDENCE_STATUS_AUTHORITATIVE
-    return EVIDENCE_STATUS_PARTIAL
 
 
 def _recipe_preset(recipe_id: str, benchmark: str) -> str:
@@ -1208,7 +1165,6 @@ def _exact_collapse_config_for_entry(
             "tree_exact_eval_max_docs": int(args.tree_exact_eval_max_docs),
             **_runtime_config_overrides(args),
             "tree_local_law_weight": 0.0,
-            "tree_task_objective_weight": 1.0,
             "tree_c1_relative_weight": 0.0,
             "tree_c2_relative_weight": 0.0,
             "tree_c3_relative_weight": 0.0,
@@ -1220,6 +1176,8 @@ def _exact_collapse_config_for_entry(
             "tree_exact_collapse_mode": str(runtime_identity_mode or ""),
         }
     )
+    base.pop("task_objective_weight", None)
+    base.pop("tree_task_objective_weight", None)
     return _run_config_from_mapping(base)
 
 
@@ -1236,6 +1194,8 @@ def _legacy_exact_collapse_control_config_for_entry(
     )
     base = resolve_tree_reference_preset_config(ROOT_ONLY_PARITY_MATCHED_ROOT_PRESET)
     base.update(reference_surface)
+    base.pop("task_objective_weight", None)
+    base.pop("tree_task_objective_weight", None)
     base.update(
         {
             "baseline_family": TREE_BASELINE_FAMILY,
@@ -1257,9 +1217,6 @@ def _legacy_exact_collapse_control_config_for_entry(
             ),
             "slot_count": 4,
             "tree_local_law_weight": float(reference_surface["local_law_weight"]),
-            "tree_task_objective_weight": float(
-                reference_surface["task_objective_weight"]
-            ),
             "tree_c1_relative_weight": float(reference_surface["c1_relative_weight"]),
             "tree_c2_relative_weight": float(reference_surface["c2_relative_weight"]),
             "tree_c3_relative_weight": float(reference_surface["c3_relative_weight"]),
@@ -2069,6 +2026,10 @@ def build_parity_grid_entries(args: argparse.Namespace) -> List[ParityGridEntry]
                     diagnostic_spec["internal_supervision_kind"]
                 ),
                 leaf_exact_supervision=bool(diagnostic_spec["leaf_exact_supervision"]),
+                tree_local_law_weight=float(
+                    diagnostic_spec.get("tree_local_law_weight", 0.8)
+                ),
+                tree_task_objective_weight=None,
             )
             for train_doc_count in diagnostic_train_doc_counts:
                 config = _with_run_intent_overrides(
@@ -2161,9 +2122,6 @@ def build_parity_grid_entries(args: argparse.Namespace) -> List[ParityGridEntry]
                     leaf_exact_supervision=bool(diagnostic_spec["leaf_exact_supervision"]),
                     tree_local_law_weight=float(
                         diagnostic_spec["tree_local_law_weight"]
-                    ),
-                    tree_task_objective_weight=float(
-                        diagnostic_spec["tree_task_objective_weight"]
                     ),
                     tree_c1_relative_weight=float(
                         diagnostic_spec["tree_c1_relative_weight"]
@@ -2577,702 +2535,8 @@ def _manifest_payload(
     }
 
 
-def _controller_failed_job_names(output_root: Path) -> set[str]:
-    payload = _load_json(output_root / "controller_results.json")
-    failed = set()
-    for row in list(payload.get("failed_jobs") or []):
-        job_name = str((row or {}).get("job_name", "")).strip()
-        if job_name:
-            failed.add(job_name)
-    return failed
-
-
-def _summary_metrics_for_job(job_output_dir: Path) -> Dict[str, Any]:
-    payload = _load_json(job_output_dir / "summary.json")
-    aggregate_rows = list(payload.get("aggregate_rows") or [])
-    runs = list(payload.get("runs") or [])
-    run = dict(runs[0] if runs else {})
-    if aggregate_rows:
-        aggregate = dict(aggregate_rows[0])
-        aggregate.update(
-            {
-                "bundle_source": run.get("bundle_source"),
-                "train_corpus_signature": run.get("train_corpus_signature"),
-                "val_corpus_signature": run.get("val_corpus_signature"),
-                "test_corpus_signature": run.get("test_corpus_signature"),
-                "collapse_runtime_delegate_family": run.get(
-                    "collapse_runtime_delegate_family"
-                ),
-                "collapse_runtime_mode": run.get("collapse_runtime_mode"),
-                "tree_local_weighting_mode": run.get("tree_local_weighting_mode"),
-                "local_loss_kind": run.get("local_loss_kind"),
-                "local_sampling_design_name": run.get(
-                    "local_sampling_design_name"
-                ),
-                "leaf_population_size": run.get("leaf_population_size"),
-                "leaf_sample_size": run.get("leaf_sample_size"),
-                "leaf_effective_propensity": run.get("leaf_effective_propensity"),
-                "merge_population_size": run.get("merge_population_size"),
-                "merge_sample_size": run.get("merge_sample_size"),
-                "merge_effective_propensity": run.get(
-                    "merge_effective_propensity"
-                ),
-                "local_objective_audit": dict(
-                    run.get("local_objective_audit", {}) or {}
-                ),
-                "optimization_root_weight": run.get("optimization_root_weight"),
-                "local_law_c1_weight": run.get("local_law_c1_weight"),
-                "local_law_c2_weight": run.get("local_law_c2_weight"),
-                "local_law_c3_weight": run.get("local_law_c3_weight"),
-                "leaf_supervision_kind": run.get("leaf_supervision_kind"),
-                "internal_supervision_kind": run.get("internal_supervision_kind"),
-                "leaf_label_rate": run.get("leaf_label_rate"),
-                "internal_label_rate": run.get("internal_label_rate"),
-                "comparison_mode": aggregate.get("comparison_mode", run.get("comparison_mode")),
-                "comparison_semantics": aggregate.get(
-                    "comparison_semantics",
-                    run.get("comparison_semantics"),
-                ),
-                "comparison_semantics_label": aggregate.get(
-                    "comparison_semantics_label",
-                    run.get("comparison_semantics_label"),
-                ),
-                "run_intent_hash": aggregate.get(
-                    "run_intent_hash",
-                    run.get("run_intent_hash"),
-                ),
-                "run_intent_validation_status": aggregate.get(
-                    "run_intent_validation_status",
-                    run.get("run_intent_validation_status"),
-                ),
-                "requested_fixed_leaf_tokens": aggregate.get(
-                    "requested_fixed_leaf_tokens",
-                    run.get("requested_fixed_leaf_tokens"),
-                ),
-                "executed_fixed_leaf_tokens": aggregate.get(
-                    "executed_fixed_leaf_tokens",
-                    run.get("executed_fixed_leaf_tokens"),
-                ),
-                "config": dict(run.get("config") or {}),
-            }
-        )
-        return aggregate
-    if runs:
-        return {
-            "test_root_mae_mean": run.get("test_root_mae"),
-            "test_leaf_mae_mean": run.get("test_leaf_mae"),
-            "test_merge_mae_mean": run.get("test_merge_mae"),
-            "val_root_mae_mean": run.get("val_root_mae"),
-            "best_epoch_mean": run.get("best_epoch"),
-            "elapsed_s_mean": run.get("elapsed_s"),
-            "selection_metric_name": run.get("selection_metric_name"),
-            "bundle_source": run.get("bundle_source"),
-            "train_corpus_signature": run.get("train_corpus_signature"),
-            "val_corpus_signature": run.get("val_corpus_signature"),
-            "test_corpus_signature": run.get("test_corpus_signature"),
-            "collapse_runtime_delegate_family": run.get(
-                "collapse_runtime_delegate_family"
-            ),
-            "collapse_runtime_mode": run.get("collapse_runtime_mode"),
-            "tree_local_weighting_mode": run.get("tree_local_weighting_mode"),
-            "local_loss_kind": run.get("local_loss_kind"),
-            "local_sampling_design_name": run.get("local_sampling_design_name"),
-            "leaf_population_size": run.get("leaf_population_size"),
-            "leaf_sample_size": run.get("leaf_sample_size"),
-            "leaf_effective_propensity": run.get("leaf_effective_propensity"),
-            "merge_population_size": run.get("merge_population_size"),
-            "merge_sample_size": run.get("merge_sample_size"),
-            "merge_effective_propensity": run.get("merge_effective_propensity"),
-            "local_objective_audit": dict(
-                run.get("local_objective_audit", {}) or {}
-            ),
-            "optimization_root_weight": run.get("optimization_root_weight"),
-            "local_law_c1_weight": run.get("local_law_c1_weight"),
-            "local_law_c2_weight": run.get("local_law_c2_weight"),
-            "local_law_c3_weight": run.get("local_law_c3_weight"),
-            "leaf_supervision_kind": run.get("leaf_supervision_kind"),
-            "internal_supervision_kind": run.get("internal_supervision_kind"),
-            "leaf_label_rate": run.get("leaf_label_rate"),
-            "internal_label_rate": run.get("internal_label_rate"),
-            "comparison_mode": run.get("comparison_mode"),
-            "comparison_semantics": run.get("comparison_semantics"),
-            "comparison_semantics_label": run.get("comparison_semantics_label"),
-            "run_intent_hash": run.get("run_intent_hash"),
-            "run_intent_validation_status": run.get(
-                "run_intent_validation_status"
-            ),
-            "requested_fixed_leaf_tokens": run.get(
-                "requested_fixed_leaf_tokens"
-            ),
-            "executed_fixed_leaf_tokens": run.get(
-                "executed_fixed_leaf_tokens"
-            ),
-            "config": dict(run.get("config") or {}),
-        }
-    return {}
-
-
-def _row_from_manifest_job(
-    job_payload: Mapping[str, Any],
-    *,
-    prior_row: Mapping[str, Any] | None = None,
-    failed_job_names: set[str],
-) -> Dict[str, Any]:
-    config = dict(job_payload.get("config") or {})
-    job_name = str(job_payload.get("job_name", "") or "")
-    job_output_dir = Path(str(job_payload.get("job_output_dir", "")))
-    metrics = _summary_metrics_for_job(job_output_dir)
-    completed = bool(metrics)
-    prior = dict(prior_row or {})
-    state = "planned"
-    if completed:
-        state = "completed"
-    elif job_name in failed_job_names:
-        state = "failed"
-    elif str(prior.get("state", "")).strip():
-        state = str(prior.get("state"))
-
-    def _pick_metric(name: str) -> Any:
-        if name in metrics:
-            return metrics.get(name)
-        return prior.get(name)
-
-    claim_level = str(
-        job_payload.get("claim_level", prior.get("claim_level", CLAIM_LEVEL_EMPIRICAL_GEOMETRY))
-        or CLAIM_LEVEL_EMPIRICAL_GEOMETRY
-    )
-    runtime_config = dict(metrics.get("config") or {})
-    config_mapping = (
-        runtime_config
-        if runtime_config
-        else _config_mapping_for_run_config(_run_config_from_mapping(config))
-    )
-    prepared_metadata = _load_prepared_metadata(config_mapping)
-    reference_surface = dict(job_payload.get("official_fno_reference_surface") or {})
-    config_diff = (
-        _config_diff_vs_official_fno(
-            config_mapping=config_mapping,
-            reference_surface=(
-                reference_surface
-                or _legacy_exact_collapse_reference_surface(
-                    benchmark=str(job_payload.get("benchmark", "") or ""),
-                    fixed_leaf_tokens=int(job_payload.get("fixed_leaf_tokens", 0) or 0),
-                    epoch_cap=int(job_payload.get("epoch_cap", 0) or 0),
-                )
-            ),
-        )
-        if claim_level == CLAIM_LEVEL_EXACT_COLLAPSE
-        else {}
-    )
-    train_doc_count = int(job_payload.get("train_doc_count", 0) or 0)
-    reference_bundle_source = str(
-        _pick_metric("bundle_source")
-        or config_mapping.get("base_bundle_path", "")
-        or ""
-    ).strip()
-    train_prefix_signature = str(
-        (prepared_metadata.get("train_prefix_signatures") or {}).get(
-            str(train_doc_count),
-            "",
-        )
-        or ""
-    ).strip()
-    runtime_train_signature = str(
-        _pick_metric("train_corpus_signature")
-        or prepared_metadata.get("train_corpus_signature", "")
-        or ""
-    ).strip()
-    runtime_val_signature = str(
-        _pick_metric("val_corpus_signature")
-        or prepared_metadata.get("val_corpus_signature", "")
-        or ""
-    ).strip()
-    runtime_test_signature = str(
-        _pick_metric("test_corpus_signature")
-        or prepared_metadata.get("test_corpus_signature", "")
-        or ""
-    ).strip()
-    optimization_root_weight = _pick_metric("optimization_root_weight")
-    local_law_c1_weight = _pick_metric("local_law_c1_weight")
-    local_law_c2_weight = _pick_metric("local_law_c2_weight")
-    local_law_c3_weight = _pick_metric("local_law_c3_weight")
-    try:
-        local_objective_inactive = (
-            math.isfinite(float(optimization_root_weight))
-            and abs(float(optimization_root_weight) - 1.0) <= 1e-12
-            and abs(float(local_law_c1_weight or 0.0)) <= 1e-12
-            and abs(float(local_law_c2_weight or 0.0)) <= 1e-12
-            and abs(float(local_law_c3_weight or 0.0)) <= 1e-12
-        )
-    except (TypeError, ValueError):
-        local_objective_inactive = False
-    root_metric = _pick_metric("test_root_mae_mean")
-    root_metric_present = False
-    try:
-        root_metric_present = math.isfinite(float(root_metric))
-    except (TypeError, ValueError):
-        root_metric_present = False
-    strict_collapse_pass = bool(
-        claim_level == CLAIM_LEVEL_EXACT_COLLAPSE
-        and bool(completed)
-        and not config_diff
-        and bool(reference_bundle_source)
-        and bool(train_prefix_signature)
-        and runtime_train_signature == train_prefix_signature
-        and runtime_val_signature
-        == str(prepared_metadata.get("val_corpus_signature", "") or "").strip()
-        and runtime_test_signature
-        == str(prepared_metadata.get("test_corpus_signature", "") or "").strip()
-        and bool(local_objective_inactive)
-        and bool(root_metric_present)
-    )
-    nominal_recipe_metadata = dict(job_payload.get("nominal_recipe_metadata") or {})
-
-    return {
-        "job_name": job_name,
-        "recipe_id": str(job_payload.get("recipe_id", "") or ""),
-        "recipe_display_name": str(
-            job_payload.get("recipe_display_name", "")
-            or RECIPE_DISPLAY_NAMES.get(str(job_payload.get("recipe_id", "")), "")
-        ),
-        "tuning_stage": str(job_payload.get("tuning_stage", "") or ""),
-        "study_axis": str(job_payload.get("study_axis", "") or ""),
-        "axis_value": str(job_payload.get("axis_value", "") or ""),
-        "scope_key": str(job_payload.get("scope_key", "") or ""),
-        "scope_label": str(job_payload.get("scope_label", "") or ""),
-        "nominal_recipe_metadata": dict(nominal_recipe_metadata),
-        "nominal_recipe_id": str(
-            nominal_recipe_metadata.get("nominal_recipe_id", "")
-            or job_payload.get("nominal_recipe_id", "")
-            or ""
-        ),
-        "nominal_recipe_budget_total_calls_per_doc": (
-            float(
-                nominal_recipe_metadata.get(
-                    "nominal_recipe_budget_total_calls_per_doc",
-                    job_payload.get(
-                        "nominal_recipe_budget_total_calls_per_doc",
-                        float("nan"),
-                    ),
-                )
-            )
-            if (
-                nominal_recipe_metadata.get("nominal_recipe_budget_total_calls_per_doc")
-                is not None
-                or job_payload.get("nominal_recipe_budget_total_calls_per_doc")
-                is not None
-            )
-            else float("nan")
-        ),
-        "claim_level": claim_level,
-        "benchmark": str(job_payload.get("benchmark", "") or ""),
-        "train_doc_count": int(train_doc_count),
-        "baseline_family": str(
-            job_payload.get("baseline_family", TREE_BASELINE_FAMILY) or TREE_BASELINE_FAMILY
-        ),
-        "comparison_mode": str(
-            metrics.get("comparison_mode", config.get("comparison_mode", "")) or ""
-        ),
-        "comparison_semantics": str(
-            metrics.get("comparison_semantics", "") or ""
-        ),
-        "comparison_semantics_label": str(
-            metrics.get("comparison_semantics_label", "") or ""
-        ),
-        "run_intent_hash": str(metrics.get("run_intent_hash", "") or ""),
-        "run_intent_validation_status": str(
-            metrics.get("run_intent_validation_status", "") or ""
-        ),
-        "seed": int(job_payload.get("seed", 0) or 0),
-        "config_label": str(config.get("label", "") or ""),
-        "state_dim": int(config.get("state_dim", 0) or 0),
-        "hidden_dim": int(config.get("hidden_dim", 0) or 0),
-        "tree_training_schedule": str(config.get("tree_training_schedule", "") or ""),
-        "tree_checkpoint_metric": str(config.get("tree_checkpoint_metric", "") or ""),
-        "tree_stage1_checkpoint_metric": str(
-            config.get("tree_stage1_checkpoint_metric", "") or ""
-        ),
-        "tree_stage1_root_weight": float(config.get("tree_stage1_root_weight", 0.0) or 0.0),
-        "tree_local_weighting_mode": str(
-            _pick_metric("tree_local_weighting_mode")
-            or config.get("tree_local_weighting_mode", "fixed_k_hajek")
-            or "fixed_k_hajek"
-        ),
-        "local_loss_kind": str(_pick_metric("local_loss_kind") or ""),
-        "local_sampling_design_name": str(
-            _pick_metric("local_sampling_design_name") or ""
-        ),
-        "leaf_population_size": _pick_metric("leaf_population_size"),
-        "leaf_sample_size": _pick_metric("leaf_sample_size"),
-        "leaf_effective_propensity": _pick_metric("leaf_effective_propensity"),
-        "merge_population_size": _pick_metric("merge_population_size"),
-        "merge_sample_size": _pick_metric("merge_sample_size"),
-        "merge_effective_propensity": _pick_metric("merge_effective_propensity"),
-        "local_objective_audit": dict(
-            _pick_metric("local_objective_audit") or {}
-        ),
-        "optimization_root_weight": optimization_root_weight,
-        "local_law_c1_weight": local_law_c1_weight,
-        "local_law_c2_weight": local_law_c2_weight,
-        "local_law_c3_weight": local_law_c3_weight,
-        "leaf_supervision_kind": str(
-            _pick_metric("leaf_supervision_kind")
-            or config.get("leaf_supervision_kind", "")
-            or ""
-        ),
-        "internal_supervision_kind": str(
-            _pick_metric("internal_supervision_kind")
-            or config.get("internal_supervision_kind", "none")
-            or "none"
-        ),
-        "leaf_label_rate": _pick_metric("leaf_label_rate"),
-        "internal_label_rate": _pick_metric("internal_label_rate"),
-        "tree_leaf_fno_width": int(config.get("tree_leaf_fno_width", 0) or 0),
-        "tree_leaf_fno_n_modes": int(config.get("tree_leaf_fno_n_modes", 0) or 0),
-        "tree_leaf_fno_n_layers": int(config.get("tree_leaf_fno_n_layers", 0) or 0),
-        "depth_discount_gamma": float(config.get("depth_discount_gamma", 1.0) or 1.0),
-        "fixed_leaf_tokens": int(job_payload.get("fixed_leaf_tokens", 0) or 0),
-        "requested_fixed_leaf_tokens": int(
-            metrics.get(
-                "requested_fixed_leaf_tokens",
-                config.get("fixed_leaf_tokens", 0),
-            )
-            or 0
-        ),
-        "executed_fixed_leaf_tokens": int(
-            metrics.get(
-                "executed_fixed_leaf_tokens",
-                job_payload.get("fixed_leaf_tokens", 0),
-            )
-            or 0
-        ),
-        "slot_count": int(job_payload.get("slot_count", 0) or 0),
-        "assumed_doc_tokens": int(job_payload.get("assumed_doc_tokens", ASSUMED_DOC_TOKENS) or ASSUMED_DOC_TOKENS),
-        "one_leaf_target": bool(job_payload.get("one_leaf_target", False)),
-        "state": str(state),
-        "test_root_mae_mean": _pick_metric("test_root_mae_mean"),
-        "test_leaf_mae_mean": _pick_metric("test_leaf_mae_mean"),
-        "test_merge_mae_mean": _pick_metric("test_merge_mae_mean"),
-        "val_root_mae_mean": _pick_metric("val_root_mae_mean"),
-        "reference_bundle_source": str(reference_bundle_source),
-        "train_prefix_counts": list(prepared_metadata.get("train_prefix_counts") or []),
-        "train_prefix_signatures": dict(prepared_metadata.get("train_prefix_signatures") or {}),
-        "train_corpus_signature": str(runtime_train_signature),
-        "val_corpus_signature": str(runtime_val_signature),
-        "test_corpus_signature": str(runtime_test_signature),
-        "collapse_runtime_delegate_family": str(
-            _pick_metric("collapse_runtime_delegate_family") or ""
-        ),
-        "collapse_runtime_mode": str(_pick_metric("collapse_runtime_mode") or ""),
-        "local_objective_inactive": bool(local_objective_inactive),
-        "config_diff_vs_official_fno": dict(config_diff),
-        "strict_collapse_pass": bool(strict_collapse_pass),
-        "selection_metric_name": str(
-            _pick_metric("selection_metric_name") or "val_root_mae_mean"
-        ),
-        "best_epoch_mean": _pick_metric("best_epoch_mean"),
-        "wall_clock_s_mean": _pick_metric("elapsed_s_mean"),
-        "prepared_data_metadata_json": str(prepared_metadata.get("metadata_json", "") or ""),
-        "source_summary_json": str(job_output_dir / "summary.json"),
-        "job_output_dir": str(job_output_dir),
-    }
-    return annotate_downstream_v3_row(
-        row,
-        canonical_fno_families=FNO_BASELINE_FAMILIES,
-        canonical_fno_fixed_leaf_tokens=FULL_DOC_OFFICIAL_FNO_FIXED_LEAF_TOKENS,
-    )
-
-
-def _overall_state(
-    rows: Sequence[Mapping[str, Any]],
-    scheduler_payload: Mapping[str, Any],
-) -> str:
-    scheduler_state = str(scheduler_payload.get("state", "") or "").strip()
-    if scheduler_state:
-        return scheduler_state
-    if any(str((row or {}).get("state", "")) == "failed" for row in rows):
-        return "failed"
-    if rows and all(str((row or {}).get("state", "")) == "completed" for row in rows):
-        return "completed"
-    if any(str((row or {}).get("state", "")) == "completed" for row in rows):
-        return "running"
-    return "planned"
-
-
-def load_parity_grid_root(output_root: Path) -> Dict[str, Any]:
-    root = Path(output_root).expanduser().resolve()
-    manifest_path = root / PARITY_MANIFEST_NAME
-    summary_path = root / PARITY_SUMMARY_NAME
-    manifest = _load_json(manifest_path)
-    existing_summary = _load_json(summary_path)
-    prior_rows = {
-        str((row or {}).get("job_name", "")): dict(row)
-        for row in list(existing_summary.get("rows") or [])
-        if str((row or {}).get("job_name", "")).strip()
-    }
-    failed_job_names = _controller_failed_job_names(root)
-    rows: List[Dict[str, Any]] = []
-    for raw_job in list(manifest.get("jobs") or []):
-        if not isinstance(raw_job, Mapping):
-            continue
-        job_name = str(raw_job.get("job_name", "") or "")
-        rows.append(
-            _row_from_manifest_job(
-                raw_job,
-                prior_row=prior_rows.get(job_name),
-                failed_job_names=failed_job_names,
-            )
-        )
-    scheduler_payload = _load_json(root / "scheduler_status.json")
-    completed_items = sum(1 for row in rows if str(row.get("state", "")) == "completed")
-    failed_items = sum(1 for row in rows if str(row.get("state", "")) == "failed")
-    pending_items = max(0, len(rows) - completed_items - failed_items)
-    state = _overall_state(rows, scheduler_payload)
-    evidence_status = _infer_root_evidence_status(
-        output_root=root,
-        state=state,
-        rows=rows,
-    )
-    rows = [{**dict(row), "evidence_status": evidence_status} for row in rows]
-    quarantined_rows = [
-        dict(row)
-        for row in rows
-        if str(row.get("contract_status", "") or "") == "legacy_quarantined"
-    ]
-    percent_complete = (
-        float(completed_items) / float(len(rows)) * 100.0
-        if rows
-        else 0.0
-    )
-    return {
-        "generated_at": _utc_now(),
-        "study_name": STUDY_NAME,
-        "output_root": str(root),
-        "assumed_doc_tokens": int(
-            manifest.get("assumed_doc_tokens", ASSUMED_DOC_TOKENS) or ASSUMED_DOC_TOKENS
-        ),
-        "canonical_train_ladder": [
-            int(value)
-            for value in list(
-                manifest.get("canonical_train_ladder") or _canonical_train_ladder_payload()
-            )
-        ],
-        "one_leaf_target_fixed_leaf_tokens": int(
-            manifest.get(
-                "one_leaf_target_fixed_leaf_tokens",
-                ONE_LEAF_TARGET_FIXED_LEAF_TOKENS,
-            )
-            or ONE_LEAF_TARGET_FIXED_LEAF_TOKENS
-        ),
-        "evidence_status": str(evidence_status),
-        "contract_gate_status": "fail" if quarantined_rows else "pass",
-        "quarantined_row_count": int(len(quarantined_rows)),
-        "quarantined_sources": [
-            str(row.get("source_summary_json", "") or "")
-            for row in quarantined_rows
-            if str(row.get("source_summary_json", "") or "").strip()
-        ],
-        "rows": rows,
-        "items_total": int(len(rows)),
-        "completed_items": int(
-            scheduler_payload.get("completed_items", completed_items) or completed_items
-        ),
-        "failed_items": int(
-            scheduler_payload.get("failed_items", failed_items) or failed_items
-        ),
-        "active_items": int(scheduler_payload.get("active_items", 0) or 0),
-        "pending_items": int(
-            scheduler_payload.get("pending_items", pending_items) or pending_items
-        ),
-        "percent_complete": float(
-            scheduler_payload.get("percent_complete", percent_complete) or percent_complete
-        ),
-        "state": state,
-        "scheduler_status_json": str(root / "scheduler_status.json"),
-        "parity_grid_manifest_json": str(manifest_path),
-        "parity_grid_summary_json": str(summary_path),
-        "results_json": str(root / "results.jsonl"),
-    }
-
-
-def _parity_results_rows(payload: Mapping[str, Any]) -> List[ResultRow]:
-    experiment_id = f"{STUDY_NAME}:{Path(str(payload.get('output_root', ''))).name}"
-    result_rows: List[ResultRow] = []
-    for row in list(payload.get("rows") or []):
-        entry = dict(row or {})
-        if str(entry.get("state", "")) != "completed":
-            continue
-        benchmark_name = str(entry.get("benchmark", "") or "")
-        scope_label = str(entry.get("scope_label", "") or "")
-        cell_id = ""
-        if "::" in benchmark_name:
-            _, _, cell_id = benchmark_name.partition("::")
-        benchmark_ref = benchmark_ref_from_parts(
-            family="markov_supervision_recovery",
-            scope=scope_label,
-            cell=cell_id,
-            dataset_id="markov_full_doc",
-            name=benchmark_name,
-            metadata={"study_name": STUDY_NAME},
-        )
-        method_ref = method_ref_from_markov_full_doc_run(
-            family=str(entry.get("baseline_family", TREE_BASELINE_FAMILY)),
-            variant=(
-                f"{str(entry.get('recipe_id', ''))}_leaf"
-                f"{int(entry.get('fixed_leaf_tokens', 0) or 0)}"
-            ),
-            adapter="markov_tree",
-            config_like={
-                "root_label_rate": 1.0,
-                "leaf_supervision_kind": "none",
-                "leaf_label_rate": 0.0,
-                "internal_supervision_kind": "none",
-                "internal_label_rate": 0.0,
-                "fixed_leaf_tokens": int(entry.get("fixed_leaf_tokens", 0) or 0),
-            },
-            package_name="full100",
-            metadata={
-                "recipe_id": str(entry.get("recipe_id", "") or ""),
-                "fixed_leaf_tokens": int(entry.get("fixed_leaf_tokens", 0) or 0),
-                "slot_count": int(entry.get("slot_count", 0) or 0),
-                "one_leaf_target": bool(entry.get("one_leaf_target", False)),
-                "study_name": STUDY_NAME,
-            },
-        )
-        supervision_ref = method_ref.supervision
-        artifact_refs = tuple(
-            item
-            for item in (
-                str(entry.get("source_summary_json", "") or "").strip(),
-                str(entry.get("job_output_dir", "") or "").strip(),
-            )
-            if item
-        )
-        metric_specs = (
-            ("test", "root_mae", entry.get("test_root_mae_mean")),
-            ("test", "leaf_mae", entry.get("test_leaf_mae_mean")),
-            ("test", "merge_mae", entry.get("test_merge_mae_mean")),
-            ("val", "root_mae", entry.get("val_root_mae_mean")),
-        )
-        for split, metric_name, metric_value in metric_specs:
-            if metric_value in {None, ""}:
-                continue
-            result_rows.append(
-                ResultRow(
-                    experiment_id=experiment_id,
-                    phase=STUDY_NAME,
-                    benchmark_ref=benchmark_ref,
-                    method_ref=method_ref,
-                    split=str(split),
-                    seed=int(entry.get("seed", 0) or 0),
-                    train_docs=int(entry.get("train_doc_count", 0) or 0),
-                    supervision_ref=supervision_ref,
-                    metric_name=str(metric_name),
-                    metric_value=float(metric_value),
-                    artifact_refs=artifact_refs,
-                    metadata={
-                        "recipe_id": str(entry.get("recipe_id", "") or ""),
-                        "claim_level": str(entry.get("claim_level", "") or ""),
-                        "fixed_leaf_tokens": int(entry.get("fixed_leaf_tokens", 0) or 0),
-                        "selection_metric_name": str(
-                            entry.get("selection_metric_name", "") or ""
-                        ),
-                        "best_epoch_mean": entry.get("best_epoch_mean"),
-                        "wall_clock_s_mean": entry.get("wall_clock_s_mean"),
-                        "scope_key": str(entry.get("scope_key", "") or ""),
-                        "scope_label": str(entry.get("scope_label", "") or ""),
-                        "reference_bundle_source": str(
-                            entry.get("reference_bundle_source", "") or ""
-                        ),
-                        "strict_collapse_pass": bool(
-                            entry.get("strict_collapse_pass", False)
-                        ),
-                        "evidence_status": str(entry.get("evidence_status", "") or ""),
-                    },
-                )
-            )
-    return result_rows
-
-
-def _write_materialized_outputs(output_root: Path) -> Dict[str, Any]:
-    payload = load_parity_grid_root(output_root)
-    _write_json(output_root / PARITY_SUMMARY_NAME, payload)
-    status_payload = {
-        "generated_at": payload["generated_at"],
-        "study_name": payload["study_name"],
-        "output_root": payload["output_root"],
-        "state": payload["state"],
-        "evidence_status": payload["evidence_status"],
-        "items_total": payload["items_total"],
-        "completed_items": payload["completed_items"],
-        "failed_items": payload["failed_items"],
-        "active_items": payload["active_items"],
-        "pending_items": payload["pending_items"],
-        "percent_complete": payload["percent_complete"],
-        "canonical_train_ladder": list(payload.get("canonical_train_ladder") or []),
-        "scheduler_status_json": payload["scheduler_status_json"],
-        "parity_grid_manifest_json": payload["parity_grid_manifest_json"],
-        "parity_grid_summary_json": payload["parity_grid_summary_json"],
-        "results_json": payload["results_json"],
-        "rows_by_scope": {
-            scope: sum(
-                1
-                for row in list(payload.get("rows") or [])
-                if str((row or {}).get("scope_label", "")) == scope
-            )
-            for scope in ("recoverable", "structural")
-        },
-        "rows_by_recipe": {
-            recipe: sum(
-                1
-                for row in list(payload.get("rows") or [])
-                if str((row or {}).get("recipe_id", "")) == recipe
-            )
-            for recipe in sorted(
-                {
-                    str((row or {}).get("recipe_id", ""))
-                    for row in list(payload.get("rows") or [])
-                    if str((row or {}).get("recipe_id", "")).strip()
-                }
-            )
-        },
-        "rows_by_claim_level": {
-            claim_level: sum(
-                1
-                for row in list(payload.get("rows") or [])
-                if str((row or {}).get("claim_level", "")) == claim_level
-            )
-            for claim_level in sorted(
-                {
-                    str((row or {}).get("claim_level", ""))
-                    for row in list(payload.get("rows") or [])
-                    if str((row or {}).get("claim_level", "")).strip()
-                }
-            )
-        },
-    }
-    _write_json(output_root / PARITY_STATUS_NAME, status_payload)
-    result_rows = _parity_results_rows(payload)
-    results_path = output_root / "results.jsonl"
-    if results_path.exists():
-        results_path.unlink()
-    append_result_rows(output_root, result_rows)
-    merge_artifacts(
-        output_root,
-        canonical_artifact_refs_from_paths(
-            {
-                "parity_grid_manifest_json": str(output_root / PARITY_MANIFEST_NAME),
-                "parity_grid_status_json": str(output_root / PARITY_STATUS_NAME),
-                "parity_grid_summary_json": str(output_root / PARITY_SUMMARY_NAME),
-                "parity_grid_results_jsonl": str(output_root / "results.jsonl"),
-                "scheduler_status_json": str(output_root / "scheduler_status.json"),
-            },
-            phase_id=STUDY_NAME,
-            required=False,
-        ),
-    )
-    return payload
-
+# Completed-run IO/materialization is package code so validators and CLI
+# wrappers share the same row contract.
 
 def _ensure_corpus(args: argparse.Namespace, output_root: Path) -> Path:
     """Return the corpus root, creating it under *output_root* if needed.

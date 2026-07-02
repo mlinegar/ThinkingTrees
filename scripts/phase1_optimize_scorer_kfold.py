@@ -27,7 +27,8 @@ from scripts.phase1_optimize_scorer import (  # noqa: E402
     _make_metric,
     _predict_and_correlate,
 )
-from src.config.dspy_config import configure_dspy, create_vllm_lm  # noqa: E402
+from src.config.dspy_config import configure_dspy, create_local_engine_lm  # noqa: E402
+from src.config.local_inference import resolve_local_inference_config  # noqa: E402
 from src.tasks.manifesto.dimensions import BENOIT_DIMENSIONS, PolicyDimension  # noqa: E402
 from src.tasks.manifesto.dimension_scorer import DimensionScorer  # noqa: E402
 
@@ -179,16 +180,12 @@ def main() -> int:
     logging.basicConfig(level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s | %(message)s")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    lm = create_vllm_lm(
-        port=args.port,
-        model=args.model,
-        temperature=args.temperature,
-        max_tokens=args.max_tokens,
-        cache=True,
-    )
+    local_inference = resolve_local_inference_config(args)
+    lm = create_local_engine_lm(**local_inference.dspy_kwargs(cache=True))
     configure_dspy(lm=lm)
-    reflection_lm = create_vllm_lm(
-        port=args.port,
+    reflection_lm = create_local_engine_lm(
+        engine=local_inference.engine,
+        endpoints=local_inference.endpoints,
         model=args.model,
         temperature=0.7,
         max_tokens=args.reflection_max_tokens,

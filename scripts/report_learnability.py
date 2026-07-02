@@ -9,7 +9,7 @@ Produces a markdown report, JSON summary, publication-ready figures, and a
 PDF — all in the output directory.
 
 The sweep variable differs by family:
-  - Markov: lambda_local (regularisation weight on C1+C2+C3)
+  - Markov: local_law_weight (local-law objective share on C1+C2+C3)
   - LDA:    tau (mixture concentration controlling local structure)
 """
 from __future__ import annotations
@@ -185,7 +185,7 @@ def _baseline_noun(*, baseline_field: str, lambda_interpretations: Sequence[str]
     interpretation_set = {str(x) for x in lambda_interpretations}
     if "dgp_term_multiplier" in interpretation_set or "quadratic_utility_weight" in interpretation_set:
         return "zero-multiplier baseline"
-    if baseline_field in {"lambda_local", "local_law_weight"}:
+    if baseline_field == "local_law_weight":
         return "no-local-law baseline"
     return "configured baseline"
 
@@ -202,12 +202,13 @@ def _paper_safety_reason(row: dict, family: FamilyReportConfig) -> Optional[str]
         and _value_matches(row.get(baseline_field), baseline_value)
     )
     if expected_package:
-        observed_package = str(row.get("law_package", "") or "unknown").strip()
+        observed_package = str(row.get("law_set_id", "") or "unknown").strip()
         if (not is_baseline_row) and observed_package != expected_package:
-            return f"unexpected_law_package:{observed_package or 'unknown'}"
+            return f"unexpected_law_set:{observed_package or 'unknown'}"
+    component_weights = dict(row.get("objective_local_law_component_weights", {}) or {})
     for field in family.required_local_law_weight_fields:
         try:
-            value = float(row.get(field, float("nan")))
+            value = float(component_weights.get(field, row.get(field, float("nan"))))
         except Exception:
             value = float("nan")
         if not np.isfinite(value):
@@ -632,7 +633,7 @@ def main() -> int:
         if cap_field in rows[0] and cap_field not in group_keys:
             group_keys.append(cap_field)
     # Add Markov-specific fields if present and multi-valued
-    for extra in ["schedule_consistency_weight", "root_weight"]:
+    for extra in ["schedule_consistency_weight", "root_share"]:
         if extra in rows[0] and extra not in group_keys:
             group_keys.append(extra)
 
@@ -873,10 +874,10 @@ def main() -> int:
         for row in rows
         if str(row.get("objective_weighting_scheme", "")).strip()
     })
-    task_weight_sources = sorted({
-        str(row.get("objective_task_weight_source", "")).strip()
+    root_share_sources = sorted({
+        str(row.get("root_share_source", "")).strip()
         for row in rows
-        if str(row.get("objective_task_weight_source", "")).strip()
+        if str(row.get("root_share_source", "")).strip()
     })
     lambda_interpretations = _objective_lambda_interpretations(rows)
     baseline_noun = _baseline_noun(
@@ -935,7 +936,7 @@ def main() -> int:
         "figure_titles": figure_titles,
         "objective_weighting_schemes": weighting_schemes,
         "objective_lambda_interpretations": lambda_interpretations,
-        "objective_task_weight_sources": task_weight_sources,
+        "root_share_sources": root_share_sources,
         "paper_safe_exclusion_reasons": dict(sorted(paper_safe_exclusions.items())),
     }
     (output_dir / "learnability_summary.json").write_text(
@@ -983,8 +984,8 @@ def main() -> int:
             f"- **Interpretation note**: `{baseline_label}` is a quadratic-utility multiplier, not the paper local-law lambda, so values above `1` are valid in this family.",
             "",
         ])
-    if task_weight_sources:
-        md_lines.extend([f"- Task-weight source(s): `{', '.join(task_weight_sources)}`", ""])
+    if root_share_sources:
+        md_lines.extend([f"- Root-share source(s): `{', '.join(root_share_sources)}`", ""])
     if paper_safe_exclusions:
         md_lines.extend([
             "- Paper-safe exclusions:",
@@ -1068,8 +1069,8 @@ def main() -> int:
         status_lines.append(
             f"{baseline_label} is a quadratic-utility multiplier, not the paper local-law lambda, so values above 1 are valid in this family."
         )
-    if task_weight_sources:
-        status_lines.append(f"Task-weight source(s): {', '.join(task_weight_sources)}.")
+    if root_share_sources:
+        status_lines.append(f"Root-share source(s): {', '.join(root_share_sources)}.")
     if paper_safe_exclusions:
         status_lines.append("Paper-safe exclusions:")
         status_lines.extend(

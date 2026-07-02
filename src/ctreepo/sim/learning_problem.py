@@ -4,6 +4,14 @@ from dataclasses import replace
 import math
 from typing import Any, Dict, Mapping, Optional, Sequence
 
+from src.ctreepo.contracts import (
+    LAW_ID_LEAF_PRESERVATION,
+    LAW_ID_MERGE_PRESERVATION,
+    LAW_ID_ON_RANGE_IDEMPOTENCE,
+    ProblemAdapterSpec,
+    canonical_law_component_weights,
+    default_law_set_specs,
+)
 from src.ctreepo.sim.util import safe_float
 from src.core.ops_checks import (
     EvidenceStatus,
@@ -61,22 +69,40 @@ _MARKOV_EXACT_LAW_AVAILABILITY: Dict[str, Dict[LawKind, bool]] = {
 
 _safe_float = lambda v, default=0.0: safe_float(v, default=default)
 
+_PROBLEM_ADAPTERS: Dict[str, ProblemAdapterSpec] = {
+    "markov_ops_count": ProblemAdapterSpec(
+        problem_id="markov_ops_count",
+        document_type_name="markov_regime_documents",
+        theorem_domain_name="changepoint_count_summary_states",
+        oracle_label_sources=("root_state", "sampled_node_labels", "oracle_state"),
+        law_sets=default_law_set_specs(
+            (
+                LAW_ID_LEAF_PRESERVATION,
+                LAW_ID_MERGE_PRESERVATION,
+                LAW_ID_ON_RANGE_IDEMPOTENCE,
+            )
+        ),
+    ),
+    "tree_relevant_lda_local_law": ProblemAdapterSpec(
+        problem_id="leaf_local_mixture_utility",
+        document_type_name="topic_mixture_documents",
+        theorem_domain_name="analysis_summary_states",
+        oracle_label_sources=("root_topic_target", "sampled_node_labels"),
+    ),
+}
+
 
 def _family_problem_metadata(summary: LocalLawRunSummary) -> Dict[str, str]:
-    family = str(summary.family)
-    if family == "markov_ops_count":
+    adapter = _PROBLEM_ADAPTERS.get(str(summary.family))
+    if adapter is not None:
         return {
-            "name": "markov_local_law_learning",
-            "document_type_name": "markov_regime_documents",
-            "theorem_domain_name": "changepoint_count_summary_states",
-        }
-    if family == "tree_relevant_lda_local_law":
-        return {
-            "name": "lda_local_law_learning",
-            "document_type_name": "topic_mixture_documents",
-            "theorem_domain_name": "analysis_summary_states",
+            "problem_id": str(adapter.problem_id),
+            "name": f"{adapter.problem_id}_local_law_learning",
+            "document_type_name": str(adapter.document_type_name),
+            "theorem_domain_name": str(adapter.theorem_domain_name),
         }
     return {
+        "problem_id": str(summary.family or "generic"),
         "name": "local_law_learning",
         "document_type_name": "documents",
         "theorem_domain_name": "summary_states",
@@ -269,9 +295,9 @@ def _full_document_supervision_active(
     raw_payload: Optional[Mapping[str, Any]] = None,
 ) -> bool:
     objective = _summary_objective_payload(summary, raw_payload=raw_payload)
-    task_weight = _safe_float(objective.get("task_weight"), float("nan"))
-    if math.isfinite(task_weight):
-        return bool(task_weight > 0.0)
+    root_share = _safe_float(objective.get("root_share"), float("nan"))
+    if math.isfinite(root_share):
+        return bool(root_share > 0.0)
     return bool(float(summary.support_budget.root_query_rate) > 0.0)
 
 
@@ -375,12 +401,17 @@ def _objective_weight(
     objective: Mapping[str, Any],
     *,
     names: Sequence[str],
-    container_name: str = "local_law_weights",
+    container_name: str = "local_law_component_weights",
 ) -> float:
-    nested = dict(objective.get(container_name, {}) or {})
+    nested = canonical_law_component_weights(
+        dict(objective.get(container_name, {}) or {}),
+        allow_aliases=True,
+    )
     for name in names:
-        if name in nested:
-            return _safe_float(nested.get(name), 0.0)
+        canonical_names = canonical_law_component_weights({str(name): 1.0}, allow_aliases=True)
+        for canonical_name in canonical_names:
+            if canonical_name in nested:
+                return _safe_float(nested.get(canonical_name), 0.0)
     for name in names:
         for key in (
             name,

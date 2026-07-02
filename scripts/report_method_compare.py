@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.experiments.reporting import build_canonical_report_views, load_canonical_result_rows
+from src.experiments.control_plane import merge_artifacts
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -101,7 +102,7 @@ def main() -> int:
             "run_dir": str(run_dir),
             "final_stats_path": str(stats_path),
             "canonical_row_count": int(run_report_views.get("row_count", 0) or 0),
-            "canonical_method_families": list(run_report_views.get("method_families", []) or []),
+            "canonical_method_ids": list(run_report_views.get("method_ids", []) or []),
             "canonical_supervision_labels": list(run_report_views.get("supervision_labels", []) or []),
             "canonical_control_labels": list(run_report_views.get("control_labels", []) or []),
         }
@@ -159,7 +160,7 @@ def main() -> int:
         md_lines.append("")
         md_lines.append("## Canonical Coverage")
         md_lines.append("")
-        md_lines.append(f"- Method families: `{', '.join(canonical_reporting.get('method_families', [])) or 'n/a'}`")
+        md_lines.append(f"- Method IDs: `{', '.join(canonical_reporting.get('method_ids', [])) or 'n/a'}`")
         md_lines.append(f"- Comparison domains: `{', '.join(canonical_reporting.get('comparison_domains', [])) or 'n/a'}`")
         md_lines.append(f"- Supervision labels: `{', '.join(canonical_reporting.get('supervision_labels', [])) or 'n/a'}`")
         md_lines.append(f"- Control labels: `{', '.join(canonical_reporting.get('control_labels', [])) or 'n/a'}`")
@@ -192,6 +193,13 @@ def main() -> int:
 
     print(f"Summary JSON: {summary_json_path}")
     print(f"Summary MD:   {summary_md_path}")
+    merge_artifacts(
+        output_root,
+        {
+            "comparison_summary_json": str(summary_json_path),
+            "comparison_summary_md": str(summary_md_path),
+        },
+    )
     return 0
 
 

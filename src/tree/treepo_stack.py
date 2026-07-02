@@ -31,7 +31,6 @@ from src.training.embedding_proxy import LabeledEmbeddingExample, fit_embedding_
 from src.training.supervision.types import ResponseJudgment, SupervisionDataset
 from src.tree.async_operator import (
     AsyncCompositionalOperator,
-    AsyncFromDiffusionBackend,
     AsyncFromInferenceEngine,
     MarkovToyOperator,
 )
@@ -374,11 +373,10 @@ def _resolve_surface(
     if requested == "chat":
         return EngineSurface.CHAT_OPENAI, requested, None
 
-    # requested == generate
-    if engine_spec.supports_surface(EngineSurface.DIFFUSION_GENERATE):
-        return EngineSurface.DIFFUSION_GENERATE, requested, None
+    # `generate` is now a prompt/transport preference under the canonical text
+    # surface. Genuine `/generate` engines are adapted inside the text engine.
     if bool(spec.prefer_generate):
-        return EngineSurface.CHAT_OPENAI, requested, "engine_missing_generate_surface"
+        return EngineSurface.CHAT_OPENAI, requested, "generate_surface_demoted_to_chat_openai"
     return EngineSurface.CHAT_OPENAI, requested, "generate_not_preferred"
 
 
@@ -450,21 +448,40 @@ def _build_operator_g(model_spec: TreePOModelSpec) -> Tuple[AsyncCompositionalOp
         if model_spec.backend is None:
             raise ValueError("TreePOModelSpec.backend is required for kind='diffusion_backend'.")
         templates = model_spec.prompt_templates or GenerateTreePromptTemplates()
-        operator = AsyncFromDiffusionBackend(
-            model_spec.backend,
-            prompt_templates=templates,
+        from src.core.inference_engine import ChatInferenceEngine, GenerateChatClient
+        from src.core.llm_client import LLMConfig
+
+        config = LLMConfig(
+            base_url="",
+            model=str(model_spec.model or "default"),
+            api_key=str(model_spec.api_key or "EMPTY"),
+            timeout=float(model_spec.timeout),
+        )
+        engine = ChatInferenceEngine(
+            engine_type=EngineType.CUSTOM_HTTP,
+            config=config,
+            llm_client=GenerateChatClient(config=config, backend=model_spec.backend),
+        )
+        operator = AsyncFromInferenceEngine(
+            engine,
+            max_tokens=int(model_spec.max_tokens),
+            temperature=float(model_spec.temperature),
+            stop=tuple(model_spec.stop or ()),
+            diffusion_prompt_templates=templates,
+            use_generate_prompt_templates=True,
         )
         return operator, {
-            "kind": "diffusion_backend",
-            "engine": "custom_backend",
+            "kind": "generate_backend",
+            "engine": EngineType.CUSTOM_HTTP.value,
             "model": str(model_spec.model or "default"),
-            "surface": EngineSurface.DIFFUSION_GENERATE.value,
+            "surface": EngineSurface.CHAT_OPENAI.value,
             "surface_requested": "generate",
-            "surface_fallback_reason": None,
+            "surface_fallback_reason": "generate_backend_wrapped_as_chat_openai",
             "base_url": None,
             "generate_path": str(model_spec.generate_path or "/generate"),
             "prompt_templates": templates,
             "backend": model_spec.backend,
+            "inference_engine": engine,
         }
 
     engine_type = _resolve_engine_type(model_spec)
@@ -482,11 +499,18 @@ def _build_operator_g(model_spec: TreePOModelSpec) -> Tuple[AsyncCompositionalOp
         host=model_spec.host,
         port=model_spec.port,
     )
-    if surface is EngineSurface.DIFFUSION_GENERATE and resolved_base_url is not None:
-        resolved_base_url = normalize_generate_base_url(
-            resolved_base_url,
-            generate_path=model_spec.generate_path,
-        )
+    transport = None
+    if surface_requested == "generate":
+        base_url_text = str(model_spec.base_url or resolved_base_url or "")
+        if engine_type is EngineType.VLLM_OMNI or (
+            engine_type is EngineType.CUSTOM_HTTP and "/generate" in base_url_text
+        ):
+            transport = "generate"
+            if resolved_base_url is not None:
+                resolved_base_url = normalize_generate_base_url(
+                    resolved_base_url,
+                    generate_path=model_spec.generate_path,
+                )
 
     engine = build_inference_engine(
         engine_type,
@@ -498,6 +522,7 @@ def _build_operator_g(model_spec: TreePOModelSpec) -> Tuple[AsyncCompositionalOp
         api_key=model_spec.api_key,
         timeout=float(model_spec.timeout),
         generate_path=str(model_spec.generate_path or "/generate"),
+        transport=transport,
     )
 
     templates = model_spec.prompt_templates or GenerateTreePromptTemplates()
@@ -507,6 +532,7 @@ def _build_operator_g(model_spec: TreePOModelSpec) -> Tuple[AsyncCompositionalOp
         temperature=float(model_spec.temperature),
         stop=tuple(model_spec.stop or ()),
         diffusion_prompt_templates=templates,
+        use_generate_prompt_templates=surface_requested == "generate",
     )
     meta = {
         "kind": "inference_engine",
@@ -764,27 +790,6 @@ def _make_sync_resummarizer_from_stack(
     resolved_sampling_params = dict(sampling_params or {})
     resolved_engine_options = dict(engine_options or {})
 
-    if stack.inference_engine is None and surface is EngineSurface.DIFFUSION_GENERATE and hasattr(stack.operator_g, "backend"):
-        from src.tree.generate_prompting import refine_prompt
-
-        backend = getattr(stack.operator_g, "backend")
-        operator_templates = getattr(stack.operator_g, "prompt_templates", None)
-        if operator_templates is not None:
-            templates = operator_templates
-
-        def resummarize(text: str, rubric: str) -> str:
-            prompt = refine_prompt(str(text or ""), str(rubric or ""), 1, templates)
-            batch = backend.generate(
-                [prompt],
-                sampling_params=dict(resolved_sampling_params),
-                engine_options=dict(resolved_engine_options),
-            )
-            if not getattr(batch, "generations", None):
-                return ""
-            return str(batch.generations[0].output_text)
-
-        return resummarize
-
     if stack.inference_engine is None:
         return None
 
@@ -793,9 +798,18 @@ def _make_sync_resummarizer_from_stack(
     if surface is EngineSurface.CHAT_OPENAI:
         from src.core.prompting import default_resummary_prompt
         from src.runtime.contracts import ChatInput, InferenceRequest
+        from src.tree.generate_prompting import refine_prompt
+
+        use_generate_templates = bool(
+            getattr(stack.operator_g, "use_generate_prompt_templates", False)
+        )
 
         def resummarize(text: str, rubric: str) -> str:
-            messages = default_resummary_prompt(str(text or ""), str(rubric or ""), round_index=None)
+            if use_generate_templates:
+                prompt = refine_prompt(str(text or ""), str(rubric or ""), 1, templates)
+                messages = [{"role": "user", "content": prompt}]
+            else:
+                messages = default_resummary_prompt(str(text or ""), str(rubric or ""), round_index=None)
             response = engine.execute(
                 InferenceRequest(
                     surface=EngineSurface.CHAT_OPENAI,
@@ -810,28 +824,6 @@ def _make_sync_resummarizer_from_stack(
                 )
             )
             return str(response.to_model_response().text or "")
-
-        return resummarize
-
-    if surface is EngineSurface.DIFFUSION_GENERATE:
-        from src.runtime.contracts import DiffusionInput, InferenceRequest, TextListOutput
-        from src.tree.generate_prompting import refine_prompt
-
-        def resummarize(text: str, rubric: str) -> str:
-            prompt = refine_prompt(str(text or ""), str(rubric or ""), 1, templates)
-            response = engine.execute(
-                InferenceRequest(
-                    surface=EngineSurface.DIFFUSION_GENERATE,
-                    input=DiffusionInput(texts=[prompt], sampling_params=dict(resolved_sampling_params)),
-                    engine_options=dict(resolved_engine_options),
-                )
-            )
-            output = response.output
-            if not isinstance(output, TextListOutput):
-                raise TypeError(
-                    f"Expected TextListOutput from diffusion resummary, got {type(output).__name__}."
-                )
-            return str(output.texts[0] if output.texts else "")
 
         return resummarize
 

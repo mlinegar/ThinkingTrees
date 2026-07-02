@@ -45,6 +45,10 @@ from src.ctreepo.sim.core.full_doc_anchor_diagnostics import (  # noqa: E402
 from src.ctreepo.sim.suite.markov_observed_token_policy import (  # noqa: E402
     resolve_markov_observed_token_policy,
 )
+from src.ctreepo.data.splits import (  # noqa: E402
+    SPLIT_SCHEMA_VERSION,
+    split_from_count_slices,
+)
 
 
 def _parse_int_list(raw: str) -> List[int]:
@@ -335,6 +339,25 @@ def _prepare_single_benchmark_corpus(
         "precomputed_tree_data": dict(precomputed_paths),
         "oracle_stats": dict(oracle_stats),
     }
+
+    # Additive: emit the shared id-based split so downstream can round-trip
+    # through src.ctreepo.data.splits. This does not alter any existing manifest
+    # key; the split slices mirror the train_pool/test/val partition above.
+    shared_split = split_from_count_slices(
+        train=int(len(train_pool)),
+        val=int(len(val_set)),
+        test=int(len(test_set)),
+        order=("train", "test", "val"),
+        id_prefix="markov_doc",
+        metadata={"family": "markov", "benchmark": str(benchmark_name)},
+    )
+    shared_split.save(output_root)
+    manifest["shared_split"] = {
+        "schema_version": SPLIT_SCHEMA_VERSION,
+        "split_ids_path": str(output_root / "split_ids.json"),
+        "counts": shared_split.counts(),
+    }
+
     manifest_path = output_root / "corpus_manifest.json"
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",

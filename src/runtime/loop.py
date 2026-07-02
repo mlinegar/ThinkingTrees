@@ -10,6 +10,7 @@ from src.runtime.adapters.base import BenchmarkAdapter
 from src.runtime.backbone import BackboneAdapter
 from src.runtime.contracts import ProblemSpec, RunUnit, RuntimeConfig
 from src.runtime.memory import TokenCounter, chunk_text_tokens, pairwise
+from src.runtime.methods import MethodResources, run_runtime_method
 from src.runtime.repair import SimpleRepairPolicy
 from src.runtime.trace import PredictionRecord, StepEvent, TraceWriter
 from src.runtime.verifier import DeterministicVerifier
@@ -47,9 +48,9 @@ def _extract_context_and_question(problem: ProblemSpec) -> Tuple[str, str]:
     return text, problem.query or ""
 
 
-def _require_backbone(backbone: Optional[BackboneAdapter], mode: str) -> BackboneAdapter:
+def _require_backbone(backbone: Optional[BackboneAdapter], method: str) -> BackboneAdapter:
     if backbone is None:
-        raise RuntimeError(f"Mode {mode!r} requires an LLM backbone, but none was configured.")
+        raise RuntimeError(f"Method {method!r} requires an LLM backbone, but none was configured.")
     return backbone
 
 
@@ -81,6 +82,7 @@ def run_unit(
     runtime: RuntimeConfig,
     trace: TraceWriter,
     backbone: Optional[BackboneAdapter],
+    resources: Optional[MethodResources] = None,
     counter: Optional[TokenCounter] = None,
     limit_problems: Optional[int] = None,
 ) -> UnitMetrics:
@@ -105,19 +107,41 @@ def run_unit(
     total_completion_tokens = 0
     total_calls = 0
     wall_start = __import__("time").time()
+    method_resources = resources or MethodResources(backbone=backbone)
+    inference_context = getattr(method_resources, "inference_context", None)
 
     for problem in problems:
+        previous_scope: Dict[str, Any] = {}
+        if inference_context is not None and hasattr(inference_context, "set_call_scope"):
+            try:
+                previous_scope = inference_context.set_call_scope(
+                    run_id=unit.run_id,
+                    experiment_id=unit.run_id,
+                    unit_id=unit.unit_id,
+                    method_id=unit.method,
+                    problem_id=problem.problem_id,
+                    metadata={
+                        "benchmark": unit.benchmark,
+                        "task_id": unit.task_id,
+                        "phase_id": unit.phase_id,
+                    },
+                )
+            except Exception:
+                previous_scope = {}
         try:
-            pred_text, cost, step_events = _run_problem(
+            method_result = run_runtime_method(
+                unit=unit,
                 problem=problem,
                 adapter=adapter,
-                unit=unit,
                 runtime=runtime,
-                backbone=backbone,
+                resources=method_resources,
                 counter=counter,
                 verifier=verifier,
                 repair=repair,
             )
+            pred_text = method_result.prediction
+            cost = dict(method_result.cost)
+            step_events = list(method_result.steps)
             # Emit steps.
             for ev in step_events:
                 trace.write_step(unit.unit_id, ev)
@@ -143,13 +167,21 @@ def run_unit(
                     split=unit.split,
                     max_seq_length=unit.max_seq_length,
                     seed=unit.seed,
-                    mode=unit.mode,
+                    method=unit.method,
                     primary_metric=primary,
                     problem_id=problem.problem_id,
                     prediction=pred_text,
                     references=list(problem.references),
                     metrics=metrics,
                     cost=cost,
+                    metadata={
+                        "problem": {
+                            key: value
+                            for key, value in dict(problem.metadata).items()
+                            if key not in {"context", "input", "prompt"}
+                        },
+                        "artifacts": dict(method_result.artifacts),
+                    },
                     failure=None,
                 ),
             )
@@ -166,16 +198,29 @@ def run_unit(
                     split=unit.split,
                     max_seq_length=unit.max_seq_length,
                     seed=unit.seed,
-                    mode=unit.mode,
+                    method=unit.method,
                     primary_metric=primary,
                     problem_id=problem.problem_id,
                     prediction="",
                     references=list(problem.references),
                     metrics={primary: 0.0},
                     cost={},
+                    metadata={
+                        "problem": {
+                            key: value
+                            for key, value in dict(problem.metadata).items()
+                            if key not in {"context", "input", "prompt"}
+                        }
+                    },
                     failure={"error_type": type(e).__name__, "message": str(e)},
                 ),
             )
+        finally:
+            if inference_context is not None and hasattr(inference_context, "set_call_scope"):
+                try:
+                    inference_context.set_call_scope(**previous_scope)
+                except Exception:
+                    pass
 
     wall_ms = (__import__("time").time() - wall_start) * 1000.0
     mean_score = total_score / max(1, n_scored)
@@ -205,7 +250,7 @@ def _run_problem(
     verifier: DeterministicVerifier,
     repair: SimpleRepairPolicy,
 ) -> Tuple[str, Dict[str, Any], List[StepEvent]]:
-    mode = runtime.mode
+    method = runtime.method
 
     answer_prefix = str(problem.metadata.get("answer_prefix", "") or "")
     full_prompt = (problem.input_text or "") + answer_prefix
@@ -250,7 +295,7 @@ def _run_problem(
             )
         )
 
-    if mode == "ground_truth":
+    if method == "ground_truth":
         pred = " ".join(problem.references)
         return (
             pred,
@@ -258,15 +303,15 @@ def _run_problem(
             step_events,
         )
 
-    if mode == "empty":
+    if method == "empty":
         return (
             "",
             {"n_calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "wall_ms": 0.0},
             step_events,
         )
 
-    if mode == "flat_prompt_baseline":
-        bb = _require_backbone(backbone, mode)
+    if method == "flat_prompt_baseline":
+        bb = _require_backbone(backbone, method)
         prompt = counter.truncate_tokens(
             full_prompt, max_tokens=max_input_tokens_for(runtime.max_output_tokens), keep="tail"
         )
@@ -306,7 +351,8 @@ def _run_problem(
                 backbone=bb,
                 messages=messages,
                 contract=adapter.build_contract(problem),
-                verifier=v or verifier.check(contract=adapter.build_contract(problem), response=resp),
+                verifier=v
+                or verifier.check(contract=adapter.build_contract(problem), response=resp),
                 max_tokens=runtime.max_output_tokens,
             )
             n_calls += 1
@@ -343,20 +389,28 @@ def _run_problem(
             step_events,
         )
 
-    if mode in {"chunk_concat_baseline", "runtime_no_verifier", "runtime_no_repair", "runtime_full"}:
-        bb = _require_backbone(backbone, mode)
+    if method in {
+        "chunk_concat_baseline",
+        "runtime_no_verifier",
+        "runtime_no_repair",
+        "runtime_full",
+    }:
+        bb = _require_backbone(backbone, method)
 
         # Apply ablation toggles.
         verifier_enabled = runtime.verifier_enabled
         repair_enabled = runtime.repair_enabled
-        if mode == "runtime_no_verifier":
+        if method == "runtime_no_verifier":
             verifier_enabled = False
-        if mode == "runtime_no_repair":
+        if method == "runtime_no_repair":
             repair_enabled = False
 
         context, question = _extract_context_and_question(problem)
         chunks = chunk_text_tokens(
-            context, counter=counter, chunk_tokens=runtime.chunk_tokens, overlap_tokens=runtime.overlap_tokens
+            context,
+            counter=counter,
+            chunk_tokens=runtime.chunk_tokens,
+            overlap_tokens=runtime.overlap_tokens,
         )
 
         system = (
@@ -419,7 +473,15 @@ def _run_problem(
             prompt_tokens_total += resp.prompt_tokens or counter.count(user)
             completion_tokens_total += resp.completion_tokens or counter.count(resp.text)
 
-            v = verifier.check(contract=adapter.build_contract(problem), response=resp, max_output_tokens=runtime.leaf_memory_tokens) if verifier_enabled else None
+            v = (
+                verifier.check(
+                    contract=adapter.build_contract(problem),
+                    response=resp,
+                    max_output_tokens=runtime.leaf_memory_tokens,
+                )
+                if verifier_enabled
+                else None
+            )
             passed = True if v is None else v.pass_
             failures = [] if v is None else list(v.failures)
             log_call(
@@ -439,7 +501,8 @@ def _run_problem(
                     backbone=bb,
                     messages=msgs,
                     contract=adapter.build_contract(problem),
-                    verifier=v or verifier.check(contract=adapter.build_contract(problem), response=resp),
+                    verifier=v
+                    or verifier.check(contract=adapter.build_contract(problem), response=resp),
                     max_tokens=runtime.leaf_memory_tokens,
                 )
                 n_calls += 1
@@ -464,7 +527,9 @@ def _run_problem(
                 )
                 resp = repaired
 
-            mem = counter.truncate_tokens(resp.text.strip(), max_tokens=runtime.leaf_memory_tokens, keep="head")
+            mem = counter.truncate_tokens(
+                resp.text.strip(), max_tokens=runtime.leaf_memory_tokens, keep="head"
+            )
             return mem
 
         def merge_memory(a: str, b: str, step_idx: int, node_id: str) -> str:
@@ -495,11 +560,15 @@ def _run_problem(
             prompt_tokens_total += resp.prompt_tokens or counter.count(user)
             completion_tokens_total += resp.completion_tokens or counter.count(resp.text)
 
-            v = verifier.check(
-                contract=adapter.build_contract(problem),
-                response=resp,
-                max_output_tokens=runtime.merge_memory_tokens,
-            ) if verifier_enabled else None
+            v = (
+                verifier.check(
+                    contract=adapter.build_contract(problem),
+                    response=resp,
+                    max_output_tokens=runtime.merge_memory_tokens,
+                )
+                if verifier_enabled
+                else None
+            )
             passed = True if v is None else v.pass_
             failures = [] if v is None else list(v.failures)
             log_call(
@@ -519,7 +588,8 @@ def _run_problem(
                     backbone=bb,
                     messages=msgs,
                     contract=adapter.build_contract(problem),
-                    verifier=v or verifier.check(contract=adapter.build_contract(problem), response=resp),
+                    verifier=v
+                    or verifier.check(contract=adapter.build_contract(problem), response=resp),
                     max_tokens=runtime.merge_memory_tokens,
                 )
                 n_calls += 1
@@ -544,7 +614,9 @@ def _run_problem(
                 )
                 resp = repaired
 
-            mem = counter.truncate_tokens(resp.text.strip(), max_tokens=runtime.merge_memory_tokens, keep="head")
+            mem = counter.truncate_tokens(
+                resp.text.strip(), max_tokens=runtime.merge_memory_tokens, keep="head"
+            )
             return mem
 
         # Leaf stage.
@@ -556,9 +628,11 @@ def _run_problem(
             step_idx += 2 if (verifier_enabled and repair_enabled) else 1
 
         # Combine stage.
-        if mode == "chunk_concat_baseline":
+        if method == "chunk_concat_baseline":
             combined = "\n\n".join(memories)
-            combined = counter.truncate_tokens(combined, max_tokens=runtime.merge_memory_tokens, keep="head")
+            combined = counter.truncate_tokens(
+                combined, max_tokens=runtime.merge_memory_tokens, keep="head"
+            )
             root_memory = combined
         else:
             level = 0
@@ -568,7 +642,9 @@ def _run_problem(
                     if b is None:
                         next_level.append(a)
                         continue
-                    merged = merge_memory(a, b, step_idx=step_idx, node_id=f"merge_L{level}_{j:04d}")
+                    merged = merge_memory(
+                        a, b, step_idx=step_idx, node_id=f"merge_L{level}_{j:04d}"
+                    )
                     next_level.append(merged)
                     step_idx += 2 if (verifier_enabled and repair_enabled) else 1
                 memories = next_level
@@ -584,8 +660,13 @@ def _run_problem(
         answer_user = counter.truncate_tokens(
             answer_user, max_tokens=max_input_tokens_for(runtime.max_output_tokens), keep="tail"
         )
-        answer_msgs = [{"role": "system", "content": answer_system}, {"role": "user", "content": answer_user}]
-        answer_resp = bb.generate(answer_msgs, max_tokens=runtime.max_output_tokens, temperature=0.0)
+        answer_msgs = [
+            {"role": "system", "content": answer_system},
+            {"role": "user", "content": answer_user},
+        ]
+        answer_resp = bb.generate(
+            answer_msgs, max_tokens=runtime.max_output_tokens, temperature=0.0
+        )
         n_calls += 1
         wall_ms += answer_resp.latency_ms
         prompt_tokens_total += answer_resp.prompt_tokens or counter.count(answer_user)
@@ -626,4 +707,4 @@ def _run_problem(
             step_events,
         )
 
-    raise ValueError(f"Unknown runtime mode: {mode}")
+    raise ValueError(f"Unknown runtime method: {method}")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable, Protocol
 
-from src.runtime.contracts import NodeContract, ProblemSpec
+from src.runtime.contracts import AnswerSpec, NodeContract, ProblemSpec, RuntimeTaskView
 
 
 class BenchmarkAdapter(Protocol):
@@ -10,6 +10,15 @@ class BenchmarkAdapter(Protocol):
         ...
 
     def build_contract(self, problem: ProblemSpec) -> NodeContract:
+        ...
+
+    def task_view(self, problem: ProblemSpec) -> RuntimeTaskView:
+        ...
+
+    def parse_prediction(self, problem: ProblemSpec, text: str) -> str:
+        ...
+
+    def build_answer_spec(self, problem: ProblemSpec) -> AnswerSpec:
         ...
 
     def score(self, problem: ProblemSpec, runtime_output: dict) -> dict[str, float]:
@@ -20,4 +29,3 @@ class BenchmarkAdapter(Protocol):
 
     def supports_tools(self) -> bool:
         ...
-

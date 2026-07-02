@@ -294,7 +294,6 @@ from src.tree.labeled import (
 # Stateful tree runner + async operator adapters (unified execution)
 from src.tree.async_operator import (
     AsyncCompositionalOperator,
-    AsyncFromDiffusionBackend,
     AsyncFromInferenceEngine,
     AsyncFromSummarizationStrategy,
     AsyncFromSyncOperator,
@@ -553,7 +552,6 @@ __all__ = [
     "LabeledDataset",
     # Stateful trees
     "AsyncCompositionalOperator",
-    "AsyncFromDiffusionBackend",
     "AsyncFromInferenceEngine",
     "AsyncFromSummarizationStrategy",
     "AsyncFromSyncOperator",

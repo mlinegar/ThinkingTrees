@@ -126,7 +126,7 @@ def test_teacher_trace_local_law_eval_cli_with_dspy_module(tmp_path: Path, monke
         def __call__(self, *, content: str, rubric: str) -> str:  # noqa: ARG002
             return f"dspy::{content[:20]}"
 
-    monkeypatch.setattr(cli, "create_vllm_lm", lambda **kwargs: object())
+    monkeypatch.setattr(cli, "create_local_engine_lm", lambda **kwargs: object())
     monkeypatch.setattr(cli, "configure_dspy", lambda **kwargs: None)
     monkeypatch.setattr(cli, "UnifiedG", _FakeUnifiedG)
     monkeypatch.setattr(cli, "_build_score_fn", lambda *args, **kwargs: (lambda text: 5.0))

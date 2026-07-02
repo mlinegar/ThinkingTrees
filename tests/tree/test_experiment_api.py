@@ -81,14 +81,14 @@ def test_experiment_spec_round_trip() -> None:
     assert restored.method_refs[0].control_ref.law_ids == ("L1", "L2")
 
 
-def test_runtime_legacy_runspec_imports_into_canonical_experiment() -> None:
+def test_runtime_runspec_imports_into_canonical_experiment() -> None:
     runtime_spec = RunSpec(
         run_id="runtime_001",
         created_utc="2026-04-01T00:00:00+00:00",
         output_dir="outputs/runtime",
         benchmark={"name": "ruler_synthetic", "family": "runtime_benchmark"},
-        model={"model": "demo-model", "engine": "vllm"},
         runtime_defaults={},
+        surfaces={"chat_openai": {"model": "demo-model", "engine": "vllm"}},
         phases=[
             RunPhaseSpec(
                 phase_id="P0",
@@ -97,7 +97,7 @@ def test_runtime_legacy_runspec_imports_into_canonical_experiment() -> None:
                 seeds=[0, 1],
                 num_samples=4,
                 split="validation",
-                modes=["runtime_full"],
+                methods=["runtime_full"],
             )
         ],
     )
@@ -138,7 +138,8 @@ def test_runtime_eval_adapter_builds_canonical_spec(tmp_path: Path) -> None:
                 "benchmark:",
                 "  name: ruler_synthetic",
                 "  family: runtime_benchmark",
-                "model:",
+                "scorer:",
+                "  endpoint: http://localhost:8000/v1",
                 "  model: demo-model",
                 "  engine: vllm",
                 "runtime_defaults: {}",
@@ -149,7 +150,7 @@ def test_runtime_eval_adapter_builds_canonical_spec(tmp_path: Path) -> None:
                 "    seeds: [0]",
                 "    num_samples: 2",
                 "    split: validation",
-                "    modes: [runtime_full]",
+                "    methods: [runtime_full]",
             ]
         ),
         encoding="utf-8",
@@ -276,7 +277,10 @@ def test_markov_full_doc_method_ref_surfaces_tree_law_contract() -> None:
     assert method_ref.control_ref.law_ids == ("L1", "L3", "L2")
     assert method_ref.metadata["family_api_group"] == "markov_full_doc_neuraloperator"
     assert method_ref.metadata["law_alignment_status"] == "approximate_audited"
-    assert "c2_replay_proxy_not_exact_paper_idempotence" in method_ref.metadata["law_contract_limitations"]
+    assert (
+        "c2_replay_proxy_not_exact_paper_idempotence"
+        in method_ref.metadata["law_contract_limitations"]
+    )
     assert method_ref.metadata["run_intent_hash"] == "intent_demo"
 
 
@@ -300,7 +304,10 @@ def test_markov_full_doc_method_ref_keeps_fno_local_budget_root_only() -> None:
     assert method_ref.supervision.internal_rate == 0.0
     assert method_ref.control_ref is None
     assert method_ref.metadata["law_alignment_status"] == "proxy_only_reference"
-    assert "root_only_reference_no_tree_local_law_channel" in method_ref.metadata["law_contract_limitations"]
+    assert (
+        "root_only_reference_no_tree_local_law_channel"
+        in method_ref.metadata["law_contract_limitations"]
+    )
 
 
 def test_markov_full_doc_control_ref_maps_paper_c2_to_lean_l3() -> None:
@@ -466,11 +473,11 @@ def test_build_canonical_report_views_separates_supervision_and_control() -> Non
         artifact_refs=(),
     )
     views = build_canonical_report_views([markov_row, treepo_row, runtime_row])
-    assert views["method_families"] == ["ctreepo", "runtime_eval", "tree_neural"]
+    assert views["method_ids"] == ["ctreepo", "runtime_eval", "tree_neural"]
     assert views["supervision_labels"] == ["R10+LcIa50", "internal_only"]
     assert "ctreepo_local_law:L1+L2" in views["control_labels"]
     assert "tree_local_law:L1+L2" in views["control_labels"]
-    assert views["comparable_metrics"]["root_mae"]["method_families"] == ["ctreepo", "tree_neural"]
+    assert views["comparable_metrics"]["root_mae"]["method_ids"] == ["ctreepo", "tree_neural"]
     markov_view = derive_comparison_view(markov_row)
     treepo_view = derive_comparison_view(treepo_row)
     runtime_view = derive_comparison_view(runtime_row)
@@ -479,8 +486,7 @@ def test_build_canonical_report_views_separates_supervision_and_control() -> Non
     assert treepo_view["local_supervision_budget"]["label"] == "internal_only"
     assert runtime_view["comparison_domain"] == "runtime_context_eval"
     assert any(
-        spec["plot_kind"] == "runtime_context_scaling"
-        for spec in views["appendix_plot_specs"]
+        spec["plot_kind"] == "runtime_context_scaling" for spec in views["appendix_plot_specs"]
     )
 
 
@@ -562,18 +568,20 @@ def test_build_canonical_report_views_selects_budget_matched_plot_specs() -> Non
         ),
     ]
     views = build_canonical_report_views(rows)
+    assert any(spec["plot_kind"] == "train_doc_scaling" for spec in views["main_body_plot_specs"])
     assert any(
-        spec["plot_kind"] == "train_doc_scaling"
-        for spec in views["main_body_plot_specs"]
-    )
-    assert any(
-        spec["plot_kind"] == "direct_label_budget_ladder"
-        for spec in views["main_body_plot_specs"]
+        spec["plot_kind"] == "direct_label_budget_ladder" for spec in views["main_body_plot_specs"]
     )
     ladder_title = next(
         spec["title"]
         for spec in views["main_body_plot_specs"]
         if spec["plot_kind"] == "direct_label_budget_ladder"
     )
-    assert "Same benchmark, split, train-doc count, and direct document/root label budget." in views["caption_contracts"][ladder_title]["match_note"]
-    assert "Family baseline means the maximal direct-label run" in views["caption_contracts"][ladder_title]["reference_note"]
+    assert (
+        "Same benchmark, split, train-doc count, and direct document/root label budget."
+        in views["caption_contracts"][ladder_title]["match_note"]
+    )
+    assert (
+        "Method baseline means the maximal direct-label run"
+        in views["caption_contracts"][ladder_title]["reference_note"]
+    )

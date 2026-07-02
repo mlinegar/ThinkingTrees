@@ -3,7 +3,7 @@ Training loop for CTreePO: learned mergeable sketches over multilingual embeddin
 
 Trains a CTreePOModel on manifesto documents with RILE supervision at the root
 (empirical labels) and optionally at tree nodes (artifact labels, callbacks, or
-online feedback).
+online preferences).
 
 Usage (from scripts/train_ctreepo.py):
     trainer = CTreePOTrainer(config)
@@ -964,7 +964,7 @@ class CTreePOTrainer:
             else "empirical_root_labels"
         )
         if self._online_queue_enabled():
-            node_supervision_source = "online_feedback_queue"
+            node_supervision_source = "online_preference_queue"
         elif self.node_oracle_predictor is not None:
             node_supervision_source = str(self.node_oracle_source_kind or "live_oracle")
         elif int(labeled_leaves) > 0 or int(labeled_internal) > 0:
@@ -1111,7 +1111,7 @@ class CTreePOTrainer:
                     query_policy=(
                         shared_sampled_substructure_query_policy(
                             selection_strategy=(
-                                "budgeted_random_node_feedback"
+                                "budgeted_random_node_preference"
                                 if self._online_queue_enabled()
                                 else "all_observed_tree_nodes"
                             ),
@@ -1125,7 +1125,7 @@ class CTreePOTrainer:
                             supports_ipw_estimation=bool(self._online_queue_enabled()),
                             notes=(
                                 (
-                                    "Online mode queues sampled node-label requests through FeedbackStore and attaches completed labels at epoch boundaries."
+                                    "Online mode queues sampled node-label requests through PreferenceStore and attaches completed labels at epoch boundaries."
                                     if self._online_queue_enabled()
                                     else "Current trainer queries the attached node oracle callback while preparing trees."
                                 ),

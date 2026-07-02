@@ -1,48 +1,234 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 import math
 from typing import Any, Dict, Mapping, Optional
 
+from treepo.objective import (
+    ResolvedObjectiveWeights,
+    resolve_root_local_objective_weights,
+)
 
-@dataclass(frozen=True)
+from src.ctreepo.contracts import (
+    LAW_ID_LEAF_PRESERVATION,
+    LAW_ID_MERGE_PRESERVATION,
+    LAW_ID_ON_RANGE_IDEMPOTENCE,
+    LOCAL_LAW_ESTIMATOR_CORRECTED,
+    LOCAL_LAW_ESTIMATOR_NONE,
+    canonical_law_component_weights,
+    normalize_objective_spec,
+)
+
+
+def _finite_nonnegative(value: object) -> float:
+    try:
+        out = float(value)  # type: ignore[arg-type]
+    except Exception:
+        return 0.0
+    return float(max(0.0, out)) if math.isfinite(out) else 0.0
+
+
+def _finite_probability(value: object, *, name: str) -> float:
+    try:
+        out = float(value)  # type: ignore[arg-type]
+    except Exception as exc:
+        raise ValueError(f"{name} must be a finite number in [0, 1], got {value!r}") from exc
+    if not math.isfinite(out) or out < 0.0 or out > 1.0:
+        raise ValueError(f"{name} must be a finite number in [0, 1], got {value!r}")
+    return float(out)
+
+
+@dataclass(frozen=True, init=False)
 class CompositeObjectiveSpec:
     name: str
-    task_name: str
-    task_weight: float
-    local_law_weights: Dict[str, float] = field(default_factory=dict)
-    proxy_weights: Dict[str, float] = field(default_factory=dict)
-    weighting_scheme: str = "explicit_weighted_sum"
-    task_weight_source: str = ""
+    root_metric_name: str
+    root_share: float
+    local_law_component_weights: Dict[str, float] = field(default_factory=dict)
+    auxiliary_diagnostic_weights: Dict[str, float] = field(default_factory=dict)
+    weighting_scheme: str = "single_lambda_root_local"
+    root_share_source: str = ""
     selection_metric_name: str = "configured_objective"
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def __init__(
+        self,
+        *,
+        name: str,
+        selection_metric_name: str = "configured_objective",
+        root_metric_name: Optional[str] = None,
+        root_share: Optional[float] = None,
+        local_law_component_weights: Optional[Mapping[str, float]] = None,
+        auxiliary_diagnostic_weights: Optional[Mapping[str, float]] = None,
+        weighting_scheme: str = "single_lambda_root_local",
+        root_share_source: str = "",
+        metadata: Optional[Mapping[str, Any]] = None,
+        # Deprecated private aliases accepted only to keep older call sites
+        # working while they are moved to the public contract vocabulary.
+        task_name: Optional[str] = None,
+        task_weight: Optional[float] = None,
+        local_law_weights: Optional[Mapping[str, float]] = None,
+        proxy_weights: Optional[Mapping[str, float]] = None,
+        task_weight_source: Optional[str] = None,
+    ) -> None:
+        used_legacy_aliases = any(
+            value is not None
+            for value in (
+                task_name,
+                task_weight,
+                local_law_weights,
+                proxy_weights,
+                task_weight_source,
+            )
+        )
+        resolved_root_metric_name = str(root_metric_name or task_name or "root_loss")
+        raw_local_weights = (
+            dict(local_law_component_weights)
+            if local_law_component_weights is not None
+            else dict(local_law_weights or {})
+        )
+        local_weights = canonical_law_component_weights(
+            raw_local_weights,
+            allow_aliases=bool(used_legacy_aliases),
+        )
+        auxiliary_weights = {
+            str(k): float(v)
+            for k, v in dict(auxiliary_diagnostic_weights or proxy_weights or {}).items()
+        }
+        if root_share is not None and task_weight is not None:
+            raise ValueError("root_share is mutually exclusive with task_weight")
+        if root_share is None and task_weight is not None:
+            root_raw = _finite_nonnegative(task_weight)
+            total = float(root_raw + sum(_finite_nonnegative(v) for v in local_weights.values()))
+            resolved_root_share = float(root_raw / total) if total > 0.0 else 1.0
+            if total > 0.0:
+                local_weights = {
+                    str(k): float(_finite_nonnegative(v) / total)
+                    for k, v in local_weights.items()
+                }
+        else:
+            resolved_root_share = _finite_probability(
+                1.0 if root_share is None else root_share,
+                name="root_share",
+            )
+        object.__setattr__(self, "name", str(name))
+        object.__setattr__(self, "root_metric_name", resolved_root_metric_name)
+        object.__setattr__(self, "root_share", float(resolved_root_share))
+        object.__setattr__(
+            self,
+            "local_law_component_weights",
+            {str(k): float(v) for k, v in local_weights.items()},
+        )
+        object.__setattr__(
+            self,
+            "auxiliary_diagnostic_weights",
+            {str(k): float(v) for k, v in auxiliary_weights.items()},
+        )
+        object.__setattr__(self, "weighting_scheme", str(weighting_scheme))
+        object.__setattr__(self, "root_share_source", str(root_share_source or task_weight_source or ""))
+        object.__setattr__(self, "selection_metric_name", str(selection_metric_name))
+        object.__setattr__(self, "metadata", dict(metadata or {}))
+
+    @property
+    def task_name(self) -> str:
+        return str(self.root_metric_name)
+
+    @property
+    def task_weight(self) -> float:
+        return float(self.root_share)
+
+    @property
+    def local_law_weights(self) -> Dict[str, float]:
+        return dict(self.local_law_component_weights)
+
+    @property
+    def proxy_weights(self) -> Dict[str, float]:
+        return dict(self.auxiliary_diagnostic_weights)
+
+    @property
+    def task_weight_source(self) -> str:
+        return str(self.root_share_source)
+
     def total_weight_without_proxy(self) -> float:
-        return float(self.task_weight + sum(float(v) for v in self.local_law_weights.values()))
+        return float(
+            _finite_nonnegative(self.root_share)
+            + sum(_finite_nonnegative(v) for v in self.local_law_component_weights.values())
+        )
+
+    def normalized_task_share(self) -> float:
+        return float(self.root_share)
+
+    def normalized_local_law_weights(self) -> Dict[str, float]:
+        return {
+            str(name): float(_finite_nonnegative(value))
+            for name, value in dict(self.local_law_component_weights).items()
+        }
+
+    def local_law_weight(self) -> float:
+        return float(sum(float(v) for v in self.normalized_local_law_weights().values()))
+
+    def normalized_proxy_weights(self) -> Dict[str, float]:
+        return {
+            str(name): _finite_nonnegative(value)
+            for name, value in dict(self.auxiliary_diagnostic_weights).items()
+        }
+
+    def to_objective_spec(self) -> Dict[str, Any]:
+        local_law_weights = self.normalized_local_law_weights()
+        return normalize_objective_spec(
+            {
+                "objective_family": str(self.name or "configured_objective"),
+                "local_law_estimator": str(
+                    self.metadata.get(
+                        "local_law_estimator",
+                        LOCAL_LAW_ESTIMATOR_CORRECTED
+                        if local_law_weights
+                        else LOCAL_LAW_ESTIMATOR_NONE,
+                    )
+                ),
+                "root_share": float(self.normalized_task_share()),
+                "local_law_weight": float(sum(float(v) for v in local_law_weights.values())),
+                "local_law_component_weights": local_law_weights,
+                "weighting_scheme": str(self.weighting_scheme),
+                "root_share_source": str(self.root_share_source),
+                "selection_metric_name": str(self.selection_metric_name),
+                "metadata": {
+                    "root_metric_name": str(self.root_metric_name),
+                    "weighting_scheme": str(self.weighting_scheme),
+                    "root_share_source": str(self.root_share_source),
+                    "selection_metric_name": str(self.selection_metric_name),
+                    **dict(self.metadata or {}),
+                },
+            }
+        )
 
     def to_dict(self) -> Dict[str, Any]:
-        local_law_weight_total = float(sum(float(v) for v in dict(self.local_law_weights).values()))
-        proxy_weight_total = float(sum(float(v) for v in dict(self.proxy_weights).values()))
+        local_law_weight_total = float(sum(float(v) for v in dict(self.local_law_component_weights).values()))
+        proxy_weight_total = float(sum(float(v) for v in dict(self.auxiliary_diagnostic_weights).values()))
         total_weight_without_proxy = float(self.total_weight_without_proxy())
-        payload = asdict(self)
-        payload["task_weight"] = float(self.task_weight)
-        payload["local_law_weights"] = {
-            str(k): float(v) for k, v in dict(self.local_law_weights).items()
+        normalized_task_share = float(self.normalized_task_share())
+        normalized_local_law_weights = self.normalized_local_law_weights()
+        normalized_local_law_share = float(sum(float(v) for v in normalized_local_law_weights.values()))
+        payload = {
+            "name": str(self.name),
+            "root_metric_name": str(self.root_metric_name),
+            "weighting_scheme": str(self.weighting_scheme),
+            "root_share_source": str(self.root_share_source),
+            "selection_metric_name": str(self.selection_metric_name),
+            "metadata": dict(self.metadata or {}),
         }
-        payload["proxy_weights"] = {str(k): float(v) for k, v in dict(self.proxy_weights).items()}
+        payload["root_share"] = normalized_task_share
+        payload["local_law_component_weights"] = normalized_local_law_weights
+        payload["auxiliary_diagnostic_weights"] = {
+            str(k): float(v) for k, v in dict(self.auxiliary_diagnostic_weights).items()
+        }
         payload["local_law_weight_total"] = local_law_weight_total
-        payload["proxy_weight_total"] = proxy_weight_total
+        payload["auxiliary_diagnostic_weight_total"] = proxy_weight_total
         payload["total_weight_without_proxy"] = total_weight_without_proxy
-        payload["normalized_task_share"] = (
-            float(self.task_weight / total_weight_without_proxy)
-            if total_weight_without_proxy > 0.0
-            else float("nan")
+        payload["local_law_weight"] = normalized_local_law_share
+        payload["objective_input_mode"] = str(
+            dict(self.metadata or {}).get("objective_input_mode", self.weighting_scheme)
         )
-        payload["normalized_local_law_share"] = (
-            float(local_law_weight_total / total_weight_without_proxy)
-            if total_weight_without_proxy > 0.0
-            else float("nan")
-        )
+        payload["objective_spec"] = self.to_objective_spec()
         return payload
 
 
@@ -55,9 +241,11 @@ class CompositeObjectiveEvaluation:
     local_law_terms: Dict[str, float] = field(default_factory=dict)
     proxy_raw: Dict[str, float] = field(default_factory=dict)
     proxy_terms: Dict[str, float] = field(default_factory=dict)
+    root_share: Optional[float] = None
+    local_law_weight: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload: Dict[str, Any] = {
             "total": float(self.total),
             "task_raw": float(self.task_raw),
             "task_term": float(self.task_term),
@@ -70,6 +258,11 @@ class CompositeObjectiveEvaluation:
             "proxy_raw_total": float(sum(float(v) for v in self.proxy_raw.values())),
             "proxy_term_total": float(sum(float(v) for v in self.proxy_terms.values())),
         }
+        if self.root_share is not None:
+            payload["root_share"] = float(self.root_share)
+        if self.local_law_weight is not None:
+            payload["local_law_weight"] = float(self.local_law_weight)
+        return payload
 
     def to_flat_dict(self, *, prefix: str) -> Dict[str, float]:
         payload = {
@@ -93,6 +286,10 @@ class CompositeObjectiveEvaluation:
             payload[f"{prefix}_{name}_raw"] = float(value)
         for name, value in self.proxy_terms.items():
             payload[f"{prefix}_{name}_term"] = float(value)
+        if self.root_share is not None:
+            payload[f"{prefix}_root_share"] = float(self.root_share)
+        if self.local_law_weight is not None:
+            payload[f"{prefix}_local_law_weight"] = float(self.local_law_weight)
         return payload
 
 
@@ -123,6 +320,9 @@ def scalarize_objective_estimates(
 ) -> Dict[str, Any]:
     base_name = str(spec.name or spec.selection_metric_name or "configured_objective")
     proxy_source = dict(proxy_estimates or {})
+    root_share = float(spec.normalized_task_share())
+    local_law_shares = spec.normalized_local_law_weights()
+    local_law_weight = float(sum(float(v) for v in local_law_shares.values()))
 
     term_breakdown: Dict[str, Dict[str, Dict[str, float]]] = {
         "task": {},
@@ -134,11 +334,11 @@ def scalarize_objective_estimates(
     for estimator in OBJECTIVE_ESTIMATOR_KEYS:
         task_raw = _safe_estimator_value(task_estimates.get(estimator))
         task_term = (
-            float(spec.task_weight) * float(task_raw) if math.isfinite(task_raw) else float("nan")
+            root_share * float(task_raw) if math.isfinite(task_raw) else float("nan")
         )
         estimator_local_raw: Dict[str, float] = {}
         estimator_local_terms: Dict[str, float] = {}
-        for name, weight in dict(spec.local_law_weights).items():
+        for name, weight in local_law_shares.items():
             raw_map = dict(local_law_estimates.get(str(name), {}) or {})
             raw_value = _safe_estimator_value(raw_map.get(estimator))
             estimator_local_raw[str(name)] = float(raw_value)
@@ -154,24 +354,30 @@ def scalarize_objective_estimates(
             estimator_proxy_terms[str(name)] = (
                 float(weight) * float(raw_value) if math.isfinite(raw_value) else float("nan")
             )
-        total = (
-            float(task_term)
-            + sum(float(v) for v in estimator_local_terms.values() if math.isfinite(float(v)))
-            + sum(float(v) for v in estimator_proxy_terms.values() if math.isfinite(float(v)))
-            if math.isfinite(task_term)
-            and all(math.isfinite(float(v)) for v in estimator_local_terms.values())
-            and all(math.isfinite(float(v)) for v in estimator_proxy_terms.values())
+        local_term_total = (
+            sum(float(v) for v in estimator_local_terms.values())
+            if all(math.isfinite(float(v)) for v in estimator_local_terms.values())
             else float("nan")
+        )
+        proxy_term_total = (
+            sum(float(v) for v in estimator_proxy_terms.values())
+            if all(math.isfinite(float(v)) for v in estimator_proxy_terms.values())
+            else float("nan")
+        )
+        if math.isfinite(task_term) and math.isfinite(local_term_total):
+            total = float(task_term + local_term_total)
+        else:
+            total = float("nan")
+        local_law_objective_value = (
+            float(local_term_total / local_law_weight)
+            if local_law_weight > 0.0 and math.isfinite(local_term_total)
+            else 0.0
         )
         totals[str(estimator)] = {
             "full_objective_value": float(total),
             "task_objective_value": float(task_raw),
             "task_objective_term": float(task_term),
-            "local_law_objective_value": float(
-                sum(float(v) for v in estimator_local_raw.values())
-            )
-            if all(math.isfinite(float(v)) for v in estimator_local_raw.values())
-            else float("nan"),
+            "local_law_objective_value": float(local_law_objective_value),
             "local_law_objective_term": float(
                 sum(float(v) for v in estimator_local_terms.values())
             )
@@ -221,6 +427,9 @@ def scalarize_objective_estimates(
         "selection_metric_value": float(selection_metric_value),
         "available_estimators": [str(x) for x in available_estimators],
         "estimator_components": term_breakdown,
+        "root_share": float(root_share),
+        "local_law_weight": float(local_law_weight),
+        "local_law_shares": {str(k): float(v) for k, v in local_law_shares.items()},
     }
     exact = totals.get("exact", {})
     payload["full_objective_value"] = float(
@@ -289,16 +498,27 @@ def evaluate_composite_objective(
     local_law_values: Mapping[str, float],
     proxy_values: Optional[Mapping[str, float]] = None,
 ) -> CompositeObjectiveEvaluation:
+    """Evaluate the single-lambda root/local objective.
+
+    ``task_weight`` and ``local_law_weights`` are normalized internally, so the
+    theorem-facing objective is always ``root_share * L_root + Σ law_share_i *
+    L_i``. Proxy terms are returned as diagnostics and are not included in
+    ``total``.
+    """
+
     task_raw = float(task_value)
-    task_term = float(spec.task_weight) * task_raw
+    root_share = float(spec.normalized_task_share())
+    local_law_shares = spec.normalized_local_law_weights()
+    local_law_weight = float(sum(float(v) for v in local_law_shares.values()))
+    task_term = root_share * task_raw
 
     local_law_raw = {
         str(name): float(local_law_values.get(name, 0.0))
         for name in dict(spec.local_law_weights).keys()
     }
     local_law_terms = {
-        str(name): float(spec.local_law_weights.get(name, 0.0)) * float(local_law_raw[str(name)])
-        for name in dict(spec.local_law_weights).keys()
+        str(name): float(local_law_shares.get(name, 0.0)) * float(local_law_raw[str(name)])
+        for name in local_law_shares.keys()
     }
 
     proxy_source = dict(proxy_values or {})
@@ -310,11 +530,8 @@ def evaluate_composite_objective(
         for name in dict(spec.proxy_weights).keys()
     }
 
-    total = float(
-        task_term
-        + sum(float(v) for v in local_law_terms.values())
-        + sum(float(v) for v in proxy_terms.values())
-    )
+    local_law_term_total = sum(float(v) for v in local_law_terms.values())
+    total = float(task_term + local_law_term_total)
     return CompositeObjectiveEvaluation(
         total=total,
         task_raw=task_raw,
@@ -323,6 +540,8 @@ def evaluate_composite_objective(
         local_law_terms=local_law_terms,
         proxy_raw=proxy_raw,
         proxy_terms=proxy_terms,
+        root_share=float(root_share),
+        local_law_weight=float(local_law_weight),
     )
 
 
@@ -336,7 +555,10 @@ def evaluate_composite_objective_from_metrics(
 ) -> CompositeObjectiveEvaluation:
     metadata = dict(spec.metadata)
     resolved_task_metric_name = str(
-        task_metric_name or metadata.get("task_metric_name") or spec.task_name
+        task_metric_name
+        or metadata.get("root_metric_name")
+        or metadata.get("task_metric_name")
+        or spec.root_metric_name
     )
     resolved_local_law_metric_names = dict(
         metadata.get("local_law_metric_names", {})

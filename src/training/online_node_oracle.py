@@ -13,11 +13,11 @@ from src.core.logged_supervision import (
     ObservationUnitKind,
     SamplingMetadata,
 )
-from src.feedback.collectors.oracle import OracleCollector
-from src.feedback.store import FeedbackStore
-from src.feedback.types import FeedbackDimension, FeedbackRequest, FeedbackResponse
+from src.preference_collection.collectors.oracle import OracleCollector
+from src.preference_collection.store import PreferenceStore
+from src.preference_collection.types import PreferenceDimension, PreferenceRequest, PreferenceResponse
 from src.training.supervision.timing import (
-    ACQUISITION_ASYNC_FEEDBACK_QUEUE,
+    ACQUISITION_ASYNC_PREFERENCE_QUEUE,
     ACTIVATION_EPOCH_BOUNDARY,
     CONSUMER_CTREEPO_GRADIENT,
     supervision_timing_contract,
@@ -36,7 +36,7 @@ class OnlineNodeOracleQueueConfig:
     merge_budget_per_epoch: int = 16
     target_name: str = "rile"
     request_prefix: str = "ctreepo_node_oracle"
-    sampling_policy_name: str = "budgeted_random_node_feedback"
+    sampling_policy_name: str = "budgeted_random_node_preference"
     source_kind: str = "oracle"
     source_spec: Optional[str] = None
     target_min: float = -100.0
@@ -60,12 +60,12 @@ class OnlineNodeOracleAttachResult:
 
 
 class OnlineNodeOracleQueue:
-    """Bridge C-TreePO runtime nodes to the shared FeedbackStore queue."""
+    """Bridge C-TreePO runtime nodes to the shared PreferenceStore queue."""
 
     def __init__(
         self,
         *,
-        store: FeedbackStore,
+        store: PreferenceStore,
         config: Optional[OnlineNodeOracleQueueConfig] = None,
         rng: Optional[random.Random] = None,
     ):
@@ -99,7 +99,7 @@ class OnlineNodeOracleQueue:
         split: str,
         epoch: int,
     ) -> Dict[str, Any]:
-        """Sample unlabeled nodes and enqueue non-blocking feedback requests."""
+        """Sample unlabeled nodes and enqueue non-blocking preference requests."""
         self._reload()
         known_ids = self._known_request_ids()
         leaf_candidates: List[Tuple[TreeItem, int, EmbeddingTreeNode, str]] = []
@@ -178,7 +178,7 @@ class OnlineNodeOracleQueue:
         split: str,
         truth_label_source: str = "oracle",
     ) -> OnlineNodeOracleAttachResult:
-        """Attach completed feedback responses to matching runtime nodes."""
+        """Attach completed preference responses to matching runtime nodes."""
         self._reload()
         completed = {
             request.request_id: (request, response)
@@ -306,15 +306,15 @@ class OnlineNodeOracleQueue:
 
     def timing_contract(self) -> Dict[str, Any]:
         return supervision_timing_contract(
-            acquisition_policy=ACQUISITION_ASYNC_FEEDBACK_QUEUE,
+            acquisition_policy=ACQUISITION_ASYNC_PREFERENCE_QUEUE,
             activation_barrier=str(self.config.activation_barrier),
             consumer=CONSUMER_CTREEPO_GRADIENT,
             producer=str(self.config.source_kind),
-            delivery_mode="feedback_store",
+            delivery_mode="preference_store",
             blocking=False,
             notes=(
                 "Trainer queues sampled node-label requests and keeps training with labels already active.",
-                "Completed feedback is attached only at the configured activation barrier.",
+                "Completed preference data is attached only at the configured activation barrier.",
             ),
             metadata={
                 "target_name": str(self.config.target_name),
@@ -335,7 +335,7 @@ class OnlineNodeOracleQueue:
         epoch: int,
         unit_kind: ObservationUnitKind,
         unit_propensity: float,
-    ) -> FeedbackRequest:
+    ) -> PreferenceRequest:
         _nodes, document_score, doc_id = item
         sampling = SamplingMetadata(
             document_propensity=1.0,
@@ -350,12 +350,12 @@ class OnlineNodeOracleQueue:
                 "merge_budget_per_epoch": int(self.config.merge_budget_per_epoch),
             },
         )
-        return FeedbackRequest(
+        return PreferenceRequest(
             request_id=request_id,
             text_a=str(node.text_span),
             reference_score=float(document_score),
             dimensions=[
-                FeedbackDimension(
+                PreferenceDimension(
                     kind="scalar",
                     name="score",
                     scale=(float(self.config.target_min), float(self.config.target_max)),
@@ -410,7 +410,7 @@ class OnlineNodeOracleQueue:
         return pending_ids | completed_ids
 
     @staticmethod
-    def _score_from_response(response: FeedbackResponse) -> Optional[float]:
+    def _score_from_response(response: PreferenceResponse) -> Optional[float]:
         for key in ("score", "rile", "value"):
             if key in response.scores:
                 try:
@@ -427,7 +427,7 @@ class OnlineNodeOracleQueue:
     @staticmethod
     def _sampling_for_response(
         sampling: SamplingMetadata,
-        response: FeedbackResponse,
+        response: PreferenceResponse,
     ) -> SamplingMetadata:
         source = str(response.source or "").strip().lower()
         metadata = dict(sampling.metadata or {})

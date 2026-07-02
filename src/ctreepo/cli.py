@@ -20,6 +20,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "family",
         choices=[
             "markov-ops-count",
+            "contextual-sbijax",
             "segment-lda-ops",
             "segmented-lda-ctreepo",
             "tensor-lda-books",
@@ -76,6 +77,10 @@ def _build_parser() -> argparse.ArgumentParser:
 def _dispatch_run(family: str, argv: Sequence[str]) -> int:
     if family == "markov-ops-count":
         from src.ctreepo.sim.cli.run_markov_changepoint_ops_count import main as _main
+
+        return int(_main(argv))
+    if family == "contextual-sbijax":
+        from src.ctreepo.sim.cli.probe_contextual_sbijax import main as _main
 
         return int(_main(argv))
     if family == "segment-lda-ops":

@@ -34,13 +34,35 @@ DEFAULT_EXTERNAL_PEARSON_MIN = 0.75
 METRIC_FIELDS = (
     "internal_f_pearson",
     "external_expert_pearson",
+    "teacher_external_pearson",
     "f_star_gap",
+    "internal_f_mae",
+    "external_expert_mae",
+    "teacher_external_mae",
+    "mean_prediction",
+    "mean_teacher",
+    "mean_expert",
     "internal_f_mae_1_7",
     "external_expert_mae_1_7",
+    "teacher_external_mae_1_7",
     "mean_prediction_1_7",
     "mean_teacher_1_7",
     "mean_expert_1_7",
 )
+METRIC_FALLBACKS = {
+    "internal_f_mae": "internal_f_mae_1_7",
+    "external_expert_mae": "external_expert_mae_1_7",
+    "teacher_external_mae": "teacher_external_mae_1_7",
+    "mean_prediction": "mean_prediction_1_7",
+    "mean_teacher": "mean_teacher_1_7",
+    "mean_expert": "mean_expert_1_7",
+    "internal_f_mae_1_7": "internal_f_mae",
+    "external_expert_mae_1_7": "external_expert_mae",
+    "teacher_external_mae_1_7": "teacher_external_mae",
+    "mean_prediction_1_7": "mean_prediction",
+    "mean_teacher_1_7": "mean_teacher",
+    "mean_expert_1_7": "mean_expert",
+}
 CSV_FIELDS = (
     "family",
     "axis_kind",
@@ -78,6 +100,16 @@ def _safe_float(value: Any) -> Optional[float]:
     return out if math.isfinite(out) else None
 
 
+def _metric_value(row: dict[str, Any], metric: str) -> Optional[float]:
+    value = _safe_float(row.get(metric))
+    if value is not None:
+        return value
+    fallback = METRIC_FALLBACKS.get(str(metric))
+    if fallback:
+        return _safe_float(row.get(fallback))
+    return None
+
+
 def _safe_int(value: Any) -> Optional[int]:
     if value is None:
         return None
@@ -85,6 +117,43 @@ def _safe_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _pearson(xs: Sequence[float], ys: Sequence[float]) -> Optional[float]:
+    if len(xs) < 2 or len(xs) != len(ys):
+        return None
+    x_arr = np.asarray(xs, dtype=float)
+    y_arr = np.asarray(ys, dtype=float)
+    if float(np.nanstd(x_arr)) == 0.0 or float(np.nanstd(y_arr)) == 0.0:
+        return None
+    value = float(np.corrcoef(x_arr, y_arr)[0, 1])
+    return value if math.isfinite(value) else None
+
+
+def _mae(xs: Sequence[float], ys: Sequence[float]) -> Optional[float]:
+    if not xs or len(xs) != len(ys):
+        return None
+    value = float(np.mean(np.abs(np.asarray(xs, dtype=float) - np.asarray(ys, dtype=float))))
+    return value if math.isfinite(value) else None
+
+
+def _x_value(row: dict[str, Any]) -> Optional[int]:
+    leaf_size = _safe_int(row.get("leaf_size_tokens"))
+    if leaf_size is not None:
+        return leaf_size
+    axis_value = _safe_int(row.get("axis_value"))
+    if axis_value is not None:
+        return axis_value
+    return _safe_int(row.get("leaf_count"))
+
+
+def _axis_xlabel(rows: Sequence[dict[str, Any]]) -> str:
+    if any(_safe_int(row.get("leaf_size_tokens")) is not None for row in rows):
+        return "leaf tokens"
+    kinds = {str(row.get("axis_kind") or "") for row in rows}
+    if kinds == {"leaf_qsentences"}:
+        return "leaf q-sentences"
+    return "leaf axis value"
 
 
 def _parse_datetime(value: Any) -> datetime:
@@ -110,6 +179,9 @@ def _axis_label(row: dict[str, Any]) -> str:
     leaf_size = _safe_int(row.get("leaf_size_tokens"))
     if leaf_size is not None:
         return f"{leaf_size}"
+    if str(row.get("axis_kind") or "") == "leaf_qsentences":
+        leaf_q = _safe_int(row.get("axis_value") or row.get("leaf_count"))
+        return f"q={leaf_q}" if leaf_q is not None else "unknown"
     leaf_count = _safe_int(row.get("leaf_count") or row.get("axis_value"))
     return f"L={leaf_count}" if leaf_count is not None else "unknown"
 
@@ -159,7 +231,7 @@ def _stage_sort_key(stage: Any, iteration: Any = None) -> tuple[int, str]:
 
 
 def _metric_count(row: dict[str, Any]) -> int:
-    return sum(_safe_float(row.get(field)) is not None for field in METRIC_FIELDS)
+    return sum(_metric_value(row, field) is not None for field in METRIC_FIELDS)
 
 
 def _source_priority(source_type: str) -> int:
@@ -200,6 +272,9 @@ def _normalize_flat_row(
         out["axis_value"] = out["leaf_size_tokens"] or out["leaf_count"]
     for field in METRIC_FIELDS:
         out[field] = _safe_float(row.get(field))
+    for field, fallback in METRIC_FALLBACKS.items():
+        if out.get(field) is None and fallback in out:
+            out[field] = out.get(fallback)
     return out
 
 
@@ -228,6 +303,65 @@ def _row_from_split_metrics(
         source_path=source_path,
         source_created_at=source_created_at,
     )
+
+
+def _prediction_records_path(leaf_dir: Path, iteration: Any) -> Optional[Path]:
+    iteration_i = _safe_int(iteration)
+    if iteration_i is None:
+        return None
+    path = leaf_dir / "prediction_records" / f"iter_{iteration_i:02d}_post_eval.jsonl"
+    return path if path.exists() else None
+
+
+def _teacher_external_metrics_from_prediction_records(
+    path: Optional[Path],
+    *,
+    eval_split: str,
+) -> dict[str, Optional[float]]:
+    if path is None:
+        return {}
+    expert: list[float] = []
+    teacher: list[float] = []
+    expert_1_7: list[float] = []
+    teacher_1_7: list[float] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        print(f"warning: failed to read {path}: {exc}", file=sys.stderr)
+        return {}
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            record = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        split = str(record.get("split") or "")
+        if split and split != str(eval_split):
+            continue
+        x = _safe_float(record.get("expert_score"))
+        y = _safe_float(record.get("teacher_score"))
+        if x is None:
+            x = _safe_float(record.get("expert_score_1_7"))
+        if y is None:
+            y = _safe_float(record.get("teacher_score_1_7"))
+        if x is not None and y is not None:
+            expert.append(x)
+            teacher.append(y)
+        x17 = _safe_float(record.get("expert_score_1_7"))
+        y17 = _safe_float(record.get("teacher_score_1_7"))
+        if x17 is not None and y17 is not None:
+            expert_1_7.append(x17)
+            teacher_1_7.append(y17)
+    metrics = {
+        "teacher_external_pearson": _pearson(teacher, expert),
+        "teacher_external_mae": _mae(teacher, expert),
+        "teacher_external_mae_1_7": _mae(teacher_1_7, expert_1_7),
+    }
+    return {key: value for key, value in metrics.items() if value is not None}
 
 
 def _rows_from_grid_summary(path: Path, source_root: Path) -> list[dict[str, Any]]:
@@ -278,15 +412,20 @@ def _rows_from_iteration_history(
         if not isinstance(iteration, dict):
             continue
         merged = {**base, **iteration}
-        rows.append(
-            _row_from_split_metrics(
-                merged,
+        row = _row_from_split_metrics(
+            merged,
+            eval_split=eval_split,
+            source_type="iteration_history",
+            source_root=source_root,
+            source_path=path,
+        )
+        row.update(
+            _teacher_external_metrics_from_prediction_records(
+                _prediction_records_path(path.parent, row.get("iteration")),
                 eval_split=eval_split,
-                source_type="iteration_history",
-                source_root=source_root,
-                source_path=path,
             )
         )
+        rows.append(row)
     return rows
 
 
@@ -303,16 +442,21 @@ def _rows_from_checkpoint(
         return []
     if not isinstance(payload, dict) or payload.get("phase") != "post_eval":
         return []
-    return [
-        _row_from_split_metrics(
-            payload,
+    row = _row_from_split_metrics(
+        payload,
+        eval_split=eval_split,
+        source_type="checkpoint",
+        source_root=source_root,
+        source_path=path,
+        source_created_at=payload.get("created_at"),
+    )
+    row.update(
+        _teacher_external_metrics_from_prediction_records(
+            _prediction_records_path(path.parent.parent, row.get("iteration")),
             eval_split=eval_split,
-            source_type="checkpoint",
-            source_root=source_root,
-            source_path=path,
-            source_created_at=payload.get("created_at"),
         )
-    ]
+    )
+    return [row]
 
 
 def _resolve_input_roots(inputs: Sequence[Path]) -> list[Path]:
@@ -382,7 +526,7 @@ def _dedupe_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         best.values(),
         key=lambda row: (
             str(row.get("family") or ""),
-            _safe_int(row.get("leaf_size_tokens")) or _safe_int(row.get("leaf_count")) or 0,
+            _x_value(row) or 0,
             _stage_sort_key(row.get("stage_name"), row.get("iteration")),
         ),
     )
@@ -391,8 +535,8 @@ def _finite_metric_rows(rows: Sequence[dict[str, Any]], metric: str) -> list[dic
     return [
         row
         for row in rows
-        if _safe_int(row.get("leaf_size_tokens")) is not None
-        and _safe_float(row.get(metric)) is not None
+        if _x_value(row) is not None
+        and _metric_value(row, metric) is not None
     ]
 
 
@@ -410,7 +554,10 @@ def _plot_metric(
     if not metric_rows:
         ax.axis("off")
         return
-    metric_values = np.asarray([float(row[metric]) for row in metric_rows], dtype=float)
+    metric_values = np.asarray(
+        [float(_metric_value(row, metric) or 0.0) for row in metric_rows],
+        dtype=float,
+    )
     stages = sorted(
         {str(row.get("stage_name") or "") for row in metric_rows},
         key=lambda stage: _stage_sort_key(stage),
@@ -422,17 +569,20 @@ def _plot_metric(
             for row in metric_rows
             if str(row.get("stage_name") or "") == stage
         ]
-        stage_rows = sorted(stage_rows, key=lambda row: int(row["leaf_size_tokens"]))
-        xs = np.asarray([int(row["leaf_size_tokens"]) for row in stage_rows], dtype=float)
-        ys = np.asarray([float(row[metric]) for row in stage_rows], dtype=float)
+        stage_rows = sorted(stage_rows, key=lambda row: int(_x_value(row) or 0))
+        xs = np.asarray([int(_x_value(row) or 0) for row in stage_rows], dtype=float)
+        ys = np.asarray(
+            [float(_metric_value(row, metric) or 0.0) for row in stage_rows],
+            dtype=float,
+        )
         color = colors(idx % 10)
         label = _stage_label_math(stage_rows[0]) if stage_rows else _as_math_stage_label(stage)
         ax.plot(xs, ys, marker="o", linewidth=2.0, label=label, color=color)
         live_rows = [row for row in stage_rows if row.get("source_type") == "checkpoint"]
         if live_rows:
             ax.scatter(
-                [int(row["leaf_size_tokens"]) for row in live_rows],
-                [float(row[metric]) for row in live_rows],
+                [int(_x_value(row) or 0) for row in live_rows],
+                [float(_metric_value(row, metric) or 0.0) for row in live_rows],
                 facecolors="none",
                 edgecolors=[color],
                 linewidths=1.8,
@@ -440,7 +590,31 @@ def _plot_metric(
                 zorder=5,
             )
     ax.set_xscale("log", base=2)
-    leaf_values = sorted({int(row["leaf_size_tokens"]) for row in metric_rows})
+    if metric == "external_expert_pearson":
+        teacher_by_leaf: dict[int, list[float]] = {}
+        for row in rows:
+            x = _x_value(row)
+            y = _metric_value(row, "teacher_external_pearson")
+            if x is None or y is None:
+                continue
+            teacher_by_leaf.setdefault(int(x), []).append(float(y))
+        if teacher_by_leaf:
+            xs_t = np.asarray(sorted(teacher_by_leaf), dtype=float)
+            ys_t = np.asarray(
+                [float(np.mean(teacher_by_leaf[int(x)])) for x in xs_t],
+                dtype=float,
+            )
+            ax.plot(
+                xs_t,
+                ys_t,
+                marker="s",
+                linewidth=1.8,
+                linestyle="--",
+                color="#222222",
+                label="teacher vs expert",
+                zorder=4,
+            )
+    leaf_values = sorted({int(_x_value(row) or 0) for row in metric_rows})
     ax.xaxis.set_major_locator(mticker.FixedLocator(leaf_values))
     ax.xaxis.set_major_formatter(mticker.FixedFormatter([str(value) for value in leaf_values]))
     ax.xaxis.set_minor_locator(mticker.NullLocator())
@@ -448,7 +622,7 @@ def _plot_metric(
         label.set_rotation(25)
         label.set_ha("right")
     ax.set_title(title)
-    ax.set_xlabel("leaf tokens")
+    ax.set_xlabel(_axis_xlabel(metric_rows))
     ax.set_ylabel(ylabel)
     ax.grid(alpha=0.25)
     if metric == "external_expert_pearson" and external_pearson_max is not None:
@@ -519,9 +693,9 @@ def _write_grid_plot(
     _plot_metric(
         axes[0, 1],
         rows,
-        metric="external_expert_mae_1_7",
+        metric="external_expert_mae",
         title="External expert MAE",
-        ylabel="MAE on 1-7 scale",
+        ylabel="MAE on metric scale",
         lower_is_better=True,
     )
     _plot_metric(
@@ -581,7 +755,7 @@ def _heatmap_matrix(
     metric: str,
 ) -> tuple[np.ndarray, list[int], list[str]]:
     metric_rows = _finite_metric_rows(rows, metric)
-    leaf_values = sorted({int(row["leaf_size_tokens"]) for row in metric_rows})
+    leaf_values = sorted({int(_x_value(row) or 0) for row in metric_rows})
     stages = sorted(
         {str(row.get("stage_name") or "") for row in metric_rows},
         key=lambda stage: _stage_sort_key(stage),
@@ -590,7 +764,10 @@ def _heatmap_matrix(
     leaf_index = {value: idx for idx, value in enumerate(leaf_values)}
     stage_index = {stage: idx for idx, stage in enumerate(stages)}
     for row in metric_rows:
-        matrix[stage_index[str(row.get("stage_name") or "")], leaf_index[int(row["leaf_size_tokens"])]] = float(row[metric])
+        matrix[
+            stage_index[str(row.get("stage_name") or "")],
+            leaf_index[int(_x_value(row) or 0)],
+        ] = float(_metric_value(row, metric) or float("nan"))
     stage_labels = []
     for stage in stages:
         matching = [row for row in metric_rows if str(row.get("stage_name") or "") == stage]
@@ -613,6 +790,7 @@ def _draw_heatmap(
     floor: Optional[float] = None,
     floor_label: str = "",
     colorbar_label: str = "",
+    x_label: str = "leaf tokens",
 ) -> None:
     if matrix.size == 0:
         ax.axis("off")
@@ -624,7 +802,7 @@ def _draw_heatmap(
     ax.set_xticklabels([str(value) for value in leaf_values], rotation=25, ha="right")
     ax.set_yticks(np.arange(len(stages)))
     ax.set_yticklabels(stages)
-    ax.set_xlabel("leaf tokens")
+    ax.set_xlabel(x_label)
     # Choose cell text color per-cell against the cell background to
     # stay readable at both ends of the colormap.
     cmap_obj = matplotlib.colormaps.get_cmap(cmap) if isinstance(cmap, str) else cmap
@@ -692,6 +870,7 @@ def _write_heatmap(
     header_in = suptitle_in + subtitle_block_in
     fig_height = plot_body_in + header_in
     fig, axes = plt.subplots(1, 2, figsize=(13, fig_height))
+    x_label = _axis_xlabel([row for row in rows if _x_value(row) is not None])
 
     # External expert Pearson heatmap.
     matrix, leaf_values, stages = _heatmap_matrix(rows, metric="external_expert_pearson")
@@ -699,8 +878,8 @@ def _write_heatmap(
     observed_min: Optional[float] = None
     observed_max: Optional[float] = None
     if ext_rows:
-        observed_min = min(float(row["external_expert_pearson"]) for row in ext_rows)
-        observed_max = max(float(row["external_expert_pearson"]) for row in ext_rows)
+        observed_min = min(float(_metric_value(row, "external_expert_pearson") or 0.0) for row in ext_rows)
+        observed_max = max(float(_metric_value(row, "external_expert_pearson") or 0.0) for row in ext_rows)
 
     # Lower bound: honor the caller's floor, but never crop out observed data.
     if external_pearson_min is None:
@@ -731,6 +910,7 @@ def _write_heatmap(
         ceiling=ceiling,
         ceiling_label=ceiling_label,
         colorbar_label="Pearson r (higher = better)",
+        x_label=x_label,
     )
 
     # Internal-external Pearson gap heatmap: sequential, non-negative, lower = better.
@@ -738,7 +918,7 @@ def _write_heatmap(
     gap_rows = _finite_metric_rows(rows, "f_star_gap")
     gap_observed_max: Optional[float] = None
     if gap_rows:
-        gap_observed_max = max(float(row["f_star_gap"]) for row in gap_rows)
+        gap_observed_max = max(float(_metric_value(row, "f_star_gap") or 0.0) for row in gap_rows)
     gap_vmax_candidates = [v for v in (f_star_gap_max, gap_observed_max, 0.2) if v is not None]
     gap_vmax = max(gap_vmax_candidates) if gap_vmax_candidates else 0.2
     _draw_heatmap(
@@ -753,6 +933,7 @@ def _write_heatmap(
         floor=0.0,
         floor_label="parity",
         colorbar_label="Pearson gap (lower = better)",
+        x_label=x_label,
     )
 
     # Layout in figure coordinates (0 = bottom, 1 = top), top-down.
@@ -822,18 +1003,19 @@ def _write_markdown(rows: Sequence[dict[str, Any]], path: Path, *, roots: Sequen
             "",
             "## Rows",
             "",
-            "| leaf | k | stage | ext_p | ext_mae | int_p | f_star_gap | source |",
-            "|---:|---:|---|---:|---:|---:|---:|---|",
+            "| leaf | k | stage | ext_p | teacher_ext_p | ext_mae | int_p | f_star_gap | source |",
+            "|---:|---:|---|---:|---:|---:|---:|---:|---|",
         ]
     )
     for row in rows:
         lines.append(
-            "| {leaf} | {iteration} | {stage} | {ext_p} | {ext_mae} | {int_p} | {gap} | {source} |".format(
+            "| {leaf} | {iteration} | {stage} | {ext_p} | {teacher_ext_p} | {ext_mae} | {int_p} | {gap} | {source} |".format(
                 leaf=_axis_label(row),
                 iteration=row.get("iteration"),
                 stage=_stage_label(row),
                 ext_p=_fmt(row.get("external_expert_pearson")),
-                ext_mae=_fmt(row.get("external_expert_mae_1_7")),
+                teacher_ext_p=_fmt(row.get("teacher_external_pearson")),
+                ext_mae=_fmt(_metric_value(row, "external_expert_mae")),
                 int_p=_fmt(row.get("internal_f_pearson")),
                 gap=_fmt(row.get("f_star_gap")),
                 source=row.get("source_type"),

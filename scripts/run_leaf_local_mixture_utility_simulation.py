@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 from fractions import Fraction
 from pathlib import Path
 import sys
-from typing import List, Sequence
+from typing import List, Mapping, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,31 @@ from src.ctreepo.sim.core.leaf_local_mixture_utility import (  # noqa: E402
     VALID_QUERY_DESIGNS,
     run_leaf_local_mixture_utility_experiment,
 )
+from src.ctreepo.contracts import (  # noqa: E402
+    CANONICAL_LAW_SET_IDS,
+    LAW_ID_LEAF_PRESERVATION,
+    LAW_ID_MERGE_PRESERVATION,
+    LAW_ID_ON_RANGE_IDEMPOTENCE,
+    LAW_SET_ALL,
+    LAW_SET_LEAF_AND_MERGE_PRESERVATION,
+    LAW_SET_LEAF_PRESERVATION_ONLY,
+    LAW_SET_MERGE_PRESERVATION_ONLY,
+    LAW_SET_ON_RANGE_IDEMPOTENCE_ONLY,
+    LAW_SET_ROOT_ONLY,
+    assert_public_contract_clean,
+    canonical_law_component_weights,
+    canonical_law_set_id,
+)
+
+
+_LAW_SET_TO_LEGACY_PACKAGE = {
+    LAW_SET_ALL: "all_laws",
+    LAW_SET_ROOT_ONLY: "root_only",
+    LAW_SET_LEAF_PRESERVATION_ONLY: "c1_only",
+    LAW_SET_MERGE_PRESERVATION_ONLY: "c3_only",
+    LAW_SET_ON_RANGE_IDEMPOTENCE_ONLY: "c2_only",
+    LAW_SET_LEAF_AND_MERGE_PRESERVATION: "c1c3",
+}
 
 
 def _parse_fraction(text: str) -> float:
@@ -36,6 +62,75 @@ def _parse_fraction(text: str) -> float:
     if "/" in raw:
         return float(Fraction(raw))
     return float(raw)
+
+
+def _parse_component_weights(text: str) -> Mapping[str, float]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    payload = json.loads(raw)
+    if not isinstance(payload, Mapping):
+        raise ValueError("--local-law-component-weights must be a JSON object")
+    return canonical_law_component_weights(dict(payload), allow_aliases=False)
+
+
+def _resolve_public_objective_args(args: argparse.Namespace) -> argparse.Namespace:
+    legacy_fields = {
+        "lambda_multiplier": getattr(args, "lambda_multiplier", None),
+        "law_package": getattr(args, "law_package", None),
+        "law_task_objective_weight": getattr(args, "law_task_objective_weight", None),
+        "law_c1_weight": getattr(args, "law_c1_weight", None),
+        "law_c2_proxy_weight": getattr(args, "law_c2_proxy_weight", None),
+        "law_c3_weight": getattr(args, "law_c3_weight", None),
+    }
+    supplied_legacy = [name for name, value in legacy_fields.items() if value is not None]
+    if supplied_legacy:
+        raise ValueError(
+            "legacy public LDA objective flags are not supported: "
+            + ", ".join(sorted(supplied_legacy))
+            + ". Use --quadratic-utility-weight, --law-set-id, "
+            "--local-law-weight, --root-share, and --local-law-component-weights."
+        )
+    law_set_id = canonical_law_set_id(str(args.law_set_id), allow_aliases=False)
+    component_weights = dict(_parse_component_weights(args.local_law_component_weights))
+    root_share = None if args.root_share is None else float(args.root_share)
+    local_law_weight = (
+        None if args.local_law_weight is None else float(args.local_law_weight)
+    )
+    if law_set_id == LAW_SET_ROOT_ONLY:
+        if local_law_weight is not None and local_law_weight != 0.0:
+            raise ValueError("law_set_id=root_only requires --local-law-weight 0.0")
+        law_set_id = LAW_SET_ALL
+        local_law_weight = 0.0
+    if component_weights:
+        if local_law_weight is not None:
+            raise ValueError(
+                "--local-law-weight is mutually exclusive with explicit "
+                "--local-law-component-weights"
+            )
+        if root_share is None:
+            raise ValueError("--root-share is required with explicit component weights")
+        args.local_law_weight = None
+        args.law_task_objective_weight = float(root_share)
+        args.law_c1_weight = float(component_weights.get(LAW_ID_LEAF_PRESERVATION, 0.0))
+        args.law_c3_weight = float(component_weights.get(LAW_ID_MERGE_PRESERVATION, 0.0))
+        args.law_c2_proxy_weight = float(component_weights.get(LAW_ID_ON_RANGE_IDEMPOTENCE, 0.0))
+        args.law_package = "all_laws"
+        return args
+    if root_share is not None:
+        raise ValueError("--root-share is explicit-weight mode; also supply component weights")
+    args.local_law_weight = 0.5 if local_law_weight is None else float(local_law_weight)
+    if law_set_id not in _LAW_SET_TO_LEGACY_PACKAGE:
+        raise ValueError(
+            f"law_set_id={law_set_id!r} is not supported by the LDA adapter; "
+            f"use one of {sorted(_LAW_SET_TO_LEGACY_PACKAGE)}"
+        )
+    args.law_package = _LAW_SET_TO_LEGACY_PACKAGE[law_set_id]
+    args.law_task_objective_weight = 1.0
+    args.law_c1_weight = 1.0 / 3.0
+    args.law_c3_weight = 1.0 / 3.0
+    args.law_c2_proxy_weight = 1.0 / 3.0
+    return args
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -81,7 +176,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--relevant-topics", type=int, default=2)
     p.add_argument("--theta-scale", type=float, default=1.0)
     p.add_argument("--zero-diagonal", action=argparse.BooleanOptionalAction, default=False)
-    p.add_argument("--lambda-multiplier", type=float, default=1.0)
+    p.add_argument("--quadratic-utility-weight", type=float, default=1.0)
+    p.add_argument("--lambda-multiplier", type=float, default=None, help=argparse.SUPPRESS)
 
     p.add_argument("--train-docs", type=int, default=512)
     p.add_argument("--val-docs", type=int, default=0)
@@ -109,12 +205,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--ipw-stabilized-clip", type=float, default=20.0)
     p.add_argument("--ipw-delta", type=float, default=0.05)
     p.add_argument("--local-law-mode", type=str, choices=list(VALID_LOCAL_LAW_MODES), default="off")
-    p.add_argument(
-        "--law-package",
-        type=str,
-        default="all_laws",
-        choices=["root_only", "c1_only", "c3_only", "c1c3", "c2_only", "all_laws"],
-    )
+    p.add_argument("--law-set-id", type=str, default=LAW_SET_ALL, choices=sorted(CANONICAL_LAW_SET_IDS))
     p.add_argument(
         "--exact-family",
         type=str,
@@ -132,10 +223,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=list(VALID_LAW_INTERNAL_QUERY_DESIGNS),
         default="uniform",
     )
-    p.add_argument("--law-task-objective-weight", type=float, default=1.0)
-    p.add_argument("--law-c1-weight", type=float, default=1.0 / 3.0)
-    p.add_argument("--law-c3-weight", type=float, default=1.0 / 3.0)
-    p.add_argument("--law-c2-proxy-weight", type=float, default=1.0 / 3.0)
+    p.add_argument("--local-law-weight", type=float, default=None)
+    p.add_argument("--root-share", type=float, default=None)
+    p.add_argument("--local-law-component-weights", type=str, default="")
+    p.add_argument("--law-package", type=str, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--law-task-objective-weight", type=float, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--law-c1-weight", type=float, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--law-c3-weight", type=float, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--law-c2-proxy-weight", type=float, default=None, help=argparse.SUPPRESS)
     p.add_argument("--law-calibration-ridge", type=float, default=1e-3)
     p.add_argument("--law-eval-leaf-sample-rate", type=float, default=0.25)
     p.add_argument("--law-eval-internal-sample-rate", type=float, default=0.25)
@@ -155,7 +250,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--artifact-dir", type=str, default="")
     p.add_argument("--suite-role", type=str, default="")
     p.add_argument("--json", action="store_true")
-    return p.parse_args(list(argv) if argv is not None else None)
+    parsed = p.parse_args(list(argv) if argv is not None else None)
+    try:
+        return _resolve_public_objective_args(parsed)
+    except ValueError as exc:
+        p.error(str(exc))
+        raise
 
 
 def _rows_from_summary(summary) -> List[dict]:
@@ -191,9 +291,9 @@ def _rows_from_summary(summary) -> List[dict]:
         if not isinstance(metrics, dict):
             continue
         row = {
-            "family": str(summary.family),
+            "problem_id": str(summary.family),
             "target_kind": str(summary.target_kind),
-            "method": str(method),
+            "method_id": str(method),
             "is_stale_generation": bool(summary.is_stale_generation),
             **{f"cfg_{k}": v for k, v in cfg.items()},
             **{
@@ -302,7 +402,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         relevant_topics=int(args.relevant_topics),
         theta_scale=float(args.theta_scale),
         zero_diagonal=bool(args.zero_diagonal),
-        lambda_multiplier=float(args.lambda_multiplier),
+        lambda_multiplier=float(args.quadratic_utility_weight),
         train_docs=int(args.train_docs),
         val_docs=int(args.val_docs),
         test_docs=int(args.test_docs),
@@ -325,6 +425,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         law_internal_query_rate=float(args.law_internal_query_rate),
         law_leaf_query_design=str(args.law_leaf_query_design),
         law_internal_query_design=str(args.law_internal_query_design),
+        local_law_weight=(
+            None if args.local_law_weight is None else float(args.local_law_weight)
+        ),
         law_task_objective_weight=float(args.law_task_objective_weight),
         law_c1_weight=float(args.law_c1_weight),
         law_c3_weight=float(args.law_c3_weight),
@@ -345,9 +448,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         suite_role=str(args.suite_role),
     )
     summary = run_leaf_local_mixture_utility_experiment(cfg)
+    summary_payload = json.loads(summary.to_json())
+    assert_public_contract_clean(summary_payload, surface="lda leaf-local-mixture summary")
 
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(summary.to_json(), encoding="utf-8")
+    json_path.write_text(
+        json.dumps(summary_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     csv_path = Path(args.csv_summary)
     _write_csv(csv_path, _rows_from_summary(summary))
 
@@ -395,7 +503,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
     if bool(args.json):
-        print(summary.to_json())
+        print(json.dumps(summary_payload, indent=2, sort_keys=True))
     return 0
 
 

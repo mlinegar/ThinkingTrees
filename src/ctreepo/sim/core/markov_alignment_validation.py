@@ -602,7 +602,7 @@ def _load_family_grids_summary_payload(path: Path | None) -> Optional[Dict[str, 
 def _load_parity_root_payloads(roots: Sequence[Path]) -> List[Dict[str, Any]]:
     if not roots:
         return []
-    from scripts.run_markov_supervision_recovery_parity_grid import load_parity_grid_root
+    from src.ctreepo.sim.core.markov_parity_grid_io import load_parity_grid_root
 
     payloads: List[Dict[str, Any]] = []
     for root in roots:

@@ -57,7 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Union
 
-from src.training.supervision.adapters import (
+from src.training.preference.optimizer_adapters import (
     build_dpo_training_records,
     build_group_grpo_training_records,
     build_reward_model_training_records,

@@ -57,7 +57,12 @@ class GArtifact:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return _serialize(asdict(self))
+        payload = _serialize(asdict(self))
+        family = str(payload.pop("family", "") or "")
+        dgp = str(payload.pop("dgp", "") or "")
+        payload["problem_id"] = dgp
+        payload["method_id"] = family or str(payload.get("name", ""))
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "GArtifact":
@@ -65,8 +70,8 @@ class GArtifact:
             artifact_id=str(payload.get("artifact_id", "")),
             name=str(payload.get("name", "")),
             role=PolicyRole(str(payload.get("role", PolicyRole.CANDIDATE_G.value))),
-            family=str(payload.get("family", "")),
-            dgp=str(payload.get("dgp", "")),
+            family=str(payload.get("method_id", payload.get("family", ""))),
+            dgp=str(payload.get("problem_id", payload.get("dgp", ""))),
             fmt=str(payload.get("fmt", "")),
             manifest_path=str(payload.get("manifest_path", "")),
             sidecar_paths={
@@ -247,8 +252,8 @@ class LocalLawRunSummary:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "family": str(self.family),
-            "dgp": str(self.dgp),
+            "problem_id": str(self.dgp),
+            "method_id": str(self.family),
             "oracle_name": str(self.oracle_name),
             "study_role": str(self.study_role),
             "split_ids": dict(self.split_ids),
@@ -270,8 +275,8 @@ class LocalLawRunSummary:
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "LocalLawRunSummary":
         return cls(
-            family=str(payload.get("family", "")),
-            dgp=str(payload.get("dgp", "")),
+            family=str(payload.get("method_id", payload.get("family", ""))),
+            dgp=str(payload.get("problem_id", payload.get("dgp", ""))),
             oracle_name=str(payload.get("oracle_name", "")),
             study_role=str(payload.get("study_role", "")),
             split_ids={
@@ -377,8 +382,8 @@ def write_json_g_artifact(
             "artifact_id": str(artifact_id),
             "name": str(name),
             "role": role.value,
-            "family": str(family),
-            "dgp": str(dgp),
+            "problem_id": str(dgp),
+            "method_id": str(family),
             "fmt": "json",
             "payload": dict(payload),
             "metadata": dict(metadata or {}),
@@ -418,8 +423,8 @@ def write_npz_g_artifact(
             "artifact_id": str(artifact_id),
             "name": str(name),
             "role": role.value,
-            "family": str(family),
-            "dgp": str(dgp),
+            "problem_id": str(dgp),
+            "method_id": str(family),
             "fmt": "json+npz",
             "payload": dict(manifest_payload),
             "sidecars": {"weights": str(sidecar_path)},

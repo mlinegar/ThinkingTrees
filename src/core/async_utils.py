@@ -7,15 +7,15 @@ around proper task cleanup to prevent orphaned tasks from piling up.
 
 from __future__ import annotations
 
-import atexit
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+import atexit
 import contextlib
 import functools
 import logging
 import os
-from typing import Any, Callable, Coroutine, Iterable, List, Optional, ParamSpec, TypeVar
 import weakref
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, Coroutine, Iterable, List, Optional, ParamSpec, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ _R = TypeVar("_R")
 # thread offloads through a shared global executor, we avoid the default executor
 # lifecycle entirely.
 _GLOBAL_EXECUTOR: Optional[ThreadPoolExecutor] = None
+_EXPLICIT_MAX_WORKERS: Optional[int] = None
 _LOOP_HEARTBEATS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _LoopHeartbeatState]" = weakref.WeakKeyDictionary()
 _HEARTBEAT_INTERVAL_SECONDS = 0.05
 
@@ -67,9 +68,57 @@ def _ensure_loop_heartbeat(loop: asyncio.AbstractEventLoop) -> _LoopHeartbeatSta
     return state
 
 
-def _default_max_workers() -> int:
+def _fallback_max_workers() -> int:
     cpu = os.cpu_count() or 1
     return max(4, min(32, cpu + 4))
+
+
+def resolve_to_thread_max_workers() -> int:
+    """Resolve the shared offload thread count.
+
+    The default remains ``max(4, min(32, os.cpu_count() + 4))``. Set
+    ``TT_TO_THREAD_MAX_WORKERS`` before the executor is created to override it,
+    or call ``configure_to_thread_max_workers`` during benchmark setup.
+    """
+    if _EXPLICIT_MAX_WORKERS is not None:
+        return int(_EXPLICIT_MAX_WORKERS)
+
+    raw = os.environ.get("TT_TO_THREAD_MAX_WORKERS")
+    if raw is not None and str(raw).strip():
+        try:
+            parsed = int(str(raw).strip())
+            if parsed > 0:
+                return parsed
+        except (TypeError, ValueError):
+            logger.warning("Ignoring invalid TT_TO_THREAD_MAX_WORKERS=%r", raw)
+    return _fallback_max_workers()
+
+
+def _default_max_workers() -> int:
+    return resolve_to_thread_max_workers()
+
+
+def configure_to_thread_max_workers(max_workers: Optional[int]) -> None:
+    """Set or clear the process-local shared offload thread cap.
+
+    This is intended for benchmark/test setup before offloaded work is active.
+    Passing ``None`` clears the explicit cap and falls back to the environment or
+    default heuristic.
+    """
+    global _EXPLICIT_MAX_WORKERS, _GLOBAL_EXECUTOR
+
+    if max_workers is not None:
+        parsed = int(max_workers)
+        if parsed <= 0:
+            raise ValueError(f"max_workers must be positive or None, got {max_workers!r}")
+        _EXPLICIT_MAX_WORKERS = parsed
+    else:
+        _EXPLICIT_MAX_WORKERS = None
+
+    executor = _GLOBAL_EXECUTOR
+    if executor is not None:
+        _GLOBAL_EXECUTOR = None
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def get_global_executor() -> ThreadPoolExecutor:

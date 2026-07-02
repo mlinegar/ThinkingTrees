@@ -108,8 +108,19 @@ def test_process_batch_with_external_strategy_still_computes_llm_backend_score(m
             super().__init__(*args, **kwargs)
             created_clients.append(self)
 
+    def _fake_build_batch_client(**kwargs):
+        return _RecordingFakeClient(
+            base_url=(kwargs.get("server_urls") or ["http://localhost:8000/v1"])[0],
+            max_concurrent=kwargs.get("max_concurrent", 1),
+            batch_size=kwargs.get("batch_size", 1),
+            batch_timeout=kwargs.get("batch_timeout", 0.0),
+            request_timeout=kwargs.get("request_timeout"),
+            recover_base_url_callback=kwargs.get("recover_base_url_callback"),
+            recovery_cooldown_seconds=kwargs.get("recovery_cooldown_seconds") or 0.0,
+        )
+
     monkeypatch.setattr("src.pipelines.batched.BatchTreeOrchestrator", _FakeOrchestrator)
-    monkeypatch.setattr("src.pipelines.batched.AsyncBatchLLMClient", _RecordingFakeClient)
+    monkeypatch.setattr("src.pipelines.batched.build_batch_client", _fake_build_batch_client)
 
     config = BatchedPipelineConfig(
         task_model_url="http://localhost:8000/v1",

@@ -24,6 +24,24 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.ctreepo.sim.util import safe_float, safe_int
+from src.experiments.script_parse import (
+    parse_float_list as _shared_parse_float_list,
+    parse_int_list as _shared_parse_int_list,
+    parse_str_list as _shared_parse_str_list,
+)
+from src.ctreepo.contracts import (
+    LAW_SET_ALL,
+    LAW_SET_MERGE_AND_ON_RANGE_IDEMPOTENCE,
+    LAW_SET_ON_RANGE_IDEMPOTENCE_ONLY,
+    LAW_SET_ROOT_ONLY,
+    LOCAL_LAW_ESTIMATOR_ORACLE_STATE,
+    RunAxisSpec,
+    assert_public_contract_clean,
+    canonical_law_set_id,
+    markov_tree_bundle_metadata,
+    objective_metadata,
+    run_manifest_metadata,
+)
 from src.experiments import (
     ExperimentSpec,
     ProgressSnapshot,
@@ -33,15 +51,17 @@ from src.experiments import (
     canonical_artifact_refs_from_paths,
     default_phase_specs,
     merge_artifacts,
-    method_ref_from_markov_full_doc_run,
     write_experiment_manifest,
     write_experiment_status,
 )
+from src.experiments.markov_full_doc import method_ref_from_markov_full_doc_run
 from src.experiments.scheduler import (
     SchedulerConfig,
     SchedulerItem,
     run_scheduler,
 )
+from src.ctreepo.sim.core.tree_neural_facade import job_output_dir_name
+from src.ctreepo.sim.core.tree_neural_execution import worker_command_for_job
 from src.ctreepo.sim.core.markov_comparison_surface import (
     FULL_DOC_OFFICIAL_FNO_FIXED_LEAF_TOKENS,
     apply_comparable_surface_to_mapping,
@@ -51,6 +71,8 @@ from src.ctreepo.sim.core.markov_comparison_surface import (
     resolve_markov_comparable_surface,
 )
 from src.ctreepo.sim.core.full_doc_config_codec import (
+    LEGACY_PUBLIC_OBJECTIVE_CONFIG_FIELDS,
+    LEGACY_PUBLIC_RUN_AXIS_CONFIG_FIELDS,
     runtime_config_overrides_from_config_like,
     serialize_full_doc_runtime_config,
 )
@@ -77,6 +99,10 @@ from src.ctreepo.sim.core.markov_study_names import (
     resolve_law_package_names as _resolve_law_package_names,
     resolve_supervision_recovery_package_names as _resolve_supervision_recovery_package_names,
 )
+from src.ctreepo.sim.core.markov_hazard_panels import (
+    panel_to_ops_overrides,
+    resolve_markov_hazard_panel,
+)
 from src.ctreepo.sim.core.tree_reference_presets import (  # noqa: E402
     COMPARISON_GRID_V3_PRESET as _PRESET_COMPARISON_GRID_V3,
     SUPERVISION_RECOVERY_COMMON_TREE_REFERENCE_PRESET as _PRESET_COMMON,
@@ -94,7 +120,7 @@ from src.ctreepo.sim.core.tree_reference_presets import (  # noqa: E402
     tree_reference_label as _imported_tree_reference_label,
 )
 from src.ctreepo.sim.util import get_str as _gs, norm_str as _ns
-from scripts.structured_config import load_structured_config, write_structured_config
+from src.experiments.structured_config import load_structured_config, write_structured_config
 
 
 FULL_DOC_CONFIG_WORKER_KINDS = frozenset({"full_doc_diagnostics", "full_doc_upper_bound"})
@@ -311,11 +337,20 @@ TREE_FULL_DOC_SCRIPT = REPO_ROOT / "scripts" / "run_tree_neural_full_doc_mig.py"
 REPORT_VERSION_MANIFEST_NAME = "report_version_manifest.json"
 REPORT_VERSION_SCHEMA_VERSION = 1
 CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES = ("official_fno", "official_fno_sumlen")
+EFFICIENCY_TREE_METHOD_RUNS = (
+    "tree_neural:on_range_idempotence_only",
+    "tree_neural:all",
+)
 EFFICIENCY_TREE_BASELINE_FAMILIES = ("tree_neural_c2", "tree_neural")
 EFFICIENCY_DENSE_ANCHOR_FAMILIES = (
     *CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES,
     *EFFICIENCY_TREE_BASELINE_FAMILIES,
 )
+DEFAULT_TREE_METHOD_RUNS = (
+    "tree_neural:on_range_idempotence_only",
+    "tree_neural:all",
+)
+DEFAULT_REFERENCE_METHOD_RUNS = tuple(CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES)
 EFFICIENCY_STRUCTURAL_BASELINE_FAMILIES = (
     *EFFICIENCY_DENSE_ANCHOR_FAMILIES,
     "palette_block_exact",
@@ -327,6 +362,115 @@ EFFICIENCY_STRUCTURAL_CORE_CELLS = (
     "r12_p079",
 )
 SUPERVISION_RECOVERY_TREE_FAMILY = "tree_neural"
+
+
+def _markov_tradeoff_tree_bundle_contract(
+    args: argparse.Namespace,
+    *,
+    phases: Sequence[str] | None = None,
+) -> Dict[str, Any]:
+    return markov_tree_bundle_metadata(
+        leaf_policy={
+            "partition_axis": "synthetic_markov_document",
+            "phases": sorted(str(phase) for phase in (phases or ())),
+            "preset": str(getattr(args, "preset", "")),
+            "fixed_leaf_tokens": int(getattr(args, "fixed_leaf_tokens", 0) or 0),
+        },
+        state_dim=int(getattr(args, "state_dim", 0) or 0) or None,
+        f_init="official_oracle",
+        g_init="raw_concat",
+        schedule=str(getattr(args, "tree_training_schedule", "balanced") or "balanced"),
+        metadata={"runner": "run_markov_optimization_tradeoff_pipeline"},
+    )
+
+
+def _manifest_local_law_weight(
+    args: argparse.Namespace,
+    *,
+    attr: str,
+) -> float | None:
+    raw = getattr(args, attr, None)
+    return float(raw) if raw is not None else None
+
+
+def _markov_tradeoff_run_manifest(
+    *,
+    args: argparse.Namespace,
+    output_root: Path,
+    phases: Sequence[str] | set[str] | None,
+    tree_bundle_contract: Mapping[str, Any],
+    sources: Mapping[str, Any] | None = None,
+    status: str = "completed",
+    publication_ready: bool = True,
+    metadata: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    artifacts = [
+        {"kind": str(kind), "uri": str(uri)}
+        for kind, uri in sorted(dict(sources or {}).items())
+        if str(uri or "")
+    ]
+    artifacts.append({"kind": "pipeline_summary", "uri": str(output_root / "pipeline_summary.json")})
+    artifacts.append({"kind": "run_directory", "uri": str(output_root)})
+    local_law_weight = _manifest_local_law_weight(
+        args,
+        attr="local_law_weight",
+    )
+    root_weight = (
+        max(0.0, 1.0 - float(local_law_weight))
+        if local_law_weight is not None
+        else (
+            float(getattr(args, "root_share"))
+            if getattr(args, "root_share", None) is not None
+            else float(getattr(args, "tree_task_objective_weight"))
+            if getattr(args, "tree_task_objective_weight", None) is not None
+            else 1.0
+        )
+    )
+    return run_manifest_metadata(
+        run_id="markov.tradeoff_pipeline",
+        domain="markov",
+        role="tradeoff_pipeline",
+        backend="fno",
+        status=str(status),
+        tree_bundle=tree_bundle_contract,
+        f_init="official_oracle",
+        g_init="raw_concat",
+        f_lineage={"init": "official_oracle", "artifact": "synthetic_oracle"},
+        g_lineage={"init": "raw_concat", "artifact": "raw_concat"},
+        schedule=str(getattr(args, "tree_training_schedule", "balanced") or "balanced"),
+        objective=objective_metadata(
+            objective_family="markov_tradeoff_pipeline",
+            local_law_estimator=LOCAL_LAW_ESTIMATOR_ORACLE_STATE,
+            local_law_weight=local_law_weight,
+            root_share=root_weight,
+            local_law_component_weights={
+                "leaf_preservation": float(local_law_weight or 0.0),
+                "merge_preservation": float(local_law_weight or 0.0),
+                "on_range_idempotence": float(local_law_weight or 0.0),
+            },
+            metadata={
+                "preset": str(getattr(args, "preset", "")),
+                "phases": sorted(str(phase) for phase in (phases or ())),
+            },
+        ),
+        optimizer_config={
+            "phases": sorted(str(phase) for phase in (phases or ())),
+            "preset": str(getattr(args, "preset", "")),
+            "train_docs": int(getattr(args, "train_docs", 0) or 0),
+        },
+        output_artifacts=artifacts,
+        audit_results={"ok": True, "policy": "manifest_contract_required"},
+        quarantine={"classification": "valid_treebundle_v1"},
+        command=sys.argv,
+        allow_legacy=False,
+        publication_ready=bool(publication_ready),
+        metadata={
+            "runner": "scripts/run_markov_optimization_tradeoff_pipeline.py",
+            **dict(metadata or {}),
+        },
+    )
+
+
 SUPERVISION_RECOVERY_RECOVERABLE_BENCHMARK = "recoverable_v5"
 SUPERVISION_RECOVERY_STRUCTURAL_GRID = "structural_core_v2"
 SUPERVISION_RECOVERY_STRUCTURAL_CELL = "r12_p079"
@@ -343,6 +487,31 @@ SUPERVISION_RECOVERY_CANONICAL_TREE_STAGE1_SELECTION_METRIC = "val_theorem_boots
 SUPERVISION_RECOVERY_CANONICAL_COMPARISON_RULE = (
     "all tree ladder points selected on val_root_mae; local metrics are diagnostics"
 )
+SUPERVISION_RECOVERY_THEOREM_STATE_DIAGNOSTICS = (
+    "leaf_direct_exact_match",
+    "merge_direct_exact_match",
+    "merge_join_bit_accuracy",
+    "leaf_first_accuracy",
+    "leaf_last_accuracy",
+    "merge_first_accuracy",
+    "merge_last_accuracy",
+    "c2_on_range_exact_match",
+    "phi_merge_alignment",
+    "phi_pair_auc",
+    "root_direct_count_mae",
+    "exact_projected_root_mae",
+    "learned_merger_gap",
+)
+SUPERVISION_RECOVERY_THEOREM_STATE_DIAGNOSTIC_ALIASES = {
+    "leaf_direct_exact_match": (
+        "leaf_direct_exact_summary_match_rate",
+        "test_leaf_direct_exact_summary_match_rate",
+    ),
+    "merge_direct_exact_match": (
+        "merge_direct_exact_summary_match_rate",
+        "test_merge_direct_exact_summary_match_rate",
+    ),
+}
 SUPERVISION_RECOVERY_PRIMARY_COMPARISON_ARM = "primary"
 SUPERVISION_RECOVERY_EXACT_COLLAPSE_ONE_TREE_COMPARISON_ARM = (
     "exact_collapse_one_tree_identity"
@@ -1028,6 +1197,48 @@ SUPERVISION_RECOVERY_PACKAGE_SPECS: Dict[str, Dict[str, Any]] = {
         "run_fno": False,
         "fno_reference_package": "full10",
     },
+    "full10_leaf_full10": {
+        "label": "10% full-doc + 10% leaf full-sketch (sparse leaves)",
+        "description": "Sparse-everywhere composition test: 10% root + 10% leaf full-sketch labels, no internals.",
+        "budget_total_calls_per_doc": 0.1,
+        "full_doc_budget_share": 1.0,
+        "doc_consumption_mode": "root_only",
+        "local_split_mode": "balanced",
+        "leaf_supervision_kind": "full_sketch",
+        "leaf_label_rate": 0.1,
+        "internal_supervision_kind": "none",
+        "internal_label_rate": 0.0,
+        "run_fno": False,
+        "fno_reference_package": "full10",
+    },
+    "full10_leaf_full10_internal_count10": {
+        "label": "10% full-doc + 10% leaf full + 10% internal count (sparse everywhere)",
+        "description": "Sparse-everywhere composition test: 10% root + 10% leaf full-sketch + 10% internal count.",
+        "budget_total_calls_per_doc": 0.1,
+        "full_doc_budget_share": 1.0,
+        "doc_consumption_mode": "root_only",
+        "local_split_mode": "balanced",
+        "leaf_supervision_kind": "full_sketch",
+        "leaf_label_rate": 0.1,
+        "internal_supervision_kind": "count_only",
+        "internal_label_rate": 0.1,
+        "run_fno": False,
+        "fno_reference_package": "full10",
+    },
+    "full10_leaf_full10_internal_count100": {
+        "label": "10% full-doc + 10% leaf full + 100% internal count",
+        "description": "Sparse leaves, full internals: 10% root + 10% leaf full-sketch + 100% internal count.",
+        "budget_total_calls_per_doc": 0.1,
+        "full_doc_budget_share": 1.0,
+        "doc_consumption_mode": "root_only",
+        "local_split_mode": "balanced",
+        "leaf_supervision_kind": "full_sketch",
+        "leaf_label_rate": 0.1,
+        "internal_supervision_kind": "count_only",
+        "internal_label_rate": 1.0,
+        "run_fno": False,
+        "fno_reference_package": "full10",
+    },
     "full10_leaf_full100_internal_depth1_count100": {
         "label": "10% full-doc + leaf full + depth-1 internal count",
         "description": "Tree gets 10% full-doc, full leaf full-sketch, and depth-1 internal count labels only (first pairwise merge level).",
@@ -1198,6 +1409,20 @@ SUPERVISION_RECOVERY_PACKAGE_SPECS: Dict[str, Dict[str, Any]] = {
         "run_fno": False,
         "fno_reference_package": "full100",
     },
+    "full100_leaf_full100_internal_full100": {
+        "label": "100% full-doc + leaf full + internal full",
+        "description": "Tree gets 100% full-doc supervision, full leaf full-sketch labels, and full internal full-sketch labels.",
+        "budget_total_calls_per_doc": 1.0,
+        "full_doc_budget_share": 1.0,
+        "doc_consumption_mode": "root_only",
+        "local_split_mode": "balanced",
+        "leaf_supervision_kind": "full_sketch",
+        "leaf_label_rate": 1.0,
+        "internal_supervision_kind": "full_sketch",
+        "internal_label_rate": 1.0,
+        "run_fno": False,
+        "fno_reference_package": "full100",
+    },
 }
 SUPERVISION_RECOVERY_PACKAGE_SPECS.update(
     _build_mass_matched_package_specs(SUPERVISION_RECOVERY_MASS_MATCHED_RATE_LADDERS)
@@ -1252,6 +1477,60 @@ def _supervision_recovery_package_order_from_args(
     return _resolve_supervision_recovery_package_order(
         _parse_str_list(raw_value, fallback)
     )
+
+
+def _resolved_supervision_recovery_leaf_token_batch_sizes(
+    args: argparse.Namespace,
+) -> Dict[int, int]:
+    raw_value = getattr(
+        args, "supervision_recovery_leaf_token_batch_sizes", None
+    )
+    text = str(raw_value or "").strip()
+    if not text:
+        return {}
+    payload: Any = None
+    try:
+        payload = json.loads(text)
+    except Exception:
+        payload = None
+    items: List[Tuple[Any, Any]] = []
+    if isinstance(payload, Mapping):
+        items = list(payload.items())
+    else:
+        for chunk in [item.strip() for item in text.split(";") if item.strip()]:
+            if "=" not in chunk:
+                raise ValueError(
+                    "invalid --supervision-recovery-leaf-token-batch-sizes "
+                    f"entry {chunk!r}; expected leaf_tokens=batch_size"
+                )
+            key_text, value_text = chunk.split("=", 1)
+            items.append((key_text.strip(), value_text.strip()))
+    resolved: Dict[int, int] = {}
+    for key, value in items:
+        try:
+            key_int = int(str(key).strip())
+            value_int = int(str(value).strip())
+        except Exception as exc:
+            raise ValueError(
+                "invalid --supervision-recovery-leaf-token-batch-sizes entry "
+                f"{key!r}={value!r}; expected integers"
+            ) from exc
+        if key_int <= 0 or value_int <= 0:
+            continue
+        resolved[key_int] = value_int
+    return resolved
+
+
+def _resolve_supervision_batch_size_for_leaf_tokens(
+    args: argparse.Namespace,
+    fixed_leaf_tokens: int,
+) -> int:
+    overrides = _resolved_supervision_recovery_leaf_token_batch_sizes(args)
+    if overrides:
+        bs = overrides.get(int(fixed_leaf_tokens))
+        if bs is not None and int(bs) > 0:
+            return int(bs)
+    return int(args.supervision_batch_size)
 
 
 def _supervision_recovery_leaf_token_ladder_from_args(
@@ -1972,6 +2251,18 @@ LAW_PACKAGE_CONFIGS: Dict[str, Dict[str, Any]] = {
         "c3_relative_weight": 1.0,
     },
 }
+LAW_SET_CONFIGS: Dict[str, Dict[str, Any]] = {
+    LAW_SET_ROOT_ONLY: dict(LAW_PACKAGE_CONFIGS["tree_root_only"]),
+    LAW_SET_ON_RANGE_IDEMPOTENCE_ONLY: dict(LAW_PACKAGE_CONFIGS["tree_c2_only"]),
+    LAW_SET_MERGE_AND_ON_RANGE_IDEMPOTENCE: {
+        "law_package": "c2c3",
+        "local_law_weight": 0.5,
+        "c1_relative_weight": 0.0,
+        "c2_relative_weight": 1.0,
+        "c3_relative_weight": 1.0,
+    },
+    LAW_SET_ALL: dict(LAW_PACKAGE_CONFIGS["tree_all_laws"]),
+}
 PRESET_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "smoke": {
         "batch_sizes": [32, 128],
@@ -1994,8 +2285,8 @@ PRESET_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "efficiency_structural_cells": ["r4_p031"],
         "oracle_budget_train_docs": 1024,
         "oracle_budget_seeds": [0],
-        "oracle_budget_tree_families": ["tree_neural"],
-        "oracle_budget_reference_families": list(CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES),
+        "oracle_budget_method_runs": ["tree_neural:all"],
+        "oracle_budget_reference_method_runs": list(DEFAULT_REFERENCE_METHOD_RUNS),
         "oracle_budget_calls_per_doc": [1.0],
         "oracle_budget_full_doc_shares": [0.5, 1.0],
         "oracle_budget_doc_consumption_modes": ["root_only", "doc_sequence"],
@@ -2007,7 +2298,7 @@ PRESET_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "supervision_seeds": [0],
         "supervision_recovery_train_docs": [1024],
         "supervision_recovery_seeds": [0],
-        "supervision_recovery_tree_family": SUPERVISION_RECOVERY_TREE_FAMILY,
+        "supervision_recovery_method_id": SUPERVISION_RECOVERY_TREE_FAMILY,
         "supervision_recovery_recoverable_benchmark": SUPERVISION_RECOVERY_RECOVERABLE_BENCHMARK,
         "supervision_recovery_structural_grid": SUPERVISION_RECOVERY_STRUCTURAL_GRID,
         "supervision_recovery_structural_cell": SUPERVISION_RECOVERY_STRUCTURAL_CELL,
@@ -2037,8 +2328,12 @@ PRESET_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "efficiency_structural_cells": list(EFFICIENCY_STRUCTURAL_CORE_CELLS),
         "oracle_budget_train_docs": 10240,
         "oracle_budget_seeds": [0, 1, 2],
-        "oracle_budget_tree_families": ["tree_neural_c2", "tree_neural_c2c3", "tree_neural"],
-        "oracle_budget_reference_families": list(CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES),
+        "oracle_budget_method_runs": [
+            "tree_neural:on_range_idempotence_only",
+            "tree_neural:merge_and_on_range_idempotence",
+            "tree_neural:all",
+        ],
+        "oracle_budget_reference_method_runs": list(DEFAULT_REFERENCE_METHOD_RUNS),
         "oracle_budget_calls_per_doc": [0.5, 1.0, 2.0],
         "oracle_budget_full_doc_shares": [0.0, 0.5, 1.0],
         "oracle_budget_doc_consumption_modes": ["root_only", "doc_sequence"],
@@ -2050,7 +2345,7 @@ PRESET_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "supervision_seeds": [0, 1],
         "supervision_recovery_train_docs": [1024, 2048, 4096],
         "supervision_recovery_seeds": [0, 1],
-        "supervision_recovery_tree_family": SUPERVISION_RECOVERY_TREE_FAMILY,
+        "supervision_recovery_method_id": SUPERVISION_RECOVERY_TREE_FAMILY,
         "supervision_recovery_recoverable_benchmark": SUPERVISION_RECOVERY_RECOVERABLE_BENCHMARK,
         "supervision_recovery_structural_grid": SUPERVISION_RECOVERY_STRUCTURAL_GRID,
         "supervision_recovery_structural_cell": SUPERVISION_RECOVERY_STRUCTURAL_CELL,
@@ -2065,7 +2360,7 @@ PRESET_DEFAULTS["v3"] = {
     **PRESET_DEFAULTS["standard"],
     "supervision_recovery_train_docs": [1024, 4096, 10240],
     "supervision_recovery_seeds": [0, 1],
-    "supervision_recovery_tree_family": SUPERVISION_RECOVERY_TREE_FAMILY,
+    "supervision_recovery_method_id": SUPERVISION_RECOVERY_TREE_FAMILY,
     "supervision_recovery_recoverable_benchmark": SUPERVISION_RECOVERY_V3_RECOVERABLE_BENCHMARK,
     "supervision_recovery_structural_grid": SUPERVISION_RECOVERY_V3_STRUCTURAL_GRID,
     "supervision_recovery_structural_cell": SUPERVISION_RECOVERY_STRUCTURAL_CELL,
@@ -2092,7 +2387,7 @@ PIPELINE_SELECTION_TEMPLATE: Dict[str, Any] = {
         "test_docs": 1024,
         "supervision_recovery_train_docs": [1024, 2048, 4096],
         "supervision_recovery_seeds": [0, 1],
-        "supervision_recovery_tree_family": SUPERVISION_RECOVERY_TREE_FAMILY,
+        "supervision_recovery_method_id": SUPERVISION_RECOVERY_TREE_FAMILY,
         "supervision_recovery_recoverable_benchmark": SUPERVISION_RECOVERY_RECOVERABLE_BENCHMARK,
         "supervision_recovery_structural_grid": SUPERVISION_RECOVERY_STRUCTURAL_GRID,
         "supervision_recovery_structural_cell": SUPERVISION_RECOVERY_STRUCTURAL_CELL,
@@ -2422,7 +2717,11 @@ def _serialized_worker_config(
     metadata: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     if _uses_full_doc_config_codec(worker_kind):
-        return serialize_full_doc_runtime_config(config, metadata=metadata)
+        return serialize_full_doc_runtime_config(
+            config,
+            metadata=metadata,
+            allow_private_tree_aliases=True,
+        )
     payload = dict(config)
     if metadata:
         payload.update(dict(metadata))
@@ -2436,7 +2735,10 @@ def _resolved_full_doc_task_config(
     task_payload: Mapping[str, Any] | None,
 ) -> Dict[str, Any]:
     original_config = (
-        runtime_config_overrides_from_config_like(config)
+        runtime_config_overrides_from_config_like(
+            config,
+            allow_private_tree_aliases=True,
+        )
         if _uses_full_doc_config_codec(worker_kind)
         else dict(config)
     )
@@ -2599,6 +2901,22 @@ def _resolved_full_doc_task_config(
     resolved["package_semantics"] = ""
     resolved["package_semantics"] = resolve_package_semantics(resolved)
     return resolved
+
+
+def _full_doc_runtime_overrides_for_worker(
+    config: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Return full-doc overrides without legacy public run-axis fields."""
+    payload = runtime_config_overrides_from_config_like(
+        config,
+        allow_private_tree_aliases=True,
+    )
+    for key in (
+        set(LEGACY_PUBLIC_RUN_AXIS_CONFIG_FIELDS)
+        | set(LEGACY_PUBLIC_OBJECTIVE_CONFIG_FIELDS)
+    ):
+        payload.pop(str(key), None)
+    return payload
 
 
 def _effective_task_epoch_total(
@@ -2976,9 +3294,21 @@ def _run_worker(task_path: Path) -> int:
                 use_cuda=bool(config.get("use_cuda", False)),
                 cuda_device=config.get("cuda_device"),
                 torch_threads=int(config.get("torch_threads", 1) or 1),
-                config_overrides=runtime_config_overrides_from_config_like(config),
-                run_metadata={**pipeline_metadata, "task_name": str(task_name)},
+                config_overrides=_full_doc_runtime_overrides_for_worker(config),
+                run_metadata={
+                    **pipeline_metadata,
+                    "task_name": str(task_name),
+                    "hazard_panel_id": str(task.get("hazard_panel_id", "") or ""),
+                    "base_bundle_path": str(task.get("base_bundle_path", "") or ""),
+                },
                 progress_callback=_emit_model_progress,
+                base_bundle_path=str(
+                    task.get(
+                        "base_bundle_path",
+                        config.get("pipeline_base_bundle_path", ""),
+                    )
+                    or ""
+                ),
             )
             wall_s = time.perf_counter() - started
             payload = dict(payload)
@@ -3035,41 +3365,135 @@ def _run_worker(task_path: Path) -> int:
 
 
 def _parse_int_list(text: str | None, default: Sequence[int]) -> List[int]:
-    if text is None:
-        return list(default)
-    values = []
-    for raw in str(text).replace(",", " ").split():
-        item = raw.strip()
-        if item:
-            values.append(int(item))
-    return values or list(default)
+    return _shared_parse_int_list(text, default=default, separators=",")
 
 
 def _parse_float_list(text: str | None, default: Sequence[float]) -> List[float]:
-    if text is None:
-        return list(default)
-    values = []
-    for raw in str(text).replace(",", " ").split():
-        item = raw.strip()
-        if item:
-            values.append(float(item))
-    return values or list(default)
+    return _shared_parse_float_list(text, default=default, separators=",")
 
 
 def _parse_str_list(text: str | None, default: Sequence[str]) -> List[str]:
+    return _shared_parse_str_list(text, default=default, separators=",")
+
+
+def _parse_key_value_text_map(text: str | None) -> Dict[str, str]:
     if text is None:
-        return list(default)
-    values = []
-    for raw in str(text).replace(",", " ").split():
-        item = raw.strip()
-        if item:
-            values.append(item)
-    return values or list(default)
+        return {}
+    payload: Dict[str, str] = {}
+    normalized = str(text or "").replace(",", ";").replace(" ", ";")
+    for raw in normalized.split(";"):
+        chunk = raw.strip()
+        if not chunk:
+            continue
+        if "=" not in chunk:
+            raise ValueError(
+                f"invalid key=value mapping entry {chunk!r}; expected key=value"
+            )
+        key, value = chunk.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if key:
+            payload[key] = value
+    return payload
+
+
+def _run_axis_from_token(
+    token: str,
+    *,
+    problem_id: str = "markov_ops_count",
+    role: str = "primary",
+) -> Dict[str, Any]:
+    text = str(token or "").strip()
+    if not text:
+        raise ValueError("method run token must be non-empty")
+    if ":" in text:
+        method_id, law_set_id = text.split(":", 1)
+    else:
+        method_id, law_set_id = text, LAW_SET_ALL
+    return RunAxisSpec(
+        problem_id=problem_id,
+        method_id=str(method_id).strip(),
+        law_set_id=canonical_law_set_id(str(law_set_id).strip() or LAW_SET_ALL),
+        role=role,
+    ).to_dict()
+
+
+def _parse_run_axis_list(
+    text: Any,
+    default: Sequence[Any],
+    *,
+    role: str,
+) -> List[Dict[str, Any]]:
+    if text is None:
+        raw_items: Sequence[Any] = list(default)
+    elif isinstance(text, (list, tuple)):
+        raw_items = list(text)
+    else:
+        raw_items = _parse_str_list(str(text), ())
+    if not raw_items:
+        raw_items = list(default)
+    runs: List[Dict[str, Any]] = []
+    for item in raw_items:
+        if isinstance(item, Mapping):
+            payload = dict(item)
+            payload.setdefault("role", role)
+            runs.append(RunAxisSpec.from_mapping(payload).to_dict())
+        else:
+            runs.append(_run_axis_from_token(str(item), role=role))
+    return runs
+
+
+RUN_AXIS_CONFIG_ROLES = {
+    "method_runs": "primary",
+    "parity_method_runs": "primary",
+    "oracle_budget_method_runs": "primary",
+    "reference_method_runs": "reference",
+    "parity_reference_method_runs": "reference",
+    "oracle_budget_reference_method_runs": "reference",
+    "full_doc_anchor_reference_method_runs": "reference",
+}
+
+
+def _normalize_run_axis_config_aliases(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    def _clean(value: Any, key: str = "") -> Any:
+        role = RUN_AXIS_CONFIG_ROLES.get(str(key))
+        if role is not None:
+            return _parse_run_axis_list(value, (), role=role)
+        if isinstance(value, Mapping):
+            return {str(child_key): _clean(child_value, str(child_key)) for child_key, child_value in value.items()}
+        if isinstance(value, list):
+            return [_clean(item) for item in value]
+        if isinstance(value, tuple):
+            return [_clean(item) for item in value]
+        return value
+
+    return dict(_clean(payload))
+
+
+def _method_ids_from_run_axes(runs: Sequence[Mapping[str, Any]]) -> List[str]:
+    return [str(run.get("method_id") or "").strip() for run in runs if str(run.get("method_id") or "").strip()]
+
+
+def _legacy_family_from_run_axis(run: Mapping[str, Any]) -> str:
+    method_id = str(run.get("method_id") or "").strip()
+    law_set_id = canonical_law_set_id(str(run.get("law_set_id") or LAW_SET_ALL))
+    if method_id == "tree_neural":
+        if law_set_id == LAW_SET_ON_RANGE_IDEMPOTENCE_ONLY:
+            return "tree_neural_c2"
+        if law_set_id == LAW_SET_MERGE_AND_ON_RANGE_IDEMPOTENCE:
+            return "tree_neural_c2c3"
+    return method_id
+
+
+def _legacy_families_from_run_axes(runs: Sequence[Mapping[str, Any]]) -> List[str]:
+    return [_legacy_family_from_run_axis(run) for run in runs]
 
 
 def _stringify_cli_default(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
+    if isinstance(value, (list, tuple)) and all(isinstance(item, Mapping) for item in value):
+        return list(value)
     if isinstance(value, (list, tuple)):
         return " ".join(str(item) for item in value)
     return value
@@ -3093,6 +3517,10 @@ def _ops_count_supported_config_keys() -> set[str]:
     return {str(field.name) for field in fields(OPSCountConfig)}
 
 
+def _reject_legacy_public_run_axis_config(payload: Mapping[str, Any], *, path: Path) -> None:
+    assert_public_contract_clean(payload, surface=str(path))
+
+
 def _load_selection_config(
     path: Path | None,
     *,
@@ -3101,6 +3529,10 @@ def _load_selection_config(
     if path is None:
         return {}
     payload = load_structured_config(path)
+    _reject_legacy_public_run_axis_config(
+        _normalize_run_axis_config_aliases(payload),
+        path=path,
+    )
     for section_name in section_names:
         section = payload.get(section_name)
         if isinstance(section, Mapping):
@@ -3277,20 +3709,21 @@ def _build_parser(*, config_defaults: Mapping[str, Any] | None = None) -> argpar
     parser.add_argument("--weight-ablation-train-docs", type=str, default=None)
     parser.add_argument("--weight-ablation-profiles", type=str, default=None)
     parser.add_argument(
-        "--law-package-names",
+        "--law-set-ids",
         type=str,
         default=None,
-        help=(
-            "Optional comma- or space-separated law package list. "
-            "Accepts canonical names like tree_c2_only and public aliases like c2_only."
-        ),
+        help="Optional comma- or space-separated generic law_set_id list.",
     )
     parser.add_argument("--support-leaf-tokens", type=str, default=None)
     parser.add_argument("--support-seeds", type=str, default=None)
     parser.add_argument("--support-modes", type=str, default=None)
     parser.add_argument("--full-doc-anchor-train-docs", type=str, default=None)
     parser.add_argument("--full-doc-anchor-seeds", type=str, default=None)
-    parser.add_argument("--full-doc-anchor-families", type=str, default="official_fno official_fno_sumlen")
+    parser.add_argument(
+        "--full-doc-anchor-reference-method-runs",
+        type=str,
+        default="official_fno official_fno_sumlen",
+    )
     parser.add_argument("--efficiency-anchor-mode", choices=("both", "fno_only", "tree_only"), default="both")
     parser.add_argument("--efficiency-train-docs", type=str, default=None)
     parser.add_argument("--efficiency-anchor-train-docs-dense", type=str, default=None)
@@ -3299,8 +3732,8 @@ def _build_parser(*, config_defaults: Mapping[str, Any] | None = None) -> argpar
     parser.add_argument("--efficiency-structural-cells", type=str, default=None)
     parser.add_argument("--oracle-budget-train-docs", type=int, default=None)
     parser.add_argument("--oracle-budget-seeds", type=str, default=None)
-    parser.add_argument("--oracle-budget-tree-families", type=str, default=None)
-    parser.add_argument("--oracle-budget-reference-families", type=str, default="official_fno official_fno_sumlen")
+    parser.add_argument("--oracle-budget-method-runs", type=str, default=None)
+    parser.add_argument("--oracle-budget-reference-method-runs", type=str, default="official_fno official_fno_sumlen")
     parser.add_argument("--oracle-budget-calls-per-doc", type=str, default=None)
     parser.add_argument("--oracle-budget-full-doc-shares", type=str, default=None)
     parser.add_argument("--oracle-budget-doc-consumption-modes", type=str, default=None)
@@ -3364,6 +3797,18 @@ def _build_parser(*, config_defaults: Mapping[str, Any] | None = None) -> argpar
     parser.add_argument("--supervision-internal-profiles", type=str, default=None)
     parser.add_argument("--supervision-seeds", type=str, default=None)
     parser.add_argument("--supervision-batch-size", type=int, default=256)
+    parser.add_argument(
+        "--supervision-recovery-leaf-token-batch-sizes",
+        type=str,
+        default=None,
+        help=(
+            "Optional per-leaf-tokens batch-size override for the supervision "
+            "recovery sweep. JSON dict (e.g. '{\"16\":8,\"64\":32}') or "
+            "semicolon-delimited list (e.g. '16=8;64=32;128=64'). Keys are "
+            "fixed_leaf_tokens, values are batch sizes (in docs). Any leaf "
+            "size not in the map falls back to --supervision-batch-size."
+        ),
+    )
     parser.add_argument("--supervision-epochs", type=int, default=10)
     parser.add_argument("--exact-metric-final-doc-limit", type=int, default=0)
     parser.add_argument("--tree-posttrain-train-doc-limit", type=int, default=0)
@@ -3421,8 +3866,8 @@ def _build_parser(*, config_defaults: Mapping[str, Any] | None = None) -> argpar
         ),
     )
     parser.add_argument(
-        "--supervision-recovery-tree-family",
-        choices=("tree_neural", "tree_neural_c2", "tree_neural_c2c3"),
+        "--supervision-recovery-method-id",
+        choices=("tree_neural",),
         default=SUPERVISION_RECOVERY_TREE_FAMILY,
     )
     parser.add_argument(
@@ -3447,6 +3892,24 @@ def _build_parser(*, config_defaults: Mapping[str, Any] | None = None) -> argpar
         help=(
             "Optional comma- or space-separated supervision_recovery scope keys to run. "
             "When omitted, both the recoverable benchmark and the structural cell are run."
+        ),
+    )
+    parser.add_argument(
+        "--supervision-recovery-hazard-panel-ids",
+        type=str,
+        default=None,
+        help=(
+            "Optional comma- or space-separated Markov hazard panel ids to expose as "
+            "supervision_recovery scopes."
+        ),
+    )
+    parser.add_argument(
+        "--supervision-recovery-hazard-panel-bundle-map",
+        type=str,
+        default=None,
+        help=(
+            "Optional panel_id=base_bundle.json mapping for hazard panel scopes. "
+            "Separate entries with semicolons, commas, or spaces."
         ),
     )
     parser.add_argument(
@@ -3971,16 +4434,17 @@ def _resolved_tradeoff_selection(args: argparse.Namespace) -> Dict[str, Any]:
         "learnability_profiles": _parse_str_list(args.learnability_profiles, preset["learnability_profiles"]),
         "weight_ablation_train_docs": _parse_int_list(args.weight_ablation_train_docs, preset["weight_ablation_train_docs"]),
         "weight_ablation_profiles": _parse_str_list(args.weight_ablation_profiles, preset["weight_ablation_profiles"]),
-        "law_package_names": _resolve_law_package_names(
-            _parse_str_list(
-                getattr(args, "law_package_names", None),
-                list(LAW_PACKAGE_CONFIGS.keys()),
-            ),
-            valid_names=tuple(LAW_PACKAGE_CONFIGS.keys()),
+        "law_set_ids": _parse_str_list(
+            getattr(args, "law_set_ids", None),
+            [LAW_SET_ROOT_ONLY, LAW_SET_ON_RANGE_IDEMPOTENCE_ONLY, LAW_SET_ALL],
         ),
         "full_doc_anchor_train_docs": _parse_int_list(args.full_doc_anchor_train_docs, preset["full_doc_anchor_train_docs"]),
         "full_doc_anchor_seeds": _parse_int_list(args.full_doc_anchor_seeds, preset["full_doc_anchor_seeds"]),
-        "full_doc_anchor_families": _parse_str_list(args.full_doc_anchor_families, CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES),
+        "full_doc_anchor_reference_method_runs": _parse_run_axis_list(
+            args.full_doc_anchor_reference_method_runs,
+            DEFAULT_REFERENCE_METHOD_RUNS,
+            role="reference",
+        ),
         "efficiency_anchor_mode": str(getattr(args, "efficiency_anchor_mode", preset["efficiency_anchor_mode"])),
         "efficiency_train_docs": _parse_int_list(
             getattr(args, "efficiency_train_docs", None),
@@ -4007,10 +4471,15 @@ def _resolved_tradeoff_selection(args: argparse.Namespace) -> Dict[str, Any]:
             else preset["oracle_budget_train_docs"]
         ),
         "oracle_budget_seeds": _parse_int_list(args.oracle_budget_seeds, preset["oracle_budget_seeds"]),
-        "oracle_budget_tree_families": _parse_str_list(args.oracle_budget_tree_families, preset["oracle_budget_tree_families"]),
-        "oracle_budget_reference_families": _parse_str_list(
-            args.oracle_budget_reference_families,
-            preset["oracle_budget_reference_families"],
+        "oracle_budget_method_runs": _parse_run_axis_list(
+            args.oracle_budget_method_runs,
+            preset["oracle_budget_method_runs"],
+            role="primary",
+        ),
+        "oracle_budget_reference_method_runs": _parse_run_axis_list(
+            args.oracle_budget_reference_method_runs,
+            preset["oracle_budget_reference_method_runs"],
+            role="reference",
         ),
         "oracle_budget_calls_per_doc": _parse_float_list(
             args.oracle_budget_calls_per_doc,
@@ -4087,15 +4556,22 @@ def _resolved_tradeoff_selection(args: argparse.Namespace) -> Dict[str, Any]:
             getattr(args, "raw_diagnostic_artifact_dir", None)
         ),
         "supervision_recovery_packages": _resolved_supervision_recovery_package_order(args),
-        "supervision_recovery_tree_family": str(
+        "supervision_recovery_method_id": str(
             getattr(
                 args,
-                "supervision_recovery_tree_family",
-                preset["supervision_recovery_tree_family"],
+                "supervision_recovery_method_id",
+                preset["supervision_recovery_method_id"],
             )
         ),
         "supervision_recovery_scope_keys": list(
             _supervision_recovery_scope_keys(args)
+        ),
+        "supervision_recovery_hazard_panel_ids": _parse_str_list(
+            getattr(args, "supervision_recovery_hazard_panel_ids", None),
+            (),
+        ),
+        "supervision_recovery_hazard_panel_bundle_map": _parse_key_value_text_map(
+            getattr(args, "supervision_recovery_hazard_panel_bundle_map", None)
         ),
         "supervision_recovery_recoverable_benchmark": _supervision_recovery_recoverable_benchmark_name(args),
         "supervision_recovery_structural_grid": _supervision_recovery_structural_grid_name(args),
@@ -4236,9 +4712,9 @@ def build_run_plan(
     if "law_packages" in phases:
         _record(
             "law_packages",
-            len(resolved["law_package_names"]),
+            len(resolved["law_set_ids"]),
             {
-                "packages": resolved["law_package_names"],
+                "law_set_ids": resolved["law_set_ids"],
                 "doc_counts": resolved["law_phase_doc_counts"],
             },
             str(output_root / "law_packages" / "fno_tree_law_comparison.json"),
@@ -4248,11 +4724,11 @@ def build_run_plan(
             "full_doc_anchor",
             len(resolved["full_doc_anchor_train_docs"])
             * len(resolved["full_doc_anchor_seeds"])
-            * len(resolved["full_doc_anchor_families"]),
+            * len(resolved["full_doc_anchor_reference_method_runs"]),
             {
                 "train_docs": resolved["full_doc_anchor_train_docs"],
                 "seeds": resolved["full_doc_anchor_seeds"],
-                "families": resolved["full_doc_anchor_families"],
+                "reference_method_runs": resolved["full_doc_anchor_reference_method_runs"],
             },
             str(output_root / "full_doc_anchor" / "full_doc_fno_upper_bound_summary.json"),
         )
@@ -4265,9 +4741,9 @@ def build_run_plan(
             local_split_modes = list(resolved["oracle_budget_local_split_modes"])
             if abs(float(full_doc_share) - 1.0) <= 1e-12:
                 local_split_modes = ["balanced"]
-                budget_jobs += len(resolved["oracle_budget_reference_families"])
+                budget_jobs += len(resolved["oracle_budget_reference_method_runs"])
             budget_jobs += (
-                len(resolved["oracle_budget_tree_families"])
+                len(resolved["oracle_budget_method_runs"])
                 * len(doc_modes)
                 * len(local_split_modes)
             )
@@ -4277,8 +4753,8 @@ def build_run_plan(
             {
                 "train_docs": int(resolved["oracle_budget_train_docs"]),
                 "seeds": resolved["oracle_budget_seeds"],
-                "tree_families": resolved["oracle_budget_tree_families"],
-                "reference_families": resolved["oracle_budget_reference_families"],
+                "method_runs": resolved["oracle_budget_method_runs"],
+                "reference_method_runs": resolved["oracle_budget_reference_method_runs"],
                 "budget_calls_per_doc": resolved["oracle_budget_calls_per_doc"],
                 "full_doc_budget_shares": resolved["oracle_budget_full_doc_shares"],
                 "doc_consumption_modes": resolved["oracle_budget_doc_consumption_modes"],
@@ -4418,7 +4894,23 @@ def build_run_plan(
             )
             for package_name in resolved_package_order
         )
-        scope_count = 2
+        plan_scope_specs = _supervision_recovery_scope_specs(
+            recoverable_benchmark=str(
+                resolved["supervision_recovery_recoverable_benchmark"]
+            ),
+            structural_grid=str(resolved["supervision_recovery_structural_grid"]),
+            structural_cell=str(resolved["supervision_recovery_structural_cell"]),
+            requested_scope_keys=list(
+                resolved.get("supervision_recovery_scope_keys") or []
+            ),
+            hazard_panel_ids=list(
+                resolved.get("supervision_recovery_hazard_panel_ids") or []
+            ),
+            hazard_panel_bundle_map=dict(
+                resolved.get("supervision_recovery_hazard_panel_bundle_map") or {}
+            ),
+        )
+        scope_count = len(plan_scope_specs)
         supervision_min_tokens = int(
             resolved.get(
                 "supervision_min_tokens",
@@ -4475,7 +4967,7 @@ def build_run_plan(
             {
                 "train_docs": resolved["supervision_recovery_train_docs"],
                 "seeds": resolved["supervision_recovery_seeds"],
-                "tree_family": resolved["supervision_recovery_tree_family"],
+                "method_id": resolved["supervision_recovery_method_id"],
                 "recoverable_benchmark": resolved["supervision_recovery_recoverable_benchmark"],
                 "structural_grid": resolved["supervision_recovery_structural_grid"],
                 "structural_cell": resolved["supervision_recovery_structural_cell"],
@@ -4503,9 +4995,14 @@ def build_run_plan(
                     and int(leaf_tokens) >= int(assumed_doc_tokens)
                 ],
                 "benchmarks": [
-                    str(resolved["supervision_recovery_recoverable_benchmark"]),
-                    f"{resolved['supervision_recovery_structural_grid']}::{resolved['supervision_recovery_structural_cell']}",
+                    str(spec.get("scope_key", "")) for spec in plan_scope_specs
                 ],
+                "hazard_panel_ids": list(
+                    resolved.get("supervision_recovery_hazard_panel_ids") or []
+                ),
+                "hazard_panel_bundle_map": dict(
+                    resolved.get("supervision_recovery_hazard_panel_bundle_map") or {}
+                ),
             },
             str(output_root / "supervision_recovery" / "summary.json"),
         )
@@ -4640,20 +5137,70 @@ def _supervision_recovery_scope_keys(
     return tuple(normalized)
 
 
+def _default_hazard_panel_bundle_path(panel_id: str) -> str:
+    return str(
+        REPO_ROOT
+        / "outputs"
+        / "_bundles"
+        / "markov_hazard_panels"
+        / str(panel_id)
+        / "seed_0"
+        / "base_bundle.json"
+    )
+
+
+def _hazard_panel_scope_spec(
+    panel_id: str,
+    *,
+    bundle_path: str,
+) -> dict[str, Any]:
+    panel = resolve_markov_hazard_panel(panel_id)
+    max_doc_tokens = int(max(condition.doc_tokens for condition in panel.conditions))
+    template_benchmark = (
+        "recoverable_v5_t2048"
+        if max_doc_tokens >= 2048
+        else "recoverable_v5_t128"
+    )
+    ops_overrides = dict(panel_to_ops_overrides(panel))
+    supported_ops_keys = _ops_count_supported_config_keys()
+    ops_overrides = {
+        str(key): value
+        for key, value in ops_overrides.items()
+        if str(key) in supported_ops_keys
+    }
+    return {
+        "scope_key": str(panel.panel_id),
+        "scope_label": str(panel.display_name),
+        "scope_kind": "hazard_panel",
+        "benchmark_name": str(template_benchmark),
+        "hardness_grid": "",
+        "grid_cell_ids": [],
+        "base_bundle_path": str(bundle_path or _default_hazard_panel_bundle_path(panel.panel_id)),
+        "ops_config_overrides": ops_overrides,
+        "hazard_panel_id": str(panel.panel_id),
+    }
+
+
 def _supervision_recovery_scope_specs(
     *,
     recoverable_benchmark: str,
     structural_grid: str,
     structural_cell: str,
     requested_scope_keys: Sequence[str] = (),
+    hazard_panel_ids: Sequence[str] = (),
+    hazard_panel_bundle_map: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     scope_specs = [
         {
             "scope_key": str(recoverable_benchmark),
             "scope_label": str(recoverable_benchmark),
+            "scope_kind": "recoverable",
             "benchmark_name": str(recoverable_benchmark),
             "hardness_grid": "",
             "grid_cell_ids": [],
+            "base_bundle_path": "",
+            "ops_config_overrides": {},
+            "hazard_panel_id": "",
         },
         {
             "scope_key": str(structural_cell),
@@ -4662,14 +5209,30 @@ def _supervision_recovery_scope_specs(
                 recoverable_scope_key=str(recoverable_benchmark),
                 structural_grid=str(structural_grid),
             ),
+            "scope_kind": "structural",
             "benchmark_name": _structural_supervision_recovery_benchmark_name(
                 str(structural_cell),
                 structural_grid=str(structural_grid),
             ),
             "hardness_grid": str(structural_grid),
             "grid_cell_ids": [str(structural_cell)],
+            "base_bundle_path": "",
+            "ops_config_overrides": {},
+            "hazard_panel_id": "",
         },
     ]
+    bundle_map = {str(key): str(value) for key, value in dict(hazard_panel_bundle_map or {}).items()}
+    for panel_id in _parse_str_list(" ".join(str(value) for value in hazard_panel_ids), ()):
+        panel = resolve_markov_hazard_panel(panel_id)
+        scope_specs.append(
+            _hazard_panel_scope_spec(
+                str(panel.panel_id),
+                bundle_path=bundle_map.get(
+                    str(panel.panel_id),
+                    bundle_map.get(str(panel_id), _default_hazard_panel_bundle_path(panel.panel_id)),
+                ),
+            )
+        )
     requested = {
         str(value or "").strip()
         for value in requested_scope_keys
@@ -5118,7 +5681,9 @@ def _validate_supervision_recovery_tree_setup(args: argparse.Namespace) -> None:
                 train_docs=train_docs,
                 val_docs=min(int(args.val_docs), max(2, int(train_docs) // 8)),
                 test_docs=min(int(args.test_docs), max(2, int(train_docs) // 8)),
-                batch_size=int(args.supervision_batch_size),
+                batch_size=_resolve_supervision_batch_size_for_leaf_tokens(
+                    args, int(fixed_leaf_tokens)
+                ),
                 n_epochs=int(args.supervision_epochs),
                 fixed_leaf_tokens=int(fixed_leaf_tokens),
             )
@@ -5497,6 +6062,22 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def _public_payload_for_contract(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    def _clean(value: Any, path: tuple[str, ...]) -> Any:
+        if isinstance(value, Mapping):
+            if path and path[-1] == "config" and any("tree_reference" in part for part in path[:-1]):
+                encoded = json.dumps(dict(value), sort_keys=True, default=str).encode("utf-8")
+                return {"backend_config_digest": hashlib.sha256(encoded).hexdigest()}
+            return {str(key): _clean(item, (*path, str(key))) for key, item in value.items()}
+        if isinstance(value, list):
+            return [_clean(item, (*path, str(index))) for index, item in enumerate(value)]
+        if isinstance(value, tuple):
+            return [_clean(item, (*path, str(index))) for index, item in enumerate(value)]
+        return value
+
+    return dict(_clean(payload, ()))
+
+
 def _tradeoff_experiment_spec(
     *,
     args: argparse.Namespace,
@@ -5540,7 +6121,7 @@ def _tradeoff_experiment_spec(
         method_ref_from_markov_full_doc_run(
             family=str(
                 resolved.get(
-                    "supervision_recovery_tree_family",
+                    "supervision_recovery_method_id",
                     SUPERVISION_RECOVERY_TREE_FAMILY,
                 )
                 or SUPERVISION_RECOVERY_TREE_FAMILY
@@ -5906,6 +6487,9 @@ def _base_ops_config(args: argparse.Namespace, *, seed: int, data_seed: int, tra
         ("train", "val", "test"),
     )
     config = {
+        "problem_id": "markov_ops_count",
+        "method_id": "tree_neural",
+        "law_set_id": LAW_SET_ALL,
         "model_family": "fno",
         "n_regimes": int(args.n_regimes) if hasattr(args, "n_regimes") else 4,
         "vocab_size": 32,
@@ -7266,6 +7850,38 @@ def _supervision_recovery_runtime_row_from_payload(
             )
             or ""
         ),
+        "tree_model_version": str(
+            run.get(
+                "tree_model_version",
+                run_config.get(
+                    "tree_model_version",
+                    task_config.get("tree_model_version", ""),
+                ),
+            )
+            or ""
+        ),
+        "tree_runtime_merge_kind": str(
+            run.get(
+                "tree_runtime_merge_kind",
+                run_config.get(
+                    "tree_runtime_merge_kind",
+                    task_config.get("tree_runtime_merge_kind", ""),
+                ),
+            )
+            or ""
+        ),
+        "tree_exact_projected_merge_is_runtime_merge": bool(
+            run.get(
+                "tree_exact_projected_merge_is_runtime_merge",
+                run_config.get(
+                    "tree_exact_projected_merge_is_runtime_merge",
+                    task_config.get(
+                        "tree_exact_projected_merge_is_runtime_merge",
+                        False,
+                    ),
+                ),
+            )
+        ),
         "summary_spec_name": str(
             run.get(
                 "summary_spec_name",
@@ -7403,6 +8019,17 @@ def _supervision_recovery_runtime_row_from_payload(
             run.get("c2_pair_weight_max"),
             float("nan"),
         ),
+        **{
+            metric_name: _safe_float(run.get(metric_name), float("nan"))
+            for metric_name in SUPERVISION_RECOVERY_THEOREM_STATE_DIAGNOSTICS
+        },
+        **{
+            f"{metric_name}_mean": _safe_float(
+                run.get(f"{metric_name}_mean", run.get(metric_name)),
+                float("nan"),
+            )
+            for metric_name in SUPERVISION_RECOVERY_THEOREM_STATE_DIAGNOSTICS
+        },
         "steady_state_h2d_bytes": _safe_float(
             runtime.get("steady_state_h2d_bytes"),
             0.0,
@@ -8535,6 +9162,22 @@ def _aggregate_supervision_recovery_from_payloads(
     observed_seeds: set[int] = set()
     scope_package_accounting: Dict[str, Dict[tuple[str, str], Dict[str, Any]]] = defaultdict(dict)
 
+    def _diagnostic_metric_value(row: Mapping[str, Any], metric_name: str) -> float:
+        keys = [
+            f"{metric_name}_mean",
+            metric_name,
+            f"test_{metric_name}",
+            *SUPERVISION_RECOVERY_THEOREM_STATE_DIAGNOSTIC_ALIASES.get(
+                str(metric_name),
+                (),
+            ),
+        ]
+        for key in keys:
+            value = _safe_float(row.get(key), float("nan"))
+            if math.isfinite(value):
+                return float(value)
+        return float("nan")
+
     for payload in payloads:
         config = dict(payload.get("config") or {})
         package_name = _gs(config, "pipeline_supervision_recovery_package")
@@ -8905,6 +9548,36 @@ def _aggregate_supervision_recovery_from_payloads(
                     "c2_pair_weighting_mode": str(
                         row.get("c2_pair_weighting_mode", "") or ""
                     ),
+                    "tree_model_version": str(
+                        row.get(
+                            "tree_model_version",
+                            config.get("tree_model_version", ""),
+                        )
+                        or ""
+                    ),
+                    "tree_runtime_merge_kind": str(
+                        row.get(
+                            "tree_runtime_merge_kind",
+                            config.get("tree_runtime_merge_kind", ""),
+                        )
+                        or ""
+                    ),
+                    "tree_exact_projected_merge_is_runtime_merge": bool(
+                        row.get(
+                            "tree_exact_projected_merge_is_runtime_merge",
+                            config.get(
+                                "tree_exact_projected_merge_is_runtime_merge",
+                                False,
+                            ),
+                        )
+                    ),
+                    **{
+                        f"{metric_name}_mean": _diagnostic_metric_value(
+                            row,
+                            metric_name,
+                        )
+                        for metric_name in SUPERVISION_RECOVERY_THEOREM_STATE_DIAGNOSTICS
+                    },
                 }
             )
         for run in list(payload.get("runs") or []):
@@ -9647,6 +10320,25 @@ def _aggregate_supervision_recovery_from_payloads(
                 detail_items,
                 "c2_pair_weighting_mode",
             ),
+            "tree_model_version": _representative_string(
+                detail_items,
+                "tree_model_version",
+            ),
+            "tree_runtime_merge_kind": _representative_string(
+                detail_items,
+                "tree_runtime_merge_kind",
+            ),
+            "tree_exact_projected_merge_is_runtime_merge_rate": _weighted_mean(
+                detail_items,
+                "tree_exact_projected_merge_is_runtime_merge",
+            ),
+            **{
+                f"{metric_name}_mean": _weighted_mean(
+                    detail_items,
+                    f"{metric_name}_mean",
+                )
+                for metric_name in SUPERVISION_RECOVERY_THEOREM_STATE_DIAGNOSTICS
+            },
             "local_sampling_design_name": _representative_string(
                 detail_items,
                 "local_sampling_design_name",
@@ -10962,6 +11654,13 @@ def _aggregate_supervision_recovery_from_payloads(
         "canonical_tree_selection_metric": canonical_tree_selection_metric,
         "canonical_tree_stage1_checkpoint_metric": canonical_tree_stage1_checkpoint_metric,
         "canonical_comparison_rule": canonical_comparison_rule,
+        "theorem_state_diagnostic_metric_names": list(
+            SUPERVISION_RECOVERY_THEOREM_STATE_DIAGNOSTICS
+        ),
+        "lean_alignment_contract": (
+            "root_mae is scalar task performance; Markov Lean alignment also "
+            "requires movement in learned state/merge diagnostics."
+        ),
         "scopes": scopes,
         "best_tree_summary": best_tree_summary,
         "family_rows": family_rows,
@@ -11203,15 +11902,19 @@ def _build_law_package_phase(args: argparse.Namespace, root: Path) -> tuple[List
     tasks = []
     train_docs, val_docs, test_docs = _law_phase_doc_counts(args)
     tree_reference = _resolve_tree_reference(args)
-    package_names = _resolve_law_package_names(
-        _parse_str_list(
-            getattr(args, "law_package_names", None),
-            list(LAW_PACKAGE_CONFIGS.keys()),
-        ),
-        valid_names=tuple(LAW_PACKAGE_CONFIGS.keys()),
-    )
-    for index, name in enumerate(package_names):
-        spec = dict(LAW_PACKAGE_CONFIGS[name])
+    law_set_ids = [
+        canonical_law_set_id(value)
+        for value in _parse_str_list(
+            getattr(args, "law_set_ids", None),
+            list(LAW_SET_CONFIGS.keys()),
+        )
+    ]
+    for index, law_set_id in enumerate(law_set_ids):
+        if law_set_id not in LAW_SET_CONFIGS:
+            raise ValueError(
+                f"unsupported law_set_id={law_set_id!r}; expected one of {sorted(LAW_SET_CONFIGS)}"
+            )
+        spec = dict(LAW_SET_CONFIGS[law_set_id])
         config = _base_ops_config(
             args,
             seed=int(args.seed) + index,
@@ -11223,10 +11926,11 @@ def _build_law_package_phase(args: argparse.Namespace, root: Path) -> tuple[List
             n_epochs=int(args.law_epochs),
         )
         config.update(spec)
+        config["law_set_id"] = law_set_id
         config["include_fno_baseline"] = True
-        config["pipeline_law_package_name"] = name
+        config["pipeline_law_set_id"] = law_set_id
         config = _apply_tree_reference_overrides(config, tree_reference)
-        tasks.append(_direct_task(root=phase_root / "raw", name=name, config=config))
+        tasks.append(_direct_task(root=phase_root / "raw", name=law_set_id, config=config))
     return tasks, phase_root
 
 
@@ -11236,9 +11940,12 @@ def _build_full_doc_anchor_phase(args: argparse.Namespace, root: Path) -> tuple[
         args.full_doc_anchor_train_docs, preset["full_doc_anchor_train_docs"]
     )
     seeds = _parse_int_list(args.full_doc_anchor_seeds, preset["full_doc_anchor_seeds"])
-    families = _parse_str_list(
-        args.full_doc_anchor_families, CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES
+    family_runs = _parse_run_axis_list(
+        args.full_doc_anchor_reference_method_runs,
+        DEFAULT_REFERENCE_METHOD_RUNS,
+        role="reference",
     )
+    families = _method_ids_from_run_axes(family_runs)
     template_benchmark = "recoverable_v4" if str(args.preset) == "standard" else "smoke"
     phase_root = _phase_execution_root(root, "full_doc_anchor")
     tasks: List[SubprocessTask] = []
@@ -11504,18 +12211,26 @@ def _oracle_budget_frontier_command(
         )
     )
     seeds = _parse_int_list(args.oracle_budget_seeds, preset["oracle_budget_seeds"])
-    tree_families = _parse_str_list(
-        " ".join(str(value) for value in tree_families_override)
+    tree_runs = (
+        [_run_axis_from_token(value, role="primary") for value in tree_families_override]
         if tree_families_override is not None
-        else args.oracle_budget_tree_families,
-        preset["oracle_budget_tree_families"],
+        else _parse_run_axis_list(
+            args.oracle_budget_method_runs,
+            preset["oracle_budget_method_runs"],
+            role="primary",
+        )
     )
-    reference_families = _parse_str_list(
-        " ".join(str(value) for value in reference_families_override)
+    reference_runs = (
+        [_run_axis_from_token(value, role="reference") for value in reference_families_override]
         if reference_families_override is not None
-        else args.oracle_budget_reference_families,
-        preset["oracle_budget_reference_families"],
+        else _parse_run_axis_list(
+            args.oracle_budget_reference_method_runs,
+            preset["oracle_budget_reference_method_runs"],
+            role="reference",
+        )
     )
+    tree_families = _legacy_families_from_run_axes(tree_runs)
+    reference_families = _method_ids_from_run_axes(reference_runs)
     budget_calls = _parse_float_list(
         args.oracle_budget_calls_per_doc,
         preset["oracle_budget_calls_per_doc"],
@@ -11610,7 +12325,7 @@ def _efficiency_budget_specs(
                     devices=devices,
                     benchmark_name="recoverable_v4",
                     train_docs_override=int(train_docs),
-                    tree_families_override=EFFICIENCY_TREE_BASELINE_FAMILIES,
+                    tree_families_override=EFFICIENCY_TREE_METHOD_RUNS,
                     reference_families_override=CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES,
                 ),
                 "log_path": recoverable_root / "oracle_budget_frontier.log",
@@ -11627,7 +12342,7 @@ def _efficiency_budget_specs(
                     devices=devices,
                     benchmark_name="recoverable_v4",
                     train_docs_override=int(train_docs),
-                    tree_families_override=EFFICIENCY_TREE_BASELINE_FAMILIES,
+                    tree_families_override=EFFICIENCY_TREE_METHOD_RUNS,
                     reference_families_override=CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES,
                     hardness_grid=str(
                         getattr(args, "efficiency_hardness_grid", preset["efficiency_hardness_grid"])
@@ -11880,15 +12595,14 @@ def _build_supervision_recovery_phase(
     tree_family = str(
         getattr(
             args,
-            "supervision_recovery_tree_family",
-            preset["supervision_recovery_tree_family"],
+            "supervision_recovery_method_id",
+            preset["supervision_recovery_method_id"],
         )
-        or preset["supervision_recovery_tree_family"]
+        or preset["supervision_recovery_method_id"]
     ).strip()
-    if tree_family not in {"tree_neural", "tree_neural_c2", "tree_neural_c2c3"}:
+    if tree_family not in {"tree_neural"}:
         raise ValueError(
-            "supervision_recovery_tree_family must be one of "
-            "{'tree_neural','tree_neural_c2','tree_neural_c2c3'}"
+            "supervision_recovery_method_id must be 'tree_neural'"
         )
     if not recoverable_benchmark:
         raise ValueError("supervision_recovery_recoverable_benchmark must be non-empty")
@@ -11955,6 +12669,13 @@ def _build_supervision_recovery_phase(
         structural_grid=str(structural_grid),
         structural_cell=str(structural_cell),
         requested_scope_keys=_supervision_recovery_scope_keys(args),
+        hazard_panel_ids=_parse_str_list(
+            getattr(args, "supervision_recovery_hazard_panel_ids", None),
+            (),
+        ),
+        hazard_panel_bundle_map=_parse_key_value_text_map(
+            getattr(args, "supervision_recovery_hazard_panel_bundle_map", None)
+        ),
     )
     tasks: List[SubprocessTask] = []
     emitted_fno_tasks: Dict[
@@ -11962,7 +12683,7 @@ def _build_supervision_recovery_phase(
         tuple[Dict[str, Any], Dict[str, Any]],
     ] = {}
     for scope in scope_specs:
-        scope_kind = (
+        scope_kind = str(scope.get("scope_kind", "") or "").strip() or (
             "recoverable"
             if not str(scope["hardness_grid"]).strip()
             else "structural"
@@ -11992,7 +12713,9 @@ def _build_supervision_recovery_phase(
                                 train_docs=int(train_docs),
                                 val_docs=min(int(args.val_docs), max(2, int(train_docs) // 8)),
                                 test_docs=min(int(args.test_docs), max(2, int(train_docs) // 8)),
-                                batch_size=int(args.supervision_batch_size),
+                                batch_size=_resolve_supervision_batch_size_for_leaf_tokens(
+                                    args, int(fixed_leaf_tokens)
+                                ),
                                 n_epochs=int(args.supervision_epochs),
                                 fixed_leaf_tokens=int(fixed_leaf_tokens),
                             )
@@ -12013,6 +12736,23 @@ def _build_supervision_recovery_phase(
                                     ),
                                 }
                             )
+                            scope_ops_overrides = {
+                                str(key): value
+                                for key, value in dict(
+                                    scope.get("ops_config_overrides") or {}
+                                ).items()
+                                if str(key) in _ops_count_supported_config_keys()
+                            }
+                            if scope_ops_overrides:
+                                base_config.update(scope_ops_overrides)
+                            if str(scope.get("base_bundle_path", "") or "").strip():
+                                base_config["pipeline_base_bundle_path"] = str(
+                                    scope.get("base_bundle_path", "")
+                                )
+                            if str(scope.get("hazard_panel_id", "") or "").strip():
+                                base_config["pipeline_hazard_panel_id"] = str(
+                                    scope.get("hazard_panel_id", "")
+                                )
                             if leafgrid_active:
                                 base_config["pipeline_supervision_recovery_leaf_tokens"] = int(
                                     fixed_leaf_tokens
@@ -12238,6 +12978,12 @@ def _build_supervision_recovery_phase(
                                         "benchmark_name": str(scope["benchmark_name"]),
                                         "hardness_grid": str(scope["hardness_grid"]),
                                         "grid_cell_ids": list(scope["grid_cell_ids"]),
+                                        "base_bundle_path": str(
+                                            scope.get("base_bundle_path", "") or ""
+                                        ),
+                                        "hazard_panel_id": str(
+                                            scope.get("hazard_panel_id", "") or ""
+                                        ),
                                         "train_doc_counts": [int(train_docs)],
                                         "baseline_families": list(
                                             CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES
@@ -12367,6 +13113,12 @@ def _build_supervision_recovery_phase(
                                     "benchmark_name": str(scope["benchmark_name"]),
                                     "hardness_grid": str(scope["hardness_grid"]),
                                     "grid_cell_ids": list(scope["grid_cell_ids"]),
+                                    "base_bundle_path": str(
+                                        scope.get("base_bundle_path", "") or ""
+                                    ),
+                                    "hazard_panel_id": str(
+                                        scope.get("hazard_panel_id", "") or ""
+                                    ),
                                     "train_doc_counts": [int(train_docs)],
                                     "baseline_families": [str(tree_family)],
                                     "seeds": [int(seed)],
@@ -12446,6 +13198,12 @@ def _build_supervision_recovery_phase(
                                         "benchmark_name": str(scope["benchmark_name"]),
                                         "hardness_grid": str(scope["hardness_grid"]),
                                         "grid_cell_ids": list(scope["grid_cell_ids"]),
+                                        "base_bundle_path": str(
+                                            scope.get("base_bundle_path", "") or ""
+                                        ),
+                                        "hazard_panel_id": str(
+                                            scope.get("hazard_panel_id", "") or ""
+                                        ),
                                         "train_doc_counts": [int(train_docs)],
                                         "baseline_families": [str(tree_family)],
                                         "seeds": [int(seed)],
@@ -12575,12 +13333,7 @@ def _full_doc_job_scheduler_item(
     torch_threads: int,
     use_cuda: bool,
 ) -> SchedulerItem:
-    from scripts.run_tree_neural_full_doc_mig import (  # type: ignore
-        _job_output_dir_name,
-        _worker_command_for_job,
-    )
-
-    job_output_dir = output_root / "jobs" / _job_output_dir_name(str(job.job_name))
+    job_output_dir = output_root / "jobs" / job_output_dir_name(str(job.job_name))
     return SchedulerItem(
         item_id=item_id,
         phase=str(phase),
@@ -12588,7 +13341,7 @@ def _full_doc_job_scheduler_item(
         expected_outputs=(str(job_output_dir / "summary.json"),),
         command=tuple(
             str(arg)
-            for arg in _worker_command_for_job(
+            for arg in worker_command_for_job(
                 job,
                 output_dir=job_output_dir,
                 torch_threads=int(torch_threads),
@@ -12626,19 +13379,26 @@ def _budget_frontier_namespace(
             else preset["oracle_budget_train_docs"]
         )
     )
-    namespace.tree_families = list(
-        tree_families_override
+    tree_runs = (
+        [_run_axis_from_token(value, role="primary") for value in tree_families_override]
         if tree_families_override is not None
-        else _parse_str_list(args.oracle_budget_tree_families, preset["oracle_budget_tree_families"])
-    )
-    namespace.reference_families = list(
-        reference_families_override
-        if reference_families_override is not None
-        else _parse_str_list(
-            args.oracle_budget_reference_families,
-            preset["oracle_budget_reference_families"],
+        else _parse_run_axis_list(
+            args.oracle_budget_method_runs,
+            preset["oracle_budget_method_runs"],
+            role="primary",
         )
     )
+    reference_runs = (
+        [_run_axis_from_token(value, role="reference") for value in reference_families_override]
+        if reference_families_override is not None
+        else _parse_run_axis_list(
+            args.oracle_budget_reference_method_runs,
+            preset["oracle_budget_reference_method_runs"],
+            role="reference",
+        )
+    )
+    namespace.tree_families = _legacy_families_from_run_axes(tree_runs)
+    namespace.reference_families = _method_ids_from_run_axes(reference_runs)
     namespace.budget_calls_per_doc = _parse_float_list(
         args.oracle_budget_calls_per_doc,
         preset["oracle_budget_calls_per_doc"],
@@ -12669,8 +13429,10 @@ def _budget_frontier_namespace(
     namespace.batch_size = int(getattr(args, "batch_size", 64))
     namespace.lr = float(getattr(args, "lr", 5e-4))
     namespace.weight_decay = float(getattr(args, "weight_decay", 0.0))
-    namespace.tree_local_law_weight = getattr(args, "tree_local_law_weight", 0.3)
-    namespace.tree_task_objective_weight = getattr(args, "tree_task_objective_weight", None)
+    namespace.local_law_weight = getattr(args, "local_law_weight", getattr(args, "tree_local_law_weight", 0.3))
+    namespace.root_share = getattr(args, "root_share", getattr(args, "tree_task_objective_weight", None))
+    namespace.tree_local_law_weight = namespace.local_law_weight
+    namespace.tree_task_objective_weight = namespace.root_share
     namespace.doc_sequence_train_fraction = float(
         getattr(args, "doc_sequence_train_fraction", 0.0)
     )
@@ -12720,13 +13482,27 @@ def _build_tradeoff_scheduler_graph(
     devices: Sequence[str],
 ) -> Dict[str, Any]:
     phases = _phase_set(args.phases)
+    tree_bundle_contract = _markov_tradeoff_tree_bundle_contract(
+        args,
+        phases=sorted(phases),
+    )
     manifest: Dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "output_root": str(output_root),
         "preset": str(args.preset),
         "phases": sorted(phases),
         "devices": list(devices),
+        "tree_bundle_contract": tree_bundle_contract,
     }
+    manifest["run_manifest"] = _markov_tradeoff_run_manifest(
+        args=args,
+        output_root=output_root,
+        phases=sorted(phases),
+        tree_bundle_contract=tree_bundle_contract,
+        status="running",
+        publication_ready=False,
+        metadata={"scheduler_mode": "global"},
+    )
     version_manifest = _load_report_version_manifest(output_root)
     _stage_report_sources(
         output_root=output_root,
@@ -13171,7 +13947,7 @@ def _build_tradeoff_scheduler_graph(
                     args,
                     phase_root=recoverable_root,
                     train_docs_override=int(train_docs),
-                    tree_families_override=EFFICIENCY_TREE_BASELINE_FAMILIES,
+                    tree_families_override=EFFICIENCY_TREE_METHOD_RUNS,
                     reference_families_override=CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES,
                 )
                 recoverable_bundle = build_budget_frontier_job_bundle(recoverable_args)
@@ -13213,7 +13989,7 @@ def _build_tradeoff_scheduler_graph(
                 args,
                 phase_root=structural_root,
                 train_docs_override=int(train_docs),
-                tree_families_override=EFFICIENCY_TREE_BASELINE_FAMILIES,
+                tree_families_override=EFFICIENCY_TREE_METHOD_RUNS,
                 reference_families_override=CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES,
                 hardness_grid=str(
                     getattr(
@@ -13453,8 +14229,8 @@ def _build_tradeoff_scheduler_graph(
                 tree_family=str(
                     getattr(
                         args,
-                        "supervision_recovery_tree_family",
-                        PRESET_DEFAULTS[str(args.preset)]["supervision_recovery_tree_family"],
+                        "supervision_recovery_method_id",
+                        PRESET_DEFAULTS[str(args.preset)]["supervision_recovery_method_id"],
                     )
                 ),
                 recoverable_benchmark=_supervision_recovery_recoverable_benchmark_name(
@@ -13481,11 +14257,11 @@ def _build_tradeoff_scheduler_graph(
                         PRESET_DEFAULTS[str(args.preset)]["supervision_recovery_train_docs"],
                     ),
                     "expected_package_order": _resolved_supervision_recovery_package_order(args),
-                    "expected_tree_family": str(
+                    "expected_method_id": str(
                         getattr(
                             args,
-                            "supervision_recovery_tree_family",
-                            PRESET_DEFAULTS[str(args.preset)]["supervision_recovery_tree_family"],
+                            "supervision_recovery_method_id",
+                            PRESET_DEFAULTS[str(args.preset)]["supervision_recovery_method_id"],
                         )
                     ),
                     "expected_recoverable_benchmark": _supervision_recovery_recoverable_benchmark_name(
@@ -13624,8 +14400,10 @@ def _run_tradeoff_scheduler(
         devices=devices,
     )
     manifest = graph["manifest"]
+    tree_bundle_contract = dict(manifest.get("tree_bundle_contract") or {})
     version_manifest = graph["report_version_manifest"]
     items = list(graph["items"])
+    phases = _phase_set(args.phases)
     experiment_spec = _tradeoff_experiment_spec(
         args=args,
         output_root=output_root,
@@ -13712,6 +14490,21 @@ def _run_tradeoff_scheduler(
         except Exception:
             pass
     pipeline_summary_path = output_root / "pipeline_summary.json"
+    scheduler_state = str(scheduler_summary.get("state", "completed") or "completed")
+    manifest["run_manifest"] = _markov_tradeoff_run_manifest(
+        args=args,
+        output_root=output_root,
+        phases=sorted(phases),
+        tree_bundle_contract=tree_bundle_contract,
+        sources={
+            **dict(version_manifest.get("selected_sources") or {}),
+            "alignment_audit_json": manifest.get("alignment_audit_json", ""),
+            "alignment_audit_markdown": manifest.get("alignment_audit_markdown", ""),
+        },
+        status="completed" if scheduler_state == "completed" else "partial",
+        publication_ready=scheduler_state == "completed",
+        metadata={"scheduler_mode": "global", "scheduler_state": scheduler_state},
+    )
     _write_json(pipeline_summary_path, manifest)
     merge_artifacts(output_root, _tradeoff_artifacts(output_root))
     canonical_rows = list(
@@ -13763,6 +14556,10 @@ def _run_tradeoff_scheduler(
 
 
 def _write_selection_template(path: Path) -> None:
+    assert_public_contract_clean(
+        PIPELINE_SELECTION_TEMPLATE,
+        surface="markov tradeoff config template",
+    )
     write_structured_config(path, PIPELINE_SELECTION_TEMPLATE)
 
 
@@ -13789,10 +14586,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     phases = _phase_set(args.phases)
     devices = _resolve_devices(args)
     run_plan = build_run_plan(args, devices=devices)
+    public_run_plan = _public_payload_for_contract(run_plan)
+    assert_public_contract_clean(public_run_plan, surface="markov tradeoff run plan")
     if args.write_run_plan is not None:
-        _write_json(Path(args.write_run_plan).expanduser(), run_plan)
+        _write_json(Path(args.write_run_plan).expanduser(), public_run_plan)
     if bool(args.plan_only):
-        print(json.dumps(run_plan, indent=2, sort_keys=True))
+        print(json.dumps(public_run_plan, indent=2, sort_keys=True))
         return 0
     if not devices:
         raise SystemExit("No devices resolved. Use --device-mode cpu or provide MIG UUIDs with --migs.")
@@ -13814,12 +14613,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
 
+    tree_bundle_contract = _markov_tradeoff_tree_bundle_contract(
+        args,
+        phases=sorted(phases),
+    )
     manifest: Dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "output_root": str(output_root),
         "preset": str(args.preset),
         "phases": sorted(phases),
         "devices": list(devices),
+        "tree_bundle_contract": tree_bundle_contract,
     }
     sources: Dict[str, str] = {}
 
@@ -14096,6 +14900,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     pipeline_summary_path = output_root / "pipeline_summary.json"
     manifest["sources"] = sources
+    manifest["run_manifest"] = _markov_tradeoff_run_manifest(
+        args=args,
+        output_root=output_root,
+        phases=sorted(phases),
+        tree_bundle_contract=tree_bundle_contract,
+        sources=sources,
+        status="completed",
+        publication_ready=True,
+        metadata={"scheduler_mode": "direct"},
+    )
     _write_json(pipeline_summary_path, manifest)
     print(json.dumps({"output_root": str(output_root), "pipeline_summary": str(pipeline_summary_path)}, indent=2))
     return 0

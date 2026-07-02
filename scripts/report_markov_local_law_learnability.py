@@ -451,7 +451,7 @@ def _set_lambda_ticks(ax: plt.Axes, llw_vals: Sequence[float]) -> None:
     ax.set_xticklabels([f"{tick:g}" for tick in ticks])
 
 
-def _apply_axis_style(ax: plt.Axes, *, ylabel: str, xlabel: str = "lambda_local", zero_line: bool = False) -> None:
+def _apply_axis_style(ax: plt.Axes, *, ylabel: str, xlabel: str = "local_law_weight", zero_line: bool = False) -> None:
     ax.set_facecolor(AX_FACE)
     ax.grid(True, color=GRID_COLOR, linewidth=0.8, alpha=0.7)
     ax.spines["top"].set_visible(False)
@@ -644,7 +644,7 @@ def _plot_heldout_metric_grid(
             _apply_axis_style(
                 ax,
                 ylabel=ylabel,
-                xlabel="lambda_local" if row_idx == len(audit_vals) - 1 else "",
+                xlabel="local_law_weight" if row_idx == len(audit_vals) - 1 else "",
             )
     _add_series_legends(
         fig,
@@ -746,7 +746,7 @@ def _plot_gain_grid(
             _apply_axis_style(
                 ax,
                 ylabel=ylabel,
-                xlabel="lambda_local" if row_idx == len(audit_vals) - 1 else "",
+                xlabel="local_law_weight" if row_idx == len(audit_vals) - 1 else "",
                 zero_line=True,
             )
     _add_series_legends(
@@ -868,7 +868,7 @@ def _plot_audit_summary(
         ("learned_root_mae_n", "Root MAE at objective optimum", "normalized error"),
         ("theorem_score", "Held-out theorem score at objective optimum", "normalized theorem error"),
         ("learned_spread_n", "Sensitivity at objective optimum", "normalized error"),
-        ("local_law_weight", "lambda_local at objective optimum", "weight"),
+        ("local_law_weight", "local_law_weight at objective optimum", "weight"),
     ]
     fig, axes = plt.subplots(1, len(metric_defs), figsize=(15.2, 4.6), squeeze=False)
     fig.subplots_adjust(top=0.76, bottom=0.16, left=0.06, right=0.98, wspace=0.26)
@@ -915,7 +915,7 @@ def _plot_audit_summary(
         scw_linestyle_map=scw_linestyle_map,
         scw_marker_map=scw_marker_map,
     )
-    title = "Sparse vs full audit at objective-optimal lambda_local"
+    title = "Sparse vs full audit at objective-optimal local_law_weight"
     fig.suptitle(
         title,
         fontsize=14,
@@ -958,7 +958,7 @@ def _plot_capacity_summary(
         ("learned_root_mae_n", "Root MAE at objective optimum", "normalized error"),
         ("theorem_score", "Held-out theorem score at objective optimum", "normalized theorem error"),
         ("learned_spread_n", "Sensitivity at objective optimum", "normalized error"),
-        ("local_law_weight", "lambda_local at objective optimum", "weight"),
+        ("local_law_weight", "local_law_weight at objective optimum", "weight"),
     ]
     fig, axes = plt.subplots(1, len(metric_defs), figsize=(15.4, 4.9), squeeze=False)
     fig.subplots_adjust(top=0.78, bottom=0.23, left=0.06, right=0.98, wspace=0.28)
@@ -1010,14 +1010,14 @@ def _plot_capacity_summary(
         ncol=max(1, min(4, len(handles))),
         frameon=False,
     )
-    title = "Capacity summary at objective-optimal lambda_local"
+    title = "Capacity summary at objective-optimal local_law_weight"
     if title_suffix:
         title = f"{title} | {title_suffix}"
     fig.suptitle(title, fontsize=14, y=0.96)
     fig.text(
         0.5,
         0.885,
-        "Each point selects the objective-optimal lambda_local separately within that fixed capacity.",
+        "Each point selects the objective-optimal local_law_weight separately within that fixed capacity.",
         ha="center",
         va="center",
         fontsize=9.5,
@@ -1100,7 +1100,7 @@ def _plot_optimization_appendix(
             _apply_axis_style(
                 ax,
                 ylabel=ylabel,
-                xlabel="lambda_local" if row_idx == len(audit_vals) - 1 else "",
+                xlabel="local_law_weight" if row_idx == len(audit_vals) - 1 else "",
                 zero_line=(metric == "generalization_gap_law_score_n"),
             )
     _add_series_legends(
@@ -1182,7 +1182,7 @@ def _write_image_page(pdf: PdfPages, *, image_path: Path, title: str) -> None:
 def _format_row_brief(row: dict) -> str:
     return (
         f"train_docs={row['train_docs']} | q_audit={_format_pct(row['audit_fraction'])} | "
-        f"lambda_local={_format_weight(row['local_law_weight'])} | "
+        f"local_law_weight={_format_weight(row['local_law_weight'])} | "
         f"lambda_sched={_format_weight(row['schedule_consistency_weight'])} | "
         f"state_dim={row['state_dim']} | hidden_dim={row['hidden_dim']} | epochs={row['n_epochs']} | "
         f"n={row['n_runs']} | objective={_row_selection_objective(row):.4f} | "
@@ -1211,7 +1211,7 @@ def _format_operating_point(label: str, row: Optional[dict]) -> str:
         return f"{label}: unavailable"
     return (
         f"{label}: train_docs={row['train_docs']} | q_audit={_format_pct(row['audit_fraction'])} | "
-        f"lambda_local={_format_weight(row['local_law_weight'])} | "
+        f"local_law_weight={_format_weight(row['local_law_weight'])} | "
         f"lambda_sched={_format_weight(row['schedule_consistency_weight'])} | "
         f"state_dim={row['state_dim']} | hidden_dim={row['hidden_dim']} | epochs={row['n_epochs']} | "
         f"objective={_row_selection_objective(row):.4f} | theorem={_row_theorem_score(row):.4f} | "
@@ -1471,8 +1471,8 @@ def main() -> int:
         # Then the learnability story
         if recommended_sparse is not None and sparse_baseline is not None:
             lines.append(
-                "**Learnability**: at the same budget, moving from lambda_local=0 to the objective-optimal setting "
-                f"(lambda_local={_format_weight(float(recommended_sparse['local_law_weight']))}) "
+                "**Learnability**: at the same budget, moving from local_law_weight=0 to the objective-optimal setting "
+                f"(local_law_weight={_format_weight(float(recommended_sparse['local_law_weight']))}) "
                 f"cuts held-out C1 from {float(sparse_baseline['learned_leaf_mae_n']):.4f} to {float(recommended_sparse['learned_leaf_mae_n']):.4f} "
                 f"and C3 from {float(sparse_baseline['learned_merge_mae_n']):.4f} to {float(recommended_sparse['learned_merge_mae_n']):.4f}."
             )
@@ -1511,13 +1511,13 @@ def main() -> int:
         ("learned_spread_n", "Held-out merge-order sensitivity", "normalized error"),
     ]
     gain_core_metric_defs = [
-        ("learned_root_mae_n", "Root MAE gain (primary)", "gain vs lambda_local=0"),
-        ("learned_leaf_mae_n", "C1 gain", "gain vs lambda_local=0"),
-        ("learned_merge_mae_n", "C3 gain", "gain vs lambda_local=0"),
-        ("learned_law_score_n", "Theorem-score gain", "gain vs lambda_local=0"),
+        ("learned_root_mae_n", "Root MAE gain (primary)", "gain vs local_law_weight=0"),
+        ("learned_leaf_mae_n", "C1 gain", "gain vs local_law_weight=0"),
+        ("learned_merge_mae_n", "C3 gain", "gain vs local_law_weight=0"),
+        ("learned_law_score_n", "Theorem-score gain", "gain vs local_law_weight=0"),
     ]
     gain_stability_metric_defs = [
-        ("learned_spread_n", "Sensitivity gain", "gain vs lambda_local=0"),
+        ("learned_spread_n", "Sensitivity gain", "gain vs local_law_weight=0"),
     ]
     for capacity in capacity_keys:
         cap_slug = _capacity_slug(capacity)
@@ -1526,55 +1526,55 @@ def main() -> int:
             [
                 (
                     output_dir / f"heldout_core_grid_{cap_slug}.png",
-                    f"Held-out root MAE, C1, C3, and theorem score vs lambda_local | {cap_label}",
+                    f"Held-out root MAE, C1, C3, and theorem score vs local_law_weight | {cap_label}",
                     lambda path, capacity=capacity: _plot_heldout_metric_grid(
                         rows,
                         output_path=path,
                         metric_defs=heldout_core_metric_defs,
-                        title_prefix="Held-out root MAE (primary), C1, C3, theorem score vs lambda_local",
+                        title_prefix="Held-out root MAE (primary), C1, C3, theorem score vs local_law_weight",
                         capacity=capacity,
                         show_feature_mode_in_title=show_feature_mode_in_title,
                     ),
                 ),
                 (
                     output_dir / f"heldout_stability_grid_{cap_slug}.png",
-                    f"Held-out merge-order sensitivity vs lambda_local | {cap_label}",
+                    f"Held-out merge-order sensitivity vs local_law_weight | {cap_label}",
                     lambda path, capacity=capacity: _plot_heldout_metric_grid(
                         rows,
                         output_path=path,
                         metric_defs=heldout_stability_metric_defs,
-                        title_prefix="Held-out merge-order sensitivity vs lambda_local",
+                        title_prefix="Held-out merge-order sensitivity vs local_law_weight",
                         capacity=capacity,
                         show_feature_mode_in_title=show_feature_mode_in_title,
                     ),
                 ),
                 (
                     output_dir / f"heldout_gain_core_{cap_slug}.png",
-                    f"Root MAE, C1, C3, theorem gains vs lambda_local=0 | {cap_label}",
+                    f"Root MAE, C1, C3, theorem gains vs local_law_weight=0 | {cap_label}",
                     lambda path, capacity=capacity: _plot_gain_grid(
                         rows,
                         output_path=path,
                         metric_defs=gain_core_metric_defs,
-                        title_prefix="Root MAE (primary), C1, C3, theorem gains vs lambda_local=0",
+                        title_prefix="Root MAE (primary), C1, C3, theorem gains vs local_law_weight=0",
                         capacity=capacity,
                         show_feature_mode_in_title=show_feature_mode_in_title,
                     ),
                 ),
                 (
                     output_dir / f"heldout_gain_stability_{cap_slug}.png",
-                    f"Sensitivity gain vs lambda_local=0 | {cap_label}",
+                    f"Sensitivity gain vs local_law_weight=0 | {cap_label}",
                     lambda path, capacity=capacity: _plot_gain_grid(
                         rows,
                         output_path=path,
                         metric_defs=gain_stability_metric_defs,
-                        title_prefix="Sensitivity gain vs lambda_local=0",
+                        title_prefix="Sensitivity gain vs local_law_weight=0",
                         capacity=capacity,
                         show_feature_mode_in_title=show_feature_mode_in_title,
                     ),
                 ),
                 (
                     output_dir / f"theorem_opt_audit_summary_{cap_slug}.png",
-                    f"Sparse vs full audit at objective-optimal lambda_local | {cap_label}",
+                    f"Sparse vs full audit at objective-optimal local_law_weight | {cap_label}",
                     lambda path, capacity=capacity: _plot_audit_summary(
                         aggregated_rows,
                         output_path=path,
@@ -1598,7 +1598,7 @@ def main() -> int:
         figure_specs.append(
             (
                 output_dir / "capacity_summary.png",
-                "Capacity summary at objective-optimal lambda_local",
+                "Capacity summary at objective-optimal local_law_weight",
                 lambda path: _plot_capacity_summary(
                     aggregated_rows,
                     output_path=path,
@@ -1729,7 +1729,7 @@ def main() -> int:
         "",
         f"- `train_docs`: `{_format_axis_values(axes['train_docs'])}`",
         f"- `q_audit`: `{_format_axis_values(axes['audit_fraction'], audit=True)}`",
-        f"- `lambda_local`: `{_format_axis_values(axes['local_law_weight'])}`",
+        f"- `local_law_weight`: `{_format_axis_values(axes['local_law_weight'])}`",
         f"- `lambda_sched`: `{_format_axis_values(axes['schedule_consistency_weight'])}`",
         f"- `state_dim`: `{_format_axis_values(axes['state_dim'])}`",
         f"- `hidden_dim`: `{_format_axis_values(axes['hidden_dim'])}`",
@@ -1750,9 +1750,9 @@ def main() -> int:
         "",
         f"- `{_format_operating_point('Best root MAE point (lowest downstream error)', best_by_root)}`",
         f"- `{_format_operating_point('High-budget sparse objective point', recommended_sparse)}`",
-        f"- `{_format_operating_point('Matched sparse lambda_local=0 baseline', sparse_baseline)}`",
+        f"- `{_format_operating_point('Matched sparse local_law_weight=0 baseline', sparse_baseline)}`",
         f"- `{_format_operating_point('High-budget full objective point', recommended_full)}`",
-        f"- `{_format_operating_point('Matched full lambda_local=0 baseline', full_baseline)}`",
+        f"- `{_format_operating_point('Matched full local_law_weight=0 baseline', full_baseline)}`",
         f"- `{_format_operating_point('Overall best objective point', best_by_objective)}`",
         f"- `{_format_operating_point('Overall best theorem point', best_by_theorem)}`",
         "",
@@ -1801,7 +1801,7 @@ def main() -> int:
         f"Aggregation: {agg} | normalized: {bool(args.normalize)}",
         f"train_docs: {_format_axis_values(axes['train_docs'])}",
         f"q_audit: {_format_axis_values(axes['audit_fraction'], audit=True)}",
-        f"lambda_local: {_format_axis_values(axes['local_law_weight'])}",
+        f"local_law_weight: {_format_axis_values(axes['local_law_weight'])}",
         f"lambda_sched: {_format_axis_values(axes['schedule_consistency_weight'])}",
         f"state_dim: {_format_axis_values(axes['state_dim'])}",
         f"hidden_dim: {_format_axis_values(axes['hidden_dim'])}",
@@ -1827,9 +1827,9 @@ def main() -> int:
         "",
         "Recommended operating points",
         _format_operating_point("High-budget sparse objective point", recommended_sparse),
-        _format_operating_point("Matched sparse lambda_local=0 baseline", sparse_baseline),
+        _format_operating_point("Matched sparse local_law_weight=0 baseline", sparse_baseline),
         _format_operating_point("High-budget full objective point", recommended_full),
-        _format_operating_point("Matched full lambda_local=0 baseline", full_baseline),
+        _format_operating_point("Matched full local_law_weight=0 baseline", full_baseline),
         _format_operating_point("Overall best objective point", best_by_objective),
         _format_operating_point("Overall best theorem point", best_by_theorem),
         _format_operating_point("Best root point", best_by_root),

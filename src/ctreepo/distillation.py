@@ -29,6 +29,11 @@ from src.training.config_sections import (
     ValidationConfig,
     config_to_dict,
 )
+from src.ctreepo.contracts import (
+    SOURCE_KIND_EXTERNAL_STATE,
+    SOURCE_KIND_RAW_INPUT,
+    normalize_tree_bundle_manifest,
+)
 from src.tree.embedding_tree import EmbeddingTreeNode
 from src.tree.labeled import LabeledNode, LabeledTree
 
@@ -46,6 +51,20 @@ STUDENT_MODEL_LM_SCALAR_REGRESSION = "lm_scalar_regression"
 
 SUPERVISION_SOURCE_LABELED_TREE_ARTIFACT = "labeled_tree_artifact"
 SUPERVISION_SOURCE_EMPIRICAL_ROOT_LABELS = "empirical_root_labels"
+
+FULL_DOC_ANCHOR_OFF = "off"
+FULL_DOC_ANCHOR_STORED_SUMMARY = "stored_summary"
+FULL_DOC_ANCHOR_RAW_DOCUMENT = "raw_document"
+FULL_DOC_ANCHOR_BOTH = "both"
+FULL_DOC_ANCHOR_TARGET_EXPERT = "expert"
+FULL_DOC_ANCHOR_TARGET_TEACHER = "teacher"
+NODE_WEIGHT_NORMALIZATION_PER_TREE = "per_tree"
+NODE_WEIGHT_NORMALIZATION_NONE = "none"
+DEFAULT_LOCAL_LAW_WEIGHT_WITH_ANCHORS = 0.25
+ROOT_LABEL_SOURCE_STORED_SUMMARY = FULL_DOC_ANCHOR_STORED_SUMMARY
+ROOT_LABEL_SOURCE_RAW_DOCUMENT = FULL_DOC_ANCHOR_RAW_DOCUMENT
+ROOT_LABEL_TARGET_EXPERT = FULL_DOC_ANCHOR_TARGET_EXPERT
+ROOT_LABEL_TARGET_TEACHER = FULL_DOC_ANCHOR_TARGET_TEACHER
 
 PAPER_TO_LEAN_LOCAL_LAW_MAPPING = {
     "C1": "Lean L1 leaf preservation",
@@ -75,6 +94,161 @@ def _normalize_score(
     if span <= 0.0:
         return 0.5
     return _clamp01((float(value) - float(target_min)) / span)
+
+
+def _normalise_anchor_mode(value: str) -> str:
+    mode = str(value or FULL_DOC_ANCHOR_OFF).strip().lower().replace("-", "_")
+    aliases = {
+        "none": FULL_DOC_ANCHOR_OFF,
+        "summary": FULL_DOC_ANCHOR_STORED_SUMMARY,
+        "stored": FULL_DOC_ANCHOR_STORED_SUMMARY,
+        "raw": FULL_DOC_ANCHOR_RAW_DOCUMENT,
+    }
+    mode = aliases.get(mode, mode)
+    allowed = {
+        FULL_DOC_ANCHOR_OFF,
+        FULL_DOC_ANCHOR_STORED_SUMMARY,
+        FULL_DOC_ANCHOR_RAW_DOCUMENT,
+        FULL_DOC_ANCHOR_BOTH,
+    }
+    if mode not in allowed:
+        raise ValueError(f"unknown full-doc anchor mode: {value!r}")
+    return mode
+
+
+def _normalise_root_label_sources(value: Optional[Sequence[str] | str]) -> Tuple[str, ...]:
+    if value is None:
+        return tuple()
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return tuple()
+        lowered = raw.lower().replace("-", "_")
+        if lowered in {FULL_DOC_ANCHOR_OFF, "none"}:
+            return tuple()
+        if lowered == FULL_DOC_ANCHOR_BOTH:
+            return (ROOT_LABEL_SOURCE_STORED_SUMMARY, ROOT_LABEL_SOURCE_RAW_DOCUMENT)
+        values: Sequence[str] = tuple(part.strip() for part in raw.split(",") if part.strip())
+    else:
+        values = tuple(str(part).strip() for part in value if str(part).strip())
+    out: List[str] = []
+    for item in values:
+        source = str(item).strip().lower().replace("-", "_")
+        aliases = {
+            "summary": ROOT_LABEL_SOURCE_STORED_SUMMARY,
+            "stored": ROOT_LABEL_SOURCE_STORED_SUMMARY,
+            "raw": ROOT_LABEL_SOURCE_RAW_DOCUMENT,
+        }
+        source = aliases.get(source, source)
+        if source not in {ROOT_LABEL_SOURCE_STORED_SUMMARY, ROOT_LABEL_SOURCE_RAW_DOCUMENT}:
+            raise ValueError(
+                f"unknown root label source {item!r}; expected stored_summary or raw_document"
+            )
+        if source not in out:
+            out.append(source)
+    return tuple(out)
+
+
+def _anchor_mode_from_root_label_sources(value: Optional[Sequence[str] | str]) -> str:
+    sources = _normalise_root_label_sources(value)
+    if not sources:
+        return FULL_DOC_ANCHOR_OFF
+    if set(sources) == {ROOT_LABEL_SOURCE_STORED_SUMMARY, ROOT_LABEL_SOURCE_RAW_DOCUMENT}:
+        return FULL_DOC_ANCHOR_BOTH
+    return sources[0]
+
+
+def _normalise_anchor_target(value: str) -> str:
+    target = str(value or FULL_DOC_ANCHOR_TARGET_EXPERT).strip().lower().replace("-", "_")
+    allowed = {FULL_DOC_ANCHOR_TARGET_EXPERT, FULL_DOC_ANCHOR_TARGET_TEACHER}
+    if target not in allowed:
+        raise ValueError(f"unknown full-doc anchor target: {value!r}")
+    return target
+
+
+def _normalise_root_label_target(value: str) -> str:
+    return _normalise_anchor_target(value)
+
+
+def _reject_legacy_anchor_kwargs(kwargs: Mapping[str, Any]) -> None:
+    legacy = sorted(str(key) for key in kwargs if str(key).startswith("full_doc_anchor_"))
+    if legacy:
+        raise TypeError(
+            "legacy full_doc_anchor_* public parameters are not supported: "
+            + ", ".join(legacy)
+            + ". Use root_label_sources and root_label_target."
+        )
+
+
+def _normalise_node_weight_normalization(value: str) -> str:
+    mode = str(value or NODE_WEIGHT_NORMALIZATION_PER_TREE).strip().lower().replace("-", "_")
+    aliases = {"tree": NODE_WEIGHT_NORMALIZATION_PER_TREE}
+    mode = aliases.get(mode, mode)
+    allowed = {NODE_WEIGHT_NORMALIZATION_PER_TREE, NODE_WEIGHT_NORMALIZATION_NONE}
+    if mode not in allowed:
+        raise ValueError(f"unknown node weight normalization: {value!r}")
+    return mode
+
+
+def _validate_local_law_weight(value: float) -> float:
+    raw = float(value)
+    if not math.isfinite(raw) or raw < 0.0 or raw > 1.0:
+        raise ValueError(f"local_law_weight must be in [0, 1], got {value!r}")
+    return float(raw)
+
+
+def _objective_masses(
+    *,
+    full_doc_anchor_mode: str,
+    local_law_weight: Optional[float] = None,
+) -> Tuple[float, float]:
+    anchor_mode = _normalise_anchor_mode(full_doc_anchor_mode)
+    if anchor_mode == FULL_DOC_ANCHOR_OFF:
+        if local_law_weight is not None:
+            local_mass = _validate_local_law_weight(float(local_law_weight))
+            if not math.isclose(local_mass, 1.0):
+                raise ValueError("full_doc_anchor_mode=off requires local_law_weight=1.0")
+        # Preserve legacy node-only training when anchors are not enabled.
+        return 0.0, 1.0
+    local_mass = _validate_local_law_weight(
+        DEFAULT_LOCAL_LAW_WEIGHT_WITH_ANCHORS
+        if local_law_weight is None
+        else float(local_law_weight)
+    )
+    return float(1.0 - local_mass), float(local_mass)
+
+
+def _node_record_weight(
+    *,
+    n_teacher_records_for_tree: int,
+    full_doc_anchor_mode: str,
+    local_law_weight: Optional[float] = None,
+    node_weight_normalization: str,
+) -> float:
+    _, teacher_mass = _objective_masses(
+        full_doc_anchor_mode=full_doc_anchor_mode,
+        local_law_weight=local_law_weight,
+    )
+    if teacher_mass <= 0.0:
+        return 0.0
+    if _normalise_anchor_mode(full_doc_anchor_mode) == FULL_DOC_ANCHOR_OFF:
+        return 1.0
+    norm = _normalise_node_weight_normalization(node_weight_normalization)
+    if norm == NODE_WEIGHT_NORMALIZATION_PER_TREE:
+        return float(teacher_mass) / float(max(1, int(n_teacher_records_for_tree)))
+    return float(teacher_mass)
+
+
+def _root_anchor_weight(
+    *,
+    full_doc_anchor_mode: str,
+    local_law_weight: Optional[float] = None,
+) -> float:
+    gold_mass, _ = _objective_masses(
+        full_doc_anchor_mode=full_doc_anchor_mode,
+        local_law_weight=local_law_weight,
+    )
+    return gold_mass
 
 
 def _uniform_windows(
@@ -986,10 +1160,190 @@ def _summary_target_for_node(
     return None
 
 
+def _root_labeled_node(tree: LabeledTree) -> Optional[LabeledNode]:
+    levels = list(tree.levels or [])
+    for level_ids in reversed(levels):
+        for node_id in level_ids:
+            node = tree.get_node(str(node_id))
+            if node is not None:
+                return node
+    if not tree.nodes:
+        return None
+    return max(tree.nodes.values(), key=lambda node: (int(node.level), str(node.node_id)))
+
+
+def _stored_summary_anchor_text(tree: LabeledTree) -> Optional[str]:
+    metadata = dict(tree.metadata or {})
+    for key in (
+        "stored_summary",
+        "source_summary",
+        "existing_summary",
+        "full_doc_summary",
+    ):
+        value = metadata.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    bundle = normalize_tree_bundle_manifest(metadata)
+    source_kind = str(bundle.get("source_kind") or "").strip().lower()
+    tree_bundle_kind = str(metadata.get("tree_bundle_kind") or "").strip().lower()
+    tree_text_source = str(metadata.get("tree_text_source") or "").strip().lower()
+    if (
+        source_kind == SOURCE_KIND_EXTERNAL_STATE
+        or tree_bundle_kind == "external_summary_token_tree"
+        or (tree_text_source and tree_text_source != "aligned_text")
+    ) and str(tree.document_text or "").strip():
+        return str(tree.document_text).strip()
+    root = _root_labeled_node(tree)
+    if root is not None:
+        root_summary = _summary_target_for_node(root, include_identity_targets=False)
+        if root_summary:
+            return root_summary
+    if str(tree.document_text or "").strip():
+        return str(tree.document_text).strip()
+    return None
+
+
+def _raw_document_anchor_text(tree: LabeledTree) -> Optional[str]:
+    metadata = dict(tree.metadata or {})
+    for key in (
+        "raw_document_text",
+        "aligned_text",
+        "full_document_text",
+        "manifesto_text",
+    ):
+        value = metadata.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    bundle = normalize_tree_bundle_manifest(metadata)
+    source_kind = str(bundle.get("source_kind") or "").strip().lower()
+    tree_bundle_kind = str(metadata.get("tree_bundle_kind") or "").strip().lower()
+    tree_text_source = str(metadata.get("tree_text_source") or "").strip().lower()
+    summary_representation = str(metadata.get("summary_representation") or "").strip().lower()
+    if (
+        source_kind == SOURCE_KIND_RAW_INPUT
+        or tree_bundle_kind == "raw_manifesto_token_tree"
+        or tree_text_source == "aligned_text"
+        or summary_representation == "raw_whole_document"
+    ):
+        if str(tree.document_text or "").strip():
+            return str(tree.document_text).strip()
+    return None
+
+
+def _full_doc_anchor_target(
+    tree: LabeledTree,
+    *,
+    target_source: str,
+    prefer_native_expert: bool = False,
+) -> Tuple[Optional[float], Optional[str]]:
+    metadata = dict(tree.metadata or {})
+    target = _normalise_anchor_target(target_source)
+    if target == FULL_DOC_ANCHOR_TARGET_EXPERT:
+        native_keys = (
+            "expert_score_native",
+            "expert_target_native",
+            "benoit_expert_mean_raw",
+            "expert_score_raw_benoit",
+            "expert_score_for_objective",
+            "benoit_expert_mean",
+        )
+        legacy_keys = ("expert_score_1_7", "expert_score_for_objective", "expert_score", "benoit_expert_mean")
+        keys = native_keys + legacy_keys if prefer_native_expert else legacy_keys + native_keys
+    else:
+        keys = (
+            "teacher_score_1_7_existing_root",
+            "teacher_score_1_7",
+            "llm_score_1_7",
+            "document_score",
+        )
+    for key in keys:
+        value = metadata.get(key)
+        if value is not None:
+            parsed = _safe_float(value, default=float("nan"))
+            if math.isfinite(parsed):
+                return float(parsed), key
+    if target == FULL_DOC_ANCHOR_TARGET_TEACHER:
+        root = _root_labeled_node(tree)
+        if root is not None and root.score is not None:
+            parsed = _safe_float(root.score, default=float("nan"))
+            if math.isfinite(parsed):
+                return float(parsed), "root_node.score"
+        parsed = _safe_float(getattr(tree, "document_score", None), default=float("nan"))
+        if math.isfinite(parsed):
+            return float(parsed), "tree.document_score"
+    return None, None
+
+
+def _score_bounds_for_target(
+    *,
+    anchor_target: str,
+    target_min: float,
+    target_max: float,
+    scorer_output_min: float,
+    scorer_output_max: float,
+) -> Tuple[float, float, str]:
+    if _normalise_anchor_target(anchor_target) == FULL_DOC_ANCHOR_TARGET_EXPERT:
+        return float(target_min), float(target_max), "expert_target"
+    return float(scorer_output_min), float(scorer_output_max), "scorer_output"
+
+
+def _full_doc_anchor_sources(
+    tree: LabeledTree,
+    *,
+    mode: str,
+) -> List[Tuple[str, str]]:
+    normalized = _normalise_anchor_mode(mode)
+    if normalized == FULL_DOC_ANCHOR_OFF:
+        return []
+    sources: List[Tuple[str, str]] = []
+    if normalized in {FULL_DOC_ANCHOR_STORED_SUMMARY, FULL_DOC_ANCHOR_BOTH}:
+        text = _stored_summary_anchor_text(tree)
+        if text:
+            sources.append((FULL_DOC_ANCHOR_STORED_SUMMARY, text))
+    if normalized in {FULL_DOC_ANCHOR_RAW_DOCUMENT, FULL_DOC_ANCHOR_BOTH}:
+        text = _raw_document_anchor_text(tree)
+        if text:
+            sources.append((FULL_DOC_ANCHOR_RAW_DOCUMENT, text))
+    return sources
+
+
+def _record_weight_metadata(
+    metadata: Dict[str, Any],
+    *,
+    weight: float,
+) -> Dict[str, Any]:
+    out = dict(metadata)
+    out["example_weight"] = float(weight)
+    return out
+
+
+def _objective_weight_metadata(
+    *,
+    root_share: float,
+    local_law_weight: float,
+) -> Dict[str, Any]:
+    return {
+        "root_share": float(root_share),
+        "local_law_weight": float(local_law_weight),
+        "local_law_component_weights": {
+            "teacher_node": float(local_law_weight),
+        },
+    }
+
+
 def build_g_sft_records(
     labeled_trees: Sequence[LabeledTree],
     *,
     include_identity_targets: bool = False,
+    target_min: float = -100.0,
+    target_max: float = 100.0,
+    scorer_output_min: Optional[float] = None,
+    scorer_output_max: Optional[float] = None,
+    root_label_sources: Optional[Sequence[str] | str] = None,
+    root_label_target: str = ROOT_LABEL_TARGET_EXPERT,
+    local_law_weight: Optional[float] = None,
+    node_weight_normalization: str = NODE_WEIGHT_NORMALIZATION_PER_TREE,
+    **legacy_anchor_kwargs: Any,
 ) -> List[Dict[str, Any]]:
     """Build TRL SFT records for the generative ``g`` target.
 
@@ -998,9 +1352,31 @@ def build_g_sft_records(
     artifact fields; it never calls a teacher.  Nodes without teacher text
     targets are skipped unless ``include_identity_targets`` is enabled.
     """
+    _reject_legacy_anchor_kwargs(legacy_anchor_kwargs)
     records: List[Dict[str, Any]] = []
+    anchor_mode = _anchor_mode_from_root_label_sources(root_label_sources)
+    anchor_target = _normalise_root_label_target(root_label_target)
+    node_weight_norm = _normalise_node_weight_normalization(node_weight_normalization)
+    scorer_min = float(target_min if scorer_output_min is None else scorer_output_min)
+    scorer_max = float(target_max if scorer_output_max is None else scorer_output_max)
+    anchor_weight = _root_anchor_weight(
+        full_doc_anchor_mode=anchor_mode,
+        local_law_weight=local_law_weight,
+    )
+    _, teacher_local_law_weight = _objective_masses(
+        full_doc_anchor_mode=anchor_mode,
+        local_law_weight=local_law_weight,
+    )
+    objective_weight_metadata = _objective_weight_metadata(
+        root_share=float(anchor_weight),
+        local_law_weight=float(teacher_local_law_weight),
+    )
+    prefer_native_expert = not (
+        math.isclose(float(target_min), 1.0) and math.isclose(float(target_max), 7.0)
+    )
     for tree in labeled_trees:
         split = str((tree.metadata or {}).get("split", "") or "")
+        tree_records: List[Dict[str, Any]] = []
         for node in tree.nodes.values():
             target = _summary_target_for_node(
                 node,
@@ -1016,7 +1392,17 @@ def build_g_sft_records(
                 "is_leaf": bool((node.metadata or {}).get("is_leaf", node.level == 0)),
                 "law_role": "leaf_g" if int(node.level) == 0 else "merge_g",
                 "target_score_raw": float(node.score),
-                "target_score_normalized": _normalize_score(float(node.score)),
+                "target_score_normalized": _normalize_score(
+                    float(node.score),
+                    target_min=scorer_min,
+                    target_max=scorer_max,
+                ),
+                "target_score_scale": "scorer_output",
+                "target_min": scorer_min,
+                "target_max": scorer_max,
+                "scorer_output_min": scorer_min,
+                "scorer_output_max": scorer_max,
+                "target_source": "teacher_node_score",
                 "label_source": str(
                     (node.metadata or {}).get("label_source")
                     or tree.label_source
@@ -1045,7 +1431,7 @@ def build_g_sft_records(
                     "C-TreePO parent summary.\n\nLEFT:\n"
                     f"{left_text}\n\nRIGHT:\n{right_text}"
                 )
-            records.append(
+            tree_records.append(
                 {
                     "prompt": prompt,
                     "completion": target,
@@ -1060,7 +1446,7 @@ def build_g_sft_records(
             target_summary = str(pair.get("target_resummary", "") or "").strip()
             if not source_summary or not target_summary:
                 continue
-            records.append(
+            tree_records.append(
                 {
                     "prompt": (
                         "Resummarize the following summary while preserving the "
@@ -1075,10 +1461,95 @@ def build_g_sft_records(
                         "level": None,
                         "is_leaf": False,
                         "law_role": "idempotence_proxy",
+                        "target_source": "teacher_idempotence_pair",
                         "label_source": str(
                             tree.label_source or (tree.metadata or {}).get("label_source", "")
                         ),
                     },
+                }
+            )
+        node_weight = _node_record_weight(
+            n_teacher_records_for_tree=len(tree_records),
+            full_doc_anchor_mode=anchor_mode,
+            local_law_weight=local_law_weight,
+            node_weight_normalization=node_weight_norm,
+        )
+        for row in tree_records:
+            row["weight"] = float(node_weight)
+            metadata = dict(row.get("metadata") or {})
+            metadata.update(objective_weight_metadata)
+            row["metadata"] = _record_weight_metadata(metadata, weight=float(node_weight))
+            if node_weight > 0.0:
+                records.append(row)
+
+        target_raw, target_key = _full_doc_anchor_target(
+            tree,
+            target_source=anchor_target,
+            prefer_native_expert=prefer_native_expert,
+        )
+        if target_raw is None:
+            continue
+        if anchor_weight <= 0.0:
+            continue
+        anchor_min, anchor_max, anchor_scale = _score_bounds_for_target(
+            anchor_target=anchor_target,
+            target_min=float(target_min),
+            target_max=float(target_max),
+            scorer_output_min=scorer_min,
+            scorer_output_max=scorer_max,
+        )
+        target_normalized = _normalize_score(
+            float(target_raw),
+            target_min=anchor_min,
+            target_max=anchor_max,
+        )
+        stored_summary = _stored_summary_anchor_text(tree)
+        anchor_sources: List[Tuple[str, str, str]] = []
+        for source_name, source_text in _full_doc_anchor_sources(tree, mode=anchor_mode):
+            if source_name == FULL_DOC_ANCHOR_RAW_DOCUMENT and not stored_summary:
+                continue
+            completion = stored_summary if source_name == FULL_DOC_ANCHOR_RAW_DOCUMENT else source_text
+            if not completion or not str(source_text).strip():
+                continue
+            anchor_sources.append((source_name, str(source_text), str(completion)))
+        if not anchor_sources:
+            continue
+        anchor_row_weight = float(anchor_weight)
+        for source_name, source_text, completion in anchor_sources:
+            anchor_node_id = f"full_doc_anchor_{source_name}"
+            metadata = {
+                "doc_id": tree.doc_id,
+                "node_id": anchor_node_id,
+                "split": split,
+                "level": None,
+                "is_leaf": False,
+                "law_role": "full_doc_g_anchor",
+                "anchor_text_source": source_name,
+                "target_score_raw": float(target_raw),
+                "target_score_normalized": float(target_normalized),
+                "target_score_scale": anchor_scale,
+                **objective_weight_metadata,
+                "target_min": float(anchor_min),
+                "target_max": float(anchor_max),
+                "scorer_output_min": scorer_min,
+                "scorer_output_max": scorer_max,
+                "target_source": f"{anchor_target}:{target_key}",
+                "observed_target": anchor_target == FULL_DOC_ANCHOR_TARGET_EXPERT,
+                "label_source": str(
+                    tree.label_source or (tree.metadata or {}).get("label_source", "")
+                ),
+                "example_weight": float(anchor_row_weight),
+            }
+            records.append(
+                {
+                    "prompt": (
+                        "Summarize the following full document input for score-preserving "
+                        "C-TreePO distillation.\n\nFULL_DOC_INPUT:\n"
+                        f"{source_text}"
+                    ),
+                    "completion": str(completion),
+                    "weight": float(anchor_row_weight),
+                    "metadata": metadata,
                 }
             )
     return records
@@ -1135,11 +1606,40 @@ def build_f_lm_regression_records(
     include_identity_targets: bool = False,
     target_min: float = -100.0,
     target_max: float = 100.0,
+    scorer_output_min: Optional[float] = None,
+    scorer_output_max: Optional[float] = None,
+    root_label_sources: Optional[Sequence[str] | str] = None,
+    root_label_target: str = ROOT_LABEL_TARGET_EXPERT,
+    local_law_weight: Optional[float] = None,
+    node_weight_normalization: str = NODE_WEIGHT_NORMALIZATION_PER_TREE,
+    **legacy_anchor_kwargs: Any,
 ) -> List[Dict[str, Any]]:
     """Build scalar-regression rows for a small LM ``f`` target."""
+    _reject_legacy_anchor_kwargs(legacy_anchor_kwargs)
     records: List[Dict[str, Any]] = []
+    anchor_mode = _anchor_mode_from_root_label_sources(root_label_sources)
+    anchor_target = _normalise_root_label_target(root_label_target)
+    node_weight_norm = _normalise_node_weight_normalization(node_weight_normalization)
+    scorer_min = float(target_min if scorer_output_min is None else scorer_output_min)
+    scorer_max = float(target_max if scorer_output_max is None else scorer_output_max)
+    anchor_weight = _root_anchor_weight(
+        full_doc_anchor_mode=anchor_mode,
+        local_law_weight=local_law_weight,
+    )
+    _, teacher_local_law_weight = _objective_masses(
+        full_doc_anchor_mode=anchor_mode,
+        local_law_weight=local_law_weight,
+    )
+    objective_weight_metadata = _objective_weight_metadata(
+        root_share=float(anchor_weight),
+        local_law_weight=float(teacher_local_law_weight),
+    )
+    prefer_native_expert = not (
+        math.isclose(float(target_min), 1.0) and math.isclose(float(target_max), 7.0)
+    )
     for tree in labeled_trees:
         split = str((tree.metadata or {}).get("split", "") or "")
+        tree_records: List[Dict[str, Any]] = []
         for node in tree.nodes.values():
             target_text = _summary_target_for_node(
                 node,
@@ -1150,10 +1650,10 @@ def build_f_lm_regression_records(
             law_role = "leaf_f" if int(node.level) == 0 else "merge_f"
             normalized = _normalize_score(
                 float(node.score),
-                target_min=float(target_min),
-                target_max=float(target_max),
+                target_min=scorer_min,
+                target_max=scorer_max,
             )
-            records.append(
+            tree_records.append(
                 {
                     "prompt": (
                         "Predict the normalized scalar RILE score in [0, 1] "
@@ -1169,6 +1669,12 @@ def build_f_lm_regression_records(
                         "law_role": law_role,
                         "target_score_raw": float(node.score),
                         "target_score_normalized": float(normalized),
+                        "target_score_scale": "scorer_output",
+                        "target_min": scorer_min,
+                        "target_max": scorer_max,
+                        "scorer_output_min": scorer_min,
+                        "scorer_output_max": scorer_max,
+                        "target_source": "teacher_node_score",
                         "paper_to_lean_local_law_mapping": dict(PAPER_TO_LEAN_LOCAL_LAW_MAPPING),
                         "label_source": str(
                             (node.metadata or {}).get("label_source")
@@ -1176,6 +1682,87 @@ def build_f_lm_regression_records(
                             or (tree.metadata or {}).get("label_source", "")
                         ),
                     },
+                }
+            )
+        node_weight = _node_record_weight(
+            n_teacher_records_for_tree=len(tree_records),
+            full_doc_anchor_mode=anchor_mode,
+            local_law_weight=local_law_weight,
+            node_weight_normalization=node_weight_norm,
+        )
+        for row in tree_records:
+            row["weight"] = float(node_weight)
+            metadata = dict(row.get("metadata") or {})
+            metadata.update(objective_weight_metadata)
+            row["metadata"] = _record_weight_metadata(metadata, weight=float(node_weight))
+            if node_weight > 0.0:
+                records.append(row)
+
+        target_raw, target_key = _full_doc_anchor_target(
+            tree,
+            target_source=anchor_target,
+            prefer_native_expert=prefer_native_expert,
+        )
+        if target_raw is None:
+            continue
+        if anchor_weight <= 0.0:
+            continue
+        anchor_min, anchor_max, anchor_scale = _score_bounds_for_target(
+            anchor_target=anchor_target,
+            target_min=float(target_min),
+            target_max=float(target_max),
+            scorer_output_min=scorer_min,
+            scorer_output_max=scorer_max,
+        )
+        target_normalized = _normalize_score(
+            float(target_raw),
+            target_min=anchor_min,
+            target_max=anchor_max,
+        )
+        anchor_sources = [
+            (source_name, str(source_text))
+            for source_name, source_text in _full_doc_anchor_sources(tree, mode=anchor_mode)
+            if str(source_text or "").strip()
+        ]
+        if not anchor_sources:
+            continue
+        anchor_row_weight = float(anchor_weight)
+        for source_name, source_text in anchor_sources:
+            if not str(source_text or "").strip():
+                continue
+            metadata = {
+                "doc_id": tree.doc_id,
+                "node_id": f"full_doc_anchor_{source_name}",
+                "split": split,
+                "level": None,
+                "law_role": "full_doc_f_anchor",
+                "anchor_text_source": source_name,
+                "target_score_raw": float(target_raw),
+                "target_score_normalized": float(target_normalized),
+                "target_score_scale": anchor_scale,
+                **objective_weight_metadata,
+                "target_min": float(anchor_min),
+                "target_max": float(anchor_max),
+                "scorer_output_min": scorer_min,
+                "scorer_output_max": scorer_max,
+                "target_source": f"{anchor_target}:{target_key}",
+                "observed_target": anchor_target == FULL_DOC_ANCHOR_TARGET_EXPERT,
+                "paper_to_lean_local_law_mapping": dict(PAPER_TO_LEAN_LOCAL_LAW_MAPPING),
+                "label_source": str(
+                    tree.label_source or (tree.metadata or {}).get("label_source", "")
+                ),
+                "example_weight": float(anchor_row_weight),
+            }
+            records.append(
+                {
+                    "prompt": (
+                        "Predict the normalized scalar RILE score in [0, 1] "
+                        "for this full-document anchor text."
+                    ),
+                    "response": str(source_text),
+                    "score": float(target_normalized),
+                    "weight": float(anchor_row_weight),
+                    "metadata": metadata,
                 }
             )
     return records

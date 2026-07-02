@@ -12,6 +12,7 @@ from scripts.run_markov_publication_bundle import (
     _publication_experiment_spec,
     _bundle_markdown,
     _parse_args,
+    _run_axis_from_token,
     _strip_detach_args,
     _validate_phase_dependencies,
     build_publication_run_plan,
@@ -36,6 +37,8 @@ def _args(**overrides: object) -> argparse.Namespace:
         "capacity_top_k": 3,
         "parity_seeds": "0,1,2,3,4",
         "parity_scale_train_doc_counts": "1024,2048,3072,4096,5120,8192,10240",
+        "parity_method_runs": "tree_neural:on_range_idempotence_only tree_neural:merge_and_on_range_idempotence tree_neural:all",
+        "parity_reference_method_runs": "official_fno official_fno_sumlen",
         "parity_upper_bound_aux_fractions": "0.25,1.0",
         "parity_run_aux_upper_bound": True,
         "parity_backfill_on_success": True,
@@ -155,8 +158,8 @@ def test_publication_bundle_selection_config_flattens_sections(tmp_path: Path, m
                 'capacity_root = "/tmp/capacity_root"',
                 "",
                 "[publication_bundle.parity]",
-                'tree_families = ["tree_neural"]',
-                'fno_families = ["official_fno"]',
+                'method_runs = ["tree_neural:all"]',
+                'reference_method_runs = ["official_fno"]',
                 "seeds = [0, 1]",
                 "",
             ]
@@ -181,9 +184,47 @@ def test_publication_bundle_selection_config_flattens_sections(tmp_path: Path, m
     assert args.tradeoff_prepared_data_allow_create is False
     assert args.tradeoff_tree_reference_mode == "capacity_locked"
     assert Path(args.tradeoff_tree_reference_capacity_root) == Path("/tmp/capacity_root")
+    assert args.parity_method_runs == "tree_neural:all"
+    assert args.parity_reference_method_runs == "official_fno"
     assert args.parity_tree_families == "tree_neural"
     assert args.parity_fno_families == "official_fno"
     assert args.parity_seeds == "0 1"
+
+
+def test_publication_bundle_selection_config_rejects_legacy_run_axis_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "legacy_bundle_selection.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[publication_bundle]",
+                'phases = ["parity"]',
+                "",
+                "[publication_bundle.parity]",
+                'tree_families = ["tree_neural"]',
+                'fno_families = ["official_fno"]',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_markov_publication_bundle.py",
+            "--selection-config",
+            str(config_path),
+        ],
+    )
+    with pytest.raises(ValueError, match="legacy public run-axis keys"):
+        _parse_args()
+
+
+def test_publication_method_run_tokens_reject_law_encoded_method_ids() -> None:
+    with pytest.raises(ValueError, match="encodes a law set"):
+        _run_axis_from_token("tree_neural_c2")
 
 
 def test_publication_run_plan_includes_nested_tradeoff_and_parity_selection(tmp_path: Path) -> None:
@@ -225,8 +266,8 @@ def test_publication_run_plan_includes_nested_tradeoff_and_parity_selection(tmp_
         parity_gate_train_doc_count=10240,
         parity_scale_train_doc_counts="1024 2048",
         parity_seeds="0 1",
-        parity_tree_families="tree_neural",
-        parity_fno_families="official_fno",
+        parity_method_runs="tree_neural:all",
+        parity_reference_method_runs="official_fno",
         parity_backfill_on_success=True,
         parity_run_aux_upper_bound=False,
         parity_upper_bound_aux_fractions="1.0",
@@ -245,8 +286,20 @@ def test_publication_run_plan_includes_nested_tradeoff_and_parity_selection(tmp_
     assert plan["resolved_selection"]["tradeoff"]["prepared_data_allow_create"] is False
     assert plan["resolved_selection"]["tradeoff"]["tree_reference"]["mode"] == "preset"
     assert plan["resolved_selection"]["tradeoff"]["tree_reference"]["preset"] == "common_factorized_sketch_v1"
-    assert plan["resolved_selection"]["parity"]["tree_families"] == ["tree_neural"]
-    assert plan["resolved_selection"]["parity"]["fno_families"] == ["official_fno"]
+    assert plan["resolved_selection"]["parity"]["method_runs"] == [
+        {
+            "schema_version": "ctreepo.run_axis.v1",
+            "problem_id": "markov_ops_count",
+            "method_id": "tree_neural",
+            "law_set_id": "all",
+            "root_share": None,
+            "local_law_weight": None,
+            "local_law_component_weights": {},
+            "role": "primary",
+            "display_metadata": {},
+        }
+    ]
+    assert plan["resolved_selection"]["parity"]["reference_method_runs"][0]["method_id"] == "official_fno"
     assert plan["tradeoff_run_plan"]["phase_task_counts"]["law_packages"]["worker_tasks"] >= 1
     assert "oracle_budget_frontier" not in plan["tradeoff_run_plan"]["phase_task_counts"]
     tradeoff_step = next(step for step in plan["step_commands"] if step["name"] == "tradeoff")
@@ -338,10 +391,40 @@ def test_checked_in_publication_config_builds_plan() -> None:
     )
     assert plan["resolved_selection"]["tradeoff"]["train_docs"] == 10240
     assert plan["resolved_selection"]["tradeoff"]["supervision_recovery_train_docs"] == [1024, 4096, 10240]
-    assert plan["resolved_selection"]["parity"]["tree_families"] == [
-        "tree_neural_c2",
-        "tree_neural_c2c3",
-        "tree_neural",
+    assert plan["resolved_selection"]["parity"]["method_runs"] == [
+        {
+            "schema_version": "ctreepo.run_axis.v1",
+            "problem_id": "markov_ops_count",
+            "method_id": "tree_neural",
+            "law_set_id": "on_range_idempotence_only",
+            "root_share": None,
+            "local_law_weight": None,
+            "local_law_component_weights": {},
+            "role": "primary",
+            "display_metadata": {},
+        },
+        {
+            "schema_version": "ctreepo.run_axis.v1",
+            "problem_id": "markov_ops_count",
+            "method_id": "tree_neural",
+            "law_set_id": "merge_and_on_range_idempotence",
+            "root_share": None,
+            "local_law_weight": None,
+            "local_law_component_weights": {},
+            "role": "primary",
+            "display_metadata": {},
+        },
+        {
+            "schema_version": "ctreepo.run_axis.v1",
+            "problem_id": "markov_ops_count",
+            "method_id": "tree_neural",
+            "law_set_id": "all",
+            "root_share": None,
+            "local_law_weight": None,
+            "local_law_component_weights": {},
+            "role": "primary",
+            "display_metadata": {},
+        },
     ]
     assert plan["resolved_selection"]["tradeoff"]["tree_reference"]["mode"] == "preset"
     assert plan["resolved_selection"]["tradeoff"]["tree_reference"]["preset"] == "common_factorized_sketch_v1"
@@ -416,7 +499,8 @@ def test_checked_in_v3_publication_bundle_config_builds_plan() -> None:
         "r100_superset_local_eq_20p0",
     ]
     assert plan["resolved_selection"]["parity"]["benchmark"] == "recoverable_v5_t128"
-    assert plan["resolved_selection"]["parity"]["tree_families"] == ["tree_neural"]
+    assert plan["resolved_selection"]["parity"]["method_runs"][0]["method_id"] == "tree_neural"
+    assert plan["resolved_selection"]["parity"]["method_runs"][0]["law_set_id"] == "all"
     assert set(plan["tradeoff_run_plan"]["phase_task_counts"]) == {"supervision_recovery", "report"}
 
 

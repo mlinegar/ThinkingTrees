@@ -42,6 +42,22 @@ class ProblemSpec:
 
 
 @dataclass(frozen=True)
+class RuntimeTaskView:
+    """Benchmark-normalized view used by runtime method runners."""
+
+    context: str
+    question: str = ""
+    choices: Dict[str, str] = field(default_factory=dict)
+    answer_instruction: str = ""
+    official_prompt: str = ""
+    answer_prefix: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class NodeContract:
     """Defines what each tree node must preserve/produce."""
 
@@ -113,11 +129,35 @@ class DiffusionInput:
 
 
 @dataclass(frozen=True)
+class EmbeddingInput:
+    """Typed embedding request for OpenAI-compatible embedding endpoints."""
+
+    texts: List[str]
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class SymbolicInput:
     """Typed symbolic execution input for exact local engines."""
 
     operation: str
     inputs: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class OperatorInput:
+    """Typed request for native or served runtime operators."""
+
+    operation: str
+    inputs: Dict[str, Any] = field(default_factory=dict)
+    batch: List[Dict[str, Any]] = field(default_factory=list)
+    options: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -146,6 +186,16 @@ class TextListOutput:
 
 
 @dataclass(frozen=True)
+class EmbeddingOutput:
+    """Ordered batch of embedding vectors."""
+
+    vectors: List[List[float]]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class StructuredOutput:
     """Structured symbolic or tool-style output."""
 
@@ -161,8 +211,193 @@ class StructuredOutput:
         }
 
 
-InferenceInput = ChatInput | DiffusionInput | SymbolicInput
-InferenceOutput = TextOutput | TextListOutput | StructuredOutput
+@dataclass(frozen=True)
+class OperatorOutput:
+    """Structured output from native or served runtime operators."""
+
+    data: Any
+    artifacts: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"data": self.data, "artifacts": dict(self.artifacts)}
+
+
+InferenceInput = ChatInput | DiffusionInput | EmbeddingInput | SymbolicInput | OperatorInput
+InferenceOutput = TextOutput | TextListOutput | EmbeddingOutput | StructuredOutput | OperatorOutput
+
+STATE_OPERATOR_ENCODE_LEAF = "encode_leaf"
+STATE_OPERATOR_MERGE_STATE = "merge_state"
+STATE_OPERATOR_SCORE_ROOT = "score_root"
+STATE_OPERATOR_SELECT_EVIDENCE = "select_evidence"
+STATE_OPERATOR_RENDER_STATE = "render_state"
+STATE_OPERATOR_OPERATIONS = (
+    STATE_OPERATOR_ENCODE_LEAF,
+    STATE_OPERATOR_MERGE_STATE,
+    STATE_OPERATOR_SCORE_ROOT,
+    STATE_OPERATOR_SELECT_EVIDENCE,
+    STATE_OPERATOR_RENDER_STATE,
+)
+
+RUNTIME_ROLE_SCORER = "scorer"
+RUNTIME_ROLE_SUMMARIZER = "summarizer"
+RUNTIME_ROLE_EMBEDDER = "embedder"
+RUNTIME_ROLE_STATE_MODEL = "state_model"
+RUNTIME_ROLES = (
+    RUNTIME_ROLE_SCORER,
+    RUNTIME_ROLE_SUMMARIZER,
+    RUNTIME_ROLE_EMBEDDER,
+    RUNTIME_ROLE_STATE_MODEL,
+)
+
+
+def _input_summary(input_payload: InferenceInput) -> Dict[str, Any]:
+    if isinstance(input_payload, ChatInput):
+        contents = [str(message.get("content", "") or "") for message in input_payload.messages]
+        return {
+            "kind": "chat",
+            "message_count": len(input_payload.messages),
+            "content_chars": sum(len(item) for item in contents),
+            "max_tokens": int(input_payload.max_tokens),
+            "temperature": float(input_payload.temperature),
+            "extra_keys": sorted(str(key) for key in input_payload.extra),
+        }
+    if isinstance(input_payload, EmbeddingInput):
+        return {
+            "kind": "embedding",
+            "text_count": len(input_payload.texts),
+            "content_chars": sum(len(str(text or "")) for text in input_payload.texts),
+            "extra_keys": sorted(str(key) for key in input_payload.extra),
+        }
+    if isinstance(input_payload, OperatorInput):
+        return {
+            "kind": "operator",
+            "operation": str(input_payload.operation),
+            "input_keys": sorted(str(key) for key in input_payload.inputs),
+            "batch_count": len(input_payload.batch),
+            "option_keys": sorted(str(key) for key in input_payload.options),
+        }
+    if isinstance(input_payload, DiffusionInput):
+        return {
+            "kind": "diffusion",
+            "text_count": len(input_payload.texts),
+            "content_chars": sum(len(str(text or "")) for text in input_payload.texts),
+            "sampling_keys": sorted(str(key) for key in input_payload.sampling_params),
+        }
+    if isinstance(input_payload, SymbolicInput):
+        return {
+            "kind": "symbolic",
+            "operation": str(input_payload.operation),
+            "input_keys": sorted(str(key) for key in input_payload.inputs),
+        }
+    return {"kind": type(input_payload).__name__}
+
+
+@dataclass(frozen=True)
+class RuntimeSurfaceCall:
+    """Compact runtime call envelope before execution."""
+
+    surface: EngineSurface
+    input: InferenceInput
+    role: str = ""
+    call_id: str = ""
+    request_id: str = ""
+    run_id: str = ""
+    unit_id: str = ""
+    method_id: str = ""
+    runner_id: str = ""
+    problem_id: str = ""
+    node_id: str = ""
+    request_kind: str = ""
+    document_id: str = ""
+    routing_key: str = ""
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    engine_options: Dict[str, Any] = field(default_factory=dict)
+    artifacts: Dict[str, Any] = field(default_factory=dict)
+    created_utc: str = field(default_factory=utc_now_iso)
+
+    def resolved_call_id(self) -> str:
+        return self.call_id or self.request_id or uuid4().hex
+
+    def to_inference_request(self) -> InferenceRequest:
+        request_id = self.request_id or self.resolved_call_id()
+        metadata = dict(self.metadata)
+        metadata.update(
+            {
+                key: value
+                for key, value in {
+                    "call_id": self.resolved_call_id(),
+                    "experiment_id": self.run_id,
+                    "unit_id": self.unit_id,
+                    "method_id": self.method_id,
+                    "runner_id": self.runner_id,
+                    "problem_id": self.problem_id,
+                    "node_id": self.node_id,
+                    "request_kind": self.request_kind,
+                    "role": self.role,
+                }.items()
+                if value
+            }
+        )
+        return InferenceRequest(
+            surface=self.surface,
+            input=self.input,
+            engine_options=dict(self.engine_options),
+            request_id=request_id,
+            document_id=self.document_id,
+            routing_key=self.routing_key,
+            priority=int(self.priority),
+            metadata=metadata,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "call_id": self.resolved_call_id(),
+            "request_id": self.request_id,
+            "experiment_id": self.run_id,
+            "unit_id": self.unit_id,
+            "method_id": self.method_id,
+            "runner_id": self.runner_id,
+            "problem_id": self.problem_id,
+            "node_id": self.node_id,
+            "request_kind": self.request_kind,
+            "role": self.role,
+            "surface": self.surface.value,
+            "document_id": self.document_id,
+            "routing_key": self.routing_key,
+            "priority": int(self.priority),
+            "metadata": dict(self.metadata),
+            "engine_options": dict(self.engine_options),
+            "artifacts": dict(self.artifacts),
+            "input_summary": _input_summary(self.input),
+            "created_utc": self.created_utc,
+        }
+
+
+@dataclass(frozen=True)
+class RuntimeSurfaceResult:
+    """Compact runtime call envelope after execution."""
+
+    call: RuntimeSurfaceCall
+    response: InferenceResponse
+    status: str = "ok"
+    error: Optional[Dict[str, Any]] = None
+    completed_utc: str = field(default_factory=utc_now_iso)
+
+    def to_dict(self) -> Dict[str, Any]:
+        response = self.response
+        return {
+            **self.call.to_dict(),
+            "status": str(self.status),
+            "engine": response.engine.value,
+            "model_id": response.model_id,
+            "usage": dict(response.usage),
+            "latency_ms": float(response.latency_ms or 0.0),
+            "telemetry": dict(response.telemetry),
+            "response_artifacts": dict(response.artifacts),
+            "error": dict(self.error or {}),
+            "completed_utc": self.completed_utc,
+        }
 
 
 @dataclass(frozen=True)
@@ -225,7 +460,7 @@ class InferenceResponse:
             prompt_tokens=int(self.usage.get("prompt_tokens", 0) or 0),
             completion_tokens=int(self.usage.get("completion_tokens", 0) or 0),
             latency_ms=float(self.latency_ms or 0.0),
-            raw=None,
+            raw=self.raw,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -258,11 +493,65 @@ class PackedPrompt:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class AnswerSpec:
+    """Benchmark-specific answer contract for the final runtime answer step."""
+
+    kind: str = "free_text"
+    choices: Dict[str, str] = field(default_factory=dict)
+    answer_prefix: str = ""
+    instruction: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class AnswerResult:
+    """Decoded final answer plus telemetry from the answer helper."""
+
+    prediction: str
+    raw_text: str = ""
+    decode_method: str = ""
+    choice_scores: Dict[str, float] = field(default_factory=dict)
+    cost: Dict[str, Any] = field(default_factory=dict)
+    artifacts: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "prediction": str(self.prediction),
+            "raw_text": str(self.raw_text),
+            "decode_method": str(self.decode_method),
+            "choice_scores": dict(self.choice_scores),
+            "cost": dict(self.cost),
+            "artifacts": dict(self.artifacts),
+        }
+
+
+@dataclass(frozen=True)
+class MethodRunResult:
+    """Uniform result envelope returned by runtime method runners."""
+
+    prediction: str
+    cost: Dict[str, Any] = field(default_factory=dict)
+    steps: List[Any] = field(default_factory=list)
+    artifacts: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "prediction": str(self.prediction),
+            "cost": dict(self.cost),
+            "steps": [step.to_dict() if hasattr(step, "to_dict") else step for step in self.steps],
+            "artifacts": dict(self.artifacts),
+        }
+
+
 @dataclass
 class RuntimeConfig:
-    """Runtime settings shared across modes."""
+    """Runtime settings shared across methods."""
 
-    mode: str = "runtime_full"
+    method: str = "summary_tree"
     cap_tokens: int = 8192
     safety_tokens: int = 256
     max_output_tokens: int = 256
@@ -284,6 +573,20 @@ class RuntimeConfig:
     repair_enabled: bool = True
     max_retries_per_step: int = 2
 
+    # Retrieval / selector settings used by method-runner variants.
+    retrieval_top_k: int = 4
+    retrieval_chunk_tokens: int = 1024
+    retrieval_overlap_tokens: int = 128
+    treepo_refine_rounds: int = 0
+    neural_checkpoint_path: str = ""
+    operator_kind: str = "llm"
+    method_dir: str = ""
+    method_family: str = ""
+    method_trained: bool = False
+    method_variant: str = ""
+    delegate_llm_for_answer: bool = True
+    choice_decode_strategy: str = "logprobs_then_generate"
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -303,7 +606,7 @@ class RunUnit:
     seed: int
     num_samples: int
 
-    mode: str
+    method: str
     runtime_overrides: Dict[str, Any] = field(default_factory=dict)
     benchmark_overrides: Dict[str, Any] = field(default_factory=dict)
 
@@ -319,7 +622,7 @@ class RunPhaseSpec:
     seeds: List[int]
     num_samples: int
     split: str
-    modes: List[str]
+    methods: List[str]
 
     runtime_overrides: Dict[str, Any] = field(default_factory=dict)
     benchmark_overrides: Dict[str, Any] = field(default_factory=dict)
@@ -339,12 +642,15 @@ class RunSpec:
     output_dir: str
 
     benchmark: Dict[str, Any]
-    model: Dict[str, Any]
     runtime_defaults: Dict[str, Any]
     phases: List[RunPhaseSpec]
+    surfaces: Dict[str, Any] = field(default_factory=dict)
+    roles: Dict[str, Any] = field(default_factory=dict)
+    oracle: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
+        d["experiment_id"] = d.pop("run_id")
         d["phases"] = [p.to_dict() for p in self.phases]
         return d
 
@@ -368,7 +674,7 @@ def expand_units(spec: RunSpec) -> List[RunUnit]:
         for task_id in phase.tasks:
             for length in phase.lengths:
                 for seed in phase.seeds:
-                    for mode in phase.modes:
+                    for method in phase.methods:
                         for r_var in runtime_variants:
                             for b_var in benchmark_variants:
                                 unit_idx += 1
@@ -387,7 +693,7 @@ def expand_units(spec: RunSpec) -> List[RunUnit]:
                                         max_seq_length=int(length),
                                         seed=int(seed),
                                         num_samples=int(phase.num_samples),
-                                        mode=mode,
+                                        method=method,
                                         runtime_overrides=runtime_overrides,
                                         benchmark_overrides=benchmark_overrides,
                                     )

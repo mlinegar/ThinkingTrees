@@ -33,6 +33,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.ctreepo.contracts import (  # noqa: E402
+    LAW_ID_LEAF_PRESERVATION,
+    LAW_ID_MERGE_PRESERVATION,
+    LAW_ID_ON_RANGE_IDEMPOTENCE,
+    assert_public_contract_clean,
+    canonical_law_set_id,
+)
+
 from src.ctreepo.sim.local_law_report_common import (
     build_local_law_report_core,
     load_local_law_runs,
@@ -51,6 +59,29 @@ MODE_COLORS = {
     "shift_half": "#7570b3",
     "random_same_count": "#666666",
 }
+
+_PUBLIC_KEY_RENAMES = {
+    "families": "problem_ids",
+    "family": "problem_id",
+    "law_package": "law_set_id",
+}
+
+
+def _canonical_public_payload(value):
+    if isinstance(value, dict):
+        out = {}
+        for raw_key, child in value.items():
+            key = _PUBLIC_KEY_RENAMES.get(str(raw_key), str(raw_key))
+            if key == "law_set_id":
+                try:
+                    child = canonical_law_set_id(str(child), allow_aliases=True)
+                except Exception:
+                    pass
+            out[key] = _canonical_public_payload(child)
+        return out
+    if isinstance(value, list):
+        return [_canonical_public_payload(item) for item in value]
+    return value
 
 
 def parse_args() -> argparse.Namespace:
@@ -168,19 +199,12 @@ def _fmt_weight(value: float) -> str:
 def _law_score_label(records: Sequence[Dict[str, object]], *, multiline: bool = False) -> str:
     tuples = {
         (
-            round(_safe_float(rec.get("objective_local_law_weight_c1")), 12),
-            round(_safe_float(rec.get("objective_local_law_weight_c2_proxy")), 12),
-            round(_safe_float(rec.get("objective_local_law_weight_c3")), 12),
+            round(_safe_float(dict(rec.get("local_law_component_weights", {}) or {}).get(LAW_ID_LEAF_PRESERVATION)), 12),
+            round(_safe_float(dict(rec.get("local_law_component_weights", {}) or {}).get(LAW_ID_ON_RANGE_IDEMPOTENCE)), 12),
+            round(_safe_float(dict(rec.get("local_law_component_weights", {}) or {}).get(LAW_ID_MERGE_PRESERVATION)), 12),
         )
         for rec in records
-        if all(
-            math.isfinite(_safe_float(rec.get(key)))
-            for key in (
-                "objective_local_law_weight_c1",
-                "objective_local_law_weight_c2_proxy",
-                "objective_local_law_weight_c3",
-            )
-        )
+        if dict(rec.get("local_law_component_weights", {}) or {})
     }
     label = "Configured local-law score"
     if len(tuples) != 1:
@@ -210,7 +234,7 @@ def _explicit_config_float(config: Dict[str, object], key: str) -> float:
     return _safe_float(config.get(key))
 
 
-def _resolve_lda_law_package(
+def _resolve_lda_law_set_id(
     *,
     objective: Dict[str, object],
     summary_metadata: Dict[str, object],
@@ -218,10 +242,10 @@ def _resolve_lda_law_package(
     top_cfg: Dict[str, object],
 ) -> str:
     for mapping, key in (
-        (objective, "law_package"),
-        (summary_metadata, "law_package"),
-        (local_law_cfg, "law_package"),
-        (top_cfg, "law_package"),
+        (objective, "law_set_id"),
+        (summary_metadata, "law_set_id"),
+        (local_law_cfg, "law_set_id"),
+        (top_cfg, "law_set_id"),
     ):
         value = str(mapping.get(key, "") or "").strip()
         if value:
@@ -236,20 +260,20 @@ def _resolve_lda_law_weights(
     local_law_cfg: Dict[str, object],
     top_cfg: Dict[str, object],
 ) -> Dict[str, float]:
-    objective_weights = dict(objective.get("local_law_weights", {}) or {})
+    objective_weights = dict(objective.get("local_law_component_weights", {}) or {})
     if objective_weights:
         return {
-            "c1": _safe_float(objective_weights.get("c1"), 0.0),
-            "c2_proxy": _safe_float(objective_weights.get("c2_proxy"), 0.0),
-            "c3": _safe_float(objective_weights.get("c3"), 0.0),
+            "c1": _safe_float(objective_weights.get(LAW_ID_LEAF_PRESERVATION), 0.0),
+            "c2_proxy": _safe_float(objective_weights.get(LAW_ID_ON_RANGE_IDEMPOTENCE), 0.0),
+            "c3": _safe_float(objective_weights.get(LAW_ID_MERGE_PRESERVATION), 0.0),
         }
 
     metadata_weights = dict(summary_metadata.get("resolved_local_law_weights", {}) or {})
     if metadata_weights:
         return {
-            "c1": _safe_float(metadata_weights.get("c1"), 0.0),
-            "c2_proxy": _safe_float(metadata_weights.get("c2_proxy"), 0.0),
-            "c3": _safe_float(metadata_weights.get("c3"), 0.0),
+            "c1": _safe_float(metadata_weights.get(LAW_ID_LEAF_PRESERVATION), 0.0),
+            "c2_proxy": _safe_float(metadata_weights.get(LAW_ID_ON_RANGE_IDEMPOTENCE), 0.0),
+            "c3": _safe_float(metadata_weights.get(LAW_ID_MERGE_PRESERVATION), 0.0),
         }
 
     base_weights = {
@@ -269,7 +293,7 @@ def _resolve_lda_law_weights(
     if not any(math.isfinite(value) for value in base_weights.values()):
         return {name: float("nan") for name in ("c1", "c2_proxy", "c3")}
 
-    pkg = _resolve_lda_law_package(
+    pkg = _resolve_lda_law_set_id(
         objective=objective,
         summary_metadata=summary_metadata,
         local_law_cfg=local_law_cfg,
@@ -325,31 +349,30 @@ def _policy_law_score(policy_metrics: Dict[str, object], *, law_weights: Dict[st
 
 
 def _objective_weight_profiles(records: Sequence[Dict[str, object]]) -> List[Dict[str, object]]:
-    counts: Dict[Tuple[str, float, float, float], int] = defaultdict(int)
+    counts: Dict[Tuple[str, Tuple[Tuple[str, float], ...]], int] = defaultdict(int)
     for rec in records:
-        c1 = _safe_float(rec.get("objective_local_law_weight_c1"))
-        c2 = _safe_float(rec.get("objective_local_law_weight_c2_proxy"))
-        c3 = _safe_float(rec.get("objective_local_law_weight_c3"))
-        if not all(math.isfinite(value) for value in (c1, c2, c3)):
+        component_weights = {
+            str(k): round(_safe_float(v), 12)
+            for k, v in dict(rec.get("local_law_component_weights", {}) or {}).items()
+        }
+        if not component_weights:
             continue
         key = (
-            str(rec.get("law_package", "unknown") or "unknown"),
-            round(c1, 12),
-            round(c2, 12),
-            round(c3, 12),
+            str(rec.get("law_set_id", "unknown") or "unknown"),
+            tuple(sorted(component_weights.items())),
         )
         counts[key] = int(counts.get(key, 0)) + 1
     rows: List[Dict[str, object]] = []
-    for (law_package, c1, c2, c3), n_runs in sorted(
+    for (law_set_id, component_items), n_runs in sorted(
         counts.items(),
-        key=lambda item: (-int(item[1]), str(item[0][0]), item[0][1], item[0][2], item[0][3]),
+        key=lambda item: (-int(item[1]), str(item[0][0]), item[0][1]),
     ):
         rows.append(
             {
-                "law_package": str(law_package),
-                "c1": float(c1),
-                "c2_proxy": float(c2),
-                "c3": float(c3),
+                "law_set_id": str(law_set_id),
+                "local_law_component_weights": {
+                    str(k): float(v) for k, v in component_items
+                },
                 "n_runs": int(n_runs),
             }
         )
@@ -405,20 +428,28 @@ def _load_records(input_root: Path) -> List[Dict[str, object]]:
             "suite": suite,
             "mode": str(cfg.get("analysis_partition_mode", "")),
             "tau": _safe_float(cfg.get("local_mixture_concentration")),
-            "lam": _safe_float(cfg.get("quadratic_utility_weight", cfg.get("lambda_multiplier"))),
+            "lam": _safe_float(cfg.get("quadratic_utility_weight")),
+            "quadratic_utility_weight": _safe_float(cfg.get("quadratic_utility_weight")),
             "seed": int(cfg.get("seed", 0)),
             "train_docs": int(cfg.get("train_docs", 0)),
             "objective_name": objective_name,
             "objective_weighting_scheme": str(objective.get("weighting_scheme", "")),
-            "objective_task_weight": _first_finite(
-                objective.get("task_weight"),
-                _explicit_config_float(local_law_cfg, "law_task_objective_weight"),
-                _explicit_config_float(cfg, "law_task_objective_weight"),
+            "root_share": _first_finite(
+                objective.get("root_share"),
+                local_law_cfg.get("root_share"),
+                cfg.get("root_share"),
             ),
-            "objective_local_law_weight_total": float(local_law_weight_total),
-            "objective_local_law_weight_c1": _safe_float(local_law_weights.get("c1")),
-            "objective_local_law_weight_c2_proxy": _safe_float(local_law_weights.get("c2_proxy")),
-            "objective_local_law_weight_c3": _safe_float(local_law_weights.get("c3")),
+            "local_law_weight": _first_finite(
+                objective.get("local_law_weight"),
+                local_law_cfg.get("local_law_weight"),
+                cfg.get("local_law_weight"),
+                local_law_weight_total,
+            ),
+            "local_law_component_weights": {
+                LAW_ID_LEAF_PRESERVATION: _safe_float(local_law_weights.get("c1"), 0.0),
+                LAW_ID_ON_RANGE_IDEMPOTENCE: _safe_float(local_law_weights.get("c2_proxy"), 0.0),
+                LAW_ID_MERGE_PRESERVATION: _safe_float(local_law_weights.get("c3"), 0.0),
+            },
             "objective_total_weight_without_proxy": _first_finite(
                 objective.get("total_weight_without_proxy"),
                 objective.get("weight_total_without_proxy"),
@@ -478,7 +509,7 @@ def _load_records(input_root: Path) -> List[Dict[str, object]]:
             "ipw_eval_law_ipw_leaf_max_weight": _safe_float(_nested_get(ipw_eval, ("law_calibrated_ipw", "diagnostics", "leaf_max_weight"))),
             "ipw_eval_law_ipw_internal_max_weight": _safe_float(_nested_get(ipw_eval, ("law_calibrated_ipw", "diagnostics", "internal_max_weight"))),
             # Law-stress classification fields
-            "law_package": _resolve_lda_law_package(
+            "law_set_id": _resolve_lda_law_set_id(
                 objective=objective,
                 summary_metadata=summary_metadata,
                 local_law_cfg=local_law_cfg,
@@ -679,7 +710,7 @@ def main() -> int:
     law_score_label_multiline = _law_score_label(records, multiline=True)
     protocol_runs = load_local_law_runs(input_root)
     unified_core = build_local_law_report_core(protocol_runs)
-    summary["unified_core"] = unified_core
+    summary["unified_core"] = _canonical_public_payload(unified_core)
 
     with PdfPages(pdf_path) as pdf:
         write_local_law_report_core_pages(
@@ -1150,14 +1181,14 @@ def main() -> int:
             _page_header(
                 fig,
                 "Law-Stress Summary Table",
-                "How to read: aggregated pass rates across all runs, grouped by law package.",
+                "How to read: aggregated pass rates across all runs, grouped by law set.",
             )
             # Compute summary stats
-            packages = sorted({str(r.get("law_package", "unknown")) for r in stress_records})
-            header = f"{'Package':<20s} {'N':>5s} {'C1%':>6s} {'C2%':>6s} {'C3%':>6s} {'Bundle%':>8s}"
+            packages = sorted({str(r.get("law_set_id", "unknown")) for r in stress_records})
+            header = f"{'Law set':<20s} {'N':>5s} {'C1%':>6s} {'C2%':>6s} {'C3%':>6s} {'Bundle%':>8s}"
             lines = [header, "-" * len(header)]
             for pkg in packages:
-                pkg_recs = [r for r in stress_records if str(r.get("law_package", "unknown")) == pkg]
+                pkg_recs = [r for r in stress_records if str(r.get("law_set_id", "unknown")) == pkg]
                 n = len(pkg_recs)
                 c1 = _safe_mean([float(bool(r.get("stress_c1_pass"))) for r in pkg_recs])
                 c2 = _safe_mean([float(bool(r.get("stress_c2_pass"))) for r in pkg_recs])
@@ -1199,6 +1230,7 @@ def main() -> int:
         summary=summary,
         unified_core=unified_core,
     )
+    assert_public_contract_clean(summary, surface=str(summary_path))
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
     print(f"wrote_pdf | {pdf_path}")
     print(f"wrote_md | {md_path}")

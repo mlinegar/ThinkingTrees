@@ -39,7 +39,8 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from src.config.dspy_config import configure_dspy, create_vllm_lm, create_vllm_lm_multi
+from src.config.dspy_config import configure_dspy, create_local_engine_lm
+from src.config.local_inference import resolve_local_inference_config
 from src.core.protocols import format_merge_input
 from src.preprocessing.chunker import chunk_for_ops
 from src.tasks.manifesto import ManifestoDataset
@@ -198,16 +199,12 @@ def main() -> int:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Configuring DSPy with vLLM on port %d", args.port)
-    lm_kwargs = {"model": args.model, "temperature": 0.0, "cache": True}
-    if args.max_tokens is not None:
-        lm_kwargs["max_tokens"] = args.max_tokens
+    logger.info("Configuring DSPy with local inference")
+    local_inference = resolve_local_inference_config({**vars(args), "temperature": 0.0})
+    if local_inference.max_tokens is not None:
         logger.info("Using max_tokens=%d for LM outputs", args.max_tokens)
-    if args.ports:
-        logger.info("Load-balancing across vLLM ports %s", args.ports)
-        lm = create_vllm_lm_multi(ports=args.ports, **lm_kwargs)
-    else:
-        lm = create_vllm_lm(port=args.port, **lm_kwargs)
+    logger.info("Configuring LM on %s port(s) %s", local_inference.engine, list(local_inference.ports))
+    lm = create_local_engine_lm(**local_inference.dspy_kwargs(cache=True))
     configure_dspy(lm=lm)
     logger.info("Using LM: %s", getattr(lm, "model", "unknown"))
 
@@ -237,7 +234,11 @@ def main() -> int:
     if args.max_year is not None:
         joined = joined[joined["year"] <= args.max_year]
     expert_lookup = {
-        (int(row.party), int(row.year)): (float(row.expert_mean), row.manifesto)
+        (int(row.party), int(row.year)): (
+            float(row.expert_mean),
+            float(row.expert_mean_1_7),
+            row.manifesto,
+        )
         for row in joined.itertuples()
     }
     logger.info("Expert lookup: %d (party, year) keys", len(expert_lookup))
@@ -271,7 +272,7 @@ def main() -> int:
         key = (int(sample.party_id), int(sample.year))
         if key not in expert_lookup:
             return None
-        expert_value, benoit_manifesto_key = expert_lookup[key]
+        expert_value, expert_value_1_7, benoit_manifesto_key = expert_lookup[key]
         try:
             summary = _summarize_manifesto(
                 sample.text, g,
@@ -290,6 +291,9 @@ def main() -> int:
             "country_name": sample.country_name,
             "year": sample.year,
             "benoit_expert_mean": expert_value,
+            "benoit_expert_mean_raw": expert_value,
+            "benoit_expert_mean_1_7": expert_value_1_7,
+            "expert_score_1_7": expert_value_1_7,
             "llm_score_1_7": result["score"],
             "is_na": result["score"] is None,
             "summary": summary,

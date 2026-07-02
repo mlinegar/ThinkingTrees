@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Generic, List, Mapping, Optional, Protocol, Sequence, Tuple, TypeVar, TYPE_CHECKING
+from typing import Any, Callable, Dict, Generic, List, Mapping, Optional, Protocol, Sequence, Tuple, TypeVar
 
 from src.core.async_utils import to_thread
 from src.core.ops_checks import (
@@ -20,9 +20,6 @@ from src.core.ops_checks import (
     OperatorCapabilityReport,
 )
 from src.core.protocols import format_merge_input
-
-if TYPE_CHECKING:  # pragma: no cover
-    from src.diffusion.backends import DiffusionBackend
 
 SpanT = TypeVar("SpanT")
 StateT = TypeVar("StateT")
@@ -268,12 +265,7 @@ class AsyncFromSummarizationStrategy:
 
 @dataclass
 class AsyncFromInferenceEngine:
-    """Text-only async operator backed by the universal ``InferenceEngine``.
-
-    This adapter supports both:
-    - chat engines (surface ``chat_openai``), producing a single text output
-    - diffusion engines (surface ``diffusion_generate``), producing a single text output
-    """
+    """Text-only async operator backed by the universal text-generation surface."""
 
     engine: Any
     name: str = "inference_engine_operator"
@@ -283,6 +275,7 @@ class AsyncFromInferenceEngine:
     summarize_prompt_fn: Optional[Callable[[str, str], Any]] = None
     merge_prompt_fn: Optional[Callable[[str, str, str], Any]] = None
     diffusion_prompt_templates: Optional[Any] = None
+    use_generate_prompt_templates: bool = False
     max_concurrent: int = 128
 
     def __post_init__(self) -> None:
@@ -294,57 +287,6 @@ class AsyncFromInferenceEngine:
 
     async def adecode(self, state: str, **_: Any) -> str:
         return str(state)
-
-    async def aresummarize(self, state: str, **kwargs: Any) -> str:
-        # Default resummary is just re-encoding the decoded span, but diffusion
-        # has a dedicated refinement template that we preserve.
-        rubric = str(kwargs.get("rubric", "") or "")
-        sampling_params = kwargs.get("sampling_params")
-        engine_options = kwargs.get("engine_options")
-        round_index = int(kwargs.get("round_index", kwargs.get("refine_round", 0) or 0) or 0)
-
-        if self.engine.surface.value == "chat_openai":
-            from src.core.prompting import default_resummary_prompt
-            from src.runtime.contracts import ChatInput, InferenceRequest
-            from src.core.engines import EngineSurface
-
-            messages = default_resummary_prompt(str(state), rubric, round_index=round_index or None)
-            response = await self.engine.aexecute(
-                InferenceRequest(
-                    surface=EngineSurface.CHAT_OPENAI,
-                    input=ChatInput(
-                        messages=list(messages),
-                        max_tokens=self._resolve_max_tokens(sampling_params),
-                        temperature=self._resolve_temperature(sampling_params),
-                        stop=list(self.stop),
-                        extra=dict(engine_options or {}),
-                    ),
-                    engine_options=dict(engine_options or {}),
-                )
-            )
-            return str(response.to_model_response().text or "")
-
-        from src.runtime.contracts import DiffusionInput, InferenceRequest, TextListOutput
-        from src.core.engines import EngineSurface
-        from src.tree.generate_prompting import GenerateTreePromptTemplates, refine_prompt
-
-        templates = self.diffusion_prompt_templates or GenerateTreePromptTemplates()
-        prompt = refine_prompt(str(state), rubric, round_index or 1, templates)
-        response = await self.engine.aexecute(
-            InferenceRequest(
-                surface=EngineSurface.DIFFUSION_GENERATE,
-                input=DiffusionInput(
-                    texts=[prompt],
-                    sampling_params=dict(sampling_params or {}),
-                ),
-                engine_options=dict(engine_options or {}),
-            )
-        )
-        if not isinstance(response.output, TextListOutput):
-            raise TypeError(
-                f"Diffusion resummarize expected TextListOutput, received {type(response.output).__name__}."
-            )
-        return str(response.output.texts[0] if response.output.texts else "")
 
     def _resolve_temperature(self, sampling_params: Optional[Mapping[str, Any]]) -> float:
         if sampling_params is None:
@@ -367,168 +309,154 @@ class AsyncFromInferenceEngine:
                     return int(self.max_tokens)
         return int(self.max_tokens)
 
-    async def aencode(self, span: str, **kwargs: Any) -> str:
-        rubric = str(kwargs.get("rubric", "") or "")
-        sampling_params = kwargs.get("sampling_params")
-        engine_options = kwargs.get("engine_options")
-        if self.engine.surface.value == "chat_openai":
-            from src.core.prompting import default_summarize_prompt
-            from src.runtime.contracts import ChatInput, InferenceRequest
-            from src.core.engines import EngineSurface
-
-            prompt_fn = self.summarize_prompt_fn or default_summarize_prompt
-            messages = prompt_fn(str(span), rubric)
-            response = await self.engine.aexecute(
-                InferenceRequest(
-                    surface=EngineSurface.CHAT_OPENAI,
-                    input=ChatInput(
-                        messages=list(messages),
-                        max_tokens=self._resolve_max_tokens(sampling_params),
-                        temperature=self._resolve_temperature(sampling_params),
-                        stop=list(self.stop),
-                        extra=dict(engine_options or {}),
-                    ),
-                    engine_options=dict(engine_options or {}),
-                )
-            )
-            return str(response.to_model_response().text or "")
-
-        # diffusion_generate
-        from src.runtime.contracts import DiffusionInput, InferenceRequest, TextListOutput
-        from src.core.engines import EngineSurface
-        from src.tree.generate_prompting import GenerateTreePromptTemplates, leaf_prompt
-
-        templates = self.diffusion_prompt_templates or GenerateTreePromptTemplates()
-        prompt = leaf_prompt(str(span), rubric, templates)
-        response = await self.engine.aexecute(
-            InferenceRequest(
-                surface=EngineSurface.DIFFUSION_GENERATE,
-                input=DiffusionInput(
-                    texts=[prompt],
-                    sampling_params=dict(sampling_params or {}),
-                ),
-                engine_options=dict(engine_options or {}),
-            )
-        )
-        if not isinstance(response.output, TextListOutput):
-            raise TypeError(
-                f"Diffusion encode expected TextListOutput, received {type(response.output).__name__}."
-            )
-        return str(response.output.texts[0] if response.output.texts else "")
-
-    async def amerge(self, left_state: str, right_state: str, **kwargs: Any) -> str:
-        rubric = str(kwargs.get("rubric", "") or "")
-        sampling_params = kwargs.get("sampling_params")
-        engine_options = kwargs.get("engine_options")
-        if self.engine.surface.value == "chat_openai":
-            from src.core.prompting import default_merge_prompt
-            from src.runtime.contracts import ChatInput, InferenceRequest
-            from src.core.engines import EngineSurface
-
-            prompt_fn = self.merge_prompt_fn or default_merge_prompt
-            messages = prompt_fn(str(left_state), str(right_state), rubric)
-            response = await self.engine.aexecute(
-                InferenceRequest(
-                    surface=EngineSurface.CHAT_OPENAI,
-                    input=ChatInput(
-                        messages=list(messages),
-                        max_tokens=self._resolve_max_tokens(sampling_params),
-                        temperature=self._resolve_temperature(sampling_params),
-                        stop=list(self.stop),
-                        extra=dict(engine_options or {}),
-                    ),
-                    engine_options=dict(engine_options or {}),
-                )
-            )
-            return str(response.to_model_response().text or "")
-
-        from src.runtime.contracts import DiffusionInput, InferenceRequest, TextListOutput
-        from src.core.engines import EngineSurface
-        from src.tree.generate_prompting import GenerateTreePromptTemplates, merge_prompt
-
-        templates = self.diffusion_prompt_templates or GenerateTreePromptTemplates()
-        prompt = merge_prompt(str(left_state), str(right_state), rubric, templates)
-        response = await self.engine.aexecute(
-            InferenceRequest(
-                surface=EngineSurface.DIFFUSION_GENERATE,
-                input=DiffusionInput(
-                    texts=[prompt],
-                    sampling_params=dict(sampling_params or {}),
-                ),
-                engine_options=dict(engine_options or {}),
-            )
-        )
-        if not isinstance(response.output, TextListOutput):
-            raise TypeError(
-                f"Diffusion merge expected TextListOutput, received {type(response.output).__name__}."
-            )
-        return str(response.output.texts[0] if response.output.texts else "")
-
-    async def aencode_many(self, spans: Sequence[str], **kwargs: Any) -> List[str]:
-        if self.engine.surface.value == "diffusion_generate":
-            rubric = str(kwargs.get("rubric", "") or "")
-            sampling_params = kwargs.get("sampling_params")
-            engine_options = kwargs.get("engine_options")
-            from src.runtime.contracts import DiffusionInput, InferenceRequest, TextListOutput
-            from src.core.engines import EngineSurface
+    def _messages_for_leaf(self, span: str, rubric: str) -> List[Dict[str, str]]:
+        if self.use_generate_prompt_templates:
             from src.tree.generate_prompting import GenerateTreePromptTemplates, leaf_prompt
 
             templates = self.diffusion_prompt_templates or GenerateTreePromptTemplates()
-            prompts = [leaf_prompt(str(span), rubric, templates) for span in spans]
-            response = await self.engine.aexecute(
-                InferenceRequest(
-                    surface=EngineSurface.DIFFUSION_GENERATE,
-                    input=DiffusionInput(
-                        texts=list(prompts),
-                        sampling_params=dict(sampling_params or {}),
-                    ),
-                    engine_options=dict(engine_options or {}),
-                )
-            )
-            if not isinstance(response.output, TextListOutput):
-                raise TypeError(
-                    f"Diffusion batch encode expected TextListOutput, received {type(response.output).__name__}."
-                )
-            return [str(text) for text in list(response.output.texts)]
+            return [{"role": "user", "content": leaf_prompt(str(span), rubric, templates)}]
+        from src.core.prompting import default_summarize_prompt
 
-        thunks = [lambda span=span: self.aencode(span, **kwargs) for span in spans]
-        return [str(item) for item in await _gather_with_semaphore(thunks, max_concurrent=self.max_concurrent)]
+        prompt_fn = self.summarize_prompt_fn or default_summarize_prompt
+        return [dict(message) for message in prompt_fn(str(span), rubric)]
 
-    async def amerge_many(self, pairs: Sequence[Tuple[str, str]], **kwargs: Any) -> List[str]:
-        if self.engine.surface.value == "diffusion_generate":
-            rubric = str(kwargs.get("rubric", "") or "")
-            sampling_params = kwargs.get("sampling_params")
-            engine_options = kwargs.get("engine_options")
-            from src.runtime.contracts import DiffusionInput, InferenceRequest, TextListOutput
-            from src.core.engines import EngineSurface
+    def _messages_for_merge(self, left_state: str, right_state: str, rubric: str) -> List[Dict[str, str]]:
+        if self.use_generate_prompt_templates:
             from src.tree.generate_prompting import GenerateTreePromptTemplates, merge_prompt
 
             templates = self.diffusion_prompt_templates or GenerateTreePromptTemplates()
-            prompts = [
-                merge_prompt(str(left), str(right), rubric, templates)
-                for left, right in pairs
+            return [
+                {
+                    "role": "user",
+                    "content": merge_prompt(str(left_state), str(right_state), rubric, templates),
+                }
             ]
-            response = await self.engine.aexecute(
-                InferenceRequest(
-                    surface=EngineSurface.DIFFUSION_GENERATE,
-                    input=DiffusionInput(
-                        texts=list(prompts),
-                        sampling_params=dict(sampling_params or {}),
-                    ),
-                    engine_options=dict(engine_options or {}),
-                )
-            )
-            if not isinstance(response.output, TextListOutput):
-                raise TypeError(
-                    f"Diffusion batch merge expected TextListOutput, received {type(response.output).__name__}."
-                )
-            return [str(text) for text in list(response.output.texts)]
+        from src.core.prompting import default_merge_prompt
 
-        thunks = [
-            lambda left=left, right=right: self.amerge(left, right, **kwargs)
-            for left, right in pairs
+        prompt_fn = self.merge_prompt_fn or default_merge_prompt
+        return [dict(message) for message in prompt_fn(str(left_state), str(right_state), rubric)]
+
+    def _messages_for_refine(self, state: str, rubric: str, round_index: int) -> List[Dict[str, str]]:
+        if self.use_generate_prompt_templates:
+            from src.tree.generate_prompting import GenerateTreePromptTemplates, refine_prompt
+
+            templates = self.diffusion_prompt_templates or GenerateTreePromptTemplates()
+            return [
+                {
+                    "role": "user",
+                    "content": refine_prompt(str(state), rubric, round_index or 1, templates),
+                }
+            ]
+        from src.core.prompting import default_resummary_prompt
+
+        return [
+            dict(message)
+            for message in default_resummary_prompt(
+                str(state), rubric, round_index=round_index or None
+            )
         ]
-        return [str(item) for item in await _gather_with_semaphore(thunks, max_concurrent=self.max_concurrent)]
+
+    def _request_for_messages(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        sampling_params: Optional[Mapping[str, Any]],
+        engine_options: Optional[Mapping[str, Any]],
+    ) -> Any:
+        from src.core.engines import EngineSurface
+        from src.runtime.contracts import ChatInput, InferenceRequest
+
+        return InferenceRequest(
+            surface=EngineSurface.CHAT_OPENAI,
+            input=ChatInput(
+                messages=[dict(message) for message in messages],
+                max_tokens=self._resolve_max_tokens(sampling_params),
+                temperature=self._resolve_temperature(sampling_params),
+                stop=list(self.stop),
+                extra=dict(engine_options or {}),
+            ),
+            engine_options=dict(engine_options or {}),
+        )
+
+    async def _achat_text(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        sampling_params: Optional[Mapping[str, Any]],
+        engine_options: Optional[Mapping[str, Any]],
+    ) -> str:
+        response = await self.engine.aexecute(
+            self._request_for_messages(
+                messages,
+                sampling_params=sampling_params,
+                engine_options=engine_options,
+            )
+        )
+        return str(response.to_model_response().text or "")
+
+    async def _achat_many(
+        self,
+        message_batches: Sequence[Sequence[Mapping[str, str]]],
+        *,
+        sampling_params: Optional[Mapping[str, Any]],
+        engine_options: Optional[Mapping[str, Any]],
+    ) -> List[str]:
+        requests = [
+            self._request_for_messages(
+                messages,
+                sampling_params=sampling_params,
+                engine_options=engine_options,
+            )
+            for messages in message_batches
+        ]
+        responses = await self.engine.aexecute_many(requests)
+        return [str(response.to_model_response().text or "") for response in responses]
+
+    async def aresummarize(self, state: str, **kwargs: Any) -> str:
+        rubric = str(kwargs.get("rubric", "") or "")
+        sampling_params = kwargs.get("sampling_params")
+        engine_options = kwargs.get("engine_options")
+        round_index = int(kwargs.get("round_index", kwargs.get("refine_round", 0) or 0) or 0)
+        return await self._achat_text(
+            self._messages_for_refine(str(state), rubric, round_index),
+            sampling_params=sampling_params,
+            engine_options=engine_options,
+        )
+
+    async def aencode(self, span: str, **kwargs: Any) -> str:
+        rubric = str(kwargs.get("rubric", "") or "")
+        return await self._achat_text(
+            self._messages_for_leaf(str(span), rubric),
+            sampling_params=kwargs.get("sampling_params"),
+            engine_options=kwargs.get("engine_options"),
+        )
+
+    async def amerge(self, left_state: str, right_state: str, **kwargs: Any) -> str:
+        rubric = str(kwargs.get("rubric", "") or "")
+        return await self._achat_text(
+            self._messages_for_merge(str(left_state), str(right_state), rubric),
+            sampling_params=kwargs.get("sampling_params"),
+            engine_options=kwargs.get("engine_options"),
+        )
+
+    async def aencode_many(self, spans: Sequence[str], **kwargs: Any) -> List[str]:
+        rubric = str(kwargs.get("rubric", "") or "")
+        return await self._achat_many(
+            [self._messages_for_leaf(str(span), rubric) for span in spans],
+            sampling_params=kwargs.get("sampling_params"),
+            engine_options=kwargs.get("engine_options"),
+        )
+
+    async def amerge_many(self, pairs: Sequence[Tuple[str, str]], **kwargs: Any) -> List[str]:
+        rubric = str(kwargs.get("rubric", "") or "")
+        return await self._achat_many(
+            [
+                self._messages_for_merge(str(left), str(right), rubric)
+                for left, right in pairs
+            ],
+            sampling_params=kwargs.get("sampling_params"),
+            engine_options=kwargs.get("engine_options"),
+        )
 
     def capability_report(self) -> OperatorCapabilityReport:
         surface = getattr(self.engine, "surface", None)
@@ -560,151 +488,6 @@ class AsyncFromInferenceEngine:
                 available=True,
                 evidence_status=EvidenceStatus.PROXY_ONLY,
                 exact=False,
-            ),
-            notes=tuple(notes),
-        )
-
-
-@dataclass
-class AsyncFromDiffusionBackend:
-    """Text-only async operator backed by a sync ``DiffusionBackend``."""
-
-    backend: "DiffusionBackend"
-    prompt_templates: Optional[Any] = None
-    name: str = "diffusion_backend_operator"
-    max_concurrent: int = 128
-
-    def __post_init__(self) -> None:
-        backend_name = getattr(self.backend, "backend_name", None)
-        if backend_name:
-            self.name = f"diffusion_backend:{backend_name}"
-
-        if self.prompt_templates is None:
-            from src.tree.generate_prompting import GenerateTreePromptTemplates
-
-            self.prompt_templates = GenerateTreePromptTemplates()
-
-    def combine(self, left_span: str, right_span: str, **_: Any) -> str:
-        return format_merge_input(str(left_span or ""), str(right_span or ""))
-
-    async def adecode(self, state: str, **_: Any) -> str:
-        return str(state)
-
-    async def aencode(self, span: str, **kwargs: Any) -> str:
-        rubric = str(kwargs.get("rubric", "") or "")
-        sampling_params = kwargs.get("sampling_params")
-        engine_options = kwargs.get("engine_options")
-
-        from src.tree.generate_prompting import leaf_prompt
-
-        prompt = leaf_prompt(str(span), rubric, self.prompt_templates)
-        batch = await to_thread(
-            self.backend.generate,
-            [prompt],
-            sampling_params=sampling_params,
-            engine_options=engine_options,
-        )
-        return str(batch.generations[0].output_text if batch.generations else "")
-
-    async def amerge(self, left_state: str, right_state: str, **kwargs: Any) -> str:
-        rubric = str(kwargs.get("rubric", "") or "")
-        sampling_params = kwargs.get("sampling_params")
-        engine_options = kwargs.get("engine_options")
-
-        from src.tree.generate_prompting import merge_prompt
-
-        prompt = merge_prompt(str(left_state), str(right_state), rubric, self.prompt_templates)
-        batch = await to_thread(
-            self.backend.generate,
-            [prompt],
-            sampling_params=sampling_params,
-            engine_options=engine_options,
-        )
-        return str(batch.generations[0].output_text if batch.generations else "")
-
-    async def aresummarize(self, state: str, **kwargs: Any) -> str:
-        rubric = str(kwargs.get("rubric", "") or "")
-        sampling_params = kwargs.get("sampling_params")
-        engine_options = kwargs.get("engine_options")
-        round_index = int(kwargs.get("round_index", kwargs.get("refine_round", 0) or 0) or 0)
-
-        from src.tree.generate_prompting import refine_prompt
-
-        prompt = refine_prompt(str(state), rubric, round_index or 1, self.prompt_templates)
-        batch = await to_thread(
-            self.backend.generate,
-            [prompt],
-            sampling_params=sampling_params,
-            engine_options=engine_options,
-        )
-        return str(batch.generations[0].output_text if batch.generations else "")
-
-    async def aencode_many(self, spans: Sequence[str], **kwargs: Any) -> List[str]:
-        rubric = str(kwargs.get("rubric", "") or "")
-        sampling_params = kwargs.get("sampling_params")
-        engine_options = kwargs.get("engine_options")
-
-        from src.tree.generate_prompting import leaf_prompt
-
-        prompts = [leaf_prompt(str(span), rubric, self.prompt_templates) for span in spans]
-        batch = await to_thread(
-            self.backend.generate,
-            list(prompts),
-            sampling_params=sampling_params,
-            engine_options=engine_options,
-        )
-        return [str(generation.output_text) for generation in batch.generations]
-
-    async def amerge_many(self, pairs: Sequence[Tuple[str, str]], **kwargs: Any) -> List[str]:
-        rubric = str(kwargs.get("rubric", "") or "")
-        sampling_params = kwargs.get("sampling_params")
-        engine_options = kwargs.get("engine_options")
-
-        from src.tree.generate_prompting import merge_prompt
-
-        prompts = [
-            merge_prompt(str(left), str(right), rubric, self.prompt_templates)
-            for left, right in pairs
-        ]
-        batch = await to_thread(
-            self.backend.generate,
-            list(prompts),
-            sampling_params=sampling_params,
-            engine_options=engine_options,
-        )
-        return [str(generation.output_text) for generation in batch.generations]
-
-    def capability_report(self) -> OperatorCapabilityReport:
-        notes = []
-        backend_name = getattr(self.backend, "backend_name", None)
-        if backend_name:
-            notes.append(f"Backed by diffusion backend {backend_name}.")
-        return OperatorCapabilityReport(
-            operator_name=self.name,
-            evidence_status=EvidenceStatus.PROXY_ONLY,
-            latent_mergeability_enforced=False,
-            tree_nesting_supported=True,
-            theorem_domain_decode_available=True,
-            theorem_domain_reencode_available=True,
-            exact_reduction_supported=False,
-            leaf_law=LawCapabilityReport(
-                law_kind=LawKind.L1_LEAF,
-                available=True,
-                evidence_status=EvidenceStatus.PROXY_ONLY,
-                exact=False,
-            ),
-            merge_law=LawCapabilityReport(
-                law_kind=LawKind.L2_MERGE,
-                available=True,
-                evidence_status=EvidenceStatus.PROXY_ONLY,
-                exact=False,
-            ),
-            idempotence_law=LawCapabilityReport(
-                law_kind=LawKind.L3_IDEMPOTENCE,
-                available=True,
-                evidence_status=EvidenceStatus.PROXY_ONLY,
-                exact=False,
-                notes="Refinement is implemented via a `/generate` refine prompt template.",
             ),
             notes=tuple(notes),
         )
@@ -781,6 +564,5 @@ __all__ = [
     "AsyncFromSyncOperator",
     "AsyncFromSummarizationStrategy",
     "AsyncFromInferenceEngine",
-    "AsyncFromDiffusionBackend",
     "MarkovToyOperator",
 ]

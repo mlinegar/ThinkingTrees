@@ -58,7 +58,7 @@ class ChunkFeedbackSignal:
     noise_probability:
         0.0 = low-noise span, 1.0 = likely noisy proxy signal.
     confidence:
-        Reliability of the feedback source in [0, 1].
+        Trust score of the feedback source in [0, 1].
     """
     start_char: int
     end_char: int

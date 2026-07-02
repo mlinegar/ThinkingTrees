@@ -8,19 +8,15 @@ new labels arrive.
 
 from __future__ import annotations
 
-from array import array
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
 import logging
 import math
 from pathlib import Path
-import sys
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
-import zlib
 
 import numpy as np
-import requests
 from src.core.conditional_memory import canonical_hash, get_default_memory
 from src.training.supervision import (
     DenseScalarRidgeModelConfig,
@@ -36,6 +32,7 @@ from src.training.supervision import (
     fit_dense_scalar_ridge_regressor,
     supervision_training_contract,
 )
+from treepo.llm import OpenAICompatibleEmbeddingClient
 try:
     import torch
 except Exception:  # pragma: no cover - optional dependency path
@@ -73,24 +70,6 @@ def _safe_optional_float(value: Any) -> Optional[float]:
     if converted != converted:
         return None
     return converted
-
-
-def _encode_embedding_f32z(vector: Sequence[float]) -> tuple[bytes, Dict[str, Any]]:
-    arr = array("f", (float(v) for v in vector))
-    if sys.byteorder != "little":
-        arr.byteswap()
-    raw = arr.tobytes()
-    compressed = zlib.compress(raw)
-    return compressed, {"dtype": "float32", "byteorder": "little", "dim": int(len(arr))}
-
-
-def _decode_embedding_f32z(blob: bytes) -> List[float]:
-    raw = zlib.decompress(bytes(blob))
-    arr = array("f")
-    arr.frombytes(raw)
-    if sys.byteorder != "little":
-        arr.byteswap()
-    return [float(v) for v in arr]
 
 
 def _solve_linear_system(a: List[List[float]], b: List[float]) -> Optional[List[float]]:
@@ -454,8 +433,8 @@ def load_embedding_proxy_model(path: Path) -> Any:
     return EmbeddingLinearSGDProxyModel.from_dict(data)
 
 
-class VLLMEmbeddingClient:
-    """Client for OpenAI-compatible embedding endpoints served by vLLM."""
+class VLLMEmbeddingClient(OpenAICompatibleEmbeddingClient):
+    """Compatibility name for the canonical OpenAI-compatible embedding client."""
 
     def __init__(
         self,
@@ -468,168 +447,16 @@ class VLLMEmbeddingClient:
         cache_enabled: bool = True,
         memory: Optional["ConditionalMemory"] = None,
     ):
-        self.api_base = (api_base or "").rstrip("/")
-        self.model = model
-        self.api_key = api_key or "EMPTY"
-        self.timeout_seconds = max(1.0, float(timeout_seconds))
-        self.batch_size = max(1, int(batch_size))
-        self.cache_enabled = bool(cache_enabled)
-        self._cache: Dict[str, List[float]] = {}
-        self._memory = memory if memory is not None else get_default_memory()
-        self._model_verified = False
-
-    @property
-    def embeddings_url(self) -> str:
-        if self.api_base.endswith("/v1"):
-            return f"{self.api_base}/embeddings"
-        return f"{self.api_base}/v1/embeddings"
-
-    @property
-    def models_url(self) -> str:
-        if self.api_base.endswith("/v1"):
-            return f"{self.api_base}/models"
-        return f"{self.api_base}/v1/models"
-
-    def resolve_model(self) -> str:
-        response = None
-        if self.model and self._model_verified:
-            return self.model
-
-        response = requests.get(
-            self.models_url,
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            timeout=self.timeout_seconds,
+        super().__init__(
+            api_base=api_base,
+            model=model,
+            api_key=api_key,
+            timeout_seconds=timeout_seconds,
+            batch_size=batch_size,
+            cache_enabled=cache_enabled,
+            memory=memory if memory is not None else get_default_memory(),
+            text_key_fn=canonical_hash,
         )
-        response.raise_for_status()
-        payload = response.json()
-        data = payload.get("data", [])
-        if not data:
-            raise RuntimeError("Embedding endpoint returned no models")
-
-        served_ids: List[str] = []
-        for row in data:
-            model_id = str(row.get("id", "")).strip()
-            if model_id:
-                served_ids.append(model_id)
-
-        if not served_ids:
-            raise RuntimeError("Embedding endpoint returned empty model ids")
-
-        if self.model:
-            requested = str(self.model).strip()
-            if requested in served_ids:
-                self._model_verified = True
-                return requested
-
-            if len(served_ids) == 1:
-                logger.warning(
-                    "Requested embedding model '%s' not found on endpoint; using served id '%s'.",
-                    requested,
-                    served_ids[0],
-                )
-                self.model = served_ids[0]
-                self._model_verified = True
-                return self.model
-
-            raise RuntimeError(
-                "Requested embedding model id not served by endpoint. "
-                f"requested={requested!r} served={served_ids!r}"
-            )
-
-        self.model = served_ids[0]
-        self._model_verified = True
-        return self.model
-
-    def embed_texts(self, texts: Sequence[str]) -> List[List[float]]:
-        """Embed texts via vLLM API with deterministic local cache."""
-        if not texts:
-            return []
-
-        model = self.resolve_model()
-        namespace = None
-        if self._memory is not None:
-            namespace = f"embed:{model}:{self._memory.namespace_version}"
-        outputs: List[Optional[List[float]]] = [None] * len(texts)
-        pending_texts: List[str] = []
-        pending_indices: List[int] = []
-        pending_keys: List[str] = []
-
-        for idx, text in enumerate(texts):
-            raw_text = str(text or "")
-            key = canonical_hash(raw_text)
-            if self.cache_enabled and key in self._cache:
-                outputs[idx] = list(self._cache[key])
-                continue
-            if self._memory is not None and namespace is not None:
-                entry = self._memory.get(namespace, key)
-                if entry is not None and entry.value_type == "f32z":
-                    try:
-                        vector = _decode_embedding_f32z(entry.value)
-                    except Exception:
-                        vector = None
-                    if vector is not None:
-                        outputs[idx] = vector
-                        if self.cache_enabled:
-                            self._cache[key] = vector
-                        continue
-            pending_texts.append(raw_text)
-            pending_indices.append(idx)
-            pending_keys.append(key)
-
-        for start in range(0, len(pending_texts), self.batch_size):
-            batch_texts = pending_texts[start : start + self.batch_size]
-            batch_indices = pending_indices[start : start + self.batch_size]
-            batch_keys = pending_keys[start : start + self.batch_size]
-
-            response = requests.post(
-                self.embeddings_url,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "input": batch_texts,
-                },
-                timeout=self.timeout_seconds,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            data = sorted(payload.get("data", []), key=lambda row: int(row.get("index", 0)))
-
-            if len(data) != len(batch_texts):
-                raise RuntimeError(
-                    f"Embedding response mismatch: expected {len(batch_texts)}, got {len(data)}"
-                )
-
-            for local_idx, row in enumerate(data):
-                embedding = row.get("embedding")
-                if not isinstance(embedding, list) or not embedding:
-                    raise RuntimeError("Embedding response missing vector")
-                vector = [float(v) for v in embedding]
-                global_idx = batch_indices[local_idx]
-                outputs[global_idx] = vector
-                if self.cache_enabled:
-                    self._cache[batch_keys[local_idx]] = vector
-                if self._memory is not None and namespace is not None:
-                    try:
-                        blob, meta = _encode_embedding_f32z(vector)
-                        self._memory.set(
-                            namespace,
-                            batch_keys[local_idx],
-                            value_type="f32z",
-                            value=blob,
-                            meta=meta,
-                        )
-                    except Exception:
-                        pass
-
-        finalized: List[List[float]] = []
-        for idx, vector in enumerate(outputs):
-            if vector is None:
-                raise RuntimeError(f"Missing embedding for index {idx}")
-            finalized.append(vector)
-        return finalized
 
 
 def fit_embedding_ridge_proxy(

@@ -1016,8 +1016,10 @@ def run_lda_tree_recovery_learned_experiment(
         "tree_svd_sketch": asdict(tree_metrics),
     }
 
+    public_config = {**asdict(config), "quadratic_utility_weight": float(config.lambda_multiplier)}
+    public_config.pop("lambda_multiplier", None)
     return LDATreeRecoveryLearnedSummary(
-        config={**asdict(config), "quadratic_utility_weight": float(config.lambda_multiplier)},
+        config=public_config,
         topic_meta=dict(world.topic_meta),
         utility_truth=dict(exact_summary.utility_truth),
         exact_reference={
@@ -1034,7 +1036,7 @@ def run_lda_tree_recovery_learned_experiment(
             linear_component_name="topic_mixture_linear_term",
             interaction_component_name="topic_mixture_quadratic_term",
             weighting_scheme="linear_plus_quadratic_utility",
-            metadata={"family": "lda_tree_recovery_learned"},
+            metadata={"problem_id": "lda_tree_recovery_learned"},
         ),
     )
 

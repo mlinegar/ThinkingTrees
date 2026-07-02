@@ -42,12 +42,24 @@ from src.core.logged_supervision import (
     write_logged_observations_jsonl,
 )
 from src.core.ops_checks import LawKind
+from src.ctreepo.contracts import (
+    LAW_ID_LEAF_PRESERVATION,
+    LAW_ID_MERGE_PRESERVATION,
+    LAW_ID_ON_RANGE_IDEMPOTENCE,
+    LAW_SET_ALL,
+    LAW_SET_LEAF_AND_MERGE_PRESERVATION,
+    LAW_SET_LEAF_PRESERVATION_ONLY,
+    LAW_SET_MERGE_PRESERVATION_ONLY,
+    LAW_SET_ON_RANGE_IDEMPOTENCE_ONLY,
+    LAW_SET_ROOT_ONLY,
+)
 from src.ctreepo.sim.composite_objective import (
     OBJECTIVE_ESTIMATOR_KEYS,
     CompositeObjectiveSpec,
     evaluate_composite_objective,
     evaluate_composite_objective_from_metrics,
     objective_estimator_alias,
+    resolve_root_local_objective_weights,
     scalarize_objective_estimates,
 )
 from src.ctreepo.sim.core import lda_tree_recovery as _base
@@ -200,6 +212,7 @@ class LeafLocalMixtureUtilityConfig:
     law_internal_query_rate: float = 0.10
     law_leaf_query_design: str = "uniform"
     law_internal_query_design: str = "uniform"
+    local_law_weight: Optional[float] = None
     law_task_objective_weight: float = 1.0
     law_c1_weight: float = 1.0 / 3.0
     law_c3_weight: float = 1.0 / 3.0
@@ -255,7 +268,7 @@ class LeafLocalMixtureUtilitySummary:
 
     def to_json(self) -> str:
         payload = {
-            "family": self.family,
+            "problem_id": self.family,
             "target_kind": self.target_kind,
             "config": self.config,
             "topic_meta": self.topic_meta,
@@ -389,6 +402,23 @@ def _validate_config(config: LeafLocalMixtureUtilityConfig) -> None:
     ):
         if not math.isfinite(float(value)) or float(value) < 0.0:
             raise ValueError(f"{name} must be finite and non-negative")
+    if config.local_law_weight is not None:
+        if (
+            not math.isfinite(float(config.local_law_weight))
+            or float(config.local_law_weight) < 0.0
+            or float(config.local_law_weight) > 1.0
+        ):
+            raise ValueError("local_law_weight must be in [0, 1]")
+        explicit_overrides = (
+            not math.isclose(float(config.law_task_objective_weight), 1.0),
+            not math.isclose(float(config.law_c1_weight), 1.0 / 3.0),
+            not math.isclose(float(config.law_c3_weight), 1.0 / 3.0),
+            not math.isclose(float(config.law_c2_proxy_weight), 1.0 / 3.0),
+        )
+        if any(explicit_overrides):
+            raise ValueError(
+                "local_law_weight is mutually exclusive with explicit law/root weights"
+            )
     if float(config.inference_prior_mass) < 0.0:
         raise ValueError("inference_prior_mass must be non-negative")
     if int(config.inference_max_iter) <= 0:
@@ -400,22 +430,28 @@ def _validate_config(config: LeafLocalMixtureUtilityConfig) -> None:
 def _local_law_objective_spec(
     config: LeafLocalMixtureUtilityConfig,
 ) -> CompositeObjectiveSpec:
+    task_weight, law_weights, input_mode = _resolve_lda_objective_weights(config)
     return CompositeObjectiveSpec(
         name="configured_objective",
         selection_metric_name="configured_objective",
-        task_name="task_objective",
-        task_weight=float(config.law_task_objective_weight),
-        local_law_weights=_resolved_lda_law_weight_map(config),
-        proxy_weights={},
-        weighting_scheme="explicit_task_plus_local_law",
-        task_weight_source="config_law_task_objective_weight",
+        root_metric_name="mean_aux_oracle_target_abs_error",
+        root_share=float(task_weight),
+        local_law_component_weights=law_weights,
+        auxiliary_diagnostic_weights={},
+        weighting_scheme=str(input_mode),
+        root_share_source=(
+            "derived_from_local_law_weight"
+            if str(input_mode) == "lambda"
+            else "normalized_explicit_weights"
+        ),
         metadata={
-            "task_metric_name": "mean_aux_oracle_target_abs_error",
+            "objective_input_mode": str(input_mode),
+            "root_metric_name": "mean_aux_oracle_target_abs_error",
             "task_delta_metric_name": "mean_aux_oracle_target_delta",
             "local_law_metric_names": {
-                "c1": "mean_c1",
-                "c2_proxy": "mean_c2_proxy",
-                "c3": "mean_c3",
+                LAW_ID_LEAF_PRESERVATION: "mean_c1",
+                LAW_ID_ON_RANGE_IDEMPOTENCE: "mean_c2_proxy",
+                LAW_ID_MERGE_PRESERVATION: "mean_c3",
             },
         },
     )
@@ -423,7 +459,7 @@ def _local_law_objective_spec(
 
 def _world_signature(config: LeafLocalMixtureUtilityConfig) -> Dict[str, object]:
     return {
-        "family": "leaf_local_mixture_utility",
+        "problem_id": "leaf_local_mixture_utility",
         "n_topics": int(config.n_topics),
         "vocab_size": int(config.vocab_size),
         "doc_tokens": int(config.doc_tokens),
@@ -1073,38 +1109,34 @@ def _objective_metrics_from_summary(
         metrics=metrics,
     )
     local_law_weight_total = float(sum(float(v) for v in objective_spec.local_law_weights.values()))
-    proxy_weight_total = float(sum(float(v) for v in objective_spec.proxy_weights.values()))
+    auxiliary_weight_total = float(sum(float(v) for v in objective_spec.proxy_weights.values()))
     total_weight_without_proxy = float(objective_spec.total_weight_without_proxy())
-    local_law_objective_value = float(sum(float(v) for v in objective_eval.local_law_raw.values()))
+    local_law_weight = float(objective_spec.local_law_weight())
     local_law_objective_term = float(sum(float(v) for v in objective_eval.local_law_terms.values()))
+    local_law_objective_value = (
+        float(local_law_objective_term / local_law_weight)
+        if local_law_weight > 0.0
+        else 0.0
+    )
     proxy_objective_value = float(sum(float(v) for v in objective_eval.proxy_raw.values()))
     proxy_objective_term = float(sum(float(v) for v in objective_eval.proxy_terms.values()))
-    task_weight = float(objective_spec.task_weight)
-    normalized_task_share = (
-        float(task_weight / total_weight_without_proxy)
-        if total_weight_without_proxy > 0.0
-        else float("nan")
-    )
-    normalized_local_law_share = (
-        float(local_law_weight_total / total_weight_without_proxy)
-        if total_weight_without_proxy > 0.0
-        else float("nan")
-    )
+    normalized_task_share = float(objective_spec.normalized_task_share())
+    normalized_local_law_share = float(local_law_weight)
     out = {
         "objective_name": objective_name,
         "selection_metric_name": objective_name,
         "weighting_scheme": str(objective_spec.weighting_scheme),
-        "task_metric_name": str(
-            dict(objective_spec.metadata).get("task_metric_name", objective_spec.task_name)
+        "root_metric_name": str(
+            dict(objective_spec.metadata).get("root_metric_name", objective_spec.root_metric_name)
         ),
-        "task_weight": task_weight,
         "local_law_weight_total": local_law_weight_total,
-        "proxy_weight_total": proxy_weight_total,
+        "auxiliary_diagnostic_weight_total": auxiliary_weight_total,
         "total_weight_without_proxy": total_weight_without_proxy,
-        "normalized_task_share": normalized_task_share,
-        "normalized_local_law_share": normalized_local_law_share,
+        "root_share": normalized_task_share,
+        "local_law_weight": normalized_local_law_share,
+        "local_law_component_weights": objective_spec.normalized_local_law_weights(),
         "quadratic_utility_weight": float(config.lambda_multiplier),
-        "model_lambda_multiplier": float(config.lambda_multiplier),
+        "model_quadratic_utility_weight": float(config.lambda_multiplier),
         "full_objective_value": float(objective_eval.total),
         "task_objective_value": float(objective_eval.task_raw),
         "task_objective_term": float(objective_eval.task_term),
@@ -1114,11 +1146,7 @@ def _objective_metrics_from_summary(
         "local_law_objective_term": local_law_objective_term,
         "proxy_objective_value": proxy_objective_value,
         "proxy_objective_term": proxy_objective_term,
-        "local_law_weights": {
-            str(name): float(value)
-            for name, value in dict(objective_spec.local_law_weights).items()
-        },
-        "proxy_weights": {
+        "auxiliary_diagnostic_weights": {
             str(name): float(value) for name, value in dict(objective_spec.proxy_weights).items()
         },
     }
@@ -1145,6 +1173,8 @@ def _objective_metrics_from_summary(
                 f"{alias}_local_law_objective_term",
                 f"{alias}_proxy_objective_value",
                 f"{alias}_proxy_objective_term",
+                f"{alias}_root_share",
+                f"{alias}_local_law_weight",
             ):
                 if key in estimator_payload:
                     out[str(key)] = estimator_payload[key]
@@ -1169,7 +1199,7 @@ def _augment_summary_metrics_with_objective_estimators(
 ) -> Dict[str, object]:
     out = dict(metrics)
     task_metric_name = str(
-        dict(objective_spec.metadata).get("task_metric_name", objective_spec.task_name)
+        dict(objective_spec.metadata).get("root_metric_name", objective_spec.root_metric_name)
     )
     task_value = float(out.get(task_metric_name, float("nan")))
     task_estimates = _constant_estimator_map(task_value)
@@ -1235,12 +1265,22 @@ def _augment_summary_metrics_with_objective_estimators(
         alias = objective_estimator_alias(base_name, estimator)
         if alias in estimator_payload:
             out[str(alias)] = estimator_payload[alias]
+        for key in tuple(estimator_payload.keys()):
+            if not str(key).startswith(f"{alias}_"):
+                continue
+            if key in estimator_payload:
+                out[str(key)] = estimator_payload[key]
     width_key = f"{base_name}_eb_width"
     if width_key in estimator_payload:
         out[width_key] = estimator_payload[width_key]
     selection_value_key = f"{base_name}_selection_value"
     if selection_value_key in estimator_payload:
         out[selection_value_key] = estimator_payload[selection_value_key]
+    local_law_objective_term_key = f"{base_name}_local_law_objective_term"
+    if local_law_objective_term_key in estimator_payload:
+        out[f"{base_name}_local_law_term_total"] = estimator_payload[
+            local_law_objective_term_key
+        ]
     return out
 
 
@@ -1274,7 +1314,6 @@ def _serialize_law_policy_artifact(
         metadata={
             "suite_role": str(config.suite_role),
             "quadratic_utility_weight": float(config.lambda_multiplier),
-            "lambda_multiplier": float(config.lambda_multiplier),
         },
     )
 
@@ -1819,16 +1858,21 @@ def _true_doc_target(
     W_base: np.ndarray,
     lambda_multiplier: float,
 ) -> float:
-    return float(
-        np.sum(
-            _base_leaf_utilities(
-                doc,
-                theta=theta,
-                W_base=W_base,
-                lambda_multiplier=lambda_multiplier,
-                latent_leaf_tokens=0,
-            )
-        )
+    """Closed-form leaf-local-mixture target.
+
+    Thin re-export for back-compat: the canonical implementation lives in
+    :mod:`src.ctreepo.oracles.lda` and is registered as
+    ``oracle:leaf_local_mixture_target`` in the unified ladder registry.
+    Internal call sites still import from this module by name; the registry
+    is the single source of truth.
+    """
+    from src.ctreepo.oracles.lda import leaf_local_mixture_target
+
+    return leaf_local_mixture_target(
+        doc,
+        theta=theta,
+        W_base=W_base,
+        lambda_multiplier=lambda_multiplier,
     )
 
 
@@ -2827,9 +2871,98 @@ VALID_LDA_LAW_PACKAGES = (
     "all_laws",
 )
 
+_LDA_PACKAGE_TO_LAW_SET_ID = {
+    "all_laws": LAW_SET_ALL,
+    "root_only": LAW_SET_ROOT_ONLY,
+    "c1_only": LAW_SET_LEAF_PRESERVATION_ONLY,
+    "c3_only": LAW_SET_MERGE_PRESERVATION_ONLY,
+    "c2_only": LAW_SET_ON_RANGE_IDEMPOTENCE_ONLY,
+    "c1c3": LAW_SET_LEAF_AND_MERGE_PRESERVATION,
+}
+
+
+def _lda_public_law_set_id(config: LeafLocalMixtureUtilityConfig) -> str:
+    return _LDA_PACKAGE_TO_LAW_SET_ID.get(
+        str(getattr(config, "law_package", "all_laws")).strip().lower(),
+        LAW_SET_ALL,
+    )
+
+
+def _active_lda_laws(config: LeafLocalMixtureUtilityConfig) -> Tuple[str, ...]:
+    pkg = str(getattr(config, "law_package", "all_laws")).strip().lower()
+    if pkg == "root_only":
+        return tuple()
+    if pkg == "c1_only":
+        return (LAW_ID_LEAF_PRESERVATION,)
+    if pkg == "c3_only":
+        return (LAW_ID_MERGE_PRESERVATION,)
+    if pkg == "c1c3":
+        return (LAW_ID_LEAF_PRESERVATION, LAW_ID_MERGE_PRESERVATION)
+    if pkg == "c2_only":
+        return (LAW_ID_ON_RANGE_IDEMPOTENCE,)
+    return (
+        LAW_ID_LEAF_PRESERVATION,
+        LAW_ID_ON_RANGE_IDEMPOTENCE,
+        LAW_ID_MERGE_PRESERVATION,
+    )
+
+
+def _resolve_lda_objective_weights(
+    config: LeafLocalMixtureUtilityConfig,
+) -> Tuple[float, Dict[str, float], str]:
+    active = _active_lda_laws(config)
+    if config.local_law_weight is not None:
+        explicit_overrides = (
+            not math.isclose(float(config.law_task_objective_weight), 1.0),
+            not math.isclose(float(config.law_c1_weight), 1.0 / 3.0),
+            not math.isclose(float(config.law_c3_weight), 1.0 / 3.0),
+            not math.isclose(float(config.law_c2_proxy_weight), 1.0 / 3.0),
+        )
+        if any(explicit_overrides):
+            raise ValueError(
+                "local_law_weight is mutually exclusive with explicit law/root weights"
+            )
+        resolved = resolve_root_local_objective_weights(
+            local_law_weight=float(config.local_law_weight),
+            active_laws=active,
+            objective_context="lda objective",
+        )
+        return (
+            float(resolved.root_share),
+            {
+                LAW_ID_LEAF_PRESERVATION: float(resolved.local_law_shares.get(LAW_ID_LEAF_PRESERVATION, 0.0)),
+                LAW_ID_ON_RANGE_IDEMPOTENCE: float(resolved.local_law_shares.get(LAW_ID_ON_RANGE_IDEMPOTENCE, 0.0)),
+                LAW_ID_MERGE_PRESERVATION: float(resolved.local_law_shares.get(LAW_ID_MERGE_PRESERVATION, 0.0)),
+            },
+            "lambda",
+        )
+    resolved = resolve_root_local_objective_weights(
+        local_law_weight=None,
+        active_laws=active,
+        explicit_root_weight=float(config.law_task_objective_weight),
+        explicit_law_weights=_resolved_lda_law_weight_map(config),
+        objective_context="lda objective",
+    )
+    return (
+        float(resolved.root_share),
+        {
+            LAW_ID_LEAF_PRESERVATION: float(resolved.local_law_shares.get(LAW_ID_LEAF_PRESERVATION, 0.0)),
+            LAW_ID_ON_RANGE_IDEMPOTENCE: float(resolved.local_law_shares.get(LAW_ID_ON_RANGE_IDEMPOTENCE, 0.0)),
+            LAW_ID_MERGE_PRESERVATION: float(resolved.local_law_shares.get(LAW_ID_MERGE_PRESERVATION, 0.0)),
+        },
+        "explicit_weights",
+    )
+
 
 def _resolve_lda_law_weights(config: LeafLocalMixtureUtilityConfig) -> Tuple[float, float, float]:
     """Resolve effective (c1, c3, c2_proxy) weights from law_package or config fields."""
+    if config.local_law_weight is not None:
+        _, law_weights, _ = _resolve_lda_objective_weights(config)
+        return (
+            float(law_weights.get(LAW_ID_LEAF_PRESERVATION, 0.0)),
+            float(law_weights.get(LAW_ID_MERGE_PRESERVATION, 0.0)),
+            float(law_weights.get(LAW_ID_ON_RANGE_IDEMPOTENCE, 0.0)),
+        )
     pkg = str(getattr(config, "law_package", "all_laws")).strip().lower()
     if pkg == "all_laws":
         return (
@@ -2857,9 +2990,9 @@ def _resolve_lda_law_weights(config: LeafLocalMixtureUtilityConfig) -> Tuple[flo
 def _resolved_lda_law_weight_map(config: LeafLocalMixtureUtilityConfig) -> Dict[str, float]:
     eff_c1_w, eff_c3_w, eff_c2_w = _resolve_lda_law_weights(config)
     return {
-        "c1": float(eff_c1_w),
-        "c2_proxy": float(eff_c2_w),
-        "c3": float(eff_c3_w),
+        LAW_ID_LEAF_PRESERVATION: float(eff_c1_w),
+        LAW_ID_ON_RANGE_IDEMPOTENCE: float(eff_c2_w),
+        LAW_ID_MERGE_PRESERVATION: float(eff_c3_w),
     }
 
 
@@ -2872,9 +3005,9 @@ def _weighted_lda_law_score(
 ) -> float:
     weights = _resolved_lda_law_weight_map(config)
     return float(
-        float(weights["c1"]) * float(c1)
-        + float(weights["c2_proxy"]) * float(c2_proxy)
-        + float(weights["c3"]) * float(c3)
+        float(weights[LAW_ID_LEAF_PRESERVATION]) * float(c1)
+        + float(weights[LAW_ID_ON_RANGE_IDEMPOTENCE]) * float(c2_proxy)
+        + float(weights[LAW_ID_MERGE_PRESERVATION]) * float(c3)
     )
 
 
@@ -3117,7 +3250,15 @@ def _evaluate_local_law_doc_policy(
 ) -> Dict[str, object]:
     tree = _balanced_merge_internal_nodes(summary_rows, truth_rows, leaf_masses=masses)
     c1_values = [float(x) for x in tree["leaf_c1"]]
-    c3_values = [float(node["error"]) for node in tree["internal_nodes"]]
+    internal_nodes_seq = list(tree["internal_nodes"])
+    c3_values = [float(node["error"]) for node in internal_nodes_seq]
+    per_node_merge_residual = list(c3_values)
+    per_node_level = [int(node.get("level", 0)) for node in internal_nodes_seq]
+    if per_node_level:
+        max_level = max(per_node_level)
+        per_node_depth = [int(max_level - lvl) for lvl in per_node_level]
+    else:
+        per_node_depth = []
     c2_values: List[float] = []
     for row, n_tok in zip(
         np.asarray(summary_rows, dtype=np.float64), np.asarray(masses, dtype=np.float64)
@@ -3180,6 +3321,10 @@ def _evaluate_local_law_doc_policy(
         "root_c3_error": float(tree["root_error"]),
         "aux_oracle_target": float(aux_target),
         "aux_oracle_target_delta": float(aux_target - pooled_target),
+        # Per-node merge residuals retained as diagnostics: each entry is
+        # ‖fhat(p) − merge(fhat(children(p)))‖ at internal node p.
+        "per_node_merge_residual": per_node_merge_residual,
+        "per_node_depth": per_node_depth,
     }
 
 
@@ -3247,9 +3392,9 @@ def _summarize_local_law_policy(
         objective_spec,
         task_value=float(mean_aux_abs_error),
         local_law_values={
-            "c1": float(mean_c1),
-            "c2_proxy": float(mean_c2),
-            "c3": float(mean_c3),
+            LAW_ID_LEAF_PRESERVATION: float(mean_c1),
+            LAW_ID_ON_RANGE_IDEMPOTENCE: float(mean_c2),
+            LAW_ID_MERGE_PRESERVATION: float(mean_c3),
         },
     )
     corr = (
@@ -3761,16 +3906,20 @@ def _build_local_law_payload(
     payload = {
         "config": {
             "local_law_mode": str(config.local_law_mode),
-            "law_package": str(getattr(config, "law_package", "all_laws")),
+            "law_set_id": _lda_public_law_set_id(config),
             "exact_family": str(getattr(config, "exact_family", "")),
             "law_leaf_query_rate": float(config.law_leaf_query_rate),
             "law_internal_query_rate": float(config.law_internal_query_rate),
             "law_leaf_query_design": str(config.law_leaf_query_design),
             "law_internal_query_design": str(config.law_internal_query_design),
-            "law_task_objective_weight": float(config.law_task_objective_weight),
-            "law_c1_weight": float(config.law_c1_weight),
-            "law_c3_weight": float(config.law_c3_weight),
-            "law_c2_proxy_weight": float(config.law_c2_proxy_weight),
+            "local_law_weight": (
+                None if config.local_law_weight is None else float(config.local_law_weight)
+            ),
+            "root_share": float(objective_spec.normalized_task_share()),
+            "local_law_component_weights": {
+                str(name): float(value)
+                for name, value in objective_spec.normalized_local_law_weights().items()
+            },
             "law_calibration_ridge": float(config.law_calibration_ridge),
             "law_eval_leaf_sample_rate": float(config.law_eval_leaf_sample_rate),
             "law_eval_internal_sample_rate": float(config.law_eval_internal_sample_rate),
@@ -4019,8 +4168,7 @@ def _build_local_law_payload(
         metadata={
             "analysis_partition_mode": str(config.analysis_partition_mode),
             "quadratic_utility_weight": float(config.lambda_multiplier),
-            "lambda_multiplier": float(config.lambda_multiplier),
-            "law_package": str(config.law_package),
+            "law_set_id": _lda_public_law_set_id(config),
             "oracle_target_metric": "mean_aux_oracle_target_abs_error",
             "configured_objective_name": str(objective_spec.selection_metric_name),
             "resolved_local_law_weights": {
@@ -4297,7 +4445,6 @@ def run_leaf_local_mixture_utility_experiment_from_world(
         "theta_true": [float(x) for x in theta_true.tolist()],
         "W_base": [[float(x) for x in row] for row in W_base.tolist()],
         "quadratic_utility_weight": float(config.lambda_multiplier),
-        "lambda_multiplier": float(config.lambda_multiplier),
     }
     heterogeneity = {
         "mean_train_gap_signal": _base._safe_stat(heterogeneity_signal_train, kind="mean"),
@@ -4755,6 +4902,23 @@ def run_leaf_local_mixture_utility_experiment_from_world(
         ),
     }
     cfg_payload = asdict(config)
+    objective_spec_for_config = _local_law_objective_spec(config)
+    for legacy_key in (
+        "law_package",
+        "law_task_objective_weight",
+        "law_c1_weight",
+        "law_c3_weight",
+        "law_c2_proxy_weight",
+        "lambda_multiplier",
+    ):
+        cfg_payload.pop(legacy_key, None)
+    cfg_payload["law_set_id"] = _lda_public_law_set_id(config)
+    cfg_payload["root_share"] = float(objective_spec_for_config.normalized_task_share())
+    cfg_payload["local_law_weight"] = float(objective_spec_for_config.local_law_weight())
+    cfg_payload["local_law_component_weights"] = {
+        str(name): float(value)
+        for name, value in objective_spec_for_config.normalized_local_law_weights().items()
+    }
     cfg_payload["quadratic_utility_weight"] = float(config.lambda_multiplier)
     cfg_payload.update(leaf_meta)
     return LeafLocalMixtureUtilitySummary(
@@ -4775,7 +4939,7 @@ def run_leaf_local_mixture_utility_experiment_from_world(
             interaction_component_name="local_topic_mixture_quadratic_term",
             weighting_scheme="linear_plus_lambda_local_quadratic_utility",
             metadata={
-                "family": "leaf_local_mixture_utility",
+                "problem_id": "leaf_local_mixture_utility",
                 "target_kind": "local_nonlinear_leaf_sum",
                 "latent_partition_mode": str(config.latent_partition_mode),
                 "analysis_partition_mode": str(config.analysis_partition_mode),

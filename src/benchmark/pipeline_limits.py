@@ -138,7 +138,7 @@ def _default_task_text(index: int, target_chars: int = 1200) -> str:
         "Tax policy should preserve growth while reducing inequality.",
         "Education funding should prioritize early learning and skills training.",
         "Trade policy should protect workers while maintaining cooperation.",
-        "Energy strategy should combine grid reliability with decarbonization.",
+        "Energy strategy should combine grid resilience with decarbonization.",
         "Rural development requires broadband and logistics modernization.",
         "Institutions should strengthen anti-corruption enforcement and transparency.",
     ]

@@ -102,15 +102,21 @@ class ManifestoDataset:
         Initialize the dataset.
 
         Args:
-            data_dir: Path to manifesto_project_full directory
+            data_dir: Path to a Manifesto corpus directory with
+                manifesto_maindataset.csv and texts/.
             countries: List of country codes to include (None = all)
             min_year: Minimum election year to include
             max_year: Maximum election year to include
             require_text: Only include manifestos with text files
         """
         if data_dir is None:
-            # Default path - go from src/tasks/manifesto to project root (4 levels up)
-            data_dir = Path(__file__).parent.parent.parent.parent / "data" / "raw" / "manifesto_project_full"
+            # Prefer the fetched full-document corpus. The legacy
+            # manifesto_project_full/texts surface is a fragment corpus and is
+            # quarantined under manifesto_project_full_OLD/texts.
+            root = Path(__file__).parent.parent.parent.parent
+            full_doc_dir = root / "data" / "raw" / "manifesto_corpus_benoit"
+            legacy_dir = root / "data" / "raw" / "manifesto_project_full"
+            data_dir = full_doc_dir if full_doc_dir.exists() else legacy_dir
 
         self.data_dir = Path(data_dir)
         self.countries = countries

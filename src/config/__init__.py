@@ -5,7 +5,6 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Dict
 
-
 _MODULE_EXPORTS = {
     "src.config.concurrency": (
         "ConcurrencyConfig",
@@ -33,7 +32,14 @@ _MODULE_EXPORTS = {
     "src.config.dspy_config": (
         "get_xml_adapter",
         "configure_dspy",
+        "create_local_engine_lm",
+        "create_local_engine_lm_with_manager",
         "create_vllm_lm",
+    ),
+    "src.config.local_inference": (
+        "LocalInferenceConfig",
+        "add_local_inference_args",
+        "resolve_local_inference_config",
     ),
     "src.config.logging": (
         "setup_logging",
@@ -106,7 +112,12 @@ __all__ = [
     "DEFAULT_DATASET",
     "get_xml_adapter",
     "configure_dspy",
+    "create_local_engine_lm",
+    "create_local_engine_lm_with_manager",
     "create_vllm_lm",
+    "LocalInferenceConfig",
+    "add_local_inference_args",
+    "resolve_local_inference_config",
     "setup_logging",
     "get_logger",
     "LOG_TRUNCATE_LENGTH",

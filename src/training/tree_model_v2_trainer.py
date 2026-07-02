@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, Iterable, List, Literal, Mapping, Option
 import torch
 import torch.nn.functional as F
 
+from treepo.training.local_law import corrected_local_law_target_mse
 from src.tree.packed_execution import PackedForwardResult
 from src.tree.tree_model_v2 import TreeModelProtocol
 
@@ -31,6 +32,11 @@ class ScalarTarget:
     normalized: bool = False
     kind: str = "node"
     weight: float = 1.0
+    proxy_value: Optional[float] = None
+    oracle_value: Optional[float] = None
+    observed: Optional[bool] = None
+    propensity: Optional[float] = None
+    local_law_adjustment: bool = False
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -156,6 +162,12 @@ class CompiledScalarTargetGroup:
     target_values: torch.Tensor
     weights: torch.Tensor
     count: int
+    corrected_local_law_mask: Optional[torch.Tensor] = None
+    proxy_target_values: Optional[torch.Tensor] = None
+    oracle_target_values: Optional[torch.Tensor] = None
+    observed: Optional[torch.Tensor] = None
+    propensities: Optional[torch.Tensor] = None
+    corrected_local_law_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -398,6 +410,10 @@ class TreeModelV2Trainer:
                 total = total + weight * mean_loss * float(root_count)
                 # Do NOT add local count to n_terms — root count is enough.
                 stats[key] = float(raw_loss.detach().cpu().item())
+                if int(getattr(group, "corrected_local_law_count", 0) or 0) > 0:
+                    stats[f"{key}_corrected_local_law_count"] = int(
+                        group.corrected_local_law_count
+                    )
 
         # --- Fiber pair losses: same treatment — normalise to mean, scale
         # by root_count so they don't inflate n_terms. ---
@@ -480,6 +496,8 @@ class TreeModelV2Trainer:
         if not targets:
             return None
         head = str(targets[0].head or self.adapter.head_name)
+        adjustment_mask = [self._uses_corrected_local_law_target(target) for target in targets]
+        has_adjustment = any(adjustment_mask)
         return CompiledScalarTargetGroup(
             head=head,
             state_indices=torch.as_tensor(
@@ -498,6 +516,60 @@ class TreeModelV2Trainer:
                 device=self.device,
             ),
             count=int(len(targets)),
+            corrected_local_law_mask=(
+                torch.as_tensor(adjustment_mask, dtype=torch.bool, device=self.device)
+                if has_adjustment
+                else None
+            ),
+            proxy_target_values=(
+                torch.as_tensor(
+                    [
+                        self._normalized_scalar_value(
+                            self._target_proxy_value(target),
+                            normalized=bool(target.normalized),
+                        )
+                        for target in targets
+                    ],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                if has_adjustment
+                else None
+            ),
+            oracle_target_values=(
+                torch.as_tensor(
+                    [
+                        self._normalized_scalar_value(
+                            self._target_oracle_value(target),
+                            normalized=bool(target.normalized),
+                        )
+                        for target in targets
+                    ],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                if has_adjustment
+                else None
+            ),
+            observed=(
+                torch.as_tensor(
+                    [self._target_observed(target) for target in targets],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                if has_adjustment
+                else None
+            ),
+            propensities=(
+                torch.as_tensor(
+                    [self._target_propensity(target) for target in targets],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+                if has_adjustment
+                else None
+            ),
+            corrected_local_law_count=int(sum(1 for flag in adjustment_mask if flag)),
         )
 
     def _compiled_scalar_targets_loss(
@@ -511,16 +583,90 @@ class TreeModelV2Trainer:
         preds = self.model.predict_normalized_batch(states, head=group.head).reshape(-1)
         target_values = group.target_values.to(device=preds.device, dtype=preds.dtype)
         weights = group.weights.to(device=preds.device, dtype=preds.dtype)
-        loss = (((preds - target_values) ** 2) * weights).sum()
+        per_row_loss = (preds - target_values) ** 2
+        if (
+            group.corrected_local_law_mask is not None
+            and group.proxy_target_values is not None
+            and group.oracle_target_values is not None
+            and group.observed is not None
+            and group.propensities is not None
+        ):
+            corrected_rows = corrected_local_law_target_mse(
+                predictions=preds,
+                proxy_targets=group.proxy_target_values,
+                oracle_targets=group.oracle_target_values,
+                observed=group.observed,
+                propensity=group.propensities,
+                weights=None,
+            )
+            mask = group.corrected_local_law_mask.to(device=preds.device)
+            per_row_loss = torch.where(mask, corrected_rows, per_row_loss)
+        loss = (per_row_loss * weights).sum()
         return loss, int(group.count)
 
     def _normalized_scalar_target(self, target: ScalarTarget) -> float:
-        if bool(target.normalized):
-            return float(target.value)
+        return self._normalized_scalar_value(float(target.value), normalized=bool(target.normalized))
+
+    def _normalized_scalar_value(self, value: float, *, normalized: bool) -> float:
+        if bool(normalized):
+            return float(value)
         span = float(self.config.score_targets.target_max) - float(self.config.score_targets.target_min)
         if span <= 0.0:
             return 0.5
-        return (float(target.value) - float(self.config.score_targets.target_min)) / float(span)
+        return (float(value) - float(self.config.score_targets.target_min)) / float(span)
+
+    def _target_adjustment_payload(self, target: ScalarTarget) -> Mapping[str, Any]:
+        metadata = dict(target.metadata or {})
+        payload = metadata.get("local_law_adjustment")
+        if isinstance(payload, Mapping):
+            return payload
+        payload = metadata.get("corrected_local_law")
+        if isinstance(payload, Mapping):
+            return payload
+        return {}
+
+    def _uses_corrected_local_law_target(self, target: ScalarTarget) -> bool:
+        payload = self._target_adjustment_payload(target)
+        enabled = bool(target.local_law_adjustment) or bool(payload.get("enabled", False))
+        if not enabled:
+            return False
+        return self._target_proxy_value(target) is not None and self._target_oracle_value(target) is not None
+
+    def _target_proxy_value(self, target: ScalarTarget) -> float:
+        if target.proxy_value is not None:
+            return float(target.proxy_value)
+        payload = self._target_adjustment_payload(target)
+        for key in ("proxy_value", "proxy_target", "proxy"):
+            if key in payload and payload[key] is not None:
+                return float(payload[key])
+        return float(target.value)
+
+    def _target_oracle_value(self, target: ScalarTarget) -> float:
+        if target.oracle_value is not None:
+            return float(target.oracle_value)
+        payload = self._target_adjustment_payload(target)
+        for key in ("oracle_value", "oracle_target", "oracle"):
+            if key in payload and payload[key] is not None:
+                return float(payload[key])
+        return float(target.value)
+
+    def _target_observed(self, target: ScalarTarget) -> bool:
+        if target.observed is not None:
+            return bool(target.observed)
+        payload = self._target_adjustment_payload(target)
+        for key in ("observed", "sampled", "node_observed"):
+            if key in payload:
+                return bool(payload[key])
+        return True
+
+    def _target_propensity(self, target: ScalarTarget) -> float:
+        if target.propensity is not None:
+            return float(target.propensity)
+        payload = self._target_adjustment_payload(target)
+        for key in ("propensity", "joint_propensity", "sampling_joint_inclusion_prob"):
+            if key in payload and payload[key] is not None:
+                return float(payload[key])
+        return 1.0
 
     def _expanded_fiber_pairs(
         self,

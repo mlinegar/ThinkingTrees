@@ -6,10 +6,6 @@ from src.tree.learned_sketch_simulation import (
     SimulationConfig,
     match_hll_precision_for_bits,
 )
-from src.tree.hll_merge_learning_simulation import (
-    ExactMaxMerger,
-    HLLMergeLearningConfig,
-)
 
 
 def test_compat_wrapper_exports_public_treepo_symbols() -> None:
@@ -18,5 +14,3 @@ def test_compat_wrapper_exports_public_treepo_symbols() -> None:
     assert sk.estimate() > 0.0
     assert match_hll_precision_for_bits(256) >= 4
     assert isinstance(SimulationConfig(), SimulationConfig)
-    assert isinstance(HLLMergeLearningConfig(), HLLMergeLearningConfig)
-    assert isinstance(ExactMaxMerger(), ExactMaxMerger)

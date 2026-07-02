@@ -2,19 +2,27 @@ from __future__ import annotations
 
 import pytest
 
+from src.ctreepo.contracts import (
+    LAW_ID_LEAF_PRESERVATION,
+    LAW_ID_MERGE_PRESERVATION,
+    LAW_ID_ON_RANGE_IDEMPOTENCE,
+)
 from src.ctreepo.sim.core.run_intent import materialize_tree_run_intent
 
 
 def _minimal_config(**overrides):
     base = {
-        "baseline_family": "tree_neural",
+        "method_id": "tree_neural",
+        "law_set_id": "all",
         "depth_discount_gamma": 1.0,
-        "c1_relative_weight": 1.0,
-        "c2_relative_weight": 1.0,
-        "c3_relative_weight": 1.0,
+        "local_law_component_weights": {
+            LAW_ID_LEAF_PRESERVATION: 1.0,
+            LAW_ID_ON_RANGE_IDEMPOTENCE: 1.0,
+            LAW_ID_MERGE_PRESERVATION: 1.0,
+        },
         "schedule_consistency_weight": 0.0,
         "local_law_weight": 0.5,
-        "task_objective_weight": 0.5,
+        "root_share": None,
     }
     base.update(overrides)
     return base
@@ -22,8 +30,23 @@ def _minimal_config(**overrides):
 
 def test_valid_config_passes() -> None:
     intent = materialize_tree_run_intent(_minimal_config())
-    assert intent["baseline_family"] == "tree_neural"
+    assert intent["method_id"] == "tree_neural"
+    assert intent["law_set_id"] == "all"
+    assert "baseline_family" not in intent
     assert intent["depth_discount_gamma"] == 1.0
+
+
+def test_legacy_private_family_label_can_materialize_intent() -> None:
+    intent = materialize_tree_run_intent(
+        _minimal_config(
+            method_id="",
+            baseline_family="tree_neural",
+            law_package="all",
+        )
+    )
+    assert intent["method_id"] == "tree_neural"
+    assert intent["law_set_id"] == "all"
+    assert "baseline_family" not in intent
 
 
 def test_gamma_boundary_values_accepted() -> None:
@@ -39,9 +62,16 @@ def test_gamma_out_of_range_raises() -> None:
 
 
 def test_negative_relative_weight_raises() -> None:
-    for field in ("c1_relative_weight", "c2_relative_weight", "c3_relative_weight"):
-        with pytest.raises(ValueError, match=field):
-            materialize_tree_run_intent(_minimal_config(**{field: -0.5}))
+    with pytest.raises(ValueError, match="local_law_component_weights"):
+        materialize_tree_run_intent(
+            _minimal_config(
+                local_law_component_weights={
+                    LAW_ID_LEAF_PRESERVATION: -0.5,
+                    LAW_ID_ON_RANGE_IDEMPOTENCE: 1.0,
+                    LAW_ID_MERGE_PRESERVATION: 1.0,
+                }
+            )
+        )
 
 
 def test_negative_schedule_consistency_weight_raises() -> None:
@@ -54,16 +84,16 @@ def test_negative_schedule_consistency_weight_raises() -> None:
 def test_negative_optional_weight_raises() -> None:
     with pytest.raises(ValueError, match="local_law_weight"):
         materialize_tree_run_intent(_minimal_config(local_law_weight=-0.1))
-    with pytest.raises(ValueError, match="task_objective_weight"):
-        materialize_tree_run_intent(_minimal_config(task_objective_weight=-0.1))
+    with pytest.raises(ValueError, match="root_share"):
+        materialize_tree_run_intent(_minimal_config(local_law_weight=None, root_share=-0.1))
 
 
 def test_none_optional_weight_accepted() -> None:
     intent = materialize_tree_run_intent(
-        _minimal_config(local_law_weight=None, task_objective_weight=None)
+        _minimal_config(local_law_weight=None, root_share=None)
     )
     assert intent["local_law_weight"] is None
-    assert intent["task_objective_weight"] is None
+    assert intent["root_share"] is None
 
 
 def test_topology_tree_accepted() -> None:

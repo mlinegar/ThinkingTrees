@@ -409,7 +409,7 @@ class _FakeSession:
 
 
 @pytest.mark.anyio
-async def test_async_from_inference_engine_routes_chat_and_diffusion_surfaces() -> None:
+async def test_async_from_inference_engine_routes_text_generation_through_chat_surface() -> None:
     # Chat surface (mocked).
     chat_engine = build_inference_engine(
         "sglang",
@@ -431,24 +431,26 @@ async def test_async_from_inference_engine_routes_chat_and_diffusion_surfaces() 
     _ = await chat_op.aencode("hello", rubric="rubric")
     assert seen_chat[0].surface is EngineSurface.CHAT_OPENAI
 
-    # Diffusion surface (fake HTTP session).
+    # Generate transport still reaches /generate, but the operator emits chat/text requests.
     session = _FakeSession({"text": "ok"})
-    diff_engine = build_inference_engine(
-        "sglang",
-        surface=EngineSurface.DIFFUSION_GENERATE,
-        base_url="http://localhost:30000",
+    generate_engine = build_inference_engine(
+        "vllm_omni",
+        surface=EngineSurface.CHAT_OPENAI,
+        base_url="http://localhost:8004",
         model="default",
         session=session,
+        transport="generate",
     )
-    seen_diff: List[Any] = []
-    orig_diff = diff_engine.aexecute
+    seen_generate: List[Any] = []
+    orig_generate = generate_engine.aexecute
 
-    async def wrapped_diff(request):
-        seen_diff.append(request)
-        return await orig_diff(request)
+    async def wrapped_generate(request):
+        seen_generate.append(request)
+        return await orig_generate(request)
 
-    diff_engine.aexecute = wrapped_diff  # type: ignore[assignment]
+    generate_engine.aexecute = wrapped_generate  # type: ignore[assignment]
 
-    diff_op = AsyncFromInferenceEngine(diff_engine)
-    _ = await diff_op.aencode("hello", rubric="rubric")
-    assert seen_diff[0].surface is EngineSurface.DIFFUSION_GENERATE
+    generate_op = AsyncFromInferenceEngine(generate_engine, use_generate_prompt_templates=True)
+    _ = await generate_op.aencode("hello", rubric="rubric")
+    assert seen_generate[0].surface is EngineSurface.CHAT_OPENAI
+    assert session.calls[0]["url"] == "http://localhost:8004/generate"

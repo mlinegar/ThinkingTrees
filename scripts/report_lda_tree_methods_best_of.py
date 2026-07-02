@@ -68,7 +68,7 @@ def _safe_mean(xs: Iterable[float]) -> float:
 
 
 def _stage2_qweight(cfg: dict) -> float:
-    return _safe_float(cfg.get("quadratic_utility_weight", cfg.get("lambda_multiplier")))
+    return _safe_float(cfg.get("quadratic_utility_weight"))
 
 
 def _qweight_label(value: float) -> str:
@@ -344,7 +344,6 @@ def _flatten_stage2(summary: dict) -> List[dict]:
                 "latent_leaf_tokens": int(cfg.get("latent_leaf_tokens", -1)),
                 "local_mixture_concentration": _safe_float(cfg.get("local_mixture_concentration")),
                 "quadratic_utility_weight": qweight,
-                "lambda_multiplier": qweight,
                 "budget_regime": str(cfg.get("budget_regime", "")),
                 "leaf_label_budget": _safe_float(cfg.get("leaf_label_budget")),
                 "seed": int(cfg.get("seed", -1)),
@@ -667,7 +666,7 @@ def main() -> int:
     )
 
     stage2_taus = sorted({float(row["local_mixture_concentration"]) for row in stage2_rows})
-    stage2_lambdas = sorted({float(row["lambda_multiplier"]) for row in stage2_rows})
+    stage2_lambdas = sorted({float(row["quadratic_utility_weight"]) for row in stage2_rows})
     stage2_llts = sorted({int(row["latent_leaf_tokens"]) for row in stage2_rows if int(row["latent_leaf_tokens"]) > 0})
     hero_lam = max(stage2_lambdas)
     best_llt = max(stage2_llts)
@@ -683,7 +682,7 @@ def main() -> int:
             and str(row.get("budget_regime")) == "all_leaves_labeled"
             and (llt is None or int(row.get("latent_leaf_tokens", -1)) == llt)
             and (tau is None or float(row.get("local_mixture_concentration")) == tau)
-            and (lam is None or float(row.get("lambda_multiplier")) == lam)
+            and (lam is None or float(row.get("quadratic_utility_weight")) == lam)
         ]
         return _safe_mean(vals)
 

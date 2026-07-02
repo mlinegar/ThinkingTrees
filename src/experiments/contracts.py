@@ -80,14 +80,18 @@ class ReferenceModelRef:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return _json_safe(asdict(self))
+        payload = asdict(self)
+        family = str(payload.pop("family", "") or "")
+        if family:
+            payload.setdefault("reference_model_id", family)
+        return _json_safe(payload)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any] | None) -> "ReferenceModelRef":
         data = dict(payload or {})
         return cls(
             reference_id=str(data.get("reference_id", "") or ""),
-            family=str(data.get("family", "") or ""),
+            family=str(data.get("reference_model_id", data.get("family", "")) or ""),
             variant=str(data.get("variant", "") or ""),
             engine=str(data.get("engine", "") or ""),
             model=str(data.get("model", "") or ""),
@@ -186,6 +190,8 @@ class BenchmarkRef:
 
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
+        family = str(payload.pop("family", "") or "")
+        payload["problem_id"] = family
         if self.prepared_data is not None:
             payload["prepared_data"] = self.prepared_data.to_dict()
         return _json_safe(payload)
@@ -196,7 +202,7 @@ class BenchmarkRef:
         prepared_data = data.get("prepared_data")
         return cls(
             benchmark_id=str(data.get("benchmark_id", "") or ""),
-            family=str(data.get("family", "") or ""),
+            family=str(data.get("problem_id", data.get("family", "")) or ""),
             scope=str(data.get("scope", "") or ""),
             cell=str(data.get("cell", "") or ""),
             dataset_id=str(data.get("dataset_id", "") or ""),
@@ -225,6 +231,7 @@ class MethodRef:
 
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
+        payload.pop("family", None)
         if self.supervision is not None:
             payload["supervision"] = self.supervision.to_dict()
         if self.control_ref is not None:
@@ -241,7 +248,7 @@ class MethodRef:
         reference_model = data.get("reference_model")
         return cls(
             method_id=str(data.get("method_id", "") or ""),
-            family=str(data.get("family", "") or ""),
+            family=str(data.get("family", data.get("method_id", "")) or ""),
             variant=str(data.get("variant", "") or ""),
             engine=str(data.get("engine", "") or ""),
             model=str(data.get("model", "") or ""),
@@ -589,6 +596,7 @@ class ExperimentSpec:
 def benchmark_ref_from_parts(
     *,
     family: str,
+    problem_id: str = "",
     scope: str = "",
     cell: str = "",
     dataset_id: str = "",
@@ -596,9 +604,10 @@ def benchmark_ref_from_parts(
     prepared_data: PreparedDataRef | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> BenchmarkRef:
+    resolved_problem_id = str(problem_id or family)
     benchmark_id = stable_hash(
         {
-            "family": str(family),
+            "problem_id": resolved_problem_id,
             "scope": str(scope),
             "cell": str(cell),
             "dataset_id": str(dataset_id),
@@ -608,7 +617,7 @@ def benchmark_ref_from_parts(
     )[:16]
     return BenchmarkRef(
         benchmark_id=benchmark_id,
-        family=str(family),
+        family=resolved_problem_id,
         scope=str(scope),
         cell=str(cell),
         dataset_id=str(dataset_id),
@@ -621,6 +630,7 @@ def benchmark_ref_from_parts(
 def method_ref_from_parts(
     *,
     family: str,
+    method_id: str = "",
     variant: str = "",
     engine: str = "",
     model: str = "",
@@ -630,9 +640,10 @@ def method_ref_from_parts(
     reference_model: ReferenceModelRef | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> MethodRef:
-    method_id = stable_hash(
+    resolved_method_id = str(method_id or family)
+    method_key = stable_hash(
         {
-            "family": str(family),
+            "method_id": resolved_method_id,
             "variant": str(variant),
             "engine": str(engine),
             "model": str(model),
@@ -643,7 +654,7 @@ def method_ref_from_parts(
         }
     )[:16]
     return MethodRef(
-        method_id=method_id,
+        method_id=resolved_method_id or method_key,
         family=str(family),
         variant=str(variant),
         engine=str(engine),

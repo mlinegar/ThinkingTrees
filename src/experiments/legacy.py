@@ -13,6 +13,7 @@ from src.experiments.contracts import (
     default_phase_specs,
     method_ref_from_parts,
 )
+from src.experiments.roles import ROLE_SCORER, metadata_with_roles, oracle_ref, role_ref
 from src.runtime import contracts as runtime_contracts
 from src.ctreepo.sim import manifest as sim_manifest
 
@@ -31,14 +32,18 @@ def runtime_run_spec_to_experiment(
         name=str(benchmark.get("name", "") or ""),
         metadata=benchmark,
     )
-    model = dict(spec.model or {})
+    roles = dict(spec.roles or {})
+    scorer = dict(roles.get("scorer", {}) or {})
+    if not scorer:
+        surfaces = dict(spec.surfaces or {})
+        scorer = dict(surfaces.get("chat_openai", {}) or {})
     method_ref = method_ref_from_parts(
         family="runtime_eval",
-        variant=str(model.get("family", "") or ""),
-        engine=str(model.get("engine", "") or ""),
-        model=str(model.get("model", "") or ""),
+        variant=str(scorer.get("family", "") or ""),
+        engine=str(scorer.get("engine", "") or ""),
+        model=str(scorer.get("model", "") or ""),
         adapter=adapter_id,
-        metadata=model,
+        metadata={"roles": roles, "oracle": dict(spec.oracle or {}), "scorer": scorer},
     )
     phases = tuple(
         PhaseSpec(
@@ -50,7 +55,7 @@ def runtime_run_spec_to_experiment(
                 "seeds": list(phase.seeds),
                 "num_samples": int(phase.num_samples),
                 "split": str(phase.split),
-                "modes": list(phase.modes),
+                "methods": list(phase.methods),
             },
         )
         for phase in list(spec.phases or ())
@@ -88,7 +93,7 @@ def runtime_run_spec_to_experiment(
         report_profiles=("runtime_eval_summary",),
         launch_command=launch_command,
         resume_command=launch_command,
-        metadata={"legacy_runtime_run_id": str(spec.run_id)},
+        metadata={"runtime_experiment_id": str(spec.run_id)},
     )
 
 
@@ -123,7 +128,18 @@ def ctreepo_runs_to_experiment(
                 family=family,
                 variant=str(run.config.get("variant", "") or ""),
                 adapter=adapter_id,
-                metadata=dict(run.config or {}),
+                metadata=metadata_with_roles(
+                    dict(run.config or {}),
+                    roles={
+                        ROLE_SCORER: role_ref(
+                            role=ROLE_SCORER,
+                            surface="native",
+                            engine="simulation",
+                            model=family,
+                        )
+                    },
+                    oracle=oracle_ref(kind="simulation_truth", source=family),
+                ),
             ),
         )
         tasks.append(

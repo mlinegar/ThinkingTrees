@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 
+from src.ctreepo.contracts import LAW_ID_ON_RANGE_IDEMPOTENCE
 from src.tree.markov_changepoint_ops_count_simulation import (
     OPSCountConfig,
     run_markov_changepoint_ops_count_experiment,
@@ -42,7 +43,6 @@ def _write_markov_runs(input_root: Path) -> None:
         leaf_query_rate=1.0,
         include_root_query=True,
         law_package="all_laws_plus_sched",
-        c2_weight=0.2,
         schedule_consistency_weight=0.1,
         violation_tau=0.0,
         data_seed=3,
@@ -87,8 +87,8 @@ def test_unified_markov_learnability_report_exposes_no_local_law_baseline(tmp_pa
 
     assert summary["baseline_value_source"] == "family_default"
     assert summary["baseline_sweep_value"] == 0.0
-    assert summary["best_baseline_point"]["lambda_local"] == 0.0
-    assert summary["best_no_local_law_point"]["lambda_local"] == 0.0
+    assert summary["best_baseline_point"]["local_law_weight"] == 0.0
+    assert summary["best_no_local_law_point"]["local_law_weight"] == 0.0
     assert "normalized_lambda_tradeoff" in summary["objective_weighting_schemes"]
     assert "Best baseline point" in md
     assert "Baseline comparison" in md
@@ -113,7 +113,7 @@ def test_unified_markov_learnability_report_accepts_base_override(tmp_path: Path
             "--output-dir",
             str(output_dir),
             "--base-field",
-            "lambda_local",
+            "local_law_weight",
             "--base-value",
             "1.0",
         ],
@@ -122,10 +122,10 @@ def test_unified_markov_learnability_report_accepts_base_override(tmp_path: Path
     )
 
     summary = json.loads((output_dir / "learnability_summary.json").read_text(encoding="utf-8"))
-    assert summary["baseline_axis_name"] == "lambda_local"
+    assert summary["baseline_axis_name"] == "local_law_weight"
     assert summary["baseline_value_source"] == "cli"
     assert summary["baseline_sweep_value"] == 1.0
-    assert summary["best_no_local_law_point"]["lambda_local"] == 1.0
+    assert summary["best_no_local_law_point"]["local_law_weight"] == 1.0
 
 
 def test_unified_markov_learnability_report_paper_safe_excludes_partial_weight_rows(tmp_path: Path) -> None:
@@ -135,7 +135,7 @@ def test_unified_markov_learnability_report_paper_safe_excludes_partial_weight_r
 
     broken_path = input_root / "llw_1p0" / "seed_10.json"
     payload = json.loads(broken_path.read_text(encoding="utf-8"))
-    payload["objective"].pop("local_law_c2_weight", None)
+    payload["objective"]["local_law_component_weights"].pop(LAW_ID_ON_RANGE_IDEMPOTENCE, None)
     broken_path.write_text(json.dumps(payload), encoding="utf-8")
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -162,5 +162,5 @@ def test_unified_markov_learnability_report_paper_safe_excludes_partial_weight_r
     assert summary["rows_loaded_before_filter"] == 2
     assert summary["run_count"] == 1
     assert summary["paper_safe_exclusion_reasons"] == {
-        "missing_explicit_local_law_weight:objective_local_law_c2_weight": 1
+        f"missing_explicit_local_law_weight:{LAW_ID_ON_RANGE_IDEMPOTENCE}": 1
     }

@@ -36,10 +36,26 @@ from src.experiments import (
     write_experiment_status,
 )
 from src.experiments.legacy import runtime_run_spec_to_experiment
-from src.runtime.adapters.ruler import RulerDatasetSpec, RulerSyntheticAdapter
-from src.runtime.backbone import BackboneAdapter, BackboneConfig
-from src.runtime.contracts import RunPhaseSpec, RunSpec, RunUnit, RuntimeConfig, expand_units, units_digest
+from src.runtime.adapters.registry import build_benchmark_adapter
+from src.runtime.contracts import (
+    RunPhaseSpec,
+    RunSpec,
+    RunUnit,
+    RuntimeConfig,
+    expand_units,
+    units_digest,
+)
+from src.runtime.inference_context import (
+    RuntimeInferenceContext,
+    normalize_runtime_inference_spec,
+    normalize_role_config,
+    normalize_oracle_config,
+    normalize_surface_config,
+    validate_public_runtime_config,
+)
 from src.runtime.loop import run_unit
+from src.runtime.methods import METHOD_COMPARE_RUNNER_ALIASES, PAPER_METHOD_ALIASES, MethodResources
+from src.runtime.results import runtime_method_ref, runtime_role_metadata, runtime_surface_metadata
 from src.runtime.trace import JsonlWriter, TraceWriter
 
 
@@ -94,7 +110,7 @@ def _default_backend_base_url(backend: str, defaults: Optional[Dict[str, Any]] =
     if resolved:
         return resolved
     raise ValueError(
-        f"Engine '{backend}' requires an explicit model base URL for runtime evaluation."
+        f"Engine '{backend}' requires an explicit scorer endpoint for runtime evaluation."
     )
 
 
@@ -121,26 +137,57 @@ def _write_yaml(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(yaml.safe_dump(payload, sort_keys=False))
 
 
-def _load_run_spec(config_path: Path, *, output_dir: Path, run_id: Optional[str]) -> RunSpec:
-    cfg = yaml.safe_load(config_path.read_text())
+def _as_list(value: Any) -> List[Any]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return list(value)
 
-    run_id_final = run_id or cfg.get("run", {}).get("run_id") or f"runtime_{_utc_ts()}"
+
+def _load_run_spec(
+    config_path: Path,
+    *,
+    output_dir: Path,
+    experiment_id: Optional[str],
+) -> RunSpec:
+    cfg = yaml.safe_load(config_path.read_text()) or {}
+    validate_public_runtime_config(cfg)
+
+    experiment_cfg = dict(cfg.get("experiment", {}) or {})
+    experiment_id_final = (
+        experiment_id
+        or cfg.get("experiment_id")
+        or experiment_cfg.get("experiment_id")
+        or f"runtime_{_utc_ts()}"
+    )
 
     benchmark_cfg = dict(cfg.get("benchmark", {}))
-    model_cfg = dict(cfg.get("model", {}))
     runtime_defaults = dict(cfg.get("runtime_defaults", {}))
+    roles_cfg = normalize_role_config(cfg)
+    surfaces_cfg = normalize_surface_config(cfg)
+    oracle_cfg = normalize_oracle_config(cfg)
+    default_methods = _as_list(cfg.get("methods"))
 
     phases: List[RunPhaseSpec] = []
     for ph in cfg.get("phases", []):
+        phase_methods = _as_list(ph.get("methods"))
+        if not phase_methods:
+            phase_methods = list(default_methods)
+        if not phase_methods:
+            raise ValueError(
+                f"Phase {ph.get('phase_id', '<unknown>')!r} must define methods "
+                "or use top-level methods."
+            )
         phases.append(
             RunPhaseSpec(
                 phase_id=str(ph["phase_id"]),
-                tasks=list(ph["tasks"]),
+                tasks=_as_list(ph["tasks"]),
                 lengths=[int(x) for x in ph["lengths"]],
                 seeds=[int(x) for x in ph["seeds"]],
                 num_samples=int(ph["num_samples"]),
                 split=str(ph.get("split", "validation")),
-                modes=list(ph["modes"]),
+                methods=[str(item) for item in phase_methods],
                 runtime_overrides=dict(ph.get("runtime_overrides", {})),
                 benchmark_overrides=dict(ph.get("benchmark_overrides", {})),
                 runtime_grid=dict(ph.get("runtime_grid", {})),
@@ -148,19 +195,188 @@ def _load_run_spec(config_path: Path, *, output_dir: Path, run_id: Optional[str]
             )
         )
 
+    configured_roles = set(roles_cfg)
+    missing_by_method: Dict[str, List[str]] = {}
+    for method in sorted({m for phase in phases for m in phase.methods}):
+        missing = [
+            role
+            for role in _required_roles_for_method(method)
+            if role != "state_model_or_embedder" and role not in configured_roles
+        ]
+        if "state_model_or_embedder" in _required_roles_for_method(method):
+            if "state_model" not in configured_roles and "embedder" not in configured_roles:
+                missing.append("state_model_or_embedder")
+        if missing:
+            missing_by_method[method] = missing
+    if missing_by_method:
+        rendered = "; ".join(
+            f"{method}: {', '.join(missing)}"
+            for method, missing in sorted(missing_by_method.items())
+        )
+        raise ValueError(f"Runtime config is missing required role(s): {rendered}")
+
     return RunSpec(
-        run_id=run_id_final,
+        run_id=str(experiment_id_final),
         created_utc=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         output_dir=str(output_dir),
         benchmark=benchmark_cfg,
-        model=model_cfg,
         runtime_defaults=runtime_defaults,
         phases=phases,
+        surfaces=surfaces_cfg,
+        roles=roles_cfg,
+        oracle=oracle_cfg,
     )
 
 
-def _run_dir(output_dir: Path, run_id: str) -> Path:
-    return output_dir / run_id
+def _runner_for_method(method: str) -> str:
+    method = str(method)
+    if method in PAPER_METHOD_ALIASES:
+        return str(PAPER_METHOD_ALIASES[method])
+    if method in METHOD_COMPARE_RUNNER_ALIASES:
+        return str(METHOD_COMPARE_RUNNER_ALIASES[method][0])
+    return method
+
+
+def _required_roles_for_method(method: str) -> List[str]:
+    runner = _runner_for_method(method)
+    if runner in {"ground_truth", "empty"}:
+        return []
+    required = ["scorer"]
+    if runner == "embedding_retrieval_llm":
+        required.append("embedder")
+    if runner in {
+        "chunk_concat_baseline",
+        "runtime_no_repair",
+        "runtime_no_verifier",
+        "runtime_full",
+        "llm_tree_memory",
+        "treepo_text_compressor_llm",
+    }:
+        required.append("summarizer")
+    if runner == "neural_tree_selector_llm":
+        required.append("state_model_or_embedder")
+    return required
+
+
+def _runtime_plan_payload(
+    *,
+    config_path: Path,
+    output_dir: Path,
+    experiment_id: Optional[str],
+    check_endpoints: bool = False,
+) -> Dict[str, Any]:
+    spec = _load_run_spec(config_path, output_dir=output_dir, experiment_id=experiment_id)
+    units = expand_units(spec)
+    methods = sorted({unit.method for unit in units})
+    ctx = RuntimeInferenceContext(spec.to_dict(), mock=False)
+    roles = {
+        key: {
+            "config": value,
+            "capabilities": ctx.role_capabilities(key).to_dict(),
+            "ready": (
+                _endpoint_ready(str(value.get("base_url", "") or ""))
+                if check_endpoints and str(value.get("base_url", "") or "")
+                else None
+            ),
+        }
+        for key, value in ctx.roles.items()
+    }
+    surfaces = {
+        key: {
+            "config": value,
+            "capabilities": ctx.capabilities(key).to_dict(),
+            "ready": (
+                _endpoint_ready(str(value.get("base_url", "") or ""))
+                if check_endpoints and str(value.get("base_url", "") or "")
+                else None
+            ),
+        }
+        for key, value in ctx.surfaces.items()
+    }
+    missing: Dict[str, List[str]] = {}
+    call_groups: Dict[str, List[str]] = {
+        "scorer": [],
+        "summarizer": [],
+        "embedder": [],
+        "state_model": [],
+    }
+    configured = set(ctx.roles)
+    for method in methods:
+        required = _required_roles_for_method(method)
+        missing_for_method: List[str] = []
+        for role in required:
+            if role == "state_model_or_embedder":
+                if "state_model" in configured:
+                    call_groups["state_model"].append(method)
+                elif "embedder" in configured:
+                    call_groups["embedder"].append(method)
+                else:
+                    missing_for_method.append("state_model_or_embedder")
+                continue
+            call_groups.setdefault(role, []).append(method)
+            if role not in configured:
+                missing_for_method.append(role)
+        if missing_for_method:
+            missing[method] = missing_for_method
+    return {
+        "experiment_id": spec.run_id,
+        "config_path": str(config_path),
+        "unit_count": len(units),
+        "methods": [
+            {
+                "method_id": method,
+                "runner_id": _runner_for_method(method),
+                "required_roles": _required_roles_for_method(method),
+            }
+            for method in methods
+        ],
+        "phases": [phase.to_dict() for phase in spec.phases],
+        "roles": roles,
+        "oracle": spec.oracle,
+        "surfaces": surfaces,
+        "missing_roles": missing,
+        "call_groups": {key: sorted(set(value)) for key, value in call_groups.items() if value},
+    }
+
+
+def cmd_plan(args: argparse.Namespace) -> None:
+    payload = _runtime_plan_payload(
+        config_path=Path(args.config).resolve(),
+        output_dir=Path(args.output_dir).resolve(),
+        experiment_id=args.experiment_id,
+        check_endpoints=bool(args.check_endpoints),
+    )
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+        return
+    print(f"Runtime experiment: {payload['experiment_id']}")
+    print(f"- Config: {payload['config_path']}")
+    print(f"- Units: {payload['unit_count']}")
+    print("- Methods:")
+    for method in payload["methods"]:
+        required = ", ".join(method["required_roles"]) or "none"
+        print(f"  - {method['method_id']} -> {method['runner_id']} ({required})")
+    print("- Roles:")
+    for key, info in payload["roles"].items():
+        caps = dict(info.get("capabilities") or {})
+        ready = info.get("ready")
+        suffix = "" if ready is None else f" ready={ready}"
+        print(
+            f"  - {key}: surface={caps.get('surface')} engine={caps.get('engine')} "
+            f"model={caps.get('model')} batching={caps.get('supports_batching')}{suffix}"
+        )
+    print(f"- Oracle: {payload['oracle']}")
+    if payload["missing_roles"]:
+        print("- Missing roles:")
+        for method, roles in payload["missing_roles"].items():
+            print(f"  - {method}: {', '.join(roles)}")
+    print("- Call groups:")
+    for surface, methods in payload["call_groups"].items():
+        print(f"  - {surface}: {', '.join(methods)}")
+
+
+def _experiment_dir(output_dir: Path, experiment_id: str) -> Path:
+    return output_dir / experiment_id
 
 
 def _runtime_experiment_status(
@@ -176,11 +392,7 @@ def _runtime_experiment_status(
 ) -> ProgressSnapshot:
     total_units = len(expand_units(spec))
     finished = int(completed_items) + int(failed_items)
-    percent_complete = (
-        100.0 * float(finished) / float(total_units)
-        if total_units > 0
-        else 100.0
-    )
+    percent_complete = 100.0 * float(finished) / float(total_units) if total_units > 0 else 100.0
     return ProgressSnapshot(
         experiment_id=str(spec.run_id),
         state=str(state),
@@ -191,8 +403,8 @@ def _runtime_experiment_status(
         active_items=int(active_items),
         pending_items=int(pending_items),
         percent_complete=percent_complete,
-        artifact_targets=("metrics_json", "merged_predictions_jsonl"),
-        metadata={"adapter": "runtime_eval", "output_root": str(run_dir)},
+        artifact_targets=("metrics_json", "merged_predictions_jsonl", "merged_calls_jsonl"),
+        metadata={"adapter": "runtime_eval", "experiment_root": str(run_dir)},
     )
 
 
@@ -201,14 +413,14 @@ def cmd_init(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    spec = _load_run_spec(config_path, output_dir=output_dir, run_id=args.run_id)
+    spec = _load_run_spec(config_path, output_dir=output_dir, experiment_id=args.experiment_id)
     units = expand_units(spec)
     digest = units_digest(units)
 
-    run_dir = _run_dir(output_dir, spec.run_id)
+    run_dir = _experiment_dir(output_dir, spec.run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    _write_yaml(run_dir / "resolved_run.yaml", spec.to_dict())
+    _write_yaml(run_dir / "resolved_experiment.yaml", spec.to_dict())
     _write_json(run_dir / "config.json", spec.to_dict())
 
     units_path = run_dir / "units.jsonl"
@@ -223,7 +435,7 @@ def cmd_init(args: argparse.Namespace) -> None:
             sys.executable,
             "scripts/run_runtime_eval.py",
             "run",
-            "--run-dir",
+            "--experiment-dir",
             str(run_dir),
         ],
     )
@@ -241,7 +453,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         run_dir,
         canonical_artifact_refs_from_paths(
             {
-                "resolved_run_yaml": str(run_dir / "resolved_run.yaml"),
+                "resolved_experiment_yaml": str(run_dir / "resolved_experiment.yaml"),
                 "config_json": str(run_dir / "config.json"),
                 "units_jsonl": str(units_path),
                 "units_digest_txt": str(run_dir / "units_digest.txt"),
@@ -251,8 +463,8 @@ def cmd_init(args: argparse.Namespace) -> None:
         ),
     )
 
-    print(f"Initialized run {spec.run_id}")
-    print(f"- Run dir: {run_dir}")
+    print(f"Initialized experiment {spec.run_id}")
+    print(f"- Experiment dir: {run_dir}")
     print(f"- Units: {len(units)} ({units_path})")
     print(f"- Digest: {digest[:12]}… ({run_dir / 'units_digest.txt'})")
 
@@ -260,7 +472,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 def _iter_units(run_dir: Path) -> Iterable[RunUnit]:
     units_path = run_dir / "units.jsonl"
     if not units_path.exists():
-        raise FileNotFoundError(f"units.jsonl not found in {run_dir}. Run init first.")
+        raise FileNotFoundError(f"units.jsonl not found in {run_dir}. Initialize the experiment first.")
     with units_path.open("r", encoding="utf-8") as f:
         for line in f:
             if not line.strip():
@@ -272,60 +484,19 @@ def _iter_units(run_dir: Path) -> Iterable[RunUnit]:
 def _load_config(run_dir: Path) -> Dict[str, Any]:
     config_json = run_dir / "config.json"
     if not config_json.exists():
-        raise FileNotFoundError(f"config.json not found in {run_dir}. Run init first.")
+        raise FileNotFoundError(f"config.json not found in {run_dir}. Initialize the experiment first.")
     return json.loads(config_json.read_text())
 
 
 def _make_runtime_config(spec: Dict[str, Any], unit: RunUnit) -> RuntimeConfig:
     base = dict(spec.get("runtime_defaults", {}))
     base.update(dict(unit.runtime_overrides or {}))
-    base["mode"] = unit.mode
+    base["method"] = unit.method
     return RuntimeConfig(**base)
 
 
-def _make_backbone(spec: Dict[str, Any], *, mock_llm: bool) -> Optional[BackboneAdapter]:
-    model_cfg = dict(spec.get("model", {}))
-    if not model_cfg:
-        return None
-
-    bb_cfg = BackboneConfig(
-        base_url=str(model_cfg.get("base_url", "http://localhost:8000/v1")),
-        model=str(model_cfg.get("model", "default")),
-        api_key=str(model_cfg.get("api_key", "EMPTY")),
-        temperature=float(model_cfg.get("temperature", 0.0)),
-        timeout=float(model_cfg.get("timeout", 120.0)),
-    )
-    return BackboneAdapter(config=bb_cfg, mock=mock_llm, enable_cache=bool(model_cfg.get("enable_cache", True)))
-
-
-def _make_adapter(spec: Dict[str, Any], run_dir: Path, unit: RunUnit) -> RulerSyntheticAdapter:
-    bench_cfg = dict(spec.get("benchmark", {}))
-    bench_cfg.update(dict(unit.benchmark_overrides or {}))
-    name = str(unit.benchmark)
-    if name != "ruler_synthetic":
-        raise ValueError(f"Only benchmark=ruler_synthetic is implemented (got {name!r})")
-
-    ruler_dir = Path(bench_cfg.get("ruler_dir", "outside_data/RULER")).resolve()
-    dataset_root = run_dir / "datasets"
-
-    ds_spec = RulerDatasetSpec(
-        task_id=unit.task_id,
-        split=unit.split,
-        max_seq_length=unit.max_seq_length,
-        num_samples=unit.num_samples,
-        seed=unit.seed,
-    )
-
-    return RulerSyntheticAdapter(
-        ruler_dir=ruler_dir,
-        dataset_root=dataset_root,
-        spec=ds_spec,
-        benchmark_name=str(bench_cfg.get("benchmark_name", "synthetic")),
-        tokenizer_type=str(bench_cfg.get("tokenizer_type", "openai")),
-        tokenizer_path=str(bench_cfg.get("tokenizer_path", "cl100k_base")),
-        model_template_type=str(bench_cfg.get("model_template_type", "base")),
-        ensure_prepared=bool(bench_cfg.get("ensure_prepared", True)),
-    )
+def _make_adapter(spec: Dict[str, Any], run_dir: Path, unit: RunUnit):
+    return build_benchmark_adapter(spec=spec, run_dir=run_dir, unit=unit)
 
 
 def _select_units(run_dir: Path, args: argparse.Namespace) -> List[RunUnit]:
@@ -353,7 +524,7 @@ def _select_units(run_dir: Path, args: argparse.Namespace) -> List[RunUnit]:
             continue
         if args.phase_id and unit.phase_id != args.phase_id:
             continue
-        if args.mode and unit.mode != args.mode:
+        if args.method and unit.method != args.method:
             continue
         if args.task_id and unit.task_id != args.task_id:
             continue
@@ -378,25 +549,36 @@ def _select_units(run_dir: Path, args: argparse.Namespace) -> List[RunUnit]:
             break
 
     if not selected:
-        raise SystemExit("No units selected (check --unit-id/--phase-id/--mode filters).")
+        raise SystemExit("No units selected (check --unit-id/--phase-id/--method filters).")
     return selected
 
 
 def _prepare_spec_for_run(
     spec: Dict[str, Any],
     *,
-    model_base_url: Optional[str],
+    scorer_endpoint: Optional[str],
 ) -> Dict[str, Any]:
-    """Create per-run spec copy with optional model endpoint override."""
+    """Create per-run spec copy with optional scorer endpoint override."""
     prepared = dict(spec)
-    model_cfg = dict(prepared.get("model", {}))
-    if model_base_url:
-        model_cfg["base_url"] = str(model_base_url)
-    prepared["model"] = model_cfg
+    roles_cfg = dict(prepared.get("roles", {}) or {})
+    surfaces_cfg = dict(prepared.get("surfaces", {}) or {})
+    if scorer_endpoint:
+        scorer_cfg = dict(roles_cfg.get("scorer") or {})
+        scorer_cfg["base_url"] = str(scorer_endpoint)
+        roles_cfg["scorer"] = scorer_cfg
+        summarizer_cfg = dict(roles_cfg.get("summarizer") or {})
+        if summarizer_cfg.get("defaulted_from") == "scorer":
+            summarizer_cfg["base_url"] = str(scorer_endpoint)
+            roles_cfg["summarizer"] = summarizer_cfg
+        chat_cfg = dict(surfaces_cfg.get("chat_openai") or {})
+        chat_cfg["base_url"] = str(scorer_endpoint)
+        surfaces_cfg["chat_openai"] = chat_cfg
+    prepared["roles"] = roles_cfg
+    prepared["surfaces"] = surfaces_cfg
     return prepared
 
 
-def _resolve_model_base_url(
+def _resolve_scorer_endpoint(
     spec: Dict[str, Any],
     *,
     args: argparse.Namespace,
@@ -410,15 +592,16 @@ def _resolve_model_base_url(
             usage="runtime evaluation backend selection",
         ).engine.value
     base_url = str(
-        args.model_base_url
-        or (spec.get("model", {}) or {}).get("base_url")
+        args.scorer_endpoint
+        or ((spec.get("roles", {}) or {}).get("scorer", {}) or {}).get("base_url")
+        or ((spec.get("surfaces", {}) or {}).get("chat_openai", {}) or {}).get("base_url")
         or _default_backend_base_url(
             explicit_backend or str(defaults.get("task_backend", "vllm")),
             defaults,
         )
     )
 
-    if explicit_backend and not args.model_base_url:
+    if explicit_backend and not args.scorer_endpoint:
         base_url = _default_backend_base_url(explicit_backend, defaults)
 
     if bool(args.mock_llm):
@@ -427,8 +610,15 @@ def _resolve_model_base_url(
     if _endpoint_ready(base_url):
         return base_url
 
-    raw_fallback_backend = getattr(args, "backend_fallback", defaults.get("fallback_backend", "none"))
-    if str(raw_fallback_backend or "").strip().lower().replace("-", "_") not in {"", "none", "off", "disabled"}:
+    raw_fallback_backend = getattr(
+        args, "backend_fallback", defaults.get("fallback_backend", "none")
+    )
+    if str(raw_fallback_backend or "").strip().lower().replace("-", "_") not in {
+        "",
+        "none",
+        "off",
+        "disabled",
+    }:
         fallback_backend = resolve_engine_for_usage(
             raw_fallback_backend,
             surface=EngineSurface.CHAT_OPENAI,
@@ -461,7 +651,9 @@ def _build_server_manager(
     port = (
         int(args.server_port)
         if args.server_port is not None
-        else int(default_engine_port(spec.engine, role="task", settings=defaults.get("settings")) or 0)
+        else int(
+            default_engine_port(spec.engine, role="task", settings=defaults.get("settings")) or 0
+        )
     )
     venv_path = None
     if spec.engine is EngineType.SGLANG:
@@ -483,16 +675,38 @@ def _run_selected_units(
     spec: Dict[str, Any],
     selected: List[RunUnit],
     args: argparse.Namespace,
-    model_base_url: Optional[str] = None,
+    scorer_endpoint: Optional[str] = None,
 ) -> None:
     trace = TraceWriter(run_dir)
-    prepared_spec = _prepare_spec_for_run(spec, model_base_url=model_base_url)
-    backbone = _make_backbone(prepared_spec, mock_llm=bool(args.mock_llm))
+    prepared_spec = _prepare_spec_for_run(spec, scorer_endpoint=scorer_endpoint)
+    prepared_spec = normalize_runtime_inference_spec(prepared_spec)
+    inference_context = RuntimeInferenceContext(
+        prepared_spec,
+        mock=bool(args.mock_llm),
+        call_sink=trace.write_call_record,
+    )
+    backbone = inference_context.backbone("scorer") if inference_context.has_role("scorer") else None
+    summarizer_backbone = (
+        inference_context.backbone("summarizer")
+        if inference_context.has_role("summarizer")
+        else None
+    )
+    embedding_client = (
+        inference_context.embedding_client() if inference_context.has_role("embedder") else None
+    )
+    resources = MethodResources(
+        backbone=backbone,
+        summarizer_backbone=summarizer_backbone,
+        embedding_client=embedding_client,
+        inference_context=inference_context,
+        run_config=prepared_spec,
+        mock=bool(args.mock_llm),
+    )
 
     for i, unit in enumerate(selected, start=1):
         print(
             f"[{i}/{len(selected)}] unit={unit.unit_id} phase={unit.phase_id} "
-            f"task={unit.task_id} len={unit.max_seq_length} seed={unit.seed} mode={unit.mode}"
+            f"task={unit.task_id} len={unit.max_seq_length} seed={unit.seed} method={unit.method}"
         )
         adapter = _make_adapter(prepared_spec, run_dir, unit)
         runtime = _make_runtime_config(prepared_spec, unit)
@@ -503,22 +717,27 @@ def _run_selected_units(
             runtime=runtime,
             trace=trace,
             backbone=backbone,
+            resources=resources,
             limit_problems=args.max_problems,
         )
 
 
 def cmd_run(args: argparse.Namespace) -> None:
-    run_dir = Path(args.run_dir).resolve()
+    if not args.experiment_dir:
+        raise SystemExit("missing --experiment-dir")
+    run_dir = Path(args.experiment_dir).resolve()
     spec = _load_config(run_dir)
     defaults = _load_inference_backend_defaults()
     selected = _select_units(run_dir, args)
     run_spec = RunSpec(
-        run_id=str(spec.get("run_id", "")),
+        run_id=str(spec.get("experiment_id") or spec.get("run_id", "")),
         created_utc=str(spec.get("created_utc", "")),
         output_dir=str(spec.get("output_dir", "")),
         benchmark=dict(spec.get("benchmark", {}) or {}),
-        model=dict(spec.get("model", {}) or {}),
         runtime_defaults=dict(spec.get("runtime_defaults", {}) or {}),
+        surfaces=dict(spec.get("surfaces", {}) or {}),
+        roles=dict(spec.get("roles", {}) or {}),
+        oracle=dict(spec.get("oracle", {}) or {}),
         phases=[
             RunPhaseSpec(
                 phase_id=str(phase.get("phase_id", "")),
@@ -527,7 +746,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 seeds=[int(item) for item in list(phase.get("seeds", []) or [])],
                 num_samples=int(phase.get("num_samples", 0) or 0),
                 split=str(phase.get("split", "validation") or "validation"),
-                modes=list(phase.get("modes", []) or []),
+                methods=list(phase.get("methods", []) or []),
                 runtime_overrides=dict(phase.get("runtime_overrides", {}) or {}),
                 benchmark_overrides=dict(phase.get("benchmark_overrides", {}) or {}),
                 runtime_grid=dict(phase.get("runtime_grid", {}) or {}),
@@ -551,7 +770,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     if args.dry_run:
         for u in selected:
             print(
-                f"unit={u.unit_id} phase={u.phase_id} task={u.task_id} len={u.max_seq_length} seed={u.seed} mode={u.mode}"
+                f"unit={u.unit_id} phase={u.phase_id} task={u.task_id} len={u.max_seq_length} seed={u.seed} method={u.method}"
             )
         return
 
@@ -563,9 +782,16 @@ def cmd_run(args: argparse.Namespace) -> None:
             usage="runtime evaluation managed startup",
             require_managed=True,
         ).engine.value
-        raw_fallback_backend = getattr(args, "backend_fallback", defaults.get("fallback_backend", "none"))
+        raw_fallback_backend = getattr(
+            args, "backend_fallback", defaults.get("fallback_backend", "none")
+        )
         fallback_backend = "none"
-        if str(raw_fallback_backend or "").strip().lower().replace("-", "_") not in {"", "none", "off", "disabled"}:
+        if str(raw_fallback_backend or "").strip().lower().replace("-", "_") not in {
+            "",
+            "none",
+            "off",
+            "disabled",
+        }:
             fallback_backend = resolve_engine_for_usage(
                 raw_fallback_backend,
                 surface=EngineSurface.CHAT_OPENAI,
@@ -593,7 +819,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                             spec=spec,
                             selected=selected,
                             args=args,
-                            model_base_url=str(server.url),
+                            scorer_endpoint=str(server.url),
                         )
 
                 asyncio.run(_run_managed())
@@ -611,13 +837,13 @@ def cmd_run(args: argparse.Namespace) -> None:
         if last_error is not None:
             raise last_error
 
-    model_base_url = _resolve_model_base_url(spec, args=args, defaults=defaults)
+    scorer_endpoint = _resolve_scorer_endpoint(spec, args=args, defaults=defaults)
     _run_selected_units(
         run_dir=run_dir,
         spec=spec,
         selected=selected,
         args=args,
-        model_base_url=model_base_url,
+        scorer_endpoint=scorer_endpoint,
     )
     completed_units = sum(
         1
@@ -637,22 +863,28 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 
 def cmd_aggregate(args: argparse.Namespace) -> None:
-    run_dir = Path(args.run_dir).resolve()
+    if not args.experiment_dir:
+        raise SystemExit("missing --experiment-dir")
+    run_dir = Path(args.experiment_dir).resolve()
 
     units_dir = run_dir / "units"
     if not units_dir.exists():
         raise SystemExit(f"No units dir found at {units_dir}; run some units first.")
 
-    # Merge steps + predictions.
+    # Merge calls + steps + predictions.
+    merged_calls = run_dir / "calls.jsonl"
     merged_steps = run_dir / "steps.jsonl"
     merged_preds = run_dir / "predictions.jsonl"
+    merged_calls.unlink(missing_ok=True)
     merged_steps.unlink(missing_ok=True)
     merged_preds.unlink(missing_ok=True)
 
+    calls_writer = JsonlWriter(merged_calls)
     steps_writer = JsonlWriter(merged_steps)
     preds_writer = JsonlWriter(merged_preds)
 
     partial_metrics: List[Dict[str, Any]] = []
+    call_count = 0
 
     for unit_dir in sorted(units_dir.iterdir()):
         if not unit_dir.is_dir():
@@ -661,6 +893,13 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
         mp = unit_dir / "metrics_partial.json"
         if mp.exists():
             partial_metrics.append(json.loads(mp.read_text()))
+
+        calls = unit_dir / "calls.jsonl"
+        if calls.exists():
+            for line in calls.read_text().splitlines():
+                if line.strip():
+                    calls_writer.write(json.loads(line))
+                    call_count += 1
 
         steps = unit_dir / "steps.jsonl"
         if steps.exists():
@@ -674,10 +913,17 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
                 if line.strip():
                     preds_writer.write(json.loads(line))
 
+    merged_calls.touch(exist_ok=True)
+    merged_steps.touch(exist_ok=True)
+    merged_preds.touch(exist_ok=True)
+
     # Aggregate metrics from merged predictions (preferred: consistent across adapters).
     primary_scores: List[float] = []
     by_phase: Dict[str, List[float]] = {}
-    by_task_len_mode: Dict[str, List[float]] = {}
+    by_task_len_method: Dict[str, List[float]] = {}
+    by_domain: Dict[str, List[float]] = {}
+    by_difficulty: Dict[str, List[float]] = {}
+    by_length_bucket: Dict[str, List[float]] = {}
 
     if merged_preds.exists():
         with merged_preds.open("r", encoding="utf-8") as f:
@@ -697,15 +943,26 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
                 phase = str(r.get("phase_id", ""))
                 by_phase.setdefault(phase, []).append(score)
 
-                key = f"{r.get('task_id')}|{r.get('max_seq_length')}|{r.get('mode')}"
-                by_task_len_mode.setdefault(key, []).append(score)
+                key = f"{r.get('task_id')}|{r.get('max_seq_length')}|{r.get('method')}"
+                by_task_len_method.setdefault(key, []).append(score)
+                problem_meta = dict((r.get("metadata") or {}).get("problem") or {})
+                if problem_meta.get("domain") is not None:
+                    by_domain.setdefault(str(problem_meta.get("domain")), []).append(score)
+                if problem_meta.get("difficulty") is not None:
+                    by_difficulty.setdefault(str(problem_meta.get("difficulty")), []).append(score)
+                if problem_meta.get("length") is not None:
+                    by_length_bucket.setdefault(str(problem_meta.get("length")), []).append(score)
 
     metrics_out: Dict[str, Any] = {
         "n_units": len(list(units_dir.iterdir())),
         "n_predictions": len(primary_scores),
+        "n_surface_calls": call_count,
         "primary_mean": sum(primary_scores) / max(1, len(primary_scores)),
         "by_phase": {k: sum(v) / max(1, len(v)) for k, v in by_phase.items()},
-        "by_task_len_mode": {k: sum(v) / max(1, len(v)) for k, v in by_task_len_mode.items()},
+        "by_task_len_method": {k: sum(v) / max(1, len(v)) for k, v in by_task_len_method.items()},
+        "by_domain": {k: sum(v) / max(1, len(v)) for k, v in by_domain.items()},
+        "by_difficulty": {k: sum(v) / max(1, len(v)) for k, v in by_difficulty.items()},
+        "by_length_bucket": {k: sum(v) / max(1, len(v)) for k, v in by_length_bucket.items()},
         "partial_units": partial_metrics,
     }
 
@@ -715,6 +972,7 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
         canonical_artifact_refs_from_paths(
             {
                 "metrics_json": str(run_dir / "metrics.json"),
+                "merged_calls_jsonl": str(merged_calls),
                 "merged_steps_jsonl": str(merged_steps),
                 "merged_predictions_jsonl": str(merged_preds),
             },
@@ -723,17 +981,22 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
         ),
     )
     result_rows: list[ResultRow] = []
-    benchmark_name = ""
-    method_model = ""
     config_json = _load_config(run_dir)
     benchmark_name = str(dict(config_json.get("benchmark", {}) or {}).get("name", "") or "")
-    method_model = str(dict(config_json.get("model", {}) or {}).get("model", "") or "")
+    surfaces_json = dict(config_json.get("surfaces", {}) or {})
+    roles_json = dict(config_json.get("roles", {}) or {})
+    oracle_json = dict(config_json.get("oracle", {}) or {})
+    surfaces_meta = runtime_surface_metadata(surfaces_json)
+    roles_meta = runtime_role_metadata(roles_json)
     for raw_line in merged_preds.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line:
             continue
         payload = json.loads(line)
         metrics = dict(payload.get("metrics", {}) or {})
+        artifacts = dict((payload.get("metadata") or {}).get("artifacts") or {})
+        method_id = str(payload.get("method", "") or "")
+        runner_id = str(artifacts.get("runner_id", "") or "")
         for metric_name, metric_value in metrics.items():
             result_rows.append(
                 ResultRow.from_dict(
@@ -746,14 +1009,14 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
                             "scope": benchmark_name,
                             "name": benchmark_name,
                         },
-                        "method_ref": {
-                            "method_id": method_model or "runtime_eval",
-                            "family": "runtime_eval",
-                            "variant": str(payload.get("mode", "") or ""),
-                            "engine": "",
-                            "model": method_model,
-                            "adapter": "runtime_eval",
-                        },
+                        "method_ref": runtime_method_ref(
+                            method_id=method_id,
+                            runner_id=runner_id,
+                            surfaces=surfaces_json,
+                            roles=roles_json,
+                            oracle=oracle_json,
+                            adapter="runtime_eval",
+                        ),
                         "split": str(payload.get("split", "") or ""),
                         "seed": payload.get("seed"),
                         "train_docs": None,
@@ -765,18 +1028,25 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
                             "problem_id": payload.get("problem_id"),
                             "max_seq_length": payload.get("max_seq_length"),
                             "primary_metric": payload.get("primary_metric"),
+                            "runner_id": runner_id,
+                            "roles": roles_meta,
+                            "oracle": oracle_json,
+                            "surfaces": surfaces_meta,
+                            **dict((payload.get("metadata") or {}).get("problem") or {}),
                         },
                     }
                 )
             )
     append_result_rows(run_dir, result_rows)
     run_spec = RunSpec(
-        run_id=str(config_json.get("run_id", "")),
+        run_id=str(config_json.get("experiment_id") or config_json.get("run_id", "")),
         created_utc=str(config_json.get("created_utc", "")),
         output_dir=str(config_json.get("output_dir", "")),
         benchmark=dict(config_json.get("benchmark", {}) or {}),
-        model=dict(config_json.get("model", {}) or {}),
         runtime_defaults=dict(config_json.get("runtime_defaults", {}) or {}),
+        surfaces=dict(config_json.get("surfaces", {}) or {}),
+        roles=dict(config_json.get("roles", {}) or {}),
+        oracle=dict(config_json.get("oracle", {}) or {}),
         phases=[
             RunPhaseSpec(
                 phase_id=str(phase.get("phase_id", "")),
@@ -785,7 +1055,7 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
                 seeds=[int(item) for item in list(phase.get("seeds", []) or [])],
                 num_samples=int(phase.get("num_samples", 0) or 0),
                 split=str(phase.get("split", "validation") or "validation"),
-                modes=list(phase.get("modes", []) or []),
+                methods=list(phase.get("methods", []) or []),
                 runtime_overrides=dict(phase.get("runtime_overrides", {}) or {}),
                 benchmark_overrides=dict(phase.get("benchmark_overrides", {}) or {}),
                 runtime_grid=dict(phase.get("runtime_grid", {}) or {}),
@@ -805,6 +1075,7 @@ def cmd_aggregate(args: argparse.Namespace) -> None:
     )
 
     print(f"Wrote merged predictions: {merged_preds}")
+    print(f"Wrote merged calls: {merged_calls}")
     print(f"Wrote merged steps: {merged_steps}")
     print(f"Wrote metrics: {run_dir / 'metrics.json'}")
 
@@ -818,33 +1089,53 @@ def main() -> None:
         default=None,
     )
 
-    p_init = sub.add_parser("init", help="Initialize a run: expand phases into units.jsonl")
-    p_init.add_argument("--config", required=True, help="Path to run config YAML")
+    p_plan = sub.add_parser("plan", help="Resolve config without running units")
+    p_plan.add_argument("--config", required=True, help="Path to experiment config YAML")
+    p_plan.add_argument("--output-dir", default="outputs/evals", help="Root output dir")
+    p_plan.add_argument("--experiment-id", default=None, help="Override experiment_id")
+    p_plan.add_argument(
+        "--check-endpoints",
+        action="store_true",
+        help="Probe configured /models endpoints where available.",
+    )
+    p_plan.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    p_plan.set_defaults(fn=cmd_plan)
+
+    p_init = sub.add_parser("init", help="Initialize an experiment: expand phases into units.jsonl")
+    p_init.add_argument("--config", required=True, help="Path to experiment config YAML")
     p_init.add_argument("--output-dir", default="outputs/evals", help="Root output dir")
-    p_init.add_argument("--run-id", default=None, help="Override run_id")
+    p_init.add_argument("--experiment-id", default=None, help="Override experiment_id")
     p_init.set_defaults(fn=cmd_init)
 
-    p_run = sub.add_parser("run", help="Run one or more units from an initialized run dir")
-    p_run.add_argument("--run-dir", required=True, help="Run directory created by init")
+    p_run = sub.add_parser("run", help="Run one or more units from an initialized experiment")
+    p_run.add_argument("--experiment-dir", default=None, help="Experiment directory created by init")
     p_run.add_argument("--unit-id", default=None, help="Run only one unit (e.g., u000001)")
     p_run.add_argument("--phase-id", default=None, help="Run only units from one phase")
-    p_run.add_argument("--mode", default=None, help="Run only units with this mode")
+    p_run.add_argument("--method", default=None, help="Run only units with this method")
     p_run.add_argument("--task-id", default=None, help="Run only units for one task_id (e.g., vt)")
-    p_run.add_argument("--max-seq-length", type=int, default=None, help="Run only units with this max_seq_length")
+    p_run.add_argument(
+        "--max-seq-length", type=int, default=None, help="Run only units with this max_seq_length"
+    )
     p_run.add_argument("--seed", type=int, default=None, help="Run only units with this seed")
     p_run.add_argument("--split", default=None, help="Run only units with this split")
     p_run.add_argument("--shard-index", type=int, default=None, help="Shard index (0-based)")
     p_run.add_argument("--shard-count", type=int, default=None, help="Total shards")
     p_run.add_argument("--max-units", type=int, default=None, help="Run at most N selected units")
-    p_run.add_argument("--max-problems", type=int, default=None, help="Run only first N problems per unit")
-    p_run.add_argument("--skip-done", action="store_true", help="Skip units with existing metrics_partial.json")
+    p_run.add_argument(
+        "--max-problems", type=int, default=None, help="Run only first N problems per unit"
+    )
+    p_run.add_argument(
+        "--skip-done", action="store_true", help="Skip units with existing metrics_partial.json"
+    )
     p_run.add_argument("--dry-run", action="store_true", help="Print selected units and exit")
-    p_run.add_argument("--mock-llm", action="store_true", help="Use MockLLMClient (no server required)")
-    p_run.add_argument("--model-base-url", default=None, help="Override model.base_url for this run")
+    p_run.add_argument(
+        "--mock-llm", action="store_true", help="Use MockLLMClient (no server required)"
+    )
+    p_run.add_argument("--scorer-endpoint", default=None, help="Override scorer endpoint for this run")
     p_run.add_argument(
         "--backend",
         default=None,
-        help="Engine hint for default endpoint selection when --model-base-url is omitted.",
+        help="Engine hint for default endpoint selection when --scorer-endpoint is omitted.",
     )
     p_run.add_argument(
         "--backend-fallback",
@@ -862,7 +1153,9 @@ def main() -> None:
         default=None,
         help="Port override for --start-server (default uses backend defaults).",
     )
-    p_run.add_argument("--cuda-devices", default=None, help="CUDA_VISIBLE_DEVICES for --start-server")
+    p_run.add_argument(
+        "--cuda-devices", default=None, help="CUDA_VISIBLE_DEVICES for --start-server"
+    )
     p_run.add_argument(
         "--vllm-venv-path",
         default=str(backend_defaults.get("vllm_venv_path", "/home/mlinegar/vllm-env")),
@@ -875,8 +1168,8 @@ def main() -> None:
     )
     p_run.set_defaults(fn=cmd_run)
 
-    p_agg = sub.add_parser("aggregate", help="Aggregate unit artifacts into run-level files")
-    p_agg.add_argument("--run-dir", required=True, help="Run directory")
+    p_agg = sub.add_parser("aggregate", help="Aggregate unit artifacts into experiment-level files")
+    p_agg.add_argument("--experiment-dir", default=None, help="Experiment directory")
     p_agg.set_defaults(fn=cmd_aggregate)
 
     args = parser.parse_args()

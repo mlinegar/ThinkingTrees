@@ -18,14 +18,31 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.experiments.metrics import regression_metrics as _regression_metrics  # noqa: E402
+from src.experiments.script_io import (  # noqa: E402
+    now_iso as _now_iso,
+    now_stamp as _now_stamp,
+    read_json as _read_json,
+    read_jsonl as _read_jsonl,
+    write_json as _write_json,
+    write_jsonl as _write_jsonl,
+)
+from src.experiments.script_parse import (  # noqa: E402
+    parse_csv as _parse_csv,
+    safe_float as _safe_float,
+)
+from src.experiments.tree_helpers import (  # noqa: E402
+    root_node_ids as _root_node_ids,
+    select_trees_by_splits as _select_trees,
+)
 
 from src.ctreepo.distillation import (  # noqa: E402
     build_f_embedding_examples,
@@ -73,65 +90,8 @@ EMBEDDING_F_BACKENDS = ("embedding_ridge", "embedding_linear_sgd")
 BACKEND_MATRICES = ("curated", "full", "smoke")
 
 
-def _now_stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _write_json(path: Path, payload: Mapping[str, Any]) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return path
-
-
-def _read_json(path: Path) -> Dict[str, Any]:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
-
-
-def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    if not path.exists():
-        return rows
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            text = line.strip()
-            if not text:
-                continue
-            row = json.loads(text)
-            if isinstance(row, dict):
-                rows.append(row)
-    return rows
-
-
-def _write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(dict(row), sort_keys=True) + "\n")
-    return path
-
-
-def _parse_csv(value: str, *, allowed: Optional[Iterable[str]] = None) -> Tuple[str, ...]:
-    items = tuple(
-        dict.fromkeys(
-            part.strip()
-            for part in str(value or "").replace(";", ",").split(",")
-            if part.strip()
-        )
-    )
-    allowed_set = set(allowed or ())
-    if allowed_set:
-        unknown = sorted(set(items) - allowed_set)
-        if unknown:
-            raise ValueError(f"unknown value(s): {unknown}; allowed={sorted(allowed_set)}")
-    return items
-
-
 def _parse_leaf_grid(value: str) -> Tuple[int, ...]:
-    leaves = tuple(int(item) for item in _parse_csv(value))
+    leaves = tuple(int(item) for item in dict.fromkeys(_parse_csv(value)))
     if not leaves or any(leaf <= 0 for leaf in leaves):
         raise ValueError(f"leaf grid must contain positive integers: {value!r}")
     return leaves
@@ -164,86 +124,6 @@ def _embedding_backend_to_method(backend: str) -> str:
     raise ValueError(f"not an embedding f backend: {backend!r}")
 
 
-def _safe_float(value: Any) -> Optional[float]:
-    try:
-        if value is None:
-            return None
-        converted = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(converted):
-        return None
-    return converted
-
-
-def _mean(values: Sequence[float]) -> Optional[float]:
-    if not values:
-        return None
-    return float(sum(values) / len(values))
-
-
-def _pearson(xs: Sequence[float], ys: Sequence[float]) -> Optional[float]:
-    if len(xs) != len(ys) or len(xs) < 2:
-        return None
-    mx = sum(xs) / len(xs)
-    my = sum(ys) / len(ys)
-    dx = [x - mx for x in xs]
-    dy = [y - my for y in ys]
-    denom_x = math.sqrt(sum(x * x for x in dx))
-    denom_y = math.sqrt(sum(y * y for y in dy))
-    denom = denom_x * denom_y
-    if denom <= 0.0:
-        return None
-    return float(sum(x * y for x, y in zip(dx, dy)) / denom)
-
-
-def _rankdata(values: Sequence[float]) -> List[float]:
-    ordered = sorted(enumerate(values), key=lambda item: item[1])
-    ranks = [0.0] * len(values)
-    pos = 0
-    while pos < len(ordered):
-        end = pos + 1
-        while end < len(ordered) and ordered[end][1] == ordered[pos][1]:
-            end += 1
-        rank = (pos + 1 + end) / 2.0
-        for idx in range(pos, end):
-            ranks[ordered[idx][0]] = float(rank)
-        pos = end
-    return ranks
-
-
-def _spearman(xs: Sequence[float], ys: Sequence[float]) -> Optional[float]:
-    if len(xs) != len(ys) or len(xs) < 2:
-        return None
-    return _pearson(_rankdata(xs), _rankdata(ys))
-
-
-def _regression_metrics(rows: Sequence[Mapping[str, Any]], *, pred_key: str, truth_key: str) -> Dict[str, Any]:
-    preds: List[float] = []
-    truths: List[float] = []
-    for row in rows:
-        pred = _safe_float(row.get(pred_key))
-        truth = _safe_float(row.get(truth_key))
-        if pred is None or truth is None:
-            continue
-        preds.append(float(pred))
-        truths.append(float(truth))
-    errors = [p - y for p, y in zip(preds, truths)]
-    abs_errors = [abs(value) for value in errors]
-    sq_errors = [value * value for value in errors]
-    mse = _mean(sq_errors)
-    return {
-        "n": int(len(preds)),
-        "pearson_r": _pearson(preds, truths),
-        "spearman_r": _spearman(preds, truths),
-        "mae": _mean(abs_errors),
-        "mse": mse,
-        "rmse": math.sqrt(mse) if mse is not None else None,
-        "mean_prediction": _mean(preds),
-        "mean_truth": _mean(truths),
-    }
-
-
 def _parse_first_float(value: Any) -> Optional[float]:
     if isinstance(value, (int, float)):
         return _safe_float(value)
@@ -260,19 +140,6 @@ def _clamp01(value: float) -> float:
 
 def _denormalize(value: float, *, target_min: float, target_max: float) -> float:
     return float(target_min) + _clamp01(float(value)) * (float(target_max) - float(target_min))
-
-
-def _root_node_ids(trees: Sequence[LabeledTree]) -> Dict[str, str]:
-    roots: Dict[str, str] = {}
-    for tree in trees:
-        root_id = ""
-        for level in reversed(tree.levels or []):
-            if level:
-                root_id = str(level[0])
-                break
-        if root_id:
-            roots[str(tree.doc_id)] = root_id
-    return roots
 
 
 def _tree_lookup(trees: Sequence[LabeledTree]) -> Dict[Tuple[str, str], Dict[str, Any]]:
@@ -304,16 +171,6 @@ def _tree_lookup(trees: Sequence[LabeledTree]) -> Dict[Tuple[str, str], Dict[str
                 ),
             }
     return lookup
-
-
-def _select_trees(trees: Sequence[LabeledTree], splits: Sequence[str]) -> List[LabeledTree]:
-    split_set = {str(split).lower() for split in splits}
-    return [
-        tree
-        for tree in trees
-        if str((tree.metadata or {}).get("split") or "").lower() in split_set
-    ]
-
 
 def _root_summary_for_tree(tree: LabeledTree) -> str:
     for level in reversed(tree.levels or []):
@@ -1443,7 +1300,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--dspy-max-tokens", type=int, default=512)
     parser.add_argument("--dspy-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--dspy-num-retries", type=int, default=1)
-    parser.add_argument("--dspy-num-threads", type=int, default=4)
+    parser.add_argument("--dspy-num-threads", type=int, default=128)
     parser.add_argument("--dspy-max-bootstrapped-demos", type=int, default=8)
     parser.add_argument("--dspy-max-labeled-demos", type=int, default=8)
     parser.add_argument("--dspy-num-candidate-programs", type=int, default=6)

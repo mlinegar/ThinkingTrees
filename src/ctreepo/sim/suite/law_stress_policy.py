@@ -3,6 +3,15 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Tuple
 
+from src.ctreepo.contracts import (
+    LAW_SET_ALL,
+    LAW_SET_LEAF_AND_MERGE_PRESERVATION,
+    LAW_SET_LEAF_PRESERVATION_ONLY,
+    LAW_SET_MERGE_PRESERVATION_ONLY,
+    LAW_SET_ON_RANGE_IDEMPOTENCE_ONLY,
+    LAW_SET_ROOT_ONLY,
+)
+
 
 @dataclass(frozen=True)
 class LawWeightProfile:
@@ -120,11 +129,11 @@ class MarkovLawStressPolicy:
 @dataclass(frozen=True)
 class LDASanityPolicy:
     taus: Tuple[float, ...]
-    lambda_multipliers: Tuple[float, ...]
+    quadratic_utility_weights: Tuple[float, ...]
     seeds: Tuple[int, ...]
     train_docs: int
     test_docs: int
-    learned_law_packages: Tuple[str, ...]
+    learned_law_set_ids: Tuple[str, ...]
     exact_families: Tuple[str, ...]
     law_leaf_query_rate: float
     law_internal_query_rate: float
@@ -134,8 +143,8 @@ class LDASanityPolicy:
 @dataclass(frozen=True)
 class LDATransitionMapPolicy:
     taus: Tuple[float, ...]
-    lambda_multipliers: Tuple[float, ...]
-    law_packages: Tuple[str, ...]
+    quadratic_utility_weights: Tuple[float, ...]
+    law_set_ids: Tuple[str, ...]
     seeds: Tuple[int, ...]
     train_docs: int
     test_docs: int
@@ -147,9 +156,9 @@ class LDATransitionMapPolicy:
 @dataclass(frozen=True)
 class LDAMechanismPolicy:
     taus: Tuple[float, ...]
-    lambda_multipliers: Tuple[float, ...]
+    quadratic_utility_weights: Tuple[float, ...]
     analysis_partition_modes: Tuple[str, ...]
-    law_packages: Tuple[str, ...]
+    law_set_ids: Tuple[str, ...]
     seeds: Tuple[int, ...]
     train_docs: int
     test_docs: int
@@ -419,11 +428,16 @@ def resolve_lda_law_stress_policy(*, smoke: bool) -> LDALawStressPolicy:
             smoke=True,
             sanity=LDASanityPolicy(
                 taus=(1.0, 8.0),
-                lambda_multipliers=(0.0, 1.5),
+                quadratic_utility_weights=(0.0, 1.5),
                 seeds=(0,),
                 train_docs=32,
                 test_docs=16,
-                learned_law_packages=("root_only", "c1_only", "c3_only", "all_laws"),
+                learned_law_set_ids=(
+                    LAW_SET_ROOT_ONLY,
+                    LAW_SET_LEAF_PRESERVATION_ONLY,
+                    LAW_SET_MERGE_PRESERVATION_ONLY,
+                    LAW_SET_ALL,
+                ),
                 exact_families=("oracle", "scrambled_topics", "uniform_prior", "adversarial_merge"),
                 law_leaf_query_rate=0.25,
                 law_internal_query_rate=0.25,
@@ -431,8 +445,8 @@ def resolve_lda_law_stress_policy(*, smoke: bool) -> LDALawStressPolicy:
             ),
             transition_map=LDATransitionMapPolicy(
                 taus=(1.0, 8.0),
-                lambda_multipliers=(0.0, 1.5),
-                law_packages=("root_only", "all_laws"),
+                quadratic_utility_weights=(0.0, 1.5),
+                law_set_ids=(LAW_SET_ROOT_ONLY, LAW_SET_ALL),
                 seeds=(0,),
                 train_docs=32,
                 test_docs=16,
@@ -442,9 +456,9 @@ def resolve_lda_law_stress_policy(*, smoke: bool) -> LDALawStressPolicy:
             ),
             mechanism=LDAMechanismPolicy(
                 taus=(1.0, 8.0),
-                lambda_multipliers=(1.5,),
+                quadratic_utility_weights=(1.5,),
                 analysis_partition_modes=("aligned", "shift_half"),
-                law_packages=("all_laws",),
+                law_set_ids=(LAW_SET_ALL,),
                 seeds=(0,),
                 train_docs=32,
                 test_docs=16,
@@ -457,11 +471,16 @@ def resolve_lda_law_stress_policy(*, smoke: bool) -> LDALawStressPolicy:
         smoke=False,
         sanity=LDASanityPolicy(
             taus=(1.0, 4.0, 16.0),
-            lambda_multipliers=(0.0, 0.5, 1.5),
+            quadratic_utility_weights=(0.0, 0.5, 1.5),
             seeds=(0, 1, 2),
             train_docs=128,
             test_docs=64,
-            learned_law_packages=("root_only", "c1_only", "c3_only", "all_laws"),
+            learned_law_set_ids=(
+                LAW_SET_ROOT_ONLY,
+                LAW_SET_LEAF_PRESERVATION_ONLY,
+                LAW_SET_MERGE_PRESERVATION_ONLY,
+                LAW_SET_ALL,
+            ),
             exact_families=("oracle", "scrambled_topics", "uniform_prior", "adversarial_merge"),
             law_leaf_query_rate=0.25,
             law_internal_query_rate=0.25,
@@ -469,8 +488,14 @@ def resolve_lda_law_stress_policy(*, smoke: bool) -> LDALawStressPolicy:
         ),
         transition_map=LDATransitionMapPolicy(
             taus=(1.0, 2.0, 4.0, 8.0, 16.0),
-            lambda_multipliers=(0.0, 0.1, 0.5, 1.0, 1.5, 3.0),
-            law_packages=("root_only", "c1_only", "c3_only", "c1c3", "all_laws"),
+            quadratic_utility_weights=(0.0, 0.1, 0.5, 1.0, 1.5, 3.0),
+            law_set_ids=(
+                LAW_SET_ROOT_ONLY,
+                LAW_SET_LEAF_PRESERVATION_ONLY,
+                LAW_SET_MERGE_PRESERVATION_ONLY,
+                LAW_SET_LEAF_AND_MERGE_PRESERVATION,
+                LAW_SET_ALL,
+            ),
             seeds=(0, 1, 2, 3),
             train_docs=256,
             test_docs=128,
@@ -480,9 +505,9 @@ def resolve_lda_law_stress_policy(*, smoke: bool) -> LDALawStressPolicy:
         ),
         mechanism=LDAMechanismPolicy(
             taus=(1.0, 4.0, 16.0),
-            lambda_multipliers=(0.5, 1.5),
+            quadratic_utility_weights=(0.5, 1.5),
             analysis_partition_modes=("aligned", "coarsen_2x", "shift_half", "random_same_count"),
-            law_packages=("root_only", "all_laws"),
+            law_set_ids=(LAW_SET_ROOT_ONLY, LAW_SET_ALL),
             seeds=(0, 1, 2, 3),
             train_docs=256,
             test_docs=128,

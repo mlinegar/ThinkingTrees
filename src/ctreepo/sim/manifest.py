@@ -68,7 +68,8 @@ class RunSpec:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": str(self.id),
-            "family": str(self.family),
+            "problem_id": str(self.family),
+            "method_id": str(dict(self.config).get("method_id", "simulation")),
             "config": dict(self.config),
             "outputs": dict(self.outputs),
             "command": str(self.command),
@@ -78,9 +79,10 @@ class RunSpec:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "RunSpec":
+        family = str(d.get("problem_id", d.get("family", "")))
         return cls(
             id=str(d.get("id", "")),
-            family=str(d.get("family", "")),
+            family=family,
             config=dict(d.get("config", {}) or {}),
             outputs={str(k): str(v) for k, v in dict(d.get("outputs", {}) or {}).items()},
             command=str(d.get("command", "")),
@@ -88,7 +90,7 @@ class RunSpec:
             resources=(
                 dict(d.get("resources", {}) or {})
                 or infer_run_resources(
-                    family=str(d.get("family", "")),
+                    family=family,
                     config=dict(d.get("config", {}) or {}),
                     requires=[str(x) for x in (d.get("requires", []) or [])],
                     command=str(d.get("command", "")),

@@ -11,12 +11,12 @@ import re
 import sys
 from typing import Any, Dict, List, Optional
 
-import requests
 
 # Add project root for direct script execution.
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
+from src.tasks.manifesto.openai_chat import OpenAIChatClient
 from src.tasks.manifesto.lawstress_eval import (
     LawStressEvalConfig,
     build_eval_metrics,
@@ -28,6 +28,15 @@ from src.tasks.manifesto.lawstress_eval import (
     write_predictions_jsonl,
 )
 from src.tasks.manifesto.lawstress_generator import load_lawstress_records_jsonl
+from src.experiments import (
+    ResultRow,
+    benchmark_ref_from_parts,
+    chat_role_ref,
+    metadata_with_roles,
+    method_ref_from_parts,
+    oracle_ref,
+    write_canonical_sidecars,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -35,62 +44,6 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_MAIN_MODEL = "/mnt/data/models/nvidia/Qwen3.5-397B-A17B-NVFP4"
 DEFAULT_STUDENT_MODEL = "/mnt/data/models/AxionML/Qwen3.5-35B-A3B-NVFP4"
 
-
-class OpenAIChatClient:
-    """Minimal OpenAI-compatible chat client."""
-
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        model: str,
-        api_key: str,
-        timeout_seconds: float = 120.0,
-        enable_thinking: bool = False,
-    ):
-        self.base_url = str(base_url).rstrip("/")
-        self.model = str(model)
-        self.api_key = str(api_key)
-        self.timeout_seconds = float(timeout_seconds)
-        self.enable_thinking = bool(enable_thinking)
-
-    def chat(
-        self,
-        *,
-        system: str,
-        user: str,
-        temperature: float,
-        max_tokens: int,
-    ) -> str:
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": float(temperature),
-            "max_tokens": int(max_tokens),
-            "chat_template_kwargs": {
-                "enable_thinking": bool(self.enable_thinking),
-            },
-        }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        response = requests.post(
-            f"{self.base_url}/chat/completions",
-            json=payload,
-            headers=headers,
-            timeout=self.timeout_seconds,
-        )
-        response.raise_for_status()
-        data = response.json()
-        choices = data.get("choices") or []
-        if not choices:
-            return ""
-        message = choices[0].get("message") or {}
-        return str(message.get("content") or "").strip()
 
 
 _NUMERIC_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
@@ -386,6 +339,52 @@ def main(argv: Optional[List[str]] = None) -> int:
         LOGGER.info("Wrote predictions: %s", predictions_path)
 
         if args.mode == "summarize_only":
+            benchmark_ref = benchmark_ref_from_parts(
+                family="manifesto_lawstress",
+                scope="eval",
+                name="manifesto_lawstress",
+                dataset_id=str(args.records),
+            )
+            method_ref = method_ref_from_parts(
+                family="lawstress_summarization",
+                variant=str(args.mode),
+                adapter="lawstress_eval",
+                metadata=metadata_with_roles(
+                    {"mode": str(args.mode)},
+                    roles={
+                        "summarizer": chat_role_ref(
+                            role="summarizer",
+                            model=str(args.summarizer_model),
+                            base_url=str(args.summarizer_base_url),
+                        )
+                    },
+                    oracle=oracle_ref(kind="benchmark_labels", source=str(args.records)),
+                ),
+            )
+            write_canonical_sidecars(
+                output_dir,
+                title="eval_manifesto_lawstress",
+                adapter_id="lawstress_eval",
+                benchmark_refs=(benchmark_ref,),
+                method_refs=(method_ref,),
+                phases=("summarize",),
+                artifacts={"predictions_jsonl": str(predictions_path)},
+                result_rows=(
+                    ResultRow(
+                        experiment_id="",
+                        phase="summarize",
+                        benchmark_ref=benchmark_ref,
+                        method_ref=method_ref,
+                        metric_name="predictions",
+                        metric_value=len(predictions),
+                        artifact_refs=("predictions_jsonl",),
+                    ),
+                ),
+                state="completed",
+                metadata={"mode": str(args.mode)},
+                launch_command=sys.argv,
+                report_profiles=("runtime_eval_summary",),
+            )
             return 0
 
     if args.mode == "score_and_judge_only":
@@ -431,6 +430,68 @@ def main(argv: Optional[List[str]] = None) -> int:
     (output_dir / "eval_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     (output_dir / "eval_by_group.json").write_text(json.dumps(groups, indent=2), encoding="utf-8")
     (output_dir / "eval_report.md").write_text(render_eval_report_markdown(metrics, groups), encoding="utf-8")
+    benchmark_ref = benchmark_ref_from_parts(
+        family="manifesto_lawstress",
+        scope="eval",
+        name="manifesto_lawstress",
+        dataset_id=str(args.records),
+    )
+    method_ref = method_ref_from_parts(
+        family="lawstress_eval",
+        variant=str(args.mode),
+        adapter="lawstress_eval",
+        metadata=metadata_with_roles(
+            {"mode": str(args.mode)},
+            roles={
+                "summarizer": chat_role_ref(
+                    role="summarizer",
+                    model=str(args.summarizer_model),
+                    base_url=str(args.summarizer_base_url),
+                ),
+                "scorer": chat_role_ref(
+                    role="scorer",
+                    model=str(args.scorer_model),
+                    base_url=str(args.scorer_base_url),
+                ),
+            },
+            oracle=oracle_ref(kind="benchmark_labels", source=str(args.records)),
+        ),
+    )
+    overall = dict(metrics.get("overall") or {})
+    result_rows = [
+        ResultRow(
+            experiment_id="",
+            phase="eval",
+            benchmark_ref=benchmark_ref,
+            method_ref=method_ref,
+            metric_name=str(key),
+            metric_value=value,
+            artifact_refs=("eval_metrics_json", "eval_results_jsonl"),
+            metadata={"mode": str(args.mode)},
+        )
+        for key, value in overall.items()
+        if isinstance(value, (int, float, bool))
+    ]
+    write_canonical_sidecars(
+        output_dir,
+        title="eval_manifesto_lawstress",
+        adapter_id="lawstress_eval",
+        benchmark_refs=(benchmark_ref,),
+        method_refs=(method_ref,),
+        phases=("eval",),
+        artifacts={
+            "predictions_jsonl": str(predictions_path),
+            "eval_results_jsonl": str(output_dir / "eval_results.jsonl"),
+            "eval_metrics_json": str(output_dir / "eval_metrics.json"),
+            "eval_by_group_json": str(output_dir / "eval_by_group.json"),
+            "eval_report_md": str(output_dir / "eval_report.md"),
+        },
+        result_rows=tuple(result_rows),
+        state="completed",
+        metadata={"mode": str(args.mode)},
+        launch_command=sys.argv,
+        report_profiles=("runtime_eval_summary",),
+    )
 
     LOGGER.info("Evaluation complete. Output directory: %s", output_dir)
     LOGGER.info("Overall metrics: %s", json.dumps(metrics.get("overall", {}), indent=2))

@@ -15,7 +15,22 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts import run_tree_neural_full_doc_mig as mig  # noqa: E402
+from src.ctreepo.sim.core.tree_neural_execution import (  # noqa: E402
+    run_job_batch,
+    write_summary_outputs,
+)
+from src.ctreepo.sim.core.tree_neural_exact_sanity import (  # noqa: E402
+    EXACT_SANITY_FAMILY,
+    render_exact_sanity_summary_markdown,
+    tree_neural_exact_sanity_summary,
+)
+from src.ctreepo.sim.core.tree_neural_facade import (  # noqa: E402
+    build_jobs_for_configs,
+    JobSpec,
+    RunConfigSpec,
+    discover_mig_uuids,
+    parse_mig_uuids,
+)
 from scripts import run_tree_neural_learning_push as lp  # noqa: E402
 
 
@@ -55,21 +70,21 @@ def _parser() -> argparse.ArgumentParser:
 
 def _resolve_mig_uuids(args: argparse.Namespace) -> list[str]:
     raw = str(getattr(args, "mig_uuids", "") or "").strip()
-    mig_uuids = mig._parse_mig_uuids(raw) if raw else mig._discover_mig_uuids()
+    mig_uuids = parse_mig_uuids(raw) if raw else discover_mig_uuids()
     if not mig_uuids:
         raise RuntimeError("No MIG UUIDs discovered")
     return list(mig_uuids)
 
 
 def _write_outputs(output_root: Path) -> None:
-    payload = mig._write_summary_outputs(output_root)
-    exact = mig._tree_neural_exact_sanity_summary(dict(payload or {}))
+    payload = write_summary_outputs(output_root)
+    exact = tree_neural_exact_sanity_summary(dict(payload or {}))
     (output_root / "tree_neural_exact_sanity_summary.json").write_text(
         json.dumps(exact, indent=2, sort_keys=True),
         encoding="utf-8",
     )
     (output_root / "tree_neural_exact_sanity_summary.md").write_text(
-        mig._render_exact_sanity_summary_markdown(exact),
+        render_exact_sanity_summary_markdown(exact),
         encoding="utf-8",
     )
 
@@ -85,7 +100,7 @@ def _collect_all_runs(output_root: Path) -> list[dict[str, Any]]:
 def _run_jobs(
     *,
     output_root: Path,
-    jobs: Sequence[mig._JobSpec],
+    jobs: Sequence[JobSpec],
     torch_threads: int,
     use_cuda: bool,
     mig_uuids: Sequence[str],
@@ -95,7 +110,7 @@ def _run_jobs(
         "mode": str(mode),
         "jobs": [asdict(job) for job in jobs],
     }
-    return mig._run_job_batch(
+    return run_job_batch(
         output_root=output_root,
         jobs=jobs,
         mig_uuids=tuple(str(uuid) for uuid in mig_uuids),
@@ -115,7 +130,7 @@ def _make_slotwise_config(
     leaf_supervision_kind: str,
     internal_supervision_kind: str,
     internal_label_rate: float,
-) -> mig._RunConfigSpec:
+) -> RunConfigSpec:
     base = lp._make_slot_config(
         args,
         train_doc_count=int(train_doc_count),
@@ -146,17 +161,17 @@ def _make_slotwise_config(
 
 def _build_jobs_for_configs(
     args: argparse.Namespace,
-    configs_by_train: Sequence[tuple[int, mig._RunConfigSpec]],
+    configs_by_train: Sequence[tuple[int, RunConfigSpec]],
     *,
     seeds: Sequence[int],
     tuning_stage: str,
     axis_value: str,
-) -> list[mig._JobSpec]:
-    jobs: list[mig._JobSpec] = []
+) -> list[JobSpec]:
+    jobs: list[JobSpec] = []
     for train_doc_count, config in configs_by_train:
         jobs.extend(
-            mig._build_jobs_for_configs(
-                families=(mig.EXACT_SANITY_FAMILY,),
+            build_jobs_for_configs(
+                families=(EXACT_SANITY_FAMILY,),
                 train_doc_counts=(int(train_doc_count),),
                 benchmark=str(args.benchmark),
                 hardness_grid="",
@@ -180,8 +195,8 @@ def _configs_for_train_doc_count(
     *,
     train_doc_count: int,
     suffix: str,
-) -> list[tuple[int, mig._RunConfigSpec]]:
-    configs: list[tuple[int, mig._RunConfigSpec]] = []
+) -> list[tuple[int, RunConfigSpec]]:
+    configs: list[tuple[int, RunConfigSpec]] = []
     for condition_label, leaf_rate, leaf_kind, internal_kind, internal_rate in SCALING_CONDITIONS:
         configs.append(
             (
@@ -291,7 +306,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     if best_label:
-        followup_configs: list[tuple[int, mig._RunConfigSpec]] = []
+        followup_configs: list[tuple[int, RunConfigSpec]] = []
         for train_doc_count, config in _configs_for_train_doc_count(
             args,
             train_doc_count=int(args.phase2_train_x5),

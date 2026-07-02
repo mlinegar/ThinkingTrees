@@ -3800,7 +3800,6 @@ def run_segment_lda_ops_weight_recovery_experiment_from_world(
         "W_base_fro_norm": float(np.linalg.norm(W_base.reshape(-1))),
         "W_base": W_base.reshape(-1).tolist(),
         "quadratic_utility_weight": float(lambda_multiplier),
-        "lambda_multiplier": float(lambda_multiplier),
     }
     metrics = {
         "exact": asdict(exact),
@@ -3816,8 +3815,10 @@ def run_segment_lda_ops_weight_recovery_experiment_from_world(
     if ridge_infer_est_phi is not None:
         metrics["ridge_infer_est_phi"] = _ridge_run_to_metrics_dict(ridge_infer_est_phi)
 
+    public_config = {**asdict(config), "quadratic_utility_weight": float(lambda_multiplier)}
+    public_config.pop("lambda_multiplier", None)
     return SegmentLDAOpsWeightRecoverySummary(
-        config={**asdict(config), "quadratic_utility_weight": float(lambda_multiplier)},
+        config=public_config,
         topic_meta={
             **dict(world.topic_meta),
             **topic_est_meta,
@@ -3845,7 +3846,7 @@ def run_segment_lda_ops_weight_recovery_experiment_from_world(
             interaction_component_name="latent_topic_bigrams",
             weighting_scheme="linear_plus_quadratic_bigrams",
             metadata={
-                "family": "segment_lda_ops_weight_recovery",
+                "problem_id": "segment_lda_ops_weight_recovery",
                 "topic_process": str(config.topic_process),
                 "topic_phi_estimator": str(config.topic_phi_estimator),
                 "feature_inference": str(config.feature_inference),
@@ -4206,7 +4207,6 @@ def run_segment_lda_ops_weight_recovery_experiment(
         "W_base_fro_norm": float(np.linalg.norm(W_base.reshape(-1))),
         "W_base": W_base.reshape(-1).tolist(),
         "quadratic_utility_weight": float(lambda_multiplier),
-        "lambda_multiplier": float(lambda_multiplier),
     }
     metrics = {
         "exact": asdict(exact),
@@ -4246,8 +4246,10 @@ def run_segment_lda_ops_weight_recovery_experiment(
             **asdict(ridge_infer_est_phi.design),
         }
 
+    public_config = {**asdict(config), "quadratic_utility_weight": float(lambda_multiplier)}
+    public_config.pop("lambda_multiplier", None)
     return SegmentLDAOpsWeightRecoverySummary(
-        config={**asdict(config), "quadratic_utility_weight": float(lambda_multiplier)},
+        config=public_config,
         topic_meta={
             **topic_meta,
             **topic_est_meta,
@@ -4270,7 +4272,7 @@ def run_segment_lda_ops_weight_recovery_experiment(
             interaction_component_name="latent_topic_bigrams",
             weighting_scheme="linear_plus_quadratic_bigrams",
             metadata={
-                "family": "segment_lda_ops_weight_recovery",
+                "problem_id": "segment_lda_ops_weight_recovery",
                 "topic_process": str(config.topic_process),
                 "topic_phi_estimator": str(config.topic_phi_estimator),
                 "feature_inference": str(config.feature_inference),

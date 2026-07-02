@@ -1,3 +1,4 @@
+# OLD_: archived 2026-07-02; depends on treepo.bench.hll_merge_learning, removed in the treepo 2026-06 minimization. Kept for reference; do not import or run.
 """Compatibility wrapper for the TreePO HLL merge-learning module."""
 
 from __future__ import annotations

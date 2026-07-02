@@ -22,19 +22,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts import run_tree_neural_full_doc_mig as mig  # noqa: E402
+from src.ctreepo.sim.core.tree_neural_execution import (  # noqa: E402
+    job_completion_keys,
+    load_completed_run_keys,
+    worker_command_for_job,
+    worker_env_for_token,
+    write_summary_outputs,
+)
+from src.ctreepo.sim.core.tree_neural_config_recipes import (  # noqa: E402
+    resolved_tree_batch_pack_mode,
+)
+from src.ctreepo.sim.core.tree_neural_facade import (  # noqa: E402
+    JobSpec,
+    RunConfigSpec,
+    discover_mig_uuids,
+    job_output_dir_name,
+    parse_mig_uuids,
+)
 from scripts import run_tree_neural_teacher_first_push as tfpush  # noqa: E402
 
-
-def _default_tree_batch_pack_mode(benchmark: str) -> str:
-    return "fixed_fused" if str(benchmark).strip().lower() == "recoverable_v4" else "structure_bucket"
-
-
-def _resolved_tree_batch_pack_mode(args: argparse.Namespace) -> str:
-    raw = str(getattr(args, "tree_batch_pack_mode", "")).strip()
-    if raw:
-        return raw
-    return _default_tree_batch_pack_mode(str(getattr(args, "benchmark", "")))
 
 
 FRONTIER_FAMILY_ROOT_WEIGHTS: Mapping[str, tuple[float, ...]] = {
@@ -110,7 +116,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
-    parser.add_argument("--tree-local-law-weight", type=float, default=0.8)
+    parser.add_argument("--local-law-weight", dest="tree_local_law_weight", type=float, default=0.8)
     parser.add_argument("--tree-join-bit-weight", type=float, default=1.0)
     parser.add_argument("--stage1-epochs", type=int, default=12)
     parser.add_argument("--stage1-rung-epochs", nargs="*", type=int, default=())
@@ -369,7 +375,10 @@ def _count_args(args: argparse.Namespace, *, train_doc_count: int) -> argparse.N
             _resolved_stage1_screen_doc_limit(int(train_doc_count))
         ),
         tree_stage1_final_exact_doc_limit=0,
-        tree_batch_pack_mode=str(_resolved_tree_batch_pack_mode(args)),
+        tree_batch_pack_mode=resolved_tree_batch_pack_mode(
+            benchmark=str(getattr(args, "benchmark", "")),
+            raw_value=getattr(args, "tree_batch_pack_mode", ""),
+        ),
         batch_token_budget=int(getattr(args, "batch_token_budget", 0)),
         batch_node_budget=int(getattr(args, "batch_node_budget", 0)),
         batch_autotune=bool(getattr(args, "batch_autotune", True)),
@@ -582,11 +591,11 @@ def _aggregate_stage1_rung_candidate_summary(
 
 
 def _make_rung_stage1_config(
-    config: mig._RunConfigSpec,
+    config: RunConfigSpec,
     *,
     total_epochs: int,
     screen_metric_name: str,
-) -> mig._RunConfigSpec:
+) -> RunConfigSpec:
     return replace(
         config,
         n_epochs=int(total_epochs),
@@ -601,12 +610,12 @@ def _build_stage1_rung_jobs(
     args: argparse.Namespace,
     train_doc_counts: Sequence[int],
     count_args_by_train: Mapping[int, argparse.Namespace],
-    stage1_configs_by_train: Mapping[int, Mapping[str, mig._RunConfigSpec]],
+    stage1_configs_by_train: Mapping[int, Mapping[str, RunConfigSpec]],
     active_labels_by_count: Mapping[int, Sequence[str]],
     rung: _Stage1RungSpec,
     screen_metric_name: str,
-) -> List[mig._JobSpec]:
-    jobs: List[mig._JobSpec] = []
+) -> List[JobSpec]:
+    jobs: List[JobSpec] = []
     for train_doc_count in [int(value) for value in train_doc_counts]:
         count_args = count_args_by_train[int(train_doc_count)]
         stage1_configs = stage1_configs_by_train[int(train_doc_count)]
@@ -639,12 +648,12 @@ def _build_stage2_jobs_for_counts(
     *,
     train_doc_counts: Sequence[int],
     count_args_by_train: Mapping[int, argparse.Namespace],
-    stage1_configs_by_train: Mapping[int, Mapping[str, mig._RunConfigSpec]],
+    stage1_configs_by_train: Mapping[int, Mapping[str, RunConfigSpec]],
     active_labels_by_count: Mapping[int, Sequence[str]],
     final_stage1_runs: Sequence[Mapping[str, Any]],
     stage2_survivors_by_count: Mapping[int, int],
-) -> List[mig._JobSpec]:
-    jobs: List[mig._JobSpec] = []
+) -> List[JobSpec]:
+    jobs: List[JobSpec] = []
     for train_doc_count in [int(value) for value in train_doc_counts]:
         count_args = count_args_by_train[int(train_doc_count)]
         survivor_limit = max(
@@ -923,7 +932,7 @@ def _run_async_scaling(
                 "jobs": [asdict(job) for job in jobs],
             },
         )
-        completed_keys = mig._load_completed_run_keys(phase_root)
+        completed_keys = load_completed_run_keys(phase_root)
         phase_key = f"stage1:{int(train_doc_count)}:{int(rung.index)}"
         phase_entry = {
             "kind": "stage1",
@@ -936,7 +945,7 @@ def _run_async_scaling(
             "labels": [str(label) for label in labels],
         }
         for job in jobs:
-            required_keys = mig._job_completion_keys(job)
+            required_keys = job_completion_keys(job)
             if required_keys and required_keys.issubset(completed_keys):
                 phase_entry["done_tasks"].add(str(job.job_name))
                 continue
@@ -985,7 +994,7 @@ def _run_async_scaling(
                 "jobs": grouped_jobs,
             },
         )
-        completed_keys = mig._load_completed_run_keys(phase_root)
+        completed_keys = load_completed_run_keys(phase_root)
         phase_key = f"stage2:{int(train_doc_count)}"
         phase_entry = {
             "kind": "stage2",
@@ -998,7 +1007,7 @@ def _run_async_scaling(
             required_keys = set()
             for job_mapping in list(grouped_job.get("jobs", ()) or ()):
                 required_keys.update(
-                    mig._job_completion_keys(tfpush._job_from_mapping(job_mapping))
+                    job_completion_keys(tfpush._job_from_mapping(job_mapping))
                 )
             if required_keys and required_keys.issubset(completed_keys):
                 phase_entry["done_tasks"].add(str(grouped_job["job_name"]))
@@ -1019,7 +1028,7 @@ def _run_async_scaling(
     def _finalize_stage1_phase(phase_key: str) -> None:
         phase_entry = phase_state[str(phase_key)]
         phase_root = Path(str(phase_entry["phase_root"]))
-        payload = mig._write_summary_outputs(phase_root)
+        payload = write_summary_outputs(phase_root)
         train_doc_count = int(phase_entry["train_doc_count"])
         count_args = count_args_by_train[int(train_doc_count)]
         runs = _runs_for_train_doc_count(
@@ -1092,7 +1101,7 @@ def _run_async_scaling(
     def _finalize_stage2_phase(phase_key: str) -> None:
         phase_entry = phase_state[str(phase_key)]
         phase_root = Path(str(phase_entry["phase_root"]))
-        payload = mig._write_summary_outputs(phase_root)
+        payload = write_summary_outputs(phase_root)
         train_doc_count = int(phase_entry["train_doc_count"])
         count_args = count_args_by_train[int(train_doc_count)]
         phase2_runs_for_count = _runs_for_train_doc_count(
@@ -1204,13 +1213,13 @@ def _run_async_scaling(
             phase_root = Path(str(task.phase_root))
             job_root = phase_root / "jobs"
             job_root.mkdir(parents=True, exist_ok=True)
-            log_path = job_root / f"{mig._job_output_dir_name(str(task.task_name))}.log"
+            log_path = job_root / f"{job_output_dir_name(str(task.task_name))}.log"
             log_fh = open(log_path, "w", encoding="utf-8")
             if str(task.task_type) == "stage1_worker":
                 job = tfpush._job_from_mapping(task.job)
-                job_output_dir = job_root / mig._job_output_dir_name(job.job_name)
+                job_output_dir = job_root / job_output_dir_name(job.job_name)
                 job_output_dir.mkdir(parents=True, exist_ok=True)
-                cmd = mig._worker_command_for_job(
+                cmd = worker_command_for_job(
                     job,
                     output_dir=job_output_dir,
                     torch_threads=int(args.torch_threads),
@@ -1221,14 +1230,14 @@ def _run_async_scaling(
                     stdout=subprocess.PIPE,
                     stderr=log_fh,
                     cwd=str(REPO_ROOT),
-                    env=mig._worker_env_for_token(
+                    env=worker_env_for_token(
                         _physical_token(str(token)),
                         use_cuda=bool(args.use_cuda),
                     ),
                     text=True,
                 )
             else:
-                job_output_dir = job_root / mig._job_output_dir_name(str(task.task_name))
+                job_output_dir = job_root / job_output_dir_name(str(task.task_name))
                 job_output_dir.mkdir(parents=True, exist_ok=True)
                 manifest_path = job_output_dir / "group_manifest.json"
                 manifest_path.write_text(
@@ -1253,7 +1262,7 @@ def _run_async_scaling(
                     stdout=log_fh,
                     stderr=subprocess.STDOUT,
                     cwd=str(REPO_ROOT),
-                    env=mig._worker_env_for_token(
+                    env=worker_env_for_token(
                         _physical_token(str(token)),
                         use_cuda=bool(args.use_cuda),
                     ),
@@ -1637,9 +1646,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     stage2_survivors_by_count = _resolved_stage2_survivors_by_count(args)
 
     mig_uuids = (
-        mig._parse_mig_uuids(str(args.mig_uuids))
+        parse_mig_uuids(str(args.mig_uuids))
         if str(args.mig_uuids).strip()
-        else mig._discover_mig_uuids()
+        else discover_mig_uuids()
     )
     if bool(args.use_cuda) and not mig_uuids:
         raise RuntimeError("No MIG UUIDs discovered")

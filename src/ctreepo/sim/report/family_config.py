@@ -10,6 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Sequence, Tuple
 
+from src.ctreepo.contracts import (
+    LAW_ID_LEAF_PRESERVATION,
+    LAW_ID_MERGE_PRESERVATION,
+    LAW_ID_ON_RANGE_IDEMPOTENCE,
+)
 
 @dataclass(frozen=True)
 class FamilyReportConfig:
@@ -37,7 +42,7 @@ class FamilyReportConfig:
     heatmap_col_label: str
 
     # ── learnability sweep axes ───────────────────────────────────────
-    sweep_field: str  # x-axis variable ("lambda_local" / "tau")
+    sweep_field: str  # x-axis variable ("local_law_weight" / "tau")
     sweep_label: str  # display label for sweep variable
     sweep_group_fields: Tuple[str, ...]  # variables that create separate curves
 
@@ -101,17 +106,17 @@ MARKOV_CONFIG = FamilyReportConfig(
     heatmap_col_field="audit_fraction",
     heatmap_row_label="Training docs",
     heatmap_col_label="q_audit",
-    sweep_field="lambda_local",
-    sweep_label="λ_local",
+    sweep_field="local_law_weight",
+    sweep_label="local_law_weight",
     sweep_group_fields=("train_docs", "audit_fraction"),
     normalization_scale_field="max_segments",
-    baseline_field="lambda_local",
-    baseline_label="λ_local",
+    baseline_field="local_law_weight",
+    baseline_label="local_law_weight",
     baseline_value=0.0,
     required_local_law_weight_fields=(
-        "objective_local_law_c1_weight",
-        "objective_local_law_c2_weight",
-        "objective_local_law_c3_weight",
+        LAW_ID_LEAF_PRESERVATION,
+        LAW_ID_ON_RANGE_IDEMPOTENCE,
+        LAW_ID_MERGE_PRESERVATION,
     ),
     valid_exact_families=("exact", "leaf_bucket", "count_only", "flip_R2"),
 )

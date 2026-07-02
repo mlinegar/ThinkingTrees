@@ -366,7 +366,7 @@ class UnifiedTrainingCollector:
     Responsibilities:
     - Aggregate examples from all registered sources
     - Balance positive/negative examples
-    - Weight examples by source reliability
+    - Weight examples by source trust score
     - Export to DSPy format
     - Persist/load training data
     """

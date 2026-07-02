@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Protocol, Sequence
 
@@ -90,6 +91,17 @@ class ReportProfileRegistry:
 
 METHOD_ADAPTERS = MethodAdapterRegistry(_adapters={})
 REPORT_PROFILES = ReportProfileRegistry(_profiles={})
+_DEFAULT_ADAPTERS_REGISTERED = False
+
+
+def ensure_default_method_adapters() -> None:
+    """Load built-in adapter registrations without exporting them publicly."""
+
+    global _DEFAULT_ADAPTERS_REGISTERED
+    if _DEFAULT_ADAPTERS_REGISTERED:
+        return
+    importlib.import_module("src.experiments.adapters")
+    _DEFAULT_ADAPTERS_REGISTERED = True
 
 
 def register_method_adapter(adapter: MethodAdapter | type[Any]) -> MethodAdapter | type[Any]:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.training.supervision.timing import (
-    ACQUISITION_ASYNC_FEEDBACK_QUEUE,
+    ACQUISITION_ASYNC_PREFERENCE_QUEUE,
     ACQUISITION_SYNCHRONOUS_OPTIMIZER_METRIC,
     ACTIVATION_EPOCH_BOUNDARY,
     ACTIVATION_IMMEDIATE,
@@ -14,14 +14,14 @@ from src.training.supervision.timing import (
 
 def test_supervision_timing_contract_describes_epoch_lag() -> None:
     timing = supervision_timing_contract(
-        acquisition_policy=ACQUISITION_ASYNC_FEEDBACK_QUEUE,
+        acquisition_policy=ACQUISITION_ASYNC_PREFERENCE_QUEUE,
         activation_barrier=ACTIVATION_EPOCH_BOUNDARY,
         consumer=CONSUMER_CTREEPO_GRADIENT,
         producer="teacher_worker",
-        delivery_mode="feedback_store",
+        delivery_mode="preference_store",
     )
 
-    assert timing["acquisition_policy"] == "async_feedback_queue"
+    assert timing["acquisition_policy"] == "async_preference_queue"
     assert timing["activation_barrier"] == "epoch_boundary"
     assert timing["blocking"] is False
     assert timing["label_lag_policy"] == (
@@ -29,7 +29,7 @@ def test_supervision_timing_contract_describes_epoch_lag() -> None:
     )
 
 
-def test_supervision_timing_contract_describes_gepa_immediate_feedback() -> None:
+def test_supervision_timing_contract_describes_gepa_immediate_metric() -> None:
     timing = supervision_timing_contract(
         acquisition_policy=ACQUISITION_SYNCHRONOUS_OPTIMIZER_METRIC,
         activation_barrier=ACTIVATION_IMMEDIATE,

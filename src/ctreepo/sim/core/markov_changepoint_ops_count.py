@@ -66,11 +66,21 @@ from src.tree.markov_changepoint_honesty_simulation import (
 )
 from src.tree.ctreepo_model import CTreePOConfig, CTreePOModel, normalize_target
 from src.core.ops_checks import EvidenceStatus, LawKind
+from src.ctreepo.contracts import (
+    LAW_ID_LEAF_PRESERVATION,
+    LAW_ID_MERGE_PRESERVATION,
+    LAW_ID_ON_RANGE_IDEMPOTENCE,
+    ORACLE_OBSERVATION_DESIGN_PARAMETER_FIELDS,
+    PUBLIC_CONTRACT_LEGACY_FIELDS,
+    assert_public_contract_clean,
+    canonical_law_set_id,
+)
 from src.ctreepo.sim.composite_objective import (
     CompositeObjectiveSpec,
     OBJECTIVE_ESTIMATOR_KEYS,
     evaluate_composite_objective_from_metrics,
     objective_estimator_alias,
+    resolve_root_local_objective_weights,
     scalarize_objective_estimates,
 )
 from src.ctreepo.sim.core.markov_capability import markov_theorem_score
@@ -127,6 +137,12 @@ from src.core.unified_runtime import (
     VALID_GPU_RUNTIME_BUCKET_MODES,
     VALID_GPU_RUNTIME_DATA_MODES,
 )
+from treepo.training.local_law import (
+    LOCAL_LAW_OBJECTIVE_CORRECTED,
+    LOCAL_LAW_OBJECTIVE_MODES as VALID_LOCAL_LAW_OBJECTIVE_MODES,
+    LOCAL_LAW_OBJECTIVE_SAMPLED_IPW,
+    normalize_local_law_objective_mode,
+)
 
 
 ScheduleName = str
@@ -148,6 +164,7 @@ VALID_DOC_SEQUENCE_OBJECTIVES: Tuple[DocSequenceObjectiveName, ...] = (
 )
 DocSequenceFNOPoolingName = str
 VALID_DOC_SEQUENCE_FNO_POOLING: Tuple[DocSequenceFNOPoolingName, ...] = ("mean", "sum")
+LocalLawObjectiveModeName = str
 TreeDocumentLossNormalizationModeName = str
 VALID_TREE_DOCUMENT_LOSS_NORMALIZATION_MODES: Tuple[
     TreeDocumentLossNormalizationModeName, ...
@@ -391,14 +408,25 @@ def _set_global_seed(seed: int) -> None:
 
 
 def _changepoint_count(regimes: Sequence[int]) -> int:
-    if len(regimes) < 2:
-        return 0
-    return int(sum(1 for a, b in zip(regimes[:-1], regimes[1:]) if int(a) != int(b)))
+    """Count regime transitions in a flat sequence.
+
+    Thin re-export of the canonical oracle now registered as
+    ``oracle:markov_changepoint_count`` in :mod:`src.ctreepo.oracles.markov`.
+    """
+    from src.ctreepo.oracles.markov import markov_changepoint_count
+
+    return markov_changepoint_count(regimes)
 
 
 def _oracle_count(doc: ChangepointMarkovDoc, *, start: int, end: int) -> int:
-    regs = doc.token_regimes[int(start) : int(end)]
-    return _changepoint_count(regs)
+    """Apply the changepoint oracle to a doc slice.
+
+    Thin re-export delegating to
+    :func:`src.ctreepo.oracles.markov.markov_changepoint_count_for_doc`.
+    """
+    from src.ctreepo.oracles.markov import markov_changepoint_count_for_doc
+
+    return markov_changepoint_count_for_doc(doc, start=int(start), end=int(end))
 
 
 def _leaf_spans(n_tokens: int, *, leaf_tokens: int) -> List[Tuple[int, int]]:
@@ -1386,6 +1414,9 @@ def _generate_ops_count_docs(
 
 @dataclass(frozen=True)
 class OPSCountConfig:
+    problem_id: str = "markov_ops_count"
+    method_id: str = "tree_neural"
+    law_set_id: str = "all"
     # Document generator.
     n_regimes: int = 4
     vocab_size: int = 96
@@ -1438,13 +1469,9 @@ class OPSCountConfig:
     leaf_weight: float = 0.0
     law_package: str = ""
     # Formal theorem-facing parameterization of the local-law bundle:
-    # (1 - λ) * root_objective + λ * [ρ_C1 * C1/L1 + ρ_C2 * C2/L3 + ρ_C3 * C3/L2].
-    # When unset, we fall back to the legacy additive term weights above.
-    #
-    # `task_objective_weight` can be used to break the normalized simplex and
-    # optimize an explicit composite objective
-    #   task_weight * task + c1 * C1 + c2 * C2 + c3 * C3 (+ proxy)
-    # while keeping the same local-law share parameterization.
+    # either (1 - λ) * root_objective + λ * equal_active_local_laws, or a
+    # normalized explicit root/C1/C2/C3 convex objective when λ is unset.
+    # `task_objective_weight` is accepted only in explicit-weight mode.
     local_law_weight: Optional[float] = None
     task_objective_weight: Optional[float] = None
     c1_relative_weight: float = 1.0
@@ -1531,6 +1558,7 @@ class OPSCountConfig:
     tree_leaf_fno_width: Optional[int] = None
     tree_leaf_fno_n_modes: Optional[int] = None
     tree_leaf_fno_n_layers: Optional[int] = None
+    tree_leaf_fno_pooling: Optional[str] = None
     tree_root_supervision_kind: TreeRootSupervisionKind = "mse"
     tree_checkpoint_metric: TreeCheckpointMetricName = "val_root_mae"
     tree_stage1_checkpoint_metric: TreeCheckpointMetricName = "val_root_mae"
@@ -1586,7 +1614,6 @@ class OPSCountConfig:
     tree_theorem_score_dim: int = 0
     tree_theorem_fiber_dim: int = 0
     tree_theorem_aux_dim: int = 0
-    tree_score_merge_mode: TreeScoreMergeModeName = "gated_affine"
     tree_phi_compose_weight: float = 1.0
     tree_phi_contrastive_weight: float = 0.25
     tree_phi_alignment_loss: TreePhiAlignmentLossName = "cosine_mse"
@@ -1613,10 +1640,10 @@ class OPSCountConfig:
     leaf_exact_supervision: bool = False
     endpoint_loss_scale: float = 1.0
 
-    # Unified IPW node-level supervision (replaces law_package for FNO when enabled).
-    use_unified_ipw: bool = False
+    # Unified local-law objective for FNO tree supervision.
     ipw_leaf_sample_rate: float = 1.0
     ipw_internal_sample_rate: float = 1.0
+    local_law_objective_mode: LocalLawObjectiveModeName = LOCAL_LAW_OBJECTIVE_CORRECTED
     use_residual_decomposition: bool = True
     root_only_train_fraction: float = 0.0
     # Fraction of training docs routed through the in-model full-document doc-sequence objective.
@@ -1668,6 +1695,10 @@ class SketchMetrics:
     c2_state_replay_mse: float = 0.0
     c2_bottleneck_reconstruction_mse: float = 0.0
     root_mse: float = float("nan")
+    condition_root_mae: Dict[str, float] = field(default_factory=dict)
+    condition_root_n_docs: Dict[str, int] = field(default_factory=dict)
+    condition_root_macro_mae: float = float("nan")
+    condition_root_worst_mae: float = float("nan")
 
     @property
     def c2_count_drift_r1_mae(self) -> float:
@@ -1837,18 +1868,79 @@ class OPSCountSummary:
     g_artifacts: Dict[str, object] = field(default_factory=dict)
 
     def to_json(self) -> str:
-        payload = {
-            "config": self.config,
-            "training_geometry": self.training_geometry,
-            "objective": self.objective,
-            "metrics": self.metrics,
-            "estimator_diagnostics": self.estimator_diagnostics,
-        }
-        if self.local_law_learnability:
-            payload["local_law_learnability"] = self.local_law_learnability
-        if self.g_artifacts:
-            payload["g_artifacts"] = self.g_artifacts
+        payload = _markov_public_summary_payload(self)
+        assert_public_contract_clean(payload, surface="markov ops-count summary")
         return json.dumps(payload, indent=2, sort_keys=True)
+
+
+def _markov_public_summary_payload(summary: OPSCountSummary) -> Dict[str, object]:
+    """Return the public Markov summary with legacy axis/objective keys removed."""
+
+    def clean(value: object) -> object:
+        if isinstance(value, Mapping):
+            out: Dict[str, object] = {}
+            for raw_key, raw_child in dict(value).items():
+                key = str(raw_key)
+                if key == "family":
+                    out.setdefault("method_id", clean(raw_child))
+                    continue
+                if key == "dgp":
+                    out.setdefault("problem_id", clean(raw_child))
+                    continue
+                if key == "law_package":
+                    try:
+                        out.setdefault(
+                            "law_set_id",
+                            canonical_law_set_id(str(raw_child), allow_aliases=True),
+                        )
+                    except Exception:
+                        out.setdefault("law_set_id", str(raw_child))
+                    continue
+                if key.startswith(("law_c", "local_law_c", "objective_local_law_c")):
+                    continue
+                if key.startswith("tree_") and key.endswith("_weight"):
+                    continue
+                if key in PUBLIC_CONTRACT_LEGACY_FIELDS:
+                    continue
+                if key in ORACLE_OBSERVATION_DESIGN_PARAMETER_FIELDS:
+                    continue
+                out[key] = clean(raw_child)
+            return out
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        if isinstance(value, tuple):
+            return [clean(item) for item in value]
+        if isinstance(value, str):
+            return (
+                value.replace("law_package", "law_set_id")
+                .replace("root_only_reference_package", "root_only_reference_law_set_id")
+                .replace("all_laws_reference_package", "all_laws_reference_law_set_id")
+            )
+        return value
+
+    objective = clean(summary.objective)
+    if isinstance(objective, Mapping):
+        component_weights = dict(objective.get("local_law_component_weights", {}) or {})
+        if component_weights:
+            objective = {
+                **dict(objective),
+                "local_law_component_weights": {
+                    str(k): float(v) for k, v in component_weights.items()
+                },
+            }
+
+    payload = {
+        "config": clean(summary.config),
+        "training_geometry": clean(summary.training_geometry),
+        "objective": objective,
+        "metrics": clean(summary.metrics),
+        "estimator_diagnostics": clean(summary.estimator_diagnostics),
+    }
+    if summary.local_law_learnability:
+        payload["local_law_learnability"] = clean(summary.local_law_learnability)
+    if summary.g_artifacts:
+        payload["g_artifacts"] = clean(summary.g_artifacts)
+    return payload
 
 
 @dataclass(frozen=True)
@@ -1859,6 +1951,7 @@ class MarkovOPSDataBundle:
     train_corpus_signature: str
     val_corpus_signature: str
     test_corpus_signature: str
+    metadata: Mapping[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -1868,6 +1961,7 @@ class MarkovOPSDataBundle:
             "train_corpus_signature": str(self.train_corpus_signature),
             "val_corpus_signature": str(self.val_corpus_signature),
             "test_corpus_signature": str(self.test_corpus_signature),
+            "metadata": dict(getattr(self, "metadata", {}) or {}),
         }
 
     def save(self, path: Path) -> None:
@@ -1905,6 +1999,7 @@ class MarkovOPSDataBundle:
             train_corpus_signature=str(payload.get("train_corpus_signature", "")),
             val_corpus_signature=str(payload.get("val_corpus_signature", "")),
             test_corpus_signature=str(payload.get("test_corpus_signature", "")),
+            metadata=dict(payload.get("metadata") or {}),
         )
 
     @classmethod
@@ -1939,7 +2034,56 @@ def _markov_corpus_signature(docs: Sequence[ChangepointMarkovDoc]) -> str:
     return h.hexdigest()
 
 
-def _root_count_diagnostics(docs: Sequence[ChangepointMarkovDoc]) -> Dict[str, float | int | bool]:
+def _condition_error_diagnostics(
+    errors: Sequence[float] | np.ndarray,
+    condition_ids: Sequence[str] | None,
+) -> Dict[str, object]:
+    err = np.asarray([float(value) for value in errors], dtype=np.float64).reshape(-1)
+    ids = [str(value) for value in list(condition_ids or [])]
+    if err.size == 0 or len(ids) != int(err.size):
+        return {
+            "condition_root_mae": {},
+            "condition_root_n_docs": {},
+            "condition_root_macro_mae": float("nan"),
+            "condition_root_worst_mae": float("nan"),
+        }
+    by_condition: Dict[str, List[float]] = {}
+    for condition_id, value in zip(ids, err.tolist()):
+        by_condition.setdefault(str(condition_id), []).append(float(value))
+    condition_mae = {
+        key: float(np.mean(np.asarray(values, dtype=np.float64)))
+        for key, values in sorted(by_condition.items())
+    }
+    condition_n_docs = {
+        key: int(len(values)) for key, values in sorted(by_condition.items())
+    }
+    mae_values = np.asarray(list(condition_mae.values()), dtype=np.float64)
+    return {
+        "condition_root_mae": condition_mae,
+        "condition_root_n_docs": condition_n_docs,
+        "condition_root_macro_mae": float(np.mean(mae_values)) if mae_values.size else float("nan"),
+        "condition_root_worst_mae": float(np.max(mae_values)) if mae_values.size else float("nan"),
+    }
+
+
+def _condition_ids_for_split(
+    data_bundle: MarkovOPSDataBundle,
+    split: str,
+    n_docs: int,
+) -> tuple[str, ...]:
+    metadata = dict(getattr(data_bundle, "metadata", {}) or {})
+    condition_ids_by_split = dict(metadata.get("condition_ids") or {})
+    raw_ids = list(condition_ids_by_split.get(str(split), []) or [])
+    if len(raw_ids) < int(n_docs):
+        return tuple()
+    return tuple(str(value) for value in raw_ids[: int(n_docs)])
+
+
+def _root_count_diagnostics(
+    docs: Sequence[ChangepointMarkovDoc],
+    *,
+    condition_ids: Sequence[str] | None = None,
+) -> Dict[str, object]:
     if not docs:
         return {
             "n_docs": 0,
@@ -1949,13 +2093,23 @@ def _root_count_diagnostics(docs: Sequence[ChangepointMarkovDoc]) -> Dict[str, f
             "std": float("nan"),
             "n_unique": 0,
             "is_constant": False,
+            "histogram": {},
+            "quantiles": {},
+            "global_mean_baseline_mae": float("nan"),
+            "condition_mean_baseline_mae": float("nan"),
+            "condition_macro_mean_baseline_mae": float("nan"),
+            "mean_guess_gap": float("nan"),
+            "condition_diagnostics": {},
         }
     counts = np.asarray(
         [float(_oracle_count(doc, start=0, end=len(doc.tokens))) for doc in docs],
         dtype=np.float64,
     )
     unique = np.unique(counts)
-    return {
+    hist_values, hist_counts = np.unique(np.rint(counts).astype(np.int64), return_counts=True)
+    global_mean = float(np.mean(counts))
+    global_mean_baseline_mae = float(np.mean(np.abs(counts - global_mean)))
+    diagnostics: Dict[str, object] = {
         "n_docs": int(counts.size),
         "min": float(np.min(counts)),
         "max": float(np.max(counts)),
@@ -1963,7 +2117,80 @@ def _root_count_diagnostics(docs: Sequence[ChangepointMarkovDoc]) -> Dict[str, f
         "std": float(np.std(counts)),
         "n_unique": int(unique.size),
         "is_constant": bool(unique.size <= 1),
+        "histogram": {
+            str(int(value)): int(count)
+            for value, count in zip(hist_values.tolist(), hist_counts.tolist())
+        },
+        "quantiles": {
+            "p00": float(np.percentile(counts, 0.0)),
+            "p25": float(np.percentile(counts, 25.0)),
+            "p50": float(np.percentile(counts, 50.0)),
+            "p75": float(np.percentile(counts, 75.0)),
+            "p90": float(np.percentile(counts, 90.0)),
+            "p95": float(np.percentile(counts, 95.0)),
+            "p100": float(np.percentile(counts, 100.0)),
+        },
+        "global_mean_baseline_mae": float(global_mean_baseline_mae),
+        "condition_mean_baseline_mae": float("nan"),
+        "condition_macro_mean_baseline_mae": float("nan"),
+        "mean_guess_gap": float("nan"),
+        "condition_diagnostics": {},
     }
+    ids = [str(value) for value in list(condition_ids or [])]
+    if len(ids) == int(counts.size):
+        by_condition: Dict[str, List[float]] = {}
+        for condition_id, count in zip(ids, counts.tolist()):
+            by_condition.setdefault(str(condition_id), []).append(float(count))
+        condition_abs: List[float] = []
+        condition_mean_baselines: List[float] = []
+        condition_payload: Dict[str, object] = {}
+        for condition_id, values in sorted(by_condition.items()):
+            arr = np.asarray(values, dtype=np.float64)
+            cond_mean = float(np.mean(arr))
+            cond_abs = np.abs(arr - cond_mean)
+            condition_abs.extend(float(value) for value in cond_abs.tolist())
+            condition_mean_baselines.append(float(np.mean(cond_abs)))
+            c_hist_values, c_hist_counts = np.unique(
+                np.rint(arr).astype(np.int64),
+                return_counts=True,
+            )
+            condition_payload[str(condition_id)] = {
+                "n_docs": int(arr.size),
+                "min": float(np.min(arr)),
+                "max": float(np.max(arr)),
+                "mean": float(cond_mean),
+                "std": float(np.std(arr)),
+                "n_unique": int(np.unique(arr).size),
+                "is_constant": bool(np.unique(arr).size <= 1),
+                "mean_baseline_mae": float(np.mean(cond_abs)),
+                "histogram": {
+                    str(int(value)): int(count)
+                    for value, count in zip(c_hist_values.tolist(), c_hist_counts.tolist())
+                },
+            }
+        condition_mean_baseline_mae = (
+            float(np.mean(np.asarray(condition_abs, dtype=np.float64)))
+            if condition_abs
+            else float("nan")
+        )
+        condition_macro_mean_baseline_mae = (
+            float(np.mean(np.asarray(condition_mean_baselines, dtype=np.float64)))
+            if condition_mean_baselines
+            else float("nan")
+        )
+        diagnostics.update(
+            {
+                "condition_mean_baseline_mae": float(condition_mean_baseline_mae),
+                "condition_macro_mean_baseline_mae": float(condition_macro_mean_baseline_mae),
+                "mean_guess_gap": (
+                    float(global_mean_baseline_mae - condition_mean_baseline_mae)
+                    if math.isfinite(condition_mean_baseline_mae)
+                    else float("nan")
+                ),
+                "condition_diagnostics": condition_payload,
+            }
+        )
+    return diagnostics
 
 
 def build_markov_changepoint_ops_count_data_bundle(config: OPSCountConfig) -> MarkovOPSDataBundle:
@@ -1997,6 +2224,7 @@ def build_markov_changepoint_ops_count_data_bundle(config: OPSCountConfig) -> Ma
         train_corpus_signature=_markov_corpus_signature(train_docs),
         val_corpus_signature=_markov_corpus_signature(val_docs),
         test_corpus_signature=_markov_corpus_signature(test_docs),
+        metadata={},
     )
 
 
@@ -2424,6 +2652,7 @@ def _markov_objective_estimator_payload(
     audit_scale: float,
     c3_audit_strategy: C3AuditStrategyName,
     c3_include_root: bool,
+    config: Optional["OPSCountConfig"] = None,
     objective_ci_delta: float = 0.05,
     seed: int = 0,
     encode_leaf_fn: Optional[Callable] = None,
@@ -2571,9 +2800,9 @@ def _markov_objective_estimator_payload(
 
     task_estimates = _constant_estimator_map(float(exact_objective.raw_root_loss))
     local_law_estimates: Dict[str, Dict[str, float]] = {
-        "c1": {"exact": float(exact_objective.raw_leaf_loss)},
-        "c2": _constant_estimator_map(float(exact_objective.raw_c2_loss)),
-        "c3": {"exact": float(exact_objective.raw_merge_loss)},
+        LAW_ID_LEAF_PRESERVATION: {"exact": float(exact_objective.raw_leaf_loss)},
+        LAW_ID_ON_RANGE_IDEMPOTENCE: _constant_estimator_map(float(exact_objective.raw_c2_loss)),
+        LAW_ID_MERGE_PRESERVATION: {"exact": float(exact_objective.raw_merge_loss)},
     }
     proxy_estimates = {
         "schedule_consistency": _constant_estimator_map(
@@ -2595,7 +2824,7 @@ def _markov_objective_estimator_payload(
             population_size=float(population_size),
             delta=float(objective_ci_delta),
         )
-        local_law_estimates["c1"].update(
+        local_law_estimates[LAW_ID_LEAF_PRESERVATION].update(
             {
                 "ht": float(leaf_eval.get("ht_mean", float("nan"))),
                 "hajek": float(leaf_eval.get("hajek", float("nan"))),
@@ -2603,9 +2832,9 @@ def _markov_objective_estimator_payload(
                 "eb_hi": float(leaf_eval.get("eb_hi", float("nan"))),
             }
         )
-        estimator_diagnostics["c1"] = dict(leaf_eval)
+        estimator_diagnostics[LAW_ID_LEAF_PRESERVATION] = dict(leaf_eval)
     else:
-        estimator_diagnostics["c1"] = {
+        estimator_diagnostics[LAW_ID_LEAF_PRESERVATION] = {
             "sample_count": float(len(leaf_samples)),
             "effective_sample_size": float(effective_sample_size(leaf_samples)),
             "max_weight": float(max_weight(leaf_samples)),
@@ -2619,7 +2848,7 @@ def _markov_objective_estimator_payload(
             population_size=float(population_size),
             delta=float(objective_ci_delta),
         )
-        local_law_estimates["c3"].update(
+        local_law_estimates[LAW_ID_MERGE_PRESERVATION].update(
             {
                 "ht": float(merge_eval.get("ht_mean", float("nan"))),
                 "hajek": float(merge_eval.get("hajek", float("nan"))),
@@ -2627,9 +2856,9 @@ def _markov_objective_estimator_payload(
                 "eb_hi": float(merge_eval.get("eb_hi", float("nan"))),
             }
         )
-        estimator_diagnostics["c3"] = dict(merge_eval)
+        estimator_diagnostics[LAW_ID_MERGE_PRESERVATION] = dict(merge_eval)
     else:
-        estimator_diagnostics["c3"] = {
+        estimator_diagnostics[LAW_ID_MERGE_PRESERVATION] = {
             "sample_count": float(len(merge_samples)),
             "effective_sample_size": float(effective_sample_size(merge_samples)),
             "max_weight": float(max_weight(merge_samples)),
@@ -2637,16 +2866,16 @@ def _markov_objective_estimator_payload(
         }
 
     prefer_hajek = False
-    if float(objective_spec.local_law_weights.get("c1", 0.0)) > 0.0 or float(
-        objective_spec.local_law_weights.get("c3", 0.0)
+    if float(objective_spec.local_law_weights.get(LAW_ID_LEAF_PRESERVATION, 0.0)) > 0.0 or float(
+        objective_spec.local_law_weights.get(LAW_ID_MERGE_PRESERVATION, 0.0)
     ) > 0.0:
         c1_ready = (
-            float(objective_spec.local_law_weights.get("c1", 0.0)) <= 0.0
-            or math.isfinite(_maybe_float(local_law_estimates["c1"].get("hajek")))
+            float(objective_spec.local_law_weights.get(LAW_ID_LEAF_PRESERVATION, 0.0)) <= 0.0
+            or math.isfinite(_maybe_float(local_law_estimates[LAW_ID_LEAF_PRESERVATION].get("hajek")))
         )
         c3_ready = (
-            float(objective_spec.local_law_weights.get("c3", 0.0)) <= 0.0
-            or math.isfinite(_maybe_float(local_law_estimates["c3"].get("hajek")))
+            float(objective_spec.local_law_weights.get(LAW_ID_MERGE_PRESERVATION, 0.0)) <= 0.0
+            or math.isfinite(_maybe_float(local_law_estimates[LAW_ID_MERGE_PRESERVATION].get("hajek")))
         )
         prefer_hajek = bool(c1_ready and c3_ready and (c1_ready or c3_ready))
 
@@ -2691,24 +2920,28 @@ def _markov_composite_objective_spec(
     return CompositeObjectiveSpec(
         name=str(composite.get("name", "configured_objective")),
         selection_metric_name=str(composite.get("selection_metric_name", "configured_objective")),
-        task_name=str(composite.get("task_name", "task_objective")),
-        task_weight=float(composite.get("task_weight", 0.0)),
-        local_law_weights={
+        root_metric_name=str(composite.get("root_metric_name", "root_error")),
+        root_share=float(composite.get("root_share", 0.0)),
+        local_law_component_weights={
             str(name): float(value)
-            for name, value in dict(composite.get("local_law_weights", {}) or {}).items()
+            for name, value in dict(
+                composite.get("local_law_component_weights", {}) or {}
+            ).items()
         },
-        proxy_weights={
+        auxiliary_diagnostic_weights={
             str(name): float(value)
-            for name, value in dict(composite.get("proxy_weights", {}) or {}).items()
+            for name, value in dict(
+                composite.get("auxiliary_diagnostic_weights", {}) or {}
+            ).items()
         },
         weighting_scheme=str(composite.get("weighting_scheme", "explicit_weighted_sum")),
-        task_weight_source=str(composite.get("task_weight_source", "")),
+        root_share_source=str(composite.get("root_share_source", "")),
         metadata={
-            "task_metric_name": "root_error",
+            "root_metric_name": "root_error",
             "local_law_metric_names": {
-                "c1": "c1",
-                "c2": "c2",
-                "c3": "c3",
+                LAW_ID_LEAF_PRESERVATION: "c1",
+                LAW_ID_ON_RANGE_IDEMPOTENCE: "c2",
+                LAW_ID_MERGE_PRESERVATION: "c3",
             },
             "proxy_metric_names": {
                 "schedule_consistency": "schedule_spread",
@@ -2738,6 +2971,8 @@ def _markov_objective_metrics(
     proxy_objective_term = float("nan")
     value_source = "recomputed_from_normalized_metrics"
     estimator_payload: Dict[str, Any] = {}
+    root_share = float("nan")
+    local_law_weight = float("nan")
     if split_payload is not None:
         payload = dict(split_payload)
         estimator_payload = dict(payload.get(f"{split_name}_objective_estimator_payload", {}) or {})
@@ -2778,8 +3013,9 @@ def _markov_objective_metrics(
         if math.isfinite(full_objective_value):
             value_source = "reported_split_payload"
     if not math.isfinite(full_objective_value):
+        objective_spec = _markov_composite_objective_spec(objective_summary)
         objective_eval = evaluate_composite_objective_from_metrics(
-            _markov_composite_objective_spec(objective_summary),
+            objective_spec,
             metrics={
                 "root_error": float(downstream_metrics.get("root_error", float("nan"))),
                 "c1": float(local_metrics.get("c1", float("nan"))),
@@ -2789,13 +3025,18 @@ def _markov_objective_metrics(
             },
         )
         full_objective_value = float(objective_eval.total)
+        root_share = float(objective_spec.normalized_task_share())
+        local_law_weight = float(objective_spec.local_law_weight())
         if not math.isfinite(task_objective_value):
             task_objective_value = float(objective_eval.task_raw)
         if not math.isfinite(task_objective_term):
             task_objective_term = float(objective_eval.task_term)
         if not math.isfinite(local_law_objective_value):
-            local_law_objective_value = float(
-                sum(float(v) for v in objective_eval.local_law_raw.values())
+            local_law_term_sum = float(sum(float(v) for v in objective_eval.local_law_terms.values()))
+            local_law_objective_value = (
+                float(local_law_term_sum / local_law_weight)
+                if local_law_weight > 0.0
+                else 0.0
             )
         if not math.isfinite(local_law_objective_term):
             local_law_objective_term = float(
@@ -2805,12 +3046,12 @@ def _markov_objective_metrics(
             proxy_objective_value = float(sum(float(v) for v in objective_eval.proxy_raw.values()))
         if not math.isfinite(proxy_objective_term):
             proxy_objective_term = float(sum(float(v) for v in objective_eval.proxy_terms.values()))
-    task_weight = float(objective_summary.get("task_objective_weight", 0.0))
+    root_share_from_summary = float(objective_summary.get("root_share", 0.0))
     local_law_weight_total = float(
-        sum(float(v) for v in dict(composite.get("local_law_weights", {}) or {}).values())
+        sum(float(v) for v in dict(composite.get("local_law_component_weights", {}) or {}).values())
     )
     proxy_weight_total = float(
-        sum(float(v) for v in dict(composite.get("proxy_weights", {}) or {}).values())
+        sum(float(v) for v in dict(composite.get("auxiliary_proxy_input_masses", {}) or {}).values())
     )
     total_weight_without_proxy = float(
         composite.get(
@@ -2818,28 +3059,25 @@ def _markov_objective_metrics(
             objective_summary.get("optimization_weight_mass_no_proxy", float("nan")),
         )
     )
-    normalized_task_share = (
-        float(task_weight / total_weight_without_proxy)
-        if math.isfinite(total_weight_without_proxy) and total_weight_without_proxy > 0.0
-        else float("nan")
+    normalized_task_share = float(composite.get("root_share", root_share_from_summary))
+    normalized_local_law_share = float(
+        composite.get("local_law_weight", objective_summary.get("local_law_weight", local_law_weight_total))
     )
-    normalized_local_law_share = (
-        float(local_law_weight_total / total_weight_without_proxy)
-        if math.isfinite(total_weight_without_proxy) and total_weight_without_proxy > 0.0
-        else float("nan")
-    )
+    if not math.isfinite(root_share):
+        root_share = normalized_task_share
+    if not math.isfinite(local_law_weight):
+        local_law_weight = normalized_local_law_share
     out = {
         "objective_name": objective_name,
         "selection_metric_name": selection_metric_name,
         "weighting_scheme": str(objective_summary.get("weighting_scheme", "")),
         "task_metric_name": task_metric_name,
-        "task_weight": task_weight,
+        "root_input_mass": root_share_from_summary,
         "local_law_weight_total": local_law_weight_total,
         "proxy_weight_total": proxy_weight_total,
         "total_weight_without_proxy": total_weight_without_proxy,
-        "lambda_local_law": float(objective_summary.get("local_law_weight", float("nan"))),
-        "normalized_task_share": normalized_task_share,
-        "normalized_local_law_share": normalized_local_law_share,
+        "local_law_weight": float(local_law_weight),
+        "root_share": float(root_share),
         "full_objective_value": float(full_objective_value),
         "task_objective_value": float(task_objective_value),
         "task_objective_term": float(task_objective_term),
@@ -2850,13 +3088,13 @@ def _markov_objective_metrics(
         "proxy_objective_value": float(proxy_objective_value),
         "proxy_objective_term": float(proxy_objective_term),
         "value_source": str(value_source),
-        "local_law_weights": {
+        "local_law_component_weights": {
             str(name): float(value)
-            for name, value in dict(composite.get("local_law_weights", {}) or {}).items()
+            for name, value in dict(composite.get("local_law_component_weights", {}) or {}).items()
         },
-        "proxy_weights": {
+        "auxiliary_proxy_input_masses": {
             str(name): float(value)
-            for name, value in dict(composite.get("proxy_weights", {}) or {}).items()
+            for name, value in dict(composite.get("auxiliary_proxy_input_masses", {}) or {}).items()
         },
     }
     if estimator_payload:
@@ -2872,6 +3110,12 @@ def _markov_objective_metrics(
             alias = objective_estimator_alias(objective_name, estimator)
             if alias in estimator_payload:
                 out[str(alias)] = float(estimator_payload[alias])
+            for key in (
+                f"{alias}_root_share",
+                f"{alias}_local_law_weight",
+            ):
+                if key in estimator_payload:
+                    out[str(key)] = float(estimator_payload[key])
         width_key = f"{objective_name}_eb_width"
         if width_key in estimator_payload:
             out[width_key] = float(estimator_payload[width_key])
@@ -3063,6 +3307,7 @@ def _policy_split_payload(
     split_name: str,
     objective_summary: Mapping[str, Any],
     split_payload: Optional[Mapping[str, Any]] = None,
+    config: Optional["OPSCountConfig"] = None,
 ) -> Dict[str, Any]:
     local_metrics = _markov_local_metrics(
         metrics,
@@ -3183,6 +3428,7 @@ def _build_markov_local_law_learnability(
                         target_scale=float(target_scale),
                         split_name="test",
                         objective_summary=objective_summary,
+                        config=config,
                     )
                 },
                 metadata={"note": str(notes)},
@@ -3197,6 +3443,7 @@ def _build_markov_local_law_learnability(
             split_name="test",
             objective_summary=objective_summary,
             split_payload=current_test_payload,
+            config=config,
         )
     }
     if current_train is not None:
@@ -3206,6 +3453,7 @@ def _build_markov_local_law_learnability(
             split_name="train",
             objective_summary=objective_summary,
             split_payload=current_train_payload,
+            config=config,
         )
     if current_val is not None:
         split_metrics["val"] = _policy_split_payload(
@@ -3214,6 +3462,7 @@ def _build_markov_local_law_learnability(
             split_name="val",
             objective_summary=objective_summary,
             split_payload=current_val_payload,
+            config=config,
         )
 
     policies = {
@@ -3227,6 +3476,7 @@ def _build_markov_local_law_learnability(
                     target_scale=float(target_scale),
                     split_name="test",
                     objective_summary=objective_summary,
+                    config=config,
                 )
             },
             metadata={"law_package": "exact"},
@@ -3373,6 +3623,37 @@ def _resolve_runtime_seeds(config: OPSCountConfig) -> Dict[str, int]:
     }
 
 
+def _markov_active_laws(package: str) -> Tuple[str, ...]:
+    law_sets = {
+        "root_only": (),
+        "c1_only": (LAW_ID_LEAF_PRESERVATION,),
+        "c2_only": (LAW_ID_ON_RANGE_IDEMPOTENCE,),
+        "c3_only": (LAW_ID_MERGE_PRESERVATION,),
+        "c1c3": (LAW_ID_LEAF_PRESERVATION, LAW_ID_MERGE_PRESERVATION),
+        "all_laws": (
+            LAW_ID_LEAF_PRESERVATION,
+            LAW_ID_ON_RANGE_IDEMPOTENCE,
+            LAW_ID_MERGE_PRESERVATION,
+        ),
+        "sched_only": (),
+        "all_laws_plus_sched": (
+            LAW_ID_LEAF_PRESERVATION,
+            LAW_ID_ON_RANGE_IDEMPOTENCE,
+            LAW_ID_MERGE_PRESERVATION,
+        ),
+    }
+    return tuple(
+        law_sets.get(
+            str(package or "all_laws").strip().lower(),
+            (
+                LAW_ID_LEAF_PRESERVATION,
+                LAW_ID_ON_RANGE_IDEMPOTENCE,
+                LAW_ID_MERGE_PRESERVATION,
+            ),
+        )
+    )
+
+
 def _law_package_weights(config: OPSCountConfig) -> Optional[Dict[str, float]]:
     package = str(config.law_package or "").strip().lower()
     if not package:
@@ -3382,42 +3663,40 @@ def _law_package_weights(config: OPSCountConfig) -> Optional[Dict[str, float]]:
             f"law_package={package!r} unsupported; expected one of {VALID_LAW_PACKAGES}"
         )
 
+    active = _markov_active_laws(package)
     if config.local_law_weight is not None:
-        lambda_local = float(max(0.0, config.local_law_weight))
-        lambda_defaulted = False
-    elif package in {"root_only", "sched_only"}:
-        lambda_local = 0.0
-        lambda_defaulted = False
+        resolved = resolve_root_local_objective_weights(
+            local_law_weight=float(config.local_law_weight),
+            active_laws=active,
+            objective_context="markov law_package",
+        )
+    elif active:
+        raise ValueError(
+            "law_package selects active local laws but local_law_weight was not "
+            "supplied; provide lambda explicitly or use explicit root/law weights"
+        )
     else:
-        lambda_local = float(DEFAULT_NORMALIZED_LOCAL_LAW_WEIGHT)
-        lambda_defaulted = True
-    sched_scale = (
-        float(config.schedule_consistency_weight)
-        if float(config.schedule_consistency_weight) > 0.0
-        else 0.1
-    )
-
-    law_sets = {
-        "root_only": (),
-        "c1_only": ("c1",),
-        "c2_only": ("c2",),
-        "c3_only": ("c3",),
-        "c1c3": ("c1", "c3"),
-        "all_laws": ("c1", "c2", "c3"),
-        "sched_only": (),
-        "all_laws_plus_sched": ("c1", "c2", "c3"),
+        resolved = resolve_root_local_objective_weights(
+            local_law_weight=0.0,
+            active_laws=active,
+            objective_context="markov law_package",
+        )
+    weights = {
+        LAW_ID_LEAF_PRESERVATION: 0.0,
+        LAW_ID_ON_RANGE_IDEMPOTENCE: 0.0,
+        LAW_ID_MERGE_PRESERVATION: 0.0,
+        "schedule": 0.0,
     }
-    active = tuple(law_sets[package])
-    if not active:
-        lambda_local = 0.0
-    share = float(lambda_local / float(len(active))) if active else 0.0
-    weights = {"c1": 0.0, "c2": 0.0, "c3": 0.0, "schedule": 0.0}
-    for key in active:
-        weights[key] = float(share)
+    for key, share in dict(resolved.local_law_shares).items():
+        weights[str(key)] = float(share)
     if package in {"sched_only", "all_laws_plus_sched"}:
+        sched_scale = (
+            float(config.schedule_consistency_weight)
+            if float(config.schedule_consistency_weight) > 0.0
+            else 0.1
+        )
         weights["schedule"] = float(max(0.0, sched_scale))
-    weights["lambda_local"] = float(lambda_local)
-    weights["lambda_defaulted"] = 1.0 if lambda_defaulted else 0.0
+    weights["local_law_weight"] = float(resolved.local_law_weight)
     return weights
 
 
@@ -3435,28 +3714,25 @@ def _resolve_local_law_weights(config: OPSCountConfig) -> Dict[str, float | str]
         return {
             "parameterization": "exact_collapse_root_only_identity",
             "weighting_scheme": "exact_collapse_root_only_identity",
-            "law_package": "",
+            "law_set_id": "root_only",
             "local_law_weight": 0.0,
-            "local_law_lambda": 0.0,
-            "task_objective_weight": float(configured_task_weight),
-            "configured_task_objective_weight": float(configured_task_weight),
-            "task_objective_weight_source": "exact_collapse_root_only_identity",
+            "root_share": 1.0,
+            "optimization_root_weight": 1.0,
+            "configured_root_share": float(configured_task_weight),
+            "root_share_source": "exact_collapse_root_only_identity",
             "local_law_c1_weight": 0.0,
             "local_law_c2_weight": 0.0,
             "local_law_c3_weight": 0.0,
             "local_law_c1_share": 0.0,
             "local_law_c2_share": 0.0,
             "local_law_c3_share": 0.0,
-            "optimization_root_weight": float(configured_task_weight),
-            "optimization_weight_mass_no_proxy": float(configured_task_weight),
-            "lambda_defaulted_from_lean_default": False,
+            "optimization_weight_mass_no_proxy": 1.0,
             "legacy_leaf_weight": float(max(0.0, config.leaf_weight)),
             "legacy_c2_weight": float(max(0.0, config.c2_weight)),
             "legacy_c3_weight": float(max(0.0, config.c3_weight)),
             "proxy_schedule_consistency_weight": 0.0,
         }
 
-    package_weights = _law_package_weights(config)
     legacy_c1 = float(config.leaf_weight)
     legacy_c2 = float(config.c2_weight)
     legacy_c3 = float(config.c3_weight)
@@ -3465,107 +3741,116 @@ def _resolve_local_law_weights(config: OPSCountConfig) -> Dict[str, float | str]
         if config.task_objective_weight is not None
         else None
     )
-    if package_weights is not None:
-        effective_c1 = float(package_weights["c1"])
-        effective_c2 = float(package_weights["c2"])
-        effective_c3 = float(package_weights["c3"])
-        lambda_local = float(package_weights["lambda_local"])
-        if lambda_local > 0.0:
-            c1_share = float(effective_c1 / lambda_local)
-            c2_share = float(effective_c2 / lambda_local)
-            c3_share = float(effective_c3 / lambda_local)
+    package = str(config.law_package or "").strip().lower()
+    if package and package not in VALID_LAW_PACKAGES:
+        raise ValueError(
+            f"law_package={package!r} unsupported; expected one of {VALID_LAW_PACKAGES}"
+        )
+    active_laws = _markov_active_laws(package or "all_laws")
+    raw_law_weights = {
+        LAW_ID_LEAF_PRESERVATION: float(max(0.0, legacy_c1)),
+        LAW_ID_ON_RANGE_IDEMPOTENCE: float(max(0.0, legacy_c2)),
+        LAW_ID_MERGE_PRESERVATION: float(max(0.0, legacy_c3)),
+    }
+    if config.local_law_weight is not None:
+        if configured_task_weight is not None:
+            raise ValueError("local_law_weight cannot be combined with task_objective_weight")
+        if max(0.0, legacy_c1) > 0.0 or max(0.0, legacy_c2) > 0.0 or max(0.0, legacy_c3) > 0.0:
+            raise ValueError("local_law_weight cannot be combined with explicit law weights")
+        lambda_raw = float(config.local_law_weight)
+        if (
+            lambda_raw > 0.0
+            and (
+                not math.isclose(float(config.c1_relative_weight), 1.0)
+                or not math.isclose(float(config.c2_relative_weight), 1.0)
+                or not math.isclose(float(config.c3_relative_weight), 1.0)
+            )
+        ):
+            raise ValueError("lambda mode uses equal active-law weights; relative weights are not supported")
+        resolved = resolve_root_local_objective_weights(
+            local_law_weight=lambda_raw,
+            active_laws=active_laws,
+            objective_context="markov objective",
+        )
+        effective_c1 = float(resolved.local_law_shares.get(LAW_ID_LEAF_PRESERVATION, 0.0))
+        effective_c2 = float(resolved.local_law_shares.get(LAW_ID_ON_RANGE_IDEMPOTENCE, 0.0))
+        effective_c3 = float(resolved.local_law_shares.get(LAW_ID_MERGE_PRESERVATION, 0.0))
+        local_weight = float(resolved.local_law_weight)
+        if local_weight > 0.0:
+            c1_share = float(effective_c1 / local_weight)
+            c2_share = float(effective_c2 / local_weight)
+            c3_share = float(effective_c3 / local_weight)
         else:
             c1_share = 0.0
             c2_share = 0.0
             c3_share = 0.0
-        proxy_weight = float(package_weights["schedule"])
-        parameterization = "law_package"
-        if configured_task_weight is None:
-            weighting_scheme = "normalized_lambda_tradeoff"
-            optimization_root_weight = float(max(0.0, 1.0 - lambda_local))
-            task_objective_weight_source = "derived_from_local_law_weight"
-        else:
-            weighting_scheme = "explicit_task_plus_local_law"
-            optimization_root_weight = float(configured_task_weight)
-            task_objective_weight_source = "explicit_task_objective_weight"
-        lambda_defaulted = bool(float(package_weights["lambda_defaulted"]) > 0.0)
-    elif config.local_law_weight is None:
-        lambda_local = float(max(0.0, legacy_c1 + legacy_c2 + legacy_c3))
-        if lambda_local > 0.0:
-            c1_share = float(max(0.0, legacy_c1) / lambda_local)
-            c2_share = float(max(0.0, legacy_c2) / lambda_local)
-            c3_share = float(max(0.0, legacy_c3) / lambda_local)
-        else:
-            c1_share = 0.0
-            c2_share = 0.0
-            c3_share = 0.0
-        effective_c1 = float(max(0.0, legacy_c1))
-        effective_c2 = float(max(0.0, legacy_c2))
-        effective_c3 = float(max(0.0, legacy_c3))
         proxy_weight = float(max(0.0, config.schedule_consistency_weight))
-        parameterization = "legacy_term_weights"
-        weighting_scheme = "legacy_additive_weights"
-        if configured_task_weight is None:
-            optimization_root_weight = float(max(0.0, config.root_weight))
-            task_objective_weight_source = "legacy_root_weight"
-        else:
-            optimization_root_weight = float(configured_task_weight)
-            task_objective_weight_source = "explicit_task_objective_weight"
-        lambda_defaulted = False
+        if package in {"sched_only", "all_laws_plus_sched"} and proxy_weight <= 0.0:
+            proxy_weight = 0.1
+        parameterization = "law_set_lambda" if package else "lambda"
+        weighting_scheme = str(resolved.weighting_scheme)
+        optimization_root_weight = float(resolved.root_share)
+        root_share_source = "derived_from_local_law_weight"
     else:
-        lambda_local = float(max(0.0, config.local_law_weight))
-        c1_rel = float(max(0.0, config.c1_relative_weight))
-        c2_rel = float(max(0.0, config.c2_relative_weight))
-        c3_rel = float(max(0.0, config.c3_relative_weight))
-        rel_total = float(c1_rel + c2_rel + c3_rel)
-        if lambda_local > 0.0 and rel_total > 0.0:
-            c1_share = float(c1_rel / rel_total)
-            c2_share = float(c2_rel / rel_total)
-            c3_share = float(c3_rel / rel_total)
-            effective_c1 = float(lambda_local * c1_share)
-            effective_c2 = float(lambda_local * c2_share)
-            effective_c3 = float(lambda_local * c3_share)
+        inactive_laws = set(raw_law_weights.keys()) - set(active_laws)
+        if package and any(float(raw_law_weights[name]) > 0.0 for name in inactive_laws):
+            raise ValueError("law_package explicit mode cannot set weights for inactive laws")
+        resolved = resolve_root_local_objective_weights(
+            local_law_weight=None,
+            active_laws=active_laws,
+            explicit_root_weight=(
+                float(config.root_weight) if configured_task_weight is None else configured_task_weight
+            ),
+            explicit_law_weights={
+                name: raw_law_weights[name] for name in active_laws if name in raw_law_weights
+            },
+            objective_context="markov objective",
+        )
+        optimization_root_weight = float(resolved.root_share)
+        effective_c1 = float(resolved.local_law_shares.get(LAW_ID_LEAF_PRESERVATION, 0.0))
+        effective_c2 = float(resolved.local_law_shares.get(LAW_ID_ON_RANGE_IDEMPOTENCE, 0.0))
+        effective_c3 = float(resolved.local_law_shares.get(LAW_ID_MERGE_PRESERVATION, 0.0))
+        local_weight = float(resolved.local_law_weight)
+        if local_weight > 0.0:
+            c1_share = float(effective_c1 / local_weight)
+            c2_share = float(effective_c2 / local_weight)
+            c3_share = float(effective_c3 / local_weight)
         else:
-            c1_share = 0.0
-            c2_share = 0.0
-            c3_share = 0.0
-            effective_c1 = 0.0
-            effective_c2 = 0.0
-            effective_c3 = 0.0
+            c1_share = c2_share = c3_share = 0.0
         proxy_weight = float(max(0.0, config.schedule_consistency_weight))
-        parameterization = "formal_local_law_weight"
-        if configured_task_weight is None:
-            weighting_scheme = "normalized_lambda_tradeoff"
-            optimization_root_weight = float(max(0.0, 1.0 - lambda_local))
-            task_objective_weight_source = "derived_from_local_law_weight"
-        else:
-            weighting_scheme = "explicit_task_plus_local_law"
-            optimization_root_weight = float(configured_task_weight)
-            task_objective_weight_source = "explicit_task_objective_weight"
-        lambda_defaulted = False
+        if package in {"sched_only", "all_laws_plus_sched"} and proxy_weight <= 0.0:
+            proxy_weight = 0.1
+        parameterization = "explicit_normalized_weights"
+        weighting_scheme = str(resolved.weighting_scheme)
+        root_share_source = (
+            "explicit_root_share"
+            if configured_task_weight is not None
+            else "explicit_root_weight"
+        )
 
     return {
         "parameterization": str(parameterization),
         "weighting_scheme": str(weighting_scheme),
-        "law_package": str(config.law_package or ""),
-        "local_law_weight": float(lambda_local),
-        "local_law_lambda": float(lambda_local),
-        "task_objective_weight": float(optimization_root_weight),
-        "configured_task_objective_weight": (
+        "law_set_id": canonical_law_set_id(
+            str(config.law_package or "all_laws"),
+            allow_aliases=True,
+        ),
+        "local_law_weight": float(local_weight),
+        "root_share": float(optimization_root_weight),
+        "optimization_root_weight": float(optimization_root_weight),
+        "configured_root_share": (
             float(configured_task_weight) if configured_task_weight is not None else None
         ),
-        "task_objective_weight_source": str(task_objective_weight_source),
+        "root_share_source": str(root_share_source),
         "local_law_c1_weight": float(effective_c1),
         "local_law_c2_weight": float(effective_c2),
         "local_law_c3_weight": float(effective_c3),
         "local_law_c1_share": float(c1_share),
         "local_law_c2_share": float(c2_share),
         "local_law_c3_share": float(c3_share),
-        "optimization_root_weight": float(optimization_root_weight),
         "optimization_weight_mass_no_proxy": float(
             optimization_root_weight + effective_c1 + effective_c2 + effective_c3
         ),
-        "lambda_defaulted_from_lean_default": bool(lambda_defaulted),
         "legacy_leaf_weight": float(legacy_c1),
         "legacy_c2_weight": float(legacy_c2),
         "legacy_c3_weight": float(legacy_c3),
@@ -3575,37 +3860,35 @@ def _resolve_local_law_weights(config: OPSCountConfig) -> Dict[str, float | str]
 
 def _build_objective_summary(config: OPSCountConfig) -> Dict[str, Any]:
     resolved = _resolve_local_law_weights(config)
-    optimization_root_weight = float(resolved["optimization_root_weight"])
-    root_active = bool(config.include_root_query) and optimization_root_weight > 0.0
+    root_share = float(resolved["root_share"])
+    root_active = bool(config.include_root_query) and root_share > 0.0
     proxy_weight = float(resolved["proxy_schedule_consistency_weight"])
     uses_weighted_neural_objective = str(config.model_family) in ("neural", "fno")
     weighting_scheme = str(resolved["weighting_scheme"])
-    if weighting_scheme == "legacy_additive_weights":
+    if weighting_scheme == "normalized_explicit_weights":
         objective_formula = (
-            "`root_weight * task + leaf_weight * C1 + c2_weight * C2 + c3_weight * C3`"
-        )
-    elif str(resolved["task_objective_weight_source"]) == "explicit_task_objective_weight":
-        objective_formula = (
-            "`task_objective_weight * task + local_law_penalties`, with local-law shares "
-            "still controlled by λ and the relative C1/C2/C3 weights"
+            "`normalized_root_weight * task + sum_i normalized_law_weight_i * law_i`"
         )
     else:
-        objective_formula = "`(1 - lambda) * task + lambda * local_laws`"
+        objective_formula = "`(1 - lambda) * task + lambda * equal_active_local_laws`"
     composite_spec = CompositeObjectiveSpec(
         name="configured_objective",
         selection_metric_name="configured_objective",
-        task_name="task_objective",
-        task_weight=float(resolved["task_objective_weight"]),
-        local_law_weights={
-            "c1": float(resolved["local_law_c1_weight"]),
-            "c2": float(resolved["local_law_c2_weight"]),
-            "c3": float(resolved["local_law_c3_weight"]),
+        root_metric_name="root_count_mse",
+        root_share=float(resolved["root_share"]),
+        local_law_component_weights={
+            LAW_ID_LEAF_PRESERVATION: float(resolved["local_law_c1_weight"]),
+            LAW_ID_ON_RANGE_IDEMPOTENCE: float(resolved["local_law_c2_weight"]),
+            LAW_ID_MERGE_PRESERVATION: float(resolved["local_law_c3_weight"]),
         },
-        proxy_weights={"schedule_consistency": float(proxy_weight)},
+        auxiliary_diagnostic_weights={"schedule_consistency": float(proxy_weight)},
         weighting_scheme=str(weighting_scheme),
-        task_weight_source=str(resolved["task_objective_weight_source"]),
+        root_share_source=str(resolved["root_share_source"]),
         metadata={
-            "task_metric_name": "root_count_mse",
+            "problem_id": str(config.problem_id),
+            "method_id": str(config.method_id),
+            "law_set_id": str(resolved["law_set_id"]),
+            "root_metric_name": "root_count_mse",
             "parameterization": str(resolved["parameterization"]),
             "local_law_weight": float(resolved["local_law_weight"]),
         },
@@ -3656,23 +3939,29 @@ def _build_objective_summary(config: OPSCountConfig) -> Dict[str, Any]:
     ]
     return {
         **resolved,
+        "problem_id": str(config.problem_id),
+        "method_id": str(config.method_id),
         "model_family": str(config.model_family),
         "training_scheme": (
             "weighted_neural_objective"
             if uses_weighted_neural_objective
             else "closed_form_label_fit"
         ),
-        "root_weight": float(config.root_weight),
         "task_objective_name": "root_count_mse",
-        "task_objective_weight": float(resolved["task_objective_weight"]),
-        "task_objective_weight_source": str(resolved["task_objective_weight_source"]),
-        "optimization_root_weight": float(optimization_root_weight),
+        "root_share": float(root_share),
+        "root_share_source": str(resolved["root_share_source"]),
+        "task_objective_weight_source": "configured_objective_builder",
         "root_supervision_active": bool(uses_weighted_neural_objective and root_active),
         "task_supervision_active": bool(uses_weighted_neural_objective and root_active),
         "proxy_schedule_consistency_weight": float(proxy_weight),
         "local_law_active": bool(
             uses_weighted_neural_objective and float(resolved["local_law_weight"]) > 0.0
         ),
+        "local_law_component_weights": {
+            LAW_ID_LEAF_PRESERVATION: float(resolved["local_law_c1_weight"]),
+            LAW_ID_ON_RANGE_IDEMPOTENCE: float(resolved["local_law_c2_weight"]),
+            LAW_ID_MERGE_PRESERVATION: float(resolved["local_law_c3_weight"]),
+        },
         "parameterization_overrides_legacy": bool(
             config.local_law_weight is not None or str(config.law_package or "").strip()
         ),
@@ -3690,6 +3979,38 @@ def _build_objective_summary(config: OPSCountConfig) -> Dict[str, Any]:
             "closed-form regression on the available C1/C3 labels and exact scalar re-summary for C2."
         ),
     }
+
+
+def _validate_unified_fno_local_law_objective(
+    config: OPSCountConfig,
+    objective_summary: Mapping[str, Any],
+) -> None:
+    """Reject law-specific FNO weights that the bundled loss cannot honor."""
+
+    if str(config.model_family) not in ("fno", "neural"):
+        return
+    local_law_weight = float(objective_summary.get("local_law_weight", 0.0) or 0.0)
+    if local_law_weight <= 1e-12:
+        return
+
+    weights = (
+        float(objective_summary.get("local_law_c1_weight", 0.0) or 0.0),
+        float(objective_summary.get("local_law_c2_weight", 0.0) or 0.0),
+        float(objective_summary.get("local_law_c3_weight", 0.0) or 0.0),
+    )
+    positive = [value for value in weights if value > 1e-12]
+    if len(positive) == 3 and all(
+        math.isclose(value, positive[0], rel_tol=1e-6, abs_tol=1e-9)
+        for value in positive
+    ):
+        return
+
+    raise ValueError(
+        "FNO unified local-law training uses one bundled corrected_local_law loss; "
+        "law-specific C1/C2/C3 weights or packages are not supported on this path. "
+        "Use root_only, local_law_weight with all active laws, or explicit equal "
+        "C1/C2/C3 shares."
+    )
 
 
 @dataclass(frozen=True)
@@ -4755,6 +5076,7 @@ def _eval_root_predictions(
     truths: Sequence[float],
     *,
     tau: float,
+    condition_ids: Sequence[str] | None = None,
 ) -> SketchMetrics:
     if len(truths) == 0:
         return _zero_sketch_metrics(n_docs=0)
@@ -4765,6 +5087,7 @@ def _eval_root_predictions(
     abs_err = np.abs(pred - y)
     sq_err = (pred - y) ** 2
     tau_v = float(tau)
+    condition_metrics = _condition_error_diagnostics(abs_err, condition_ids)
     _nan = float("nan")
     return SketchMetrics(
         root_mae=float(np.mean(abs_err)),
@@ -4786,6 +5109,10 @@ def _eval_root_predictions(
         merge_mae=_nan,
         merge_violation_rate=_nan,
         n_docs=int(len(truths)),
+        condition_root_mae=dict(condition_metrics["condition_root_mae"]),
+        condition_root_n_docs=dict(condition_metrics["condition_root_n_docs"]),
+        condition_root_macro_mae=float(condition_metrics["condition_root_macro_mae"]),
+        condition_root_worst_mae=float(condition_metrics["condition_root_worst_mae"]),
     )
 
 
@@ -5372,6 +5699,7 @@ def _eval_root_only_predictions(
     *,
     n_docs: int,
     tau: float,
+    condition_ids: Sequence[str] | None = None,
 ) -> SketchMetrics:
     if int(n_docs) <= 0:
         return _zero_sketch_metrics(n_docs=0)
@@ -5381,6 +5709,7 @@ def _eval_root_only_predictions(
         raise ValueError("root-only predictions must align with targets")
     abs_err = np.abs(pred - y)
     tau_v = float(tau)
+    condition_metrics = _condition_error_diagnostics(abs_err, condition_ids)
     return SketchMetrics(
         root_mae=float(np.mean(abs_err)),
         root_median_abs_error=float(np.median(abs_err)),
@@ -5399,6 +5728,10 @@ def _eval_root_only_predictions(
         merge_mae=0.0,
         merge_violation_rate=0.0,
         n_docs=int(n_docs),
+        condition_root_mae=dict(condition_metrics["condition_root_mae"]),
+        condition_root_n_docs=dict(condition_metrics["condition_root_n_docs"]),
+        condition_root_macro_mae=float(condition_metrics["condition_root_macro_mae"]),
+        condition_root_worst_mae=float(condition_metrics["condition_root_worst_mae"]),
     )
 
 
@@ -6095,6 +6428,7 @@ def _eval_learned_model(
     *,
     device: torch.device,
     tau: float,
+    condition_ids: Sequence[str] | None = None,
 ) -> SketchMetrics:
     if len(docs) == 0:
         return _zero_sketch_metrics(n_docs=0)
@@ -6200,6 +6534,7 @@ def _eval_learned_model(
     root_drift_r1_arr = np.asarray(root_drift_r1, dtype=np.float64)
     root_drift_r2_arr = np.asarray(root_drift_r2, dtype=np.float64)
     root_drift_r4_arr = np.asarray(root_drift_r4, dtype=np.float64)
+    condition_metrics = _condition_error_diagnostics(root_abs_arr, condition_ids)
 
     return SketchMetrics(
         root_mae=float(np.mean(root_abs_arr)),
@@ -6232,6 +6567,10 @@ def _eval_learned_model(
         c2_bottleneck_reconstruction_mse=(
             float(np.mean(c2_bottleneck_recon)) if c2_bottleneck_recon else 0.0
         ),
+        condition_root_mae=dict(condition_metrics["condition_root_mae"]),
+        condition_root_n_docs=dict(condition_metrics["condition_root_n_docs"]),
+        condition_root_macro_mae=float(condition_metrics["condition_root_macro_mae"]),
+        condition_root_worst_mae=float(condition_metrics["condition_root_worst_mae"]),
     )
 
 
@@ -6879,17 +7218,20 @@ def run_markov_changepoint_ops_count_experiment(
         raise ValueError("c2_relative_weight must be non-negative")
     if float(config.c3_relative_weight) < 0.0:
         raise ValueError("c3_relative_weight must be non-negative")
-    if (
-        config.local_law_weight is not None
-        and float(config.local_law_weight) > 0.0
-        and float(config.c1_relative_weight)
-        + float(config.c2_relative_weight)
-        + float(config.c3_relative_weight)
-        <= 0.0
-    ):
-        raise ValueError(
-            "local_law_weight > 0 requires c1_relative_weight + c2_relative_weight + c3_relative_weight > 0"
-        )
+    if config.local_law_weight is not None:
+        if config.task_objective_weight is not None:
+            raise ValueError("local_law_weight is mutually exclusive with task_objective_weight")
+        if float(config.leaf_weight) > 0.0 or float(config.c2_weight) > 0.0 or float(config.c3_weight) > 0.0:
+            raise ValueError("local_law_weight is mutually exclusive with explicit law weights")
+        if (
+            float(config.local_law_weight) > 0.0
+            and (
+                not math.isclose(float(config.c1_relative_weight), 1.0)
+                or not math.isclose(float(config.c2_relative_weight), 1.0)
+                or not math.isclose(float(config.c3_relative_weight), 1.0)
+            )
+        ):
+            raise ValueError("lambda mode uses equal active-law weights")
     if float(config.root_weight) < 0.0:
         raise ValueError("root_weight must be non-negative")
     if float(config.schedule_consistency_weight) < 0.0:
@@ -6924,6 +7266,16 @@ def run_markov_changepoint_ops_count_experiment(
             f"{config.doc_sequence_fno_pooling!r} unsupported; expected one of "
             f"{VALID_DOC_SEQUENCE_FNO_POOLING}"
         )
+    try:
+        normalized_local_law_objective_mode = normalize_local_law_objective_mode(
+            str(config.local_law_objective_mode)
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "local_law_objective_mode="
+            f"{config.local_law_objective_mode!r} unsupported; expected one of "
+            f"{VALID_LOCAL_LAW_OBJECTIVE_MODES}"
+        ) from exc
     if (
         str(config.tree_document_loss_normalization_mode)
         not in VALID_TREE_DOCUMENT_LOSS_NORMALIZATION_MODES
@@ -7093,12 +7445,6 @@ def run_markov_changepoint_ops_count_experiment(
         raise ValueError(
             "tree_theorem_score_dim + tree_theorem_fiber_dim + tree_theorem_aux_dim "
             "must be zero/unset or equal tree_theorem_feature_dim"
-        )
-    if str(getattr(config, "tree_score_merge_mode", "gated_affine")) not in VALID_TREE_SCORE_MERGE_MODES:
-        raise ValueError(
-            "tree_score_merge_mode="
-            f"{getattr(config, 'tree_score_merge_mode', '')!r} unsupported; expected one of "
-            f"{VALID_TREE_SCORE_MERGE_MODES}"
         )
     if float(config.tree_phi_compose_weight) < 0.0:
         raise ValueError("tree_phi_compose_weight must be non-negative")
@@ -7333,6 +7679,7 @@ def run_markov_changepoint_ops_count_experiment(
         device = torch.device("cpu")
 
     objective = _build_objective_summary(config)
+    _validate_unified_fno_local_law_objective(config, objective)
     normalized_tree_supervision_source = str(
         getattr(config, "tree_supervision_source", "rate") or "rate"
     ).strip().lower()
@@ -7368,6 +7715,9 @@ def run_markov_changepoint_ops_count_experiment(
     docs_train = tuple(data_bundle.train_docs[: int(config.train_docs)])
     docs_val = tuple(data_bundle.val_docs[: int(config.val_docs)])
     docs_test = tuple(data_bundle.test_docs[: int(config.test_docs)])
+    train_condition_ids = _condition_ids_for_split(data_bundle, "train", len(docs_train))
+    val_condition_ids = _condition_ids_for_split(data_bundle, "val", len(docs_val))
+    test_condition_ids = _condition_ids_for_split(data_bundle, "test", len(docs_test))
     train_corpus_signature = _markov_corpus_signature(docs_train)
     val_corpus_signature = _markov_corpus_signature(docs_val)
     test_corpus_signature = _markov_corpus_signature(docs_test)
@@ -7377,9 +7727,19 @@ def run_markov_changepoint_ops_count_experiment(
         test_docs=docs_test,
         pad_id=int(config.vocab_size),
     )
-    train_target_diagnostics = _root_count_diagnostics(docs_train)
-    val_target_diagnostics = _root_count_diagnostics(docs_val)
-    test_target_diagnostics = _root_count_diagnostics(docs_test)
+    train_target_diagnostics = _root_count_diagnostics(
+        docs_train,
+        condition_ids=train_condition_ids,
+    )
+    val_target_diagnostics = _root_count_diagnostics(
+        docs_val,
+        condition_ids=val_condition_ids,
+    )
+    test_target_diagnostics = _root_count_diagnostics(
+        docs_test,
+        condition_ids=test_condition_ids,
+    )
+    hazard_panel_metadata = dict(getattr(data_bundle, "metadata", {}) or {})
     config_payload = {
         **asdict(config),
         **seeds,
@@ -7387,6 +7747,8 @@ def run_markov_changepoint_ops_count_experiment(
         "val_corpus_signature": str(val_corpus_signature),
         "test_corpus_signature": str(test_corpus_signature),
         "data_bundle_source": str(data_bundle_source),
+        "data_bundle_metadata": hazard_panel_metadata,
+        "hazard_panel_id": str(hazard_panel_metadata.get("hazard_panel_id", "")),
         "full_sequence_input_backend": "shared_token_sequence_arrays",
         "full_sequence_input_signatures": dict(full_sequence_input_signatures),
         "train_target_diagnostics": train_target_diagnostics,
@@ -7579,7 +7941,6 @@ def run_markov_changepoint_ops_count_experiment(
                 _FNOCountDoc,
                 _prepare_fno_count_docs,
                 _root_only_view_fno_docs,
-                train_fno_tree,
             )
             fno_tree_train_regular = _prepare_fno_count_docs(
                 docs_train, leaf_tokens=int(config.fixed_leaf_tokens)
@@ -7672,7 +8033,7 @@ def run_markov_changepoint_ops_count_experiment(
                 theorem_score_dim=int(getattr(config, "tree_theorem_score_dim", 0)),
                 theorem_fiber_dim=int(getattr(config, "tree_theorem_fiber_dim", 0)),
                 theorem_aux_dim=int(getattr(config, "tree_theorem_aux_dim", 0)),
-                score_merge_mode=str(getattr(config, "tree_score_merge_mode", "gated_affine")),
+                score_merge_mode="gated_affine",
                 phi_alignment_loss=str(config.tree_phi_alignment_loss),
                 c2_mode=str(getattr(config, "tree_c2_mode", "reconstruction")),
                 theorem_feature_adapter=str(
@@ -7693,128 +8054,32 @@ def run_markov_changepoint_ops_count_experiment(
                 oracle_diff_threshold=float(getattr(config, "oracle_diff_threshold", 0.0)),
                 tree_model_version=str(getattr(config, "tree_model_version", "legacy")),
             ).to(device=device)
-            if bool(config.use_unified_ipw):
-                from src.ctreepo.sim.core.markov_neural_operator_baselines import (
-                    train_fno_tree_ipw,
-                )
-                _fno_result = train_fno_tree_ipw(
-                    model=model,
-                    train_docs=fno_tree_train,
-                    val_docs=fno_tree_val,
-                    device=device,
-                    n_epochs=int(config.n_epochs),
-                    batch_size=int(config.batch_size),
-                    lr=float(config.lr),
-                    weight_decay=float(config.weight_decay),
-                    leaf_sample_rate=float(config.ipw_leaf_sample_rate),
-                    internal_sample_rate=float(config.ipw_internal_sample_rate),
-                    document_loss_weight=float(objective["optimization_root_weight"]),
-                    use_residual_decomposition=bool(config.use_residual_decomposition),
-                    doc_sequence_train_fraction=float(config.doc_sequence_train_fraction),
-                    doc_sequence_objective=str(config.doc_sequence_objective),
-                    doc_sequence_class_index=fno_doc_sequence_class_index,
-                    grad_clip_norm=float(config.grad_clip_norm),
-                    seed=int(seeds["effective_model_seed"]),
-                )
-            else:
-                _prev_tree_runtime_mode = os.environ.get("TT_TREE_BATCH_RUNTIME_MODE")
-                os.environ["TT_TREE_BATCH_RUNTIME_MODE"] = str(
-                    getattr(config, "tree_batch_runtime_mode", "legacy") or "legacy"
-                )
-                try:
-                    _fno_result = train_fno_tree(
-                        model=model,
-                        train_docs=fno_tree_train,
-                        val_docs=fno_tree_val,
-                        device=device,
-                        n_epochs=int(config.n_epochs),
-                        batch_size=int(config.batch_size),
-                        lr=float(config.lr),
-                        weight_decay=float(config.weight_decay),
-                        c1_weight=float(objective["local_law_c1_weight"]),
-                        c2_weight=float(objective["local_law_c2_weight"]),
-                        c3_weight=float(objective["local_law_c3_weight"]),
-                        root_weight=float(objective["optimization_root_weight"]),
-                        leaf_query_rate=float(config.leaf_query_rate),
-                        audit_fraction=float(config.audit_fraction),
-                        doc_sequence_train_fraction=float(config.doc_sequence_train_fraction),
-                        doc_sequence_objective=str(config.doc_sequence_objective),
-                        doc_sequence_class_index=fno_doc_sequence_class_index,
-                        root_class_index=fno_doc_sequence_class_index,
-                        tree_document_loss_normalization_mode=str(
-                            getattr(
-                                config,
-                                "tree_document_loss_normalization_mode",
-                                "auto",
-                            )
-                        ),
-                        tree_local_weighting_mode=str(
-                            getattr(config, "tree_local_weighting_mode", "fixed_k_hajek")
-                        ),
-                        tree_supervision_source=str(
-                            getattr(config, "tree_supervision_source", "rate")
-                        ),
-                        phi_compose_weight=float(config.tree_phi_compose_weight),
-                        phi_contrastive_weight=float(
-                            config.tree_phi_contrastive_weight
-                        ),
-                        checkpoint_metric=str(config.tree_checkpoint_metric),
-                        tree_training_schedule=str(config.tree_training_schedule),
-                        tree_stage1_epochs=int(config.tree_stage1_epochs),
-                        tree_stage2_epochs=int(config.tree_stage2_epochs),
-                        tree_stage1_checkpoint_metric=str(
-                            config.tree_stage1_checkpoint_metric
-                        ),
-                        tree_stage1_eval_mode=str(config.tree_stage1_eval_mode),
-                        tree_stage1_screen_doc_limit=int(
-                            config.tree_stage1_screen_doc_limit
-                        ),
-                        tree_stage1_final_exact_doc_limit=int(
-                            config.tree_stage1_final_exact_doc_limit
-                        ),
-                        exact_metric_final_doc_limit=int(
-                            getattr(config, "exact_metric_final_doc_limit", 0)
-                        ),
-                        tree_batch_pack_mode=str(config.tree_batch_pack_mode),
-                        tree_batch_token_budget=int(config.tree_batch_token_budget),
-                        tree_batch_node_budget=int(config.tree_batch_node_budget),
-                        tree_batch_autotune=bool(config.tree_batch_autotune),
-                        tree_eval_workers_per_mig=int(config.tree_eval_workers_per_mig),
-                        tree_stage1_artifact_dir=str(
-                            getattr(config, "tree_stage1_artifact_dir", "")
-                        ),
-                        tree_stage1_resume_if_available=bool(
-                            getattr(config, "tree_stage1_resume_if_available", True)
-                        ),
-                        tree_stage1_root_weight=float(
-                            getattr(config, "tree_stage1_root_weight", 0.0)
-                        ),
-                        runtime_config=_gpu_runtime_config_from_ops_config(
-                            config,
-                            device=device,
-                        ),
-                        progress_snapshot_interval=int(
-                            getattr(config, "tree_progress_snapshot_interval", 10)
-                        ),
-                        progress_snapshot_dir=(
-                            str(
-                                Path(str(getattr(config, "artifact_dir", "") or "")).expanduser()
-                                / "training_progress"
-                            )
-                            if str(getattr(config, "artifact_dir", "") or "").strip()
-                            else ""
-                        ),
-                        grad_clip_norm=float(config.grad_clip_norm),
-                        depth_discount_gamma=float(
-                            getattr(config, "depth_discount_gamma", 1.0)
-                        ),
-                        seed=int(seeds["effective_model_seed"]),
-                    )
-                finally:
-                    if _prev_tree_runtime_mode is None:
-                        os.environ.pop("TT_TREE_BATCH_RUNTIME_MODE", None)
-                    else:
-                        os.environ["TT_TREE_BATCH_RUNTIME_MODE"] = _prev_tree_runtime_mode
+            from src.ctreepo.sim.core.markov_neural_operator_baselines import (
+                train_fno_tree_local_law,
+            )
+
+            _fno_result = train_fno_tree_local_law(
+                model=model,
+                train_docs=fno_tree_train,
+                val_docs=fno_tree_val,
+                device=device,
+                n_epochs=int(config.n_epochs),
+                batch_size=int(config.batch_size),
+                lr=float(config.lr),
+                weight_decay=float(config.weight_decay),
+                leaf_sample_rate=float(config.ipw_leaf_sample_rate),
+                internal_sample_rate=float(config.ipw_internal_sample_rate),
+                root_objective_share=float(objective["root_share"]),
+                local_law_objective_share=float(objective["local_law_weight"]),
+                local_law_objective_mode=str(normalized_local_law_objective_mode),
+                depth_discount_gamma=float(getattr(config, "depth_discount_gamma", 1.0)),
+                use_residual_decomposition=bool(config.use_residual_decomposition),
+                doc_sequence_train_fraction=float(config.doc_sequence_train_fraction),
+                doc_sequence_objective=str(config.doc_sequence_objective),
+                doc_sequence_class_index=fno_doc_sequence_class_index,
+                grad_clip_norm=float(config.grad_clip_norm),
+                seed=int(seeds["effective_model_seed"]),
+            )
             _fno_loss_curve = tuple(float(x) for x in _fno_result["loss_curve"])
             train_loss_final = TrainFitDiagnostics(
                 train_loss_final=float(_fno_result["train"]["root_mae"]),
@@ -7865,7 +8130,7 @@ def run_markov_changepoint_ops_count_experiment(
             leaf_weight=float(objective["local_law_c1_weight"]),
             c2_weight=float(objective["local_law_c2_weight"]),
             c3_weight=float(objective["local_law_c3_weight"]),
-            root_weight=float(objective["optimization_root_weight"]),
+            root_weight=float(objective["root_share"]),
             schedule_consistency_weight=float(objective["proxy_schedule_consistency_weight"]),
             include_root_query=bool(config.include_root_query),
         )
@@ -7875,36 +8140,42 @@ def run_markov_changepoint_ops_count_experiment(
                 fno_tree_train_regular,
                 device=device,
                 tau=float(config.violation_tau),
+                condition_ids=train_condition_ids,
             )
             learned_val = _eval_fno_model(
                 model,
                 fno_tree_val_regular,
                 device=device,
                 tau=float(config.violation_tau),
+                condition_ids=val_condition_ids,
             )
             learned = _eval_fno_model(
                 model,
                 fno_tree_test_regular,
                 device=device,
                 tau=float(config.violation_tau),
+                condition_ids=test_condition_ids,
             )
             root_only_view_train = _eval_fno_model(
                 model,
                 fno_tree_train_root_only,
                 device=device,
                 tau=float(config.violation_tau),
+                condition_ids=train_condition_ids,
             )
             root_only_view_val = _eval_fno_model(
                 model,
                 fno_tree_val_root_only,
                 device=device,
                 tau=float(config.violation_tau),
+                condition_ids=val_condition_ids,
             )
             root_only_view_test = _eval_fno_model(
                 model,
                 fno_tree_test_root_only,
                 device=device,
                 tau=float(config.violation_tau),
+                condition_ids=test_condition_ids,
             )
             doc_sequence_view_train = _eval_fno_doc_sequence_view(
                 model,
@@ -7943,13 +8214,25 @@ def run_markov_changepoint_ops_count_experiment(
             }
         else:
             learned_train = _eval_learned_model(
-                model, train_prepped, device=device, tau=float(config.violation_tau),
+                model,
+                train_prepped,
+                device=device,
+                tau=float(config.violation_tau),
+                condition_ids=train_condition_ids,
             )
             learned_val = _eval_learned_model(
-                model, val_prepped, device=device, tau=float(config.violation_tau),
+                model,
+                val_prepped,
+                device=device,
+                tau=float(config.violation_tau),
+                condition_ids=val_condition_ids,
             )
             learned = _eval_learned_model(
-                model, test_prepped, device=device, tau=float(config.violation_tau),
+                model,
+                test_prepped,
+                device=device,
+                tau=float(config.violation_tau),
+                condition_ids=test_condition_ids,
             )
             root_only_view_train = None
             root_only_view_val = None
@@ -7974,6 +8257,7 @@ def run_markov_changepoint_ops_count_experiment(
             _est_kw = dict(
                 device=device,
                 objective_summary=objective,
+                config=config,
                 leaf_query_rate=float(config.leaf_query_rate),
                 audit_policy=str(config.audit_policy),
                 audit_fixed_nodes=int(config.audit_fixed_nodes),
@@ -8001,6 +8285,7 @@ def run_markov_changepoint_ops_count_experiment(
                 train_prepped,
                 device=device,
                 objective_summary=objective,
+                config=config,
                 exact_objective=train_weighted_objective,
                 leaf_query_rate=float(config.leaf_query_rate),
                 audit_policy=str(config.audit_policy),
@@ -8016,6 +8301,7 @@ def run_markov_changepoint_ops_count_experiment(
                 val_prepped,
                 device=device,
                 objective_summary=objective,
+                config=config,
                 exact_objective=val_weighted_objective,
                 leaf_query_rate=float(config.leaf_query_rate),
                 audit_policy=str(config.audit_policy),
@@ -8031,6 +8317,7 @@ def run_markov_changepoint_ops_count_experiment(
                 test_prepped,
                 device=device,
                 objective_summary=objective,
+                config=config,
                 exact_objective=test_weighted_objective,
                 leaf_query_rate=float(config.leaf_query_rate),
                 audit_policy=str(config.audit_policy),
@@ -8811,7 +9098,10 @@ def run_markov_changepoint_ops_count_experiment(
     full_tree_ipw_train: Dict[str, Any] | None = None
     full_tree_ipw_val: Dict[str, Any] | None = None
     full_tree_ipw_test: Dict[str, Any] | None = None
-    if _is_fno and bool(config.use_unified_ipw):
+    if (
+        _is_fno
+        and str(normalized_local_law_objective_mode) == LOCAL_LAW_OBJECTIVE_SAMPLED_IPW
+    ):
         full_tree_ipw_train = _eval_fno_full_tree_ipw_metrics(
             model,
             fno_tree_train_regular,
@@ -8990,6 +9280,9 @@ def run_markov_changepoint_ops_count_experiment(
                 "full_tree_ipw_enabled": True,
                 "full_tree_ipw_leaf_sample_rate": float(config.ipw_leaf_sample_rate),
                 "full_tree_ipw_internal_sample_rate": float(config.ipw_internal_sample_rate),
+                "full_tree_ipw_local_law_objective_mode": str(
+                    normalized_local_law_objective_mode
+                ),
                 "full_tree_ipw_use_residual_decomposition": bool(
                     config.use_residual_decomposition
                 ),
@@ -8999,12 +9292,34 @@ def run_markov_changepoint_ops_count_experiment(
     learned_payload["dpo_preference_gap"] = dpo_gap_result
     learned_payload["doc_sequence_train_fraction"] = float(config.doc_sequence_train_fraction)
     learned_payload["doc_sequence_train_docs_used"] = int(doc_sequence_train_docs_used)
+    learned_payload["local_law_objective_mode"] = str(normalized_local_law_objective_mode)
     learned_payload["tree_root_supervision_kind"] = str(
         config.tree_root_supervision_kind
     )
     learned_payload["tree_exact_collapse_mode"] = str(
         config.tree_exact_collapse_mode
     )
+    learned_payload["tree_model_version"] = str(
+        getattr(config, "tree_model_version", "")
+    )
+    if _is_fno:
+        learned_payload.update(
+            {
+                "tree_runtime_merge_kind": str(
+                    getattr(model, "runtime_merge_kind", "")
+                ),
+                "tree_exact_projected_merge_is_runtime_merge": bool(
+                    getattr(
+                        model,
+                        "exact_projected_merge_is_runtime_merge",
+                        False,
+                    )
+                ),
+                "uses_unified_g_learned_merge": bool(
+                    getattr(model, "uses_unified_g_learned_merge", False)
+                ),
+            }
+        )
     from src.ctreepo.sim.core.fno_arch_config import resolve_fno_arch
     _fno_arch_payload = resolve_fno_arch(config)
     learned_payload["tree_leaf_fno_width"] = _fno_arch_payload.width
@@ -9703,6 +10018,7 @@ __all__ = [
     "VALID_EXACT_FAMILIES",
     "VALID_GENERATOR_PROFILES",
     "VALID_LAW_PACKAGES",
+    "VALID_LOCAL_LAW_OBJECTIVE_MODES",
     "VALID_SCHEDULES",
     "audit_sample_count",
     "build_markov_changepoint_ops_count_data_bundle",

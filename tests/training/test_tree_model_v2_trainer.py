@@ -14,6 +14,9 @@ from src.training.ctreepo_trainer import (
 )
 from src.training.tree_model_v2_trainer import (
     RealDocumentTaskAdapter,
+    ScalarTarget,
+    TreeNodeRef,
+    TreeSupervisionBatch,
     TreeModelV2Trainer,
     TreeModelV2ObjectiveConfig,
     TreeModelV2ScoreTargetConfig,
@@ -83,6 +86,68 @@ def _ctreepo_config(
         ),
         supervision=LocalLawSupervisionConfig(n_audit=n_audit),
     )
+
+
+class _FixedScalarAdapter:
+    name = "fixed_scalar"
+    head_name = "count"
+    supervision_mode = "sparse_local_law"
+
+    def build_supervision_batch(self, batch_items):
+        return TreeSupervisionBatch(
+            mode="sparse_local_law",
+            node_scalar_targets=(
+                ScalarTarget(
+                    node_ref=TreeNodeRef(0, 0),
+                    value=0.6,
+                    head="count",
+                    normalized=True,
+                    kind="leaf",
+                    proxy_value=0.2,
+                    oracle_value=0.6,
+                    observed=True,
+                    propensity=0.5,
+                    local_law_adjustment=True,
+                ),
+            ),
+            adapter_name=self.name,
+        )
+
+    def compute_auxiliary_losses(self, **kwargs):
+        return {}
+
+
+class _FixedScalarModel:
+    has_phi = False
+
+    def predict_normalized_batch(self, states, head="count"):
+        return states[:, 0]
+
+
+def test_tree_model_v2_corrected_local_law_target_uses_live_prediction_loss() -> None:
+    state = torch.tensor([0.0], dtype=torch.float32, requires_grad=True)
+    trainer = TreeModelV2Trainer(
+        model=_FixedScalarModel(),
+        adapter=_FixedScalarAdapter(),
+        forward_batch=lambda current_model, items: None,
+        state_getter=lambda item, node_index: state,
+        config=TreeModelV2TrainingConfig(
+            score_targets=TreeModelV2ScoreTargetConfig(target_min=0.0, target_max=1.0),
+            objective=TreeModelV2ObjectiveConfig(leaf_scalar_weight=1.0),
+        ),
+        device=torch.device("cpu"),
+    )
+
+    prepared = trainer.prepare_batch([object()])
+    raw_loss, count = trainer._compiled_scalar_targets_loss(
+        prepared,
+        prepared.leaf_scalar_group,
+    )
+
+    assert count == 1
+    # proxy=(0-.2)^2=.04, oracle=(0-.6)^2=.36, corrected=.04+(.36-.04)/.5=.68
+    assert raw_loss.item() == pytest.approx(0.68)
+    assert raw_loss.requires_grad is True
 
 
 def test_real_document_tree_model_v2_trainer_builds_sparse_batch_and_loss() -> None:

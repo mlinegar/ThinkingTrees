@@ -45,7 +45,8 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from src.config.dspy_config import configure_dspy, create_vllm_lm, create_vllm_lm_multi
+from src.config.dspy_config import configure_dspy, create_local_engine_lm
+from src.config.local_inference import resolve_local_inference_config
 from src.core.protocols import format_merge_input
 from src.preprocessing.chunker import chunk_for_ops
 from src.tasks.manifesto import ManifestoDataset
@@ -397,7 +398,7 @@ def _build_examples(
             "manifesto_id": mid,
             "benoit_key": str(row.manifesto),
             "text": sample.text,
-            "label": float(row.expert_mean),
+            "label": float(row.expert_mean_1_7),
             "party": key[0],
             "year": key[1],
         })
@@ -458,7 +459,7 @@ def _build_examples(
         ensemble = benoit_ensemble_mean(scores)
         train_lookup = {row.manifesto: float(row.score_llm_mean) for row in ensemble.itertuples()}
     elif train_pool == "expert":
-        train_lookup = {row.manifesto: float(row.expert_mean) for row in experts.itertuples()}
+        train_lookup = {row.manifesto: float(row.expert_mean_1_7) for row in experts.itertuples()}
     else:
         raise ValueError(train_pool)
 
@@ -883,14 +884,9 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     dim = _DIM_FROM_NAME[args.dimension]
-    lm_kwargs = {"model": args.model, "temperature": 0.0, "cache": True}
-    if args.max_tokens is not None:
-        lm_kwargs["max_tokens"] = args.max_tokens
-    if args.ports:
-        logger.info("LM: load-balanced across %s", args.ports)
-        lm = create_vllm_lm_multi(ports=args.ports, **lm_kwargs)
-    else:
-        lm = create_vllm_lm(port=args.port, **lm_kwargs)
+    local_inference = resolve_local_inference_config({**vars(args), "temperature": 0.0})
+    logger.info("LM: configured on %s port(s) %s", local_inference.engine, list(local_inference.ports))
+    lm = create_local_engine_lm(**local_inference.dspy_kwargs(cache=True))
     configure_dspy(lm=lm)
 
     logger.info("Building examples for dimension=%s", dim.value)
@@ -1025,10 +1021,10 @@ def main() -> int:
                 "cache": True,
                 "max_tokens": int(args.reflection_max_tokens),
             }
-            reflection_lm = (
-                create_vllm_lm_multi(ports=args.ports, **reflection_kwargs)
-                if args.ports
-                else create_vllm_lm(port=args.port, **reflection_kwargs)
+            reflection_lm = create_local_engine_lm(
+                engine=local_inference.engine,
+                endpoints=local_inference.endpoints,
+                **reflection_kwargs,
             )
             gepa_kwargs: dict[str, Any] = {
                 "metric": _make_gepa_metric(

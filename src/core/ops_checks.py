@@ -49,6 +49,14 @@ class LawKind(Enum):
             LawKind.L3_IDEMPOTENCE: "C2",
         }[self]
 
+    @property
+    def law_id(self) -> str:
+        return {
+            LawKind.L1_LEAF: "leaf_preservation",
+            LawKind.L2_MERGE: "merge_preservation",
+            LawKind.L3_IDEMPOTENCE: "on_range_idempotence",
+        }[self]
+
 
 class AuditCheckKind(Enum):
     """Operational audit decompositions used by Python tooling."""
@@ -179,14 +187,19 @@ class LawCapabilityReport:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "law_kind": self.law_kind.value,
-            "lean_name": self.law_kind.lean_name,
-            "paper_condition": self.law_kind.paper_condition,
+            "law_id": self.law_kind.law_id,
+            "theorem_label": self.law_kind.lean_name,
+            "paper_label": self.law_kind.paper_condition,
             "available": bool(self.available),
             "evidence_status": self.evidence_status.value,
             "objective_enforced": bool(self.objective_enforced),
             "exact": self.exact,
             "notes": self.notes,
+            "metadata": {
+                "law_kind": self.law_kind.value,
+                "lean_name": self.law_kind.lean_name,
+                "paper_condition": self.law_kind.paper_condition,
+            },
         }
 
 
@@ -272,9 +285,9 @@ class OperatorCapabilityReport:
             ),
             "objective_enforces_idempotence": bool(self.idempotence_law.objective_enforced),
             "laws": {
-                self.leaf_law.law_kind.value: self.leaf_law.to_dict(),
-                self.merge_law.law_kind.value: self.merge_law.to_dict(),
-                self.idempotence_law.law_kind.value: self.idempotence_law.to_dict(),
+                self.leaf_law.law_kind.law_id: self.leaf_law.to_dict(),
+                self.merge_law.law_kind.law_id: self.merge_law.to_dict(),
+                self.idempotence_law.law_kind.law_id: self.idempotence_law.to_dict(),
             },
             "approx_local_laws": (
                 self.approx_local_laws.to_dict()

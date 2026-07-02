@@ -164,7 +164,7 @@ def _load_runs(results_root: Path, *, root_name: str) -> List[dict]:
                 "test_docs": int(cfg.get("test_docs", -1)),
                 "doc_topic_concentration": _safe_float(cfg.get("doc_topic_concentration")),
                 "tau": _safe_float(cfg.get("local_mixture_concentration")),
-                "lam": _safe_float(cfg.get("quadratic_utility_weight", cfg.get("lambda_multiplier"))),
+                "lam": _safe_float(cfg.get("quadratic_utility_weight")),
                 "seed": int(cfg.get("seed", -1)),
                 "pooled_error": pooled,
                 "leaf_error": leaf,

@@ -1080,7 +1080,7 @@ class TournamentStrategy:
         base: SummarizationStrategy,
         judge: Any,
         config: Optional[TournamentConfig] = None,
-        feedback_collector: Optional[Any] = None,
+        preference_collector: Optional[Any] = None,
     ):
         """
         Initialize tournament strategy.
@@ -1091,8 +1091,8 @@ class TournamentStrategy:
                 DSPy-style `.forward(...)` or listwise `.rank_candidates(...)`
                 support.
             config: Tournament configuration (k candidates, temperature)
-            feedback_collector: Optional FeedbackCollector for enriched feedback.
-                When set, tournament matches also produce FeedbackResponse objects
+            preference_collector: Optional PreferenceCollector for enriched preferences.
+                When set, tournament matches also produce PreferenceResponse objects
                 in addition to PreferencePair objects.
         """
         self.base = base
@@ -1100,9 +1100,9 @@ class TournamentStrategy:
         self.config = config or TournamentConfig()
         self._preferences: List["BinaryComparison"] = []
         self._comparative_judgments: List["ComparativeJudgment"] = []
-        self._feedback_responses: List[Any] = []
+        self._preference_responses: List[Any] = []
         self._segment_counter = 0
-        self._feedback_collector = feedback_collector
+        self._preference_collector = preference_collector
 
     def reset_counter(self) -> None:
         """Reset the segment counter. Call between documents in sequential mode
@@ -1673,16 +1673,16 @@ class TournamentStrategy:
 
                     preferences.append(pair)
 
-                    # Collect enriched feedback if collector is configured
-                    if self._feedback_collector is not None:
+                    # Collect enriched preferences if collector is configured
+                    if self._preference_collector is not None:
                         try:
-                            from src.feedback.types import FeedbackRequest, FeedbackDimension
+                            from src.preference_collection.types import PreferenceRequest, PreferenceDimension
 
                             judge_reasoning = clean_summary_text(pair.reasoning)
                             if len(judge_reasoning) > 2400:
                                 judge_reasoning = judge_reasoning[:2400].rstrip() + " ... (truncated)"
 
-                            fb_request = FeedbackRequest(
+                            preference_request = PreferenceRequest(
                                 request_id=pair.pair_id,
                                 text_a=pair.summary_a,
                                 text_b=pair.summary_b,
@@ -1691,8 +1691,8 @@ class TournamentStrategy:
                                 law_type=law_type,
                                 node_id=segment_tag,
                                 dimensions=[
-                                    FeedbackDimension(kind="pairwise"),
-                                    FeedbackDimension(kind="critique"),
+                                    PreferenceDimension(kind="pairwise"),
+                                    PreferenceDimension(kind="critique"),
                                 ],
                                 context={
                                     "match_label": f"{segment_tag}_m{match_id}",
@@ -1710,10 +1710,14 @@ class TournamentStrategy:
                                     "judge_model": judge_model,
                                 },
                             )
-                            fb_response = self._feedback_collector.collect(fb_request)
-                            self._feedback_responses.append((fb_request, fb_response))
+                            preference_response = self._preference_collector.collect(
+                                preference_request
+                            )
+                            self._preference_responses.append(
+                                (preference_request, preference_response)
+                            )
                         except Exception as e:
-                            logger.debug("Feedback collector failed in tournament: %s", e)
+                            logger.debug("Preference collector failed in tournament: %s", e)
 
                     # Check for newly ready matches
                     for m in matches.values():
@@ -1969,15 +1973,15 @@ class TournamentStrategy:
             },
         )
 
-        if self._feedback_collector is not None:
+        if self._preference_collector is not None:
             try:
-                from src.feedback.types import FeedbackDimension, FeedbackRequest
+                from src.preference_collection.types import PreferenceDimension, PreferenceRequest
 
                 judge_reasoning = clean_summary_text(reasoning)
                 if len(judge_reasoning) > 2400:
                     judge_reasoning = judge_reasoning[:2400].rstrip() + " ... (truncated)"
 
-                fb_request = FeedbackRequest(
+                preference_request = PreferenceRequest(
                     request_id=comparative_record.record_id,
                     text_a=winner_summary,
                     text_b=runner_up_summary,
@@ -1986,8 +1990,8 @@ class TournamentStrategy:
                     law_type=law_type,
                     node_id=segment_tag,
                     dimensions=[
-                        FeedbackDimension(kind="pairwise"),
-                        FeedbackDimension(kind="critique"),
+                        PreferenceDimension(kind="pairwise"),
+                        PreferenceDimension(kind="critique"),
                     ],
                     context={
                         "match_label": match_label,
@@ -2003,10 +2007,10 @@ class TournamentStrategy:
                         "num_candidates": len(candidates),
                     },
                 )
-                fb_response = self._feedback_collector.collect(fb_request)
-                self._feedback_responses.append((fb_request, fb_response))
+                preference_response = self._preference_collector.collect(preference_request)
+                self._preference_responses.append((preference_request, preference_response))
             except Exception as exc:
-                logger.debug("Feedback collector failed in listwise tournament: %s", exc)
+                logger.debug("Preference collector failed in listwise tournament: %s", exc)
 
         return winner_summary, [projection_pair], [comparative_record]
 
@@ -2018,19 +2022,19 @@ class TournamentStrategy:
         """Get all collected comparative judgments."""
         return self._comparative_judgments
 
-    def get_feedback_responses(self) -> List[Any]:
-        """Get all collected feedback request/response pairs.
+    def get_preference_responses(self) -> List[Any]:
+        """Get all collected preference request/response pairs.
 
-        Returns list of (FeedbackRequest, FeedbackResponse) tuples collected
-        when a feedback_collector is configured.
+        Returns list of (PreferenceRequest, PreferenceResponse) tuples collected
+        when a preference_collector is configured.
         """
-        return self._feedback_responses
+        return self._preference_responses
 
     def reset_preferences(self) -> None:
         """Reset collected preferences (e.g., between documents)."""
         self._preferences = []
         self._comparative_judgments = []
-        self._feedback_responses = []
+        self._preference_responses = []
 
     def get_preference_count(self) -> int:
         """Get number of collected preferences."""

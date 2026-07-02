@@ -19,8 +19,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.experiments.contracts import (
+    MethodRef,
+    ResultRow,
+    benchmark_ref_from_parts,
+    method_ref_from_parts,
+)
+from src.experiments.roles import (
+    ROLE_SCORER,
+    ROLE_STATE_MODEL,
+    chat_role_ref,
+    embedder_role_ref,
+    metadata_with_roles,
+    oracle_ref,
+    state_model_role_ref,
+)
+from src.experiments.sidecars import write_canonical_sidecars
+
+
 DEFAULT_MODE = "fast-smoke"
 
 
@@ -93,6 +113,36 @@ def _profiles() -> Dict[str, List[str]]:
             "--no-enable-unified-training",
         ],
     }
+
+
+def _profile_method_ref(profile_name: str, *, task: str) -> MethodRef:
+    roles: Dict[str, Any] = {
+        ROLE_SCORER: chat_role_ref(role=ROLE_SCORER, metadata={"task": task})
+    }
+    if profile_name == "embedding_proxy_ridge":
+        roles["embedder"] = embedder_role_ref(engine="local", model="embedding_proxy")
+    if profile_name == "neural_operator_hybrid":
+        roles[ROLE_STATE_MODEL] = state_model_role_ref(
+            engine="pytorch",
+            model="neural_operator_hybrid",
+            execution_mode="training_or_inference",
+        )
+    if profile_name == "generator_lora_dpo":
+        roles[ROLE_SCORER] = chat_role_ref(
+            role=ROLE_SCORER,
+            model="generator_lora_dpo",
+            metadata={"task": task, "adapter": "lora"},
+        )
+    return method_ref_from_parts(
+        family=str(profile_name),
+        variant="method_compare_profile",
+        adapter="method_compare",
+        metadata=metadata_with_roles(
+            {"profile": profile_name, "task": task},
+            roles=roles,
+            oracle=oracle_ref(kind="task_labels", source=task),
+        ),
+    )
 
 
 def _build_base_cmd(
@@ -268,6 +318,53 @@ def main() -> int:
     with open(manifest_path, "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2)
     print(f"Manifest: {manifest_path}")
+
+    benchmark_ref = benchmark_ref_from_parts(
+        family=str(args.task),
+        scope=str(args.mode),
+        dataset_id=str(args.dataset),
+        name=str(args.task),
+        metadata={"dataset": args.dataset, "mode": args.mode},
+    )
+    method_refs = tuple(
+        _profile_method_ref(profile_name, task=str(args.task))
+        for profile_name in list(args.profiles)
+    )
+    result_rows = []
+    for entry in manifest["entries"]:
+        if entry.get("status") not in {"success", "dry_run"}:
+            continue
+        profile = str(entry.get("profile") or "")
+        method_ref = next((item for item in method_refs if item.family == profile), None)
+        if method_ref is None:
+            continue
+        result_rows.append(
+            ResultRow(
+                experiment_id="",
+                phase=str(args.mode),
+                benchmark_ref=benchmark_ref,
+                method_ref=method_ref,
+                split="compare",
+                metric_name="profile_completed",
+                metric_value=entry.get("status") == "success",
+                artifact_refs=("method_compare_manifest_json",),
+                metadata=dict(entry),
+            )
+        )
+    write_canonical_sidecars(
+        output_root,
+        title="method_compare",
+        adapter_id="method_compare",
+        benchmark_refs=(benchmark_ref,),
+        method_refs=method_refs,
+        phases=(str(args.mode),),
+        artifacts={"method_compare_manifest_json": str(manifest_path)},
+        result_rows=result_rows,
+        state="dry_run" if args.dry_run else ("completed" if overall_ok else "failed"),
+        metadata={"mode": args.mode, "task": args.task, "dataset": args.dataset},
+        launch_command=sys.argv,
+        report_profiles=("runtime_eval_summary",),
+    )
 
     if args.dry_run:
         return 0

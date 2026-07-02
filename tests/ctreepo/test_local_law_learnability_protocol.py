@@ -400,7 +400,7 @@ def test_direct_local_law_payload_backfills_compositional_learning_problem():
     assert loaded is not None
     loaded_summary, augmented = loaded
     problem = dict(loaded_summary.compositional_learning_problem)
-    assert problem["name"] == "markov_local_law_learning"
+    assert problem["name"] == "markov_ops_count_local_law_learning"
     assert problem["uses_full_document_labels"] is True
     assert problem["uses_sampled_substructure_labels"] is True
     assert problem["requires_propensity_logging"] is True
@@ -409,7 +409,7 @@ def test_direct_local_law_payload_backfills_compositional_learning_problem():
     assert sampled_channel["supports_unbiased_risk"] is True
     assert sampled_channel["query_policy"]["logs_realized_propensities"] is True
     assert augmented["local_law_learnability"]["compositional_learning_problem"]["name"] == (
-        "markov_local_law_learning"
+        "markov_ops_count_local_law_learning"
     )
 
 
@@ -429,17 +429,19 @@ def test_legacy_backfill_maps_lda_and_markov_payloads():
     assert lda_summary.policies["learned_g"].name == "law_calibrated_ipw_stabilized"
     lda_objective = lda_summary.policies["learned_g"].split_metrics["test"]["objective"]
     assert lda_objective["weighting_scheme"] == "legacy_local_law_only_weighted_sum"
-    assert float(lda_objective["task_weight"]) == pytest.approx(0.0)
-    assert float(lda_objective["local_law_weight_total"]) == pytest.approx(2.25)
-    assert float(lda_objective["configured_local_law_objective"]) == pytest.approx(0.24)
-    assert float(lda_objective["configured_local_law_objective_hajek"]) == pytest.approx(0.285)
+    assert float(lda_objective["root_share"]) == pytest.approx(0.0)
+    assert float(lda_objective["local_law_weight_total"]) == pytest.approx(1.0)
+    assert float(lda_objective["configured_local_law_objective"]) == pytest.approx(0.24 / 2.25)
+    assert float(lda_objective["configured_local_law_objective_hajek"]) == pytest.approx(
+        0.285 / 2.25
+    )
     assert lda_summary.metadata["resolved_local_law_weights"] == {
         "c1": pytest.approx(1.0),
         "c2_proxy": pytest.approx(0.25),
         "c3": pytest.approx(1.0),
     }
     lda_problem = dict(lda_summary.compositional_learning_problem)
-    assert lda_problem["name"] == "lda_local_law_learning"
+    assert lda_problem["name"] == "leaf_local_mixture_utility_local_law_learning"
     assert lda_problem["uses_full_document_labels"] is False
     assert lda_problem["uses_sampled_substructure_labels"] is True
     assert lda_problem["uses_online_oracle_queries"] is True
@@ -469,7 +471,7 @@ def test_legacy_backfill_maps_lda_and_markov_payloads():
     assert markov_summary.selection["selection_metric"] == "val_objective_full_labels"
     assert markov_summary.policies["root_only"].selection_metric_value == pytest.approx(0.18)
     markov_problem = dict(markov_summary.compositional_learning_problem)
-    assert markov_problem["name"] == "markov_local_law_learning"
+    assert markov_problem["name"] == "markov_ops_count_local_law_learning"
     assert markov_problem["uses_full_document_labels"] is True
     assert markov_problem["uses_sampled_substructure_labels"] is True
     assert markov_problem["uses_online_oracle_queries"] is True
@@ -1049,7 +1051,7 @@ def test_combined_local_law_meta_smoke(tmp_path: Path):
                     f"{sys.executable} scripts/run_leaf_local_mixture_utility_simulation.py "
                     f"--train-docs 24 --val-docs 8 --test-docs 16 --doc-tokens 96 "
                     f"--latent-leaf-tokens 32 --analysis-leaf-tokens 32 --analysis-partition-mode aligned "
-                    f"--local-mixture-concentration 8.0 --lambda-multiplier 1.5 "
+                    f"--local-mixture-concentration 8.0 --quadratic-utility-weight 1.5 "
                     f"--local-law-mode diagnostics_and_learned --law-leaf-query-rate 0.1 --law-internal-query-rate 0.1 "
                     f"--suite-role support_scaling --artifact-dir {lda_json.parent / 'seed_0_artifacts'} "
                     f"--json-summary {lda_json} --csv-summary {lda_json.with_suffix('.csv')}"

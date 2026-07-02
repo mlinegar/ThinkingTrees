@@ -3,7 +3,7 @@ Provenance utilities shared across the codebase.
 
 Today we mainly standardize "truth label source" values used for:
   - training-data filtering (what supervision is trusted enough to learn from)
-  - preference/feedback provenance reporting
+  - preference provenance reporting
   - adaptive chunking / proxy-model metadata
 
 Canonical sources are intentionally small so downstream stats are stable:

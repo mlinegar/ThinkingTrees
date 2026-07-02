@@ -62,7 +62,7 @@ from src.training.supervision import (
     SupervisionDataset,
     save_supervision_artifact_bundle,
 )
-from src.feedback.types import FeedbackDataset, FeedbackRequest, FeedbackResponse
+from src.preference_collection.types import PreferenceRequest, PreferenceResponse, preference_dataset_from_responses
 
 logger = logging.getLogger(__name__)
 
@@ -163,8 +163,8 @@ class HarnessResult:
     supervision: SupervisionDataset
     trace: List[Dict[str, Any]]
     audit_reports: List[AuditReport]
-    feedback: Optional[FeedbackDataset] = None
-    """Generalized feedback collected via FeedbackCollectors (if configured)."""
+    preferences: Optional[Any] = None
+    """Unit/candidate preferences collected by configured collectors."""
 
     def save(self, output_dir: str) -> None:
         """Save all artifacts to a directory."""
@@ -179,9 +179,9 @@ class HarnessResult:
             supervision_path=out / "supervision.json",
         )
 
-        # Feedback
-        if self.feedback and len(self.feedback) > 0:
-            self.feedback.save(out / "feedback.json")
+        # Preferences
+        if self.preferences and len(self.preferences) > 0:
+            self.preferences.save(out / "preferences.json")
 
         # Trace
         with (out / "trace.jsonl").open("w") as f:
@@ -261,14 +261,14 @@ class TreeAudit:
         tournament_k: int = 0,
         judge: Any = None,
         seed: Optional[int] = None,
-        feedback_collectors: Optional[List[Any]] = None,
+        preference_collectors: Optional[List[Any]] = None,
         _client_override: Any = None,
     ):
         self.budget = budget or AuditBudget()
         self.rubric = rubric
         self.seed = seed
         self.tournament_k = tournament_k
-        self._feedback_collectors = feedback_collectors or []
+        self._preference_collectors = preference_collectors or []
         self._run_id = str(uuid.uuid4())[:12]
         self._chunk_chars = chunk_chars
         self._max_summary_tokens = max_summary_tokens
@@ -335,16 +335,16 @@ class TreeAudit:
     async def run(
         self,
         documents: List[str],
-        feedback_signals: Optional[List[Any]] = None,
+        preference_signals: Optional[List[Any]] = None,
     ) -> HarnessResult:
         """
         Process documents, build trees, audit, and emit certificate.
 
         Args:
             documents: Document texts to process.
-            feedback_signals: Optional per-document feedback signals (e.g., from
+            preference_signals: Optional per-document preference signals (e.g., from
                 VLM visual segmentation). Each entry is a list of
-                ``ChunkFeedbackSignal`` or None. When provided, signals are
+                ``ChunkPreferenceSignal`` or None. When provided, signals are
                 injected into the build config for adaptive chunking.
 
         In production mode (default), uses AsyncBatchLLMClient for high-
@@ -353,17 +353,17 @@ class TreeAudit:
         sequential per-document processing.
         """
         if self._use_batch:
-            return await self._run_batched(documents, feedback_signals)
+            return await self._run_batched(documents, preference_signals)
         else:
-            return await self._run_sequential(documents, feedback_signals)
+            return await self._run_sequential(documents, preference_signals)
 
     def run_sync(
         self,
         documents: List[str],
-        feedback_signals: Optional[List[Any]] = None,
+        preference_signals: Optional[List[Any]] = None,
     ) -> HarnessResult:
         """Synchronous wrapper for run()."""
-        return asyncio.run(self.run(documents, feedback_signals=feedback_signals))
+        return asyncio.run(self.run(documents, preference_signals=preference_signals))
 
     # ------------------------------------------------------------------
     # Production path: batched async
@@ -372,17 +372,17 @@ class TreeAudit:
     async def _run_batched(
         self,
         documents: List[str],
-        feedback_signals: Optional[List[Any]] = None,
+        preference_signals: Optional[List[Any]] = None,
     ) -> HarnessResult:
         """Build trees with full async batching, then audit."""
         from src.core.batch_processor import AsyncBatchLLMClient
         from src.core.batch_orchestrator import BatchTreeOrchestrator
 
-        # Per-document feedback signals not yet supported in batch mode.
+        # Per-document preference signals not yet supported in batch mode.
         # Log a warning if provided; they will be ignored.
-        if feedback_signals and any(s is not None for s in feedback_signals):
+        if preference_signals and any(s is not None for s in preference_signals):
             logger.warning(
-                "Per-document feedback_signals are not yet supported in batched mode. "
+                "Per-document preference_signals are not yet supported in batched mode. "
                 "Use sequential mode (set _client_override) or pass a single shared "
                 "signal set via BuildConfig for batched VLM workflows."
             )
@@ -459,22 +459,22 @@ class TreeAudit:
     async def _run_sequential(
         self,
         documents: List[str],
-        feedback_signals: Optional[List[Any]] = None,
+        preference_signals: Optional[List[Any]] = None,
     ) -> HarnessResult:
         """Build trees one at a time (test/small-run mode)."""
         build_results: List[BuildResult] = []
         for doc_idx, doc_text in enumerate(documents):
-            # Per-document feedback signals for adaptive chunking
+            # Per-document preference signals for adaptive chunking
             doc_signals = None
-            if feedback_signals and doc_idx < len(feedback_signals):
-                doc_signals = feedback_signals[doc_idx]
+            if preference_signals and doc_idx < len(preference_signals):
+                doc_signals = preference_signals[doc_idx]
 
             builder = TreeBuilder(
                 strategy=self._strategy,
                 config=BuildConfig(
                     max_chunk_chars=self._chunk_chars,
                     chunk_strategy="axis",
-                    chunk_feedback_signals=doc_signals,
+                    chunk_preference_signals=doc_signals,
                 ),
             )
 
@@ -616,10 +616,10 @@ class TreeAudit:
             len(build_results), token_usage,
         )
 
-        # --- Generalized feedback collection ---
-        feedback_dataset = None
-        if self._feedback_collectors:
-            feedback_dataset = self._collect_feedback(
+        # --- Generalized preference collection ---
+        preference_dataset = None
+        if self._preference_collectors:
+            preference_dataset = self._collect_preferences(
                 build_results, audit_reports, trees,
             )
 
@@ -633,7 +633,7 @@ class TreeAudit:
             ),
             trace=trace,
             audit_reports=audit_reports,
-            feedback=feedback_dataset,
+            preferences=preference_dataset,
         )
 
     # ------------------------------------------------------------------
@@ -711,25 +711,25 @@ class TreeAudit:
         )
 
     # ------------------------------------------------------------------
-    # Generalized feedback collection
+    # Generalized preference collection
     # ------------------------------------------------------------------
 
-    def _collect_feedback(
+    def _collect_preferences(
         self,
         build_results: List[BuildResult],
         audit_reports: List[AuditReport],
         trees: List[Tree],
-    ) -> FeedbackDataset:
-        """Create FeedbackRequests from audited nodes and route through collectors.
+    ) -> Any:
+        """Create PreferenceRequests from audited nodes and route through collectors.
 
-        For each audited node, creates a FeedbackRequest carrying the node's
+        For each audited node, creates a PreferenceRequest carrying the node's
         content, rubric, and propensity metadata. Routes through all configured
-        feedback collectors and aggregates responses into a FeedbackDataset.
+        preference collectors and aggregates responses into a PreferenceDataset.
         """
         from src.core.logged_supervision import ObservationUnitKind, SamplingMetadata
         from src.tree.compositional_learning import SHARED_SAMPLED_QUERY_POLICY_NAME
 
-        dataset = FeedbackDataset()
+        items: list[tuple[PreferenceRequest, PreferenceResponse]] = []
         req_counter = 0
 
         for doc_idx, tree in enumerate(trees):
@@ -737,12 +737,12 @@ class TreeAudit:
             report = audit_reports[doc_idx] if doc_idx < len(audit_reports) else None
             prob_map = report.inclusion_probability_map if report else {}
 
-            # Create feedback requests for leaf nodes (auditable units)
+            # Create preference requests for leaf nodes (auditable units)
             for node in tree.leaves():
                 req_counter += 1
                 node_prop = prob_map.get(node.id, 1.0)
-                request = FeedbackRequest(
-                    request_id=f"fb_{self._run_id}_{req_counter}",
+                request = PreferenceRequest(
+                    request_id=f"pref_{self._run_id}_{req_counter}",
                     text_a=node.summary if hasattr(node, "summary") else str(node),
                     original_text=node.text if hasattr(node, "text") else "",
                     rubric=self.rubric,
@@ -761,43 +761,43 @@ class TreeAudit:
                     ),
                 )
 
-                for collector in self._feedback_collectors:
+                for collector in self._preference_collectors:
                     try:
                         response = collector.collect(request)
-                        dataset.add(request, response)
+                        items.append((request, response))
                     except Exception as e:
                         logger.warning(
-                            "Feedback collector failed for node %s: %s",
+                            "Preference collector failed for node %s: %s",
                             node.id, e,
                         )
 
-        if len(dataset) > 0:
+        if len(items) > 0:
             logger.info(
-                "Collected %d feedback items via %d collectors",
-                len(dataset), len(self._feedback_collectors),
+                "Collected %d preference items via %d collectors",
+                len(items), len(self._preference_collectors),
             )
 
-        return dataset
+        return preference_dataset_from_responses(items)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def extract_feedback_from_samples(
+def extract_preferences_from_samples(
     samples: List[Any],
 ) -> tuple:
     """
-    Extract texts and feedback signals from DocumentSample-like objects.
+    Extract texts and preference signals from DocumentSample-like objects.
 
     Convenience helper for PDF workflows where VLM segmentation produces
-    visual_feedback_signals in sample metadata.
+    visual_preference_signals in sample metadata.
 
     Args:
         samples: List of DocumentSample objects (or plain strings).
 
     Returns:
-        Tuple of (texts, feedback_signals) suitable for ``TreeAudit.run()``.
+        Tuple of (texts, preference_signals) suitable for ``TreeAudit.run()``.
     """
     texts: List[str] = []
     signals: List[Any] = []
@@ -809,7 +809,7 @@ def extract_feedback_from_samples(
             texts.append(getattr(sample, "text", str(sample)))
             meta = getattr(sample, "metadata", {})
             if isinstance(meta, dict):
-                signals.append(meta.get("visual_feedback_signals"))
+                signals.append(meta.get("visual_preference_signals"))
             else:
                 signals.append(None)
     return texts, signals

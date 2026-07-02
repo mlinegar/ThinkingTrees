@@ -5,13 +5,21 @@ import math
 from typing import Any, Dict, Mapping
 
 from src.ctreepo.opt.serialization import canonical_json
+from src.ctreepo.contracts import (
+    LAW_ID_LEAF_PRESERVATION,
+    LAW_ID_MERGE_PRESERVATION,
+    LAW_ID_ON_RANGE_IDEMPOTENCE,
+    LAW_SET_ALL,
+    canonical_law_component_weights,
+    canonical_law_set_id,
+)
 from src.ctreepo.sim.core.full_doc_config_codec import (
     canonicalize_full_doc_config_mapping,
 )
 from src.ctreepo.sim.core.markov_changepoint_ops_count import OPSCountConfig
 
 
-RUN_INTENT_VERSION = "tree_run_intent_v3"
+RUN_INTENT_VERSION = "tree_run_intent_v4"
 
 TOPOLOGY_TREE = "tree"
 TOPOLOGY_FULL_DOC = "full_doc"
@@ -19,7 +27,9 @@ VALID_TOPOLOGIES = frozenset({TOPOLOGY_TREE, TOPOLOGY_FULL_DOC, ""})
 
 RUN_INTENT_FIELDS: tuple[str, ...] = (
     "run_intent_version",
-    "baseline_family",
+    "problem_id",
+    "method_id",
+    "law_set_id",
     "topology",
     "comparison_mode",
     "tree_exact_collapse_mode",
@@ -30,10 +40,8 @@ RUN_INTENT_FIELDS: tuple[str, ...] = (
     "tree_local_weighting_mode",
     "tree_c2_mode",
     "local_law_weight",
-    "task_objective_weight",
-    "c1_relative_weight",
-    "c2_relative_weight",
-    "c3_relative_weight",
+    "root_share",
+    "local_law_component_weights",
     "schedule_consistency_weight",
     "depth_discount_gamma",
     "leaf_supervision_kind",
@@ -57,7 +65,10 @@ RUN_INTENT_FIELDS: tuple[str, ...] = (
 
 
 def _mapping_from_config_like(config_like: Mapping[str, Any] | OPSCountConfig | None) -> Dict[str, Any]:
-    return canonicalize_full_doc_config_mapping(config_like)
+    return canonicalize_full_doc_config_mapping(
+        config_like,
+        allow_private_tree_aliases=True,
+    )
 
 
 def _clean_float(value: Any, *, default: float) -> float:
@@ -123,18 +134,48 @@ def materialize_tree_run_intent(
     *,
     fixed_leaf_tokens_override: int | None = None,
     baseline_family_override: str | None = None,
+    method_id_override: str | None = None,
 ) -> Dict[str, Any]:
     mapping = _mapping_from_config_like(config_like)
-    baseline_family = str(
-        baseline_family_override
+    method_id = str(
+        method_id_override
+        if method_id_override is not None
+        else baseline_family_override
         if baseline_family_override is not None
-        else mapping.get("baseline_family", "")
+        else mapping.get("method_id", "")
+        or mapping.get("baseline_family", "")
         or ""
     ).strip()
-    if not baseline_family:
+    if not method_id:
         raise ValueError(
-            "materialize_tree_run_intent requires a non-empty baseline_family"
+            "materialize_tree_run_intent requires a non-empty method_id"
         )
+    law_set_id = canonical_law_set_id(
+        str(
+            mapping.get("law_set_id")
+            or mapping.get("law_package")
+            or LAW_SET_ALL
+        ),
+        allow_aliases=True,
+    )
+    component_weights = canonical_law_component_weights(
+        mapping.get("local_law_component_weights")
+        or {
+            LAW_ID_LEAF_PRESERVATION: _clean_float(
+                _first_present(mapping, "c1_relative_weight", "tree_c1_relative_weight", default=1.0),
+                default=1.0,
+            ),
+            LAW_ID_ON_RANGE_IDEMPOTENCE: _clean_float(
+                _first_present(mapping, "c2_relative_weight", "tree_c2_relative_weight", default=1.0),
+                default=1.0,
+            ),
+            LAW_ID_MERGE_PRESERVATION: _clean_float(
+                _first_present(mapping, "c3_relative_weight", "tree_c3_relative_weight", default=1.0),
+                default=1.0,
+            ),
+        },
+        allow_aliases=True,
+    )
     fixed_leaf_tokens_raw = (
         mapping.get("fixed_leaf_tokens", 0)
         if fixed_leaf_tokens_override is None
@@ -153,7 +194,9 @@ def materialize_tree_run_intent(
 
     intent = {
         "run_intent_version": RUN_INTENT_VERSION,
-        "baseline_family": baseline_family,
+        "problem_id": str(mapping.get("problem_id") or "markov_ops_count"),
+        "method_id": method_id,
+        "law_set_id": law_set_id,
         "topology": topology,
         "comparison_mode": str(mapping.get("comparison_mode", "legacy") or "legacy"),
         "tree_exact_collapse_mode": str(mapping.get("tree_exact_collapse_mode", "") or ""),
@@ -175,23 +218,12 @@ def materialize_tree_run_intent(
             mapping.get("tree_c2_mode", "reconstruction") or "reconstruction"
         ),
         "local_law_weight": _optional_float(
-            _first_present(mapping, "local_law_weight", "tree_local_law_weight")
+            _first_present(mapping, "local_law_weight")
         ),
-        "task_objective_weight": _optional_float(
-            _first_present(mapping, "task_objective_weight", "tree_task_objective_weight")
+        "root_share": _optional_float(
+            _first_present(mapping, "root_share")
         ),
-        "c1_relative_weight": _clean_float(
-            _first_present(mapping, "c1_relative_weight", "tree_c1_relative_weight", default=1.0),
-            default=1.0,
-        ),
-        "c2_relative_weight": _clean_float(
-            _first_present(mapping, "c2_relative_weight", "tree_c2_relative_weight", default=1.0),
-            default=1.0,
-        ),
-        "c3_relative_weight": _clean_float(
-            _first_present(mapping, "c3_relative_weight", "tree_c3_relative_weight", default=1.0),
-            default=1.0,
-        ),
+        "local_law_component_weights": component_weights,
         "schedule_consistency_weight": _clean_float(
             mapping.get("schedule_consistency_weight", 0.0),
             default=0.0,
@@ -244,15 +276,15 @@ def _validate_intent_ranges(intent: Dict[str, Any]) -> None:
             f"depth_discount_gamma must be in [0, 1], got {gamma}"
         )
     for field in (
-        "c1_relative_weight",
-        "c2_relative_weight",
-        "c3_relative_weight",
         "schedule_consistency_weight",
     ):
         val = intent[field]
         if val < 0.0:
             raise ValueError(f"{field} must be non-negative, got {val}")
-    for field in ("local_law_weight", "task_objective_weight"):
+    for law_id, val in dict(intent["local_law_component_weights"]).items():
+        if float(val) < 0.0:
+            raise ValueError(f"local_law_component_weights[{law_id}] must be non-negative, got {val}")
+    for field in ("local_law_weight", "root_share"):
         val = intent[field]
         if val is not None and val < 0.0:
             raise ValueError(f"{field} must be non-negative, got {val}")

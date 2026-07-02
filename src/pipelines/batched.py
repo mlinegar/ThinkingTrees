@@ -30,7 +30,7 @@ from collections import Counter
 from contextlib import AsyncExitStack
 from dataclasses import asdict, dataclass, field as dataclass_field
 from pathlib import Path
-from typing import List, Dict, Optional, Any, Callable, TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urlparse
 
 import numpy as np
@@ -39,14 +39,17 @@ if TYPE_CHECKING:
     from src.core.conditional_memory import ConditionalMemory
     from src.core.semantic_memory import SemanticMemoryIndex
 
-from src.core.batch_processor import (
-    AsyncBatchLLMClient,
-    MultiServerBatchClient,
-    BatchRequest,
-    BatchStats,
-    parse_routing_policy,
+from src.core.batch_client_factory import build_batch_client
+from src.core.batch_processor import BatchRequest, BatchStats, parse_routing_policy
+from src.core.batch_transport import (
+    DEFAULT_BATCH_MAX_CONCURRENT,
+    DEFAULT_BATCH_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_BATCH_ROUTING_POLICY,
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_BATCH_TIMEOUT_SECONDS,
 )
 from src.core.batch_orchestrator import BatchTreeOrchestrator
+from src.core.engines import LocalChatEndpoints
 from src.core.strategy import (
     SummarizationStrategy,
     DSPyStrategy,
@@ -301,19 +304,20 @@ class BatchedPipelineConfig:
 
     # vLLM server settings - can be single URL or list of URLs for load balancing
     # Defaults are loaded from config/settings.yaml or environment variables
+    task_model_endpoints: Optional[LocalChatEndpoints] = None
     task_model_url: str = dataclass_field(default_factory=get_task_model_url)
     task_model_urls: Optional[List[str]] = None  # Multiple servers for load balancing
     # Optional callback(base_url)->bool used for automatic server recovery.
     task_model_recovery_callback: Optional[Callable[[str], bool]] = None
     task_model_recovery_cooldown_seconds: float = 120.0
-    routing_policy: str = "affinity_load_aware"
+    routing_policy: str = DEFAULT_BATCH_ROUTING_POLICY
     metrics_poll_seconds: Optional[float] = None
 
     # Batching settings
-    max_concurrent_requests: int = 200    # Max concurrent HTTP requests
-    batch_size: int = 50                  # Requests per batch (independent from max_concurrent)
+    max_concurrent_requests: int = DEFAULT_BATCH_MAX_CONCURRENT    # Max concurrent HTTP requests
+    batch_size: int = DEFAULT_BATCH_SIZE  # Requests per batch (independent from max_concurrent)
     max_concurrent_documents: int = 30    # Max documents in parallel (increased from 20)
-    batch_timeout: float = 0.02           # Max wait to fill batch (20ms, was 50ms)
+    batch_timeout: float = DEFAULT_BATCH_TIMEOUT_SECONDS  # Max wait to fill batch
     request_timeout_seconds: Optional[float] = None
     await_response_timeout_seconds: Optional[float] = None
 
@@ -338,6 +342,7 @@ class BatchedPipelineConfig:
 
     # Progress reporting
     show_progress: bool = True
+    call_trace_sink: Optional[Callable[[Mapping[str, Any]], None]] = None
 
     # Task configuration (to be supplied by task plugins)
     rubric: str = ""
@@ -398,6 +403,10 @@ class BatchedPipelineConfig:
     cache_full_trees: bool = False
 
     def __post_init__(self):
+        if self.task_model_endpoints is not None:
+            self.task_model_url = self.task_model_endpoints.primary_base_url
+            self.task_model_urls = self.task_model_endpoints.pipeline_base_urls
+
         self.routing_policy = parse_routing_policy(self.routing_policy).value
         self.runtime_mode = normalize_runtime_mode(self.runtime_mode)
         if self.metrics_poll_seconds is None:
@@ -416,12 +425,12 @@ class BatchedPipelineConfig:
 
         try:
             request_timeout = (
-                300.0
+                DEFAULT_BATCH_REQUEST_TIMEOUT_SECONDS
                 if self.request_timeout_seconds is None
                 else float(self.request_timeout_seconds)
             )
         except (TypeError, ValueError):
-            request_timeout = 300.0
+            request_timeout = DEFAULT_BATCH_REQUEST_TIMEOUT_SECONDS
         self.request_timeout_seconds = max(1.0, request_timeout)
 
         try:
@@ -2407,27 +2416,18 @@ class BatchedDocPipeline:
 
             if len(server_urls) > 1:
                 logger.info(f"Using {len(server_urls)} servers for load balancing")
-                client = MultiServerBatchClient(
-                    servers=server_urls,
-                    max_concurrent_per_server=self.config.max_concurrent_requests,
-                    batch_size=self.config.batch_size,
-                    batch_timeout=self.config.batch_timeout,
-                    request_timeout=float(self.config.request_timeout_seconds),
-                    recover_base_url_callback=self.config.task_model_recovery_callback,
-                    recovery_cooldown_seconds=self.config.task_model_recovery_cooldown_seconds,
-                    routing_policy=self.config.routing_policy,
-                    metrics_collector=metrics_collector,
-                )
-            else:
-                client = AsyncBatchLLMClient(
-                    base_url=server_urls[0],
-                    max_concurrent=self.config.max_concurrent_requests,
-                    batch_size=self.config.batch_size,
-                    batch_timeout=self.config.batch_timeout,
-                    request_timeout=float(self.config.request_timeout_seconds),
-                    recover_base_url_callback=self.config.task_model_recovery_callback,
-                    recovery_cooldown_seconds=self.config.task_model_recovery_cooldown_seconds,
-                )
+            client = build_batch_client(
+                server_urls=server_urls,
+                max_concurrent=self.config.max_concurrent_requests,
+                batch_size=self.config.batch_size,
+                batch_timeout=self.config.batch_timeout,
+                request_timeout=float(self.config.request_timeout_seconds),
+                recover_base_url_callback=self.config.task_model_recovery_callback,
+                recovery_cooldown_seconds=self.config.task_model_recovery_cooldown_seconds,
+                routing_policy=self.config.routing_policy,
+                metrics_collector=metrics_collector,
+                call_sink=self.config.call_trace_sink,
+            )
         elif (
             llm_score_requested
             and self.config.prompt_builders.score
@@ -2441,30 +2441,22 @@ class BatchedDocPipeline:
                     "External strategy in use; creating dedicated LLM scoring client across %d servers",
                     len(server_urls),
                 )
-                llm_scoring_client = MultiServerBatchClient(
-                    servers=server_urls,
-                    max_concurrent_per_server=self.config.max_concurrent_requests,
-                    batch_size=self.config.batch_size,
-                    batch_timeout=self.config.batch_timeout,
-                    request_timeout=float(self.config.request_timeout_seconds),
-                    recover_base_url_callback=self.config.task_model_recovery_callback,
-                    recovery_cooldown_seconds=self.config.task_model_recovery_cooldown_seconds,
-                    routing_policy=self.config.routing_policy,
-                    metrics_collector=None,
-                )
             else:
                 logger.info(
                     "External strategy in use; creating dedicated LLM scoring client"
                 )
-                llm_scoring_client = AsyncBatchLLMClient(
-                    base_url=server_urls[0],
-                    max_concurrent=self.config.max_concurrent_requests,
-                    batch_size=self.config.batch_size,
-                    batch_timeout=self.config.batch_timeout,
-                    request_timeout=float(self.config.request_timeout_seconds),
-                    recover_base_url_callback=self.config.task_model_recovery_callback,
-                    recovery_cooldown_seconds=self.config.task_model_recovery_cooldown_seconds,
-                )
+            llm_scoring_client = build_batch_client(
+                server_urls=server_urls,
+                max_concurrent=self.config.max_concurrent_requests,
+                batch_size=self.config.batch_size,
+                batch_timeout=self.config.batch_timeout,
+                request_timeout=float(self.config.request_timeout_seconds),
+                recover_base_url_callback=self.config.task_model_recovery_callback,
+                recovery_cooldown_seconds=self.config.task_model_recovery_cooldown_seconds,
+                routing_policy=self.config.routing_policy,
+                metrics_collector=None,
+                call_sink=self.config.call_trace_sink,
+            )
 
         results = []
 

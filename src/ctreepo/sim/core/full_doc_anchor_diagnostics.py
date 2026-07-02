@@ -115,6 +115,17 @@ from src.ctreepo.sim.core.run_intent import (
 from src.ctreepo.sim.suite.markov_observed_token_policy import (
     resolve_markov_observed_token_policy,
 )
+from src.ctreepo.sim.core.markov_hazard_panels import (
+    DEFAULT_STICKY_STRUCTURAL_V2_CELL_ID,
+    STICKY_STRUCTURAL_V2_CELL_SPECS,
+    STICKY_STRUCTURAL_V2_LEGACY_ALIAS_MAP,
+    canonicalize_structural_v2_cell_id as _canonicalize_structural_v2_cell_id,
+    sticky_markov_mean_segment_length as _sticky_markov_mean_segment_length,
+    sticky_markov_switch_probability as _sticky_markov_switch_probability,
+    sticky_recoverable_config_overrides as _sticky_recoverable_config_overrides,
+    sticky_recoverable_config_overrides_t2048 as _sticky_recoverable_config_overrides_t2048,
+    sticky_structural_config_overrides as _sticky_structural_config_overrides,
+)
 from src.training.supervision import (
     DenseScalarRidgeModelConfig,
     DenseScalarRidgeTrainingConfig,
@@ -164,6 +175,9 @@ CANONICAL_DIAGNOSTIC_BUNDLES = {
     ),
     "recoverable_v5_t128": _canonical_diagnostic_bundle_path(
         "markov_observed_token_recoverable_v5_t128"
+    ),
+    "recoverable_v5_t2048": _canonical_diagnostic_bundle_path(
+        "markov_observed_token_recoverable_v5_t2048"
     ),
     "recoverable_10x_v1_t128": _canonical_diagnostic_bundle_path(
         "markov_observed_token_recoverable_10x_v1_t128"
@@ -1390,6 +1404,9 @@ def _resolved_tree_leaf_fno_hyperparameters(
             if config.tree_leaf_fno_n_layers is not None
             else config.fno_n_layers
         ),
+        "tree_leaf_fno_pooling": str(
+            getattr(config, "tree_leaf_fno_pooling", None) or "mean"
+        ).strip().lower() or "mean",
     }
 
 
@@ -1964,6 +1981,10 @@ def _backfill_loaded_run_fields(run: Mapping[str, Any]) -> Dict[str, Any]:
     for field_name, raw_value in resolved_tree_fno.items():
         if _is_missing_field(normalized.get(field_name)) and raw_value not in {"", None}:
             normalized[field_name] = int(raw_value)
+    if _is_missing_field(normalized.get("tree_leaf_fno_pooling")):
+        raw_pool = config.get("tree_leaf_fno_pooling")
+        if raw_pool not in {"", None}:
+            normalized["tree_leaf_fno_pooling"] = str(raw_pool).strip().lower() or "mean"
     if _is_missing_field(normalized.get("fixed_leaf_tokens")) and "fixed_leaf_tokens" in config:
         normalized["fixed_leaf_tokens"] = int(config["fixed_leaf_tokens"])
     for split in REPORTED_SPLITS:
@@ -2225,79 +2246,6 @@ class FullDocDiagnosticBenchmarkSpec:
     official_weight_decay: float = 0.0
 
 
-def _sticky_markov_mean_segment_length(
-    *,
-    doc_tokens: int,
-    min_segments: int,
-    max_segments: int,
-) -> int:
-    target_segments = 0.5 * (float(min_segments) + float(max_segments))
-    target_boundaries = max(1.0, target_segments - 1.0)
-    mean_segment_length = float(max(1, int(doc_tokens) - 1)) / target_boundaries
-    return max(1, int(round(mean_segment_length)))
-
-
-def _sticky_markov_switch_probability(
-    *,
-    doc_tokens: int,
-    expected_boundaries: float,
-) -> float:
-    return float(max(0.0, expected_boundaries) / max(1.0, float(int(doc_tokens) - 1)))
-
-
-STICKY_STRUCTURAL_V2_CELL_SPECS: tuple[dict[str, Any], ...] = (
-    {
-        "cell_id": "r4_p031",
-        "legacy_aliases": ("r4_seg4to6",),
-        "regime_count": 4,
-        "segment_density_band": "lower_switch",
-        "segment_min": 4,
-        "segment_max": 6,
-        "expected_boundaries": 4.0,
-    },
-    {
-        "cell_id": "r12_p031",
-        "legacy_aliases": ("r12_seg4to6",),
-        "regime_count": 12,
-        "segment_density_band": "lower_switch",
-        "segment_min": 4,
-        "segment_max": 6,
-        "expected_boundaries": 4.0,
-    },
-    {
-        "cell_id": "r4_p079",
-        "legacy_aliases": ("r4_seg10to12",),
-        "regime_count": 4,
-        "segment_density_band": "higher_switch",
-        "segment_min": 10,
-        "segment_max": 12,
-        "expected_boundaries": 10.0,
-    },
-    {
-        "cell_id": "r12_p079",
-        "legacy_aliases": ("r12_seg10to12",),
-        "regime_count": 12,
-        "segment_density_band": "higher_switch",
-        "segment_min": 10,
-        "segment_max": 12,
-        "expected_boundaries": 10.0,
-    },
-)
-DEFAULT_STICKY_STRUCTURAL_V2_CELL_ID = "r12_p079"
-STICKY_STRUCTURAL_V2_LEGACY_ALIAS_MAP: dict[str, str] = {
-    str(alias): str(spec["cell_id"])
-    for spec in STICKY_STRUCTURAL_V2_CELL_SPECS
-    for alias in tuple(spec.get("legacy_aliases", ()) or ())
-}
-
-
-def _canonicalize_structural_v2_cell_id(cell_id: str) -> str:
-    normalized = str(cell_id or "").strip().lower()
-    if not normalized:
-        return ""
-    return str(STICKY_STRUCTURAL_V2_LEGACY_ALIAS_MAP.get(normalized, normalized))
-
-
 def _normalized_selected_grid_cell_ids(
     normalized_grid: str,
     grid_cell_ids: Sequence[str],
@@ -2306,63 +2254,6 @@ def _normalized_selected_grid_cell_ids(
     if str(normalized_grid).startswith("structural_core_v2"):
         return {_canonicalize_structural_v2_cell_id(value) for value in selected_ids}
     return selected_ids
-
-
-def _sticky_recoverable_config_overrides(*, doc_tokens: int) -> Dict[str, Any]:
-    switch_prob = _sticky_markov_switch_probability(
-        doc_tokens=int(doc_tokens),
-        expected_boundaries=5.0,
-    )
-    mean_seg_len = _sticky_markov_mean_segment_length(
-        doc_tokens=int(doc_tokens),
-        min_segments=2,
-        max_segments=6,
-    )
-    return {
-        "generator_profile": "hazard_topic",
-        "n_regimes": 4,
-        "vocab_size": 16,
-        "min_tokens": int(doc_tokens),
-        "max_tokens": int(doc_tokens),
-        "min_segments": 2,
-        "max_segments": 6,
-        "min_seg_len": int(mean_seg_len),
-        "max_seg_len": int(mean_seg_len),
-        "hazard_switch_prob": float(switch_prob),
-        "train_docs": 1024,
-        "val_docs": 128,
-        "test_docs": 256,
-    }
-
-
-def _sticky_structural_config_overrides(
-    *,
-    doc_tokens: int,
-    n_regimes: int,
-    min_segments: int,
-    max_segments: int,
-    hazard_switch_prob: float,
-) -> Dict[str, Any]:
-    mean_seg_len = _sticky_markov_mean_segment_length(
-        doc_tokens=int(doc_tokens),
-        min_segments=int(min_segments),
-        max_segments=int(max_segments),
-    )
-    return {
-        "generator_profile": "hazard_topic",
-        "n_regimes": int(n_regimes),
-        "vocab_size": int(4 * int(n_regimes)),
-        "min_tokens": int(doc_tokens),
-        "max_tokens": int(doc_tokens),
-        "min_segments": int(min_segments),
-        "max_segments": int(max_segments),
-        "min_seg_len": int(mean_seg_len),
-        "max_seg_len": int(mean_seg_len),
-        "hazard_switch_prob": float(hazard_switch_prob),
-        "train_docs": 1024,
-        "val_docs": 128,
-        "test_docs": 256,
-    }
 
 
 def resolve_full_doc_diagnostic_benchmark(
@@ -2481,6 +2372,32 @@ def resolve_full_doc_diagnostic_benchmark(
                 )
             ),
             config_overrides=_sticky_recoverable_config_overrides(doc_tokens=128),
+        )
+    if key in {"recoverable_v5_t2048", "recoverable_sticky_t2048"}:
+        # Composition-stress benchmark: 2048-token docs scale boundary count
+        # by sqrt(2048/128) ~ 4x (so ~20 boundaries/doc), keeping per-leaf
+        # statistics recognizable at the small-leaf rungs while exposing a
+        # much longer merge chain (up to 127 merges at fixed_leaf_tokens=16).
+        return FullDocDiagnosticBenchmarkSpec(
+            name="recoverable_v5_t2048",
+            description=(
+                "Sticky recoverable full-document benchmark with 2048-token geometry, "
+                "4 hidden regimes, disjoint token palettes, stochastic stay/switch "
+                "regime changes, and about 20 expected regime changes per document. "
+                "Designed to stress merge composition under a leaf-size ladder."
+            ),
+            observed_token_profile="recoverable",
+            canonical_bundle_path=str(CANONICAL_DIAGNOSTIC_BUNDLES["recoverable_v5_t2048"]),
+            canonical_train_docs_capacity=10240,
+            degenerate=False,
+            cell_id="recoverable_v5_t2048",
+            hazard_switch_prob=float(
+                _sticky_markov_switch_probability(
+                    doc_tokens=2048,
+                    expected_boundaries=20.0,
+                )
+            ),
+            config_overrides=_sticky_recoverable_config_overrides_t2048(),
         )
     if key == "recoverable_10x_v1_t128":
         return FullDocDiagnosticBenchmarkSpec(
@@ -3214,7 +3131,7 @@ def _official_fno_locked_config_for_benchmark(
             "leaf_weight": 0.0,
             "c2_weight": 0.0,
             "c3_weight": 0.0,
-            "local_law_weight": 0.0,
+            "local_law_weight": None,
             "task_objective_weight": 1.0,
             "c1_relative_weight": 0.0,
             "c2_relative_weight": 0.0,
@@ -3286,7 +3203,7 @@ def _official_fno_locked_config_for_benchmark(
         "leaf_weight": 0.0,
         "c2_weight": 0.0,
         "c3_weight": 0.0,
-        "local_law_weight": 0.0,
+        "local_law_weight": None,
         "task_objective_weight": 1.0,
         "c1_relative_weight": 0.0,
         "c2_relative_weight": 0.0,
@@ -3304,6 +3221,7 @@ def _official_fno_locked_config_for_benchmark(
         "tree_leaf_fno_width": getattr(config, "tree_leaf_fno_width", None),
         "tree_leaf_fno_n_modes": getattr(config, "tree_leaf_fno_n_modes", None),
         "tree_leaf_fno_n_layers": getattr(config, "tree_leaf_fno_n_layers", None),
+        "tree_leaf_fno_pooling": getattr(config, "tree_leaf_fno_pooling", None),
         "comparison_mode": str(comparison_mode),
     }
     return OPSCountConfig(**{**asdict(config), **locked})
@@ -3466,6 +3384,23 @@ def _bundle_with_fixed_eval_splits(
             f"{len(base_bundle.train_docs)}"
         )
     selected_train_docs = tuple(base_bundle.train_docs[: int(train_doc_count)])
+    metadata = dict(getattr(base_bundle, "metadata", {}) or {})
+    condition_ids_by_split = dict(metadata.get("condition_ids") or {})
+    if condition_ids_by_split:
+        sliced_condition_ids: Dict[str, List[str]] = {}
+        for split_name in ("train", "val", "test"):
+            values = [str(value) for value in list(condition_ids_by_split.get(split_name) or [])]
+            if split_name == "train":
+                values = values[: int(train_doc_count)]
+            sliced_condition_ids[split_name] = values
+        metadata["condition_ids"] = sliced_condition_ids
+        condition_counts: Dict[str, Dict[str, int]] = {}
+        for split_name, values in sliced_condition_ids.items():
+            split_counts: Dict[str, int] = {}
+            for value in values:
+                split_counts[str(value)] = int(split_counts.get(str(value), 0)) + 1
+            condition_counts[split_name] = split_counts
+        metadata["condition_counts"] = condition_counts
     return (
         MarkovOPSDataBundle(
             train_docs=selected_train_docs,
@@ -3474,6 +3409,7 @@ def _bundle_with_fixed_eval_splits(
             train_corpus_signature=str(_markov_corpus_signature(selected_train_docs)),
             val_corpus_signature=str(base_bundle.val_corpus_signature),
             test_corpus_signature=str(base_bundle.test_corpus_signature),
+            metadata=metadata,
         ),
         f"{base_source}::train_prefix_{int(train_doc_count)}",
     )
@@ -3624,6 +3560,7 @@ def _prepared_tree_data_identity_payload(
         "train_corpus_signature": str(base_bundle.train_corpus_signature),
         "val_corpus_signature": str(base_bundle.val_corpus_signature),
         "test_corpus_signature": str(base_bundle.test_corpus_signature),
+        "data_bundle_metadata": dict(getattr(base_bundle, "metadata", {}) or {}),
     }
 
 
@@ -4156,7 +4093,7 @@ def _tree_neural_family_effective_config(
                 "leaf_weight": 0.0,
                 "c2_weight": 0.0,
                 "c3_weight": 0.0,
-                "local_law_weight": 0.0,
+                "local_law_weight": None,
                 "task_objective_weight": 1.0,
                 "c1_relative_weight": 0.0,
                 "c2_relative_weight": 0.0,
@@ -4295,7 +4232,6 @@ def _tree_stage1_expected_layout_metadata(
             getattr(config, "tree_theorem_count_head_mode", "") or ""
         ),
         "c2_mode": str(getattr(config, "tree_c2_mode", "") or ""),
-        "score_merge_mode": str(getattr(config, "tree_score_merge_mode", "") or ""),
         "tree_model_version": str(getattr(config, "tree_model_version", "") or ""),
     }
 
@@ -6621,7 +6557,7 @@ def _summarize_tree_exact_split(
     )
     selection_root_mae = (
         float(exact_projected_root_mae)
-        if bool(getattr(model, "use_exact_projected_sketch_merge", False))
+        if bool(getattr(model, "exact_projected_merge_is_runtime_merge", False))
         and np.isfinite(exact_projected_root_mae)
         else float(root_direct_count_mae)
     )
@@ -6756,6 +6692,14 @@ def _summarize_tree_exact_split(
         "val_theorem_bootstrap_direct": float(theorem_bootstrap_selection_value),
         "val_exact_sketch_direct": float(direct_selection_value),
         "exact_sketch_direct_selection_value": float(direct_selection_value),
+        "tree_model_version": str(getattr(model, "tree_model_version", "")),
+        "tree_runtime_merge_kind": str(getattr(model, "runtime_merge_kind", "")),
+        "tree_exact_projected_merge_is_runtime_merge": bool(
+            getattr(model, "exact_projected_merge_is_runtime_merge", False)
+        ),
+        "uses_unified_g_learned_merge": bool(
+            getattr(model, "uses_unified_g_learned_merge", False)
+        ),
     }
     return exact_split, tree_split, direct_selection
 
@@ -7445,6 +7389,7 @@ def _fit_tree_neural_baseline_with_predictions(
         fno_width=int(tree_leaf_fno_hparams["tree_leaf_fno_width"]),
         fno_n_modes=int(tree_leaf_fno_hparams["tree_leaf_fno_n_modes"]),
         fno_n_layers=int(tree_leaf_fno_hparams["tree_leaf_fno_n_layers"]),
+        leaf_fno_pooling=str(tree_leaf_fno_hparams["tree_leaf_fno_pooling"]),
         root_supervision_kind=str(config.tree_root_supervision_kind),
         root_count_class_values=root_class_values,
         aligned_sketch_surface=str(config.aligned_sketch_surface),
@@ -7475,9 +7420,7 @@ def _fit_tree_neural_baseline_with_predictions(
         theorem_score_dim=int(getattr(config, "tree_theorem_score_dim", 0)),
         theorem_fiber_dim=int(getattr(config, "tree_theorem_fiber_dim", 0)),
         theorem_aux_dim=int(getattr(config, "tree_theorem_aux_dim", 0)),
-        score_merge_mode=str(
-            getattr(config, "tree_score_merge_mode", "gated_affine")
-        ),
+        score_merge_mode="gated_affine",
         phi_alignment_loss=str(
             getattr(config, "tree_phi_alignment_loss", "cosine_mse")
         ),
@@ -9569,6 +9512,14 @@ def _run_payload(
         payload["exact_sketch_failure_bucket"] = str(
             failure_attribution.get("bucket", "")
         )
+        for key in (
+            "tree_model_version",
+            "tree_runtime_merge_kind",
+            "tree_exact_projected_merge_is_runtime_merge",
+            "uses_unified_g_learned_merge",
+        ):
+            if key in test_direct_metrics:
+                payload[key] = test_direct_metrics[key]
         payload["exact_sketch_leaf_gap_score"] = float(
             failure_attribution.get("leaf_gap_score", float("nan"))
         )

@@ -12,8 +12,10 @@ Three methods can participate, keyed by the `method` CSV column:
 
 - `classical_native` / `classical_datasketches` — no optimization; classical
   `g` (register-wise max / HLL union) and classical `f` (HLL estimate formula).
-- `learned_g` — learned merge `g` with state dim = 2^precision and classical
-  HLL estimator as `f`.
+- `learned_g` — learned leaf encoder + learned merge `g` with state dim =
+  2^precision and classical HLL estimator as `f`.
+- `learned_g_oracle_state` — official native-HLL leaf register states and
+  fixed classical `f`; only the merge operator is learned.
 - `learned_joint` — fully end-to-end learned; `g` and `f` are both MLPs.
 
 Learned cells use a smaller sweep grid by default since each is a full training
@@ -59,6 +61,7 @@ METRIC_COLUMNS = (
     "root_rel_mae",
     "c1_mae",
     "c3_mae",
+    "merge_state_mae",
     "flat_vs_tree_abs_mean",
     "flat_vs_tree_abs_max",
     "flat_vs_tree_rel_mean",
@@ -80,8 +83,123 @@ COLUMNS = (
     "seed",
     "oracle_kind",
     "n_val",
+    "embedding_dim",
+    "summary_dim",
+    "state_dim",
+    "hidden_dim",
     *METRIC_COLUMNS,
 )
+
+
+def _write_canonical_parity_sidecars(
+    *,
+    output_root: Path,
+    summary_path: Path,
+    rows: list[dict[str, Any]],
+    args: argparse.Namespace,
+) -> None:
+    from src.experiments import (
+        ARTIFACT_SUMMARY_CSV,
+        ResultRow,
+        benchmark_ref_from_parts,
+        experiment_method_ref,
+        oracle_ref,
+        role_ref,
+        state_model_role_ref,
+        write_canonical_sidecars,
+    )
+
+    benchmark_ref = benchmark_ref_from_parts(
+        family="hll_parity",
+        scope="classical_parity",
+        name="Classical and learned HLL parity",
+        metadata={
+            "precisions": list(args.precisions),
+            "leaf_counts": list(args.leaf_counts),
+            "learned_precisions": list(args.learned_precisions),
+            "learned_leaf_counts": list(args.learned_leaf_counts),
+        },
+    )
+    method_refs = {
+        method_name: experiment_method_ref(
+            family=str(method_name),
+            variant="fit_sweep",
+            adapter="classical_parity_benchmark",
+            roles={
+                "scorer": role_ref(
+                    role="scorer",
+                    surface="native",
+                    engine="python",
+                    model=str(method_name),
+                ),
+                **(
+                    {
+                        "state_model": state_model_role_ref(
+                            engine="pytorch",
+                            model=str(method_name),
+                            execution_mode="fit",
+                        )
+                    }
+                    if str(method_name).startswith("learned_")
+                    else {}
+                ),
+            },
+            oracle=oracle_ref(kind="analytic_or_reference", source="hll_parity"),
+            metadata={"method": str(method_name)},
+        )
+        for method_name in sorted({str(row.get("method", "") or "") for row in rows})
+        if method_name
+    }
+    result_rows: list[ResultRow] = []
+    for row in rows:
+        method_name = str(row.get("method", "") or "")
+        method_ref = method_refs.get(method_name)
+        if method_ref is None:
+            continue
+        seed = None
+        try:
+            seed = int(row.get("seed"))
+        except Exception:
+            seed = None
+        base_metadata = {
+            "backend": row.get("backend", ""),
+            "precision": row.get("precision", ""),
+            "n_leaves": row.get("n_leaves", ""),
+            "schedule": row.get("schedule", ""),
+            "oracle_kind": row.get("oracle_kind", ""),
+        }
+        for metric_name in METRIC_COLUMNS:
+            value = row.get(metric_name, "")
+            if value == "":
+                continue
+            result_rows.append(
+                ResultRow(
+                    experiment_id="",
+                    phase="eval",
+                    benchmark_ref=benchmark_ref,
+                    method_ref=method_ref,
+                    split="validation",
+                    seed=seed,
+                    metric_name=str(metric_name),
+                    metric_value=value,
+                    artifact_refs=(ARTIFACT_SUMMARY_CSV,),
+                    metadata=base_metadata,
+                )
+            )
+    write_canonical_sidecars(
+        output_root,
+        title="classical_parity_benchmark",
+        adapter_id="classical_parity_benchmark",
+        benchmark_refs=(benchmark_ref,),
+        method_refs=tuple(method_refs.values()),
+        phases=("fit", "eval", "report"),
+        artifacts={ARTIFACT_SUMMARY_CSV: str(summary_path)},
+        result_rows=tuple(result_rows),
+        state="completed",
+        metadata={"total_cells": len(rows)},
+        launch_command=tuple(sys.argv),
+        report_profiles=("runtime_eval_summary",),
+    )
 
 
 @dataclass(frozen=True)
@@ -111,7 +229,7 @@ class ClassicalCell:
 
 @dataclass(frozen=True)
 class LearnedCell:
-    method: str  # "learned_g" or "learned_joint"
+    method: str  # "learned_g", "learned_g_oracle_state", or "learned_joint"
     oracle_kind: str
     precision: int
     n_leaves: int
@@ -124,6 +242,14 @@ class LearnedCell:
     n_epochs: int
     train_batch_size: int
     learning_rate: float
+    local_law_weight: float
+    merge_state_relative_weight: float
+    embedding_dim: int | None
+    summary_dim: int | None
+    state_dim: int | None
+    hidden_dim: int | None
+    use_cuda: bool
+    cuda_device: int | None
     out_root: str
 
     def cell_dir(self) -> Path:
@@ -200,6 +326,14 @@ def _run_learned_cell(cell: LearnedCell) -> dict[str, Any]:
         n_epochs=int(cell.n_epochs),
         train_batch_size=int(cell.train_batch_size),
         learning_rate=float(cell.learning_rate),
+        local_law_weight=float(cell.local_law_weight),
+        merge_state_relative_weight=float(cell.merge_state_relative_weight),
+        embedding_dim=cell.embedding_dim,
+        summary_dim=cell.summary_dim,
+        state_dim=cell.state_dim,
+        hidden_dim=cell.hidden_dim,
+        use_cuda=bool(cell.use_cuda),
+        cuda_device=cell.cuda_device,
     )
     result = fit(trainer_config=cfg, output_dir=cell.cell_dir())
     total_wall = float(time.perf_counter() - t0)
@@ -219,6 +353,7 @@ def _run_learned_cell(cell: LearnedCell) -> dict[str, Any]:
     rel_mae = _num("root_rel_mae")
     c1 = _num("c1_mae")
     c3 = _num("c3_mae")
+    merge_state = _num("merge_state_mae", default="")
     root_rmse = _num("root_rmse")
 
     row: dict[str, Any] = {
@@ -230,6 +365,10 @@ def _run_learned_cell(cell: LearnedCell) -> dict[str, Any]:
         "seed": int(cell.seed),
         "oracle_kind": cell.oracle_kind,
         "n_val": int(cell.n_val),
+        "embedding_dim": int(cfg.extra.get("embedding_dim", 0)),
+        "summary_dim": int(cfg.extra.get("summary_dim", 0)),
+        "state_dim": int(cfg.extra.get("state_dim", 0)),
+        "hidden_dim": int(cfg.extra.get("hidden_dim", 0)),
         "count": int(cell.n_val),
         "val_mae": val_mae,
         "root_mae": val_mae,
@@ -237,6 +376,7 @@ def _run_learned_cell(cell: LearnedCell) -> dict[str, Any]:
         "root_rel_mae": rel_mae,
         "c1_mae": c1,
         "c3_mae": c3,
+        "merge_state_mae": merge_state,
         # The learned path doesn't compute flat_vs_tree deltas directly; we
         # leave those blank so the report can distinguish learned from
         # classical rows by column population.
@@ -311,7 +451,7 @@ def _build_learned_cells(args, out_hll: Path) -> list[LearnedCell]:
     methods_requested: list[str] = []
     for method in args.methods:
         canonical = "learned_joint" if method == "learned_fg" else str(method)
-        if canonical in ("learned_g", "learned_joint") and canonical not in methods_requested:
+        if canonical in ("learned_g", "learned_g_oracle_state", "learned_joint") and canonical not in methods_requested:
             methods_requested.append(canonical)
     if not methods_requested:
         return cells
@@ -335,6 +475,14 @@ def _build_learned_cells(args, out_hll: Path) -> list[LearnedCell]:
                                 n_epochs=int(args.learned_n_epochs),
                                 train_batch_size=int(args.learned_batch_size),
                                 learning_rate=float(args.learned_lr),
+                                local_law_weight=float(args.learned_local_law_weight),
+                                merge_state_relative_weight=float(args.learned_merge_state_weight),
+                                embedding_dim=args.learned_embedding_dim,
+                                summary_dim=args.learned_summary_dim,
+                                state_dim=args.learned_state_dim,
+                                hidden_dim=args.learned_hidden_dim,
+                                use_cuda=bool(args.learned_use_cuda),
+                                cuda_device=args.learned_cuda_device,
                                 out_root=str(out_hll),
                             )
                         )
@@ -352,9 +500,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--methods",
         type=_parse_str_list,
-        default="classical,learned_g,learned_joint",
-        help="Methods to sweep: any of 'classical', 'learned_g', 'learned_joint'. "
-             "'learned_fg' is accepted as a legacy alias.",
+        default="classical,learned_g,learned_g_oracle_state,learned_joint",
+        help="Methods to sweep: any of 'classical', 'learned_g', "
+             "'learned_g_oracle_state', 'learned_joint'. 'learned_fg' is accepted "
+             "as a legacy alias.",
     )
     # Classical grid (fast, big).
     ap.add_argument("--precisions", type=_parse_int_list, default="7,9,11,13")
@@ -381,6 +530,50 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--learned-n-epochs", type=int, default=150)
     ap.add_argument("--learned-batch-size", type=int, default=16)
     ap.add_argument("--learned-lr", type=float, default=1e-3)
+    ap.add_argument(
+        "--learned-embedding-dim",
+        type=int,
+        default=None,
+        help="Token embedding width for learned HLL cells. Default: 2 * max leaf tokens for the cell.",
+    )
+    ap.add_argument(
+        "--learned-summary-dim",
+        type=int,
+        default=None,
+        help="Leaf summary width for learned HLL cells. Default: learned embedding width.",
+    )
+    ap.add_argument(
+        "--learned-state-dim",
+        type=int,
+        default=None,
+        help="State width for learned f+g cells. Default: 2 * summary_dim.",
+    )
+    ap.add_argument(
+        "--learned-hidden-dim",
+        type=int,
+        default=None,
+        help="Hidden width for learned HLL cells. Default: max(128, 2 * summary_dim).",
+    )
+    ap.add_argument(
+        "--learned-local-law-weight",
+        type=float,
+        default=0.9,
+        help="Weight on local-law losses for learned HLL methods.",
+    )
+    ap.add_argument(
+        "--learned-merge-state-weight",
+        type=float,
+        default=100.0,
+        help="Extra register-state target weight for learned_g_oracle_state.",
+    )
+    ap.add_argument("--learned-use-cuda", action="store_true", help="Train learned HLL cells on CUDA.")
+    ap.add_argument("--learned-cuda-device", type=int, default=None, help="CUDA device index for learned HLL cells.")
+    ap.add_argument(
+        "--tables-dir",
+        type=Path,
+        default=Path("paper/ctreepo/tables"),
+        help="Directory for generated report tables.",
+    )
     # Parallelism.
     ap.add_argument(
         "--jobs",
@@ -419,6 +612,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     jobs = int(args.jobs) if int(args.jobs) > 0 else (os.cpu_count() or 1)
     jobs = min(jobs, max(1, total))
+    if bool(args.learned_use_cuda) and jobs > 1 and learned_cells:
+        print("warning: --learned-use-cuda with --jobs > 1 launches multiple CUDA workers")
     print(f"running {total} cells with {jobs} parallel workers")
 
     rows: list[dict[str, Any]] = []
@@ -457,6 +652,12 @@ def main(argv: list[str] | None = None) -> int:
         for row in rows:
             writer.writerow(row)
     print(f"wrote {summary_path} ({len(rows)} rows)")
+    _write_canonical_parity_sidecars(
+        output_root=out_hll,
+        summary_path=summary_path,
+        rows=rows,
+        args=args,
+    )
 
     try:
         from unified_g_v1.sketch.classical_parity_report import main as report_main
@@ -471,7 +672,7 @@ def main(argv: list[str] | None = None) -> int:
             "--out-dir",
             str(out_hll),
             "--tables-dir",
-            str(Path("paper/ctreepo/tables")),
+            str(args.tables_dir),
         ]
     )
     return 0

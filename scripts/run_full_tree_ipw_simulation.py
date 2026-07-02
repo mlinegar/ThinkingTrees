@@ -139,6 +139,7 @@ def _synthetic_full_tree_population(
             )
             if is_root:
                 root_prediction = float(prediction)
+            oracle_loss = float((float(prediction) - float(normalized_target)) ** 2)
             node_records.append(
                 FullTreeNodeRecord(
                     doc_id=doc_id,
@@ -150,6 +151,8 @@ def _synthetic_full_tree_population(
                     target=float(normalized_target),
                     sampled=False,
                     propensity=1.0,
+                    proxy_loss=float(oracle_loss),
+                    oracle_loss=float(oracle_loss),
                     metadata={
                         "hardness_score": float(hardness),
                         "depth_fraction": float(depth_scale),

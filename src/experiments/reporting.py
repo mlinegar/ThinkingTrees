@@ -271,26 +271,26 @@ def _benchmark_scope_key(row: ResultRow) -> str:
 
 
 def _comparison_domain(row: ResultRow) -> str:
-    benchmark_family = str(row.benchmark_ref.family or "").strip()
-    method_family = str(row.method_ref.family or "").strip()
+    problem_id = str(row.benchmark_ref.family or "").strip()
+    method_id = str(row.method_ref.method_id or row.method_ref.family or "").strip()
     metric_semantics = _metric_semantics(row)
-    if benchmark_family == "runtime_benchmark" or method_family == "runtime_eval":
+    if problem_id == "runtime_benchmark" or method_id == "runtime_eval":
         return "runtime_context_eval"
-    if benchmark_family == "markov_full_doc" and metric_semantics in {"test_mae", "control_outcome"}:
+    if problem_id == "markov_full_doc" and metric_semantics in {"test_mae", "control_outcome"}:
         return "supervised_root_regression"
-    if benchmark_family == "treepo_task" and metric_semantics in {"test_mae", "control_outcome", "correlation", "directional_accuracy"}:
+    if problem_id == "treepo_task" and metric_semantics in {"test_mae", "control_outcome", "correlation", "directional_accuracy"}:
         return "supervised_doc_regression"
-    if benchmark_family == "ctreepo_sim":
+    if problem_id == "ctreepo_sim":
         return "tree_support_recovery"
-    return "family_specific"
+    return "problem_specific"
 
 
 def _direct_label_budget(row: ResultRow) -> dict[str, Any]:
     ref = _row_supervision_ref(row)
     train_docs = _safe_int(row.train_docs)
-    benchmark_family = str(row.benchmark_ref.family or "").strip()
-    method_family = str(row.method_ref.family or "").strip()
-    if benchmark_family == "markov_full_doc":
+    problem_id = str(row.benchmark_ref.family or "").strip()
+    method_id = str(row.method_ref.method_id or row.method_ref.family or "").strip()
+    if problem_id == "markov_full_doc":
         rate = _safe_float(getattr(ref, "root_rate", None)) if ref is not None else None
         label = ""
         if rate is not None:
@@ -305,11 +305,11 @@ def _direct_label_budget(row: ResultRow) -> dict[str, Any]:
             "label": label,
             "maximal": bool(rate is not None and rate >= 0.999999),
         }
-    if benchmark_family == "treepo_task":
+    if problem_id == "treepo_task":
         rate = _safe_float(getattr(ref, "doc_sample_probability", None)) if ref is not None else None
         if rate is None and ref is not None and getattr(ref, "topology_scope", "") == "document":
             rate = 1.0
-        if rate is None and method_family in {
+        if rate is None and method_id in {
             "llm_prompt_optimization",
             "embedding_proxy",
             "generator_finetune",
@@ -402,13 +402,13 @@ def _source_cohort_key(row: ResultRow) -> str:
     return ""
 
 
-def _family_full_label_reference_key(view: Mapping[str, Any]) -> str:
+def _method_full_label_reference_key(view: Mapping[str, Any]) -> str:
     return "|".join(
         [
             str(view.get("source_cohort_key", "")),
             str(view.get("comparison_domain", "")),
             str(view.get("benchmark_scope_key", "")),
-            str(view.get("method_family", "")),
+            str(view.get("method_id", "")),
             str(view.get("split", "")),
             str(view.get("metric_semantics", "")),
             str(view.get("train_docs", "")),
@@ -435,10 +435,10 @@ def derive_comparison_view(row: ResultRow) -> dict[str, Any]:
         "experiment_id": str(row.experiment_id or ""),
         "source_cohort_key": _source_cohort_key(row),
         "phase": str(row.phase or ""),
-        "method_family": str(row.method_ref.family or ""),
+        "method_id": str(row.method_ref.method_id or row.method_ref.family or ""),
         "method_variant": str(row.method_ref.variant or ""),
         "benchmark_scope_key": _benchmark_scope_key(row),
-        "benchmark_family": str(row.benchmark_ref.family or ""),
+        "problem_id": str(row.benchmark_ref.family or ""),
         "benchmark_scope": str(row.benchmark_ref.scope or row.benchmark_ref.name or ""),
         "split": str(row.split or ""),
         "seed": row.seed,
@@ -453,7 +453,7 @@ def derive_comparison_view(row: ResultRow) -> dict[str, Any]:
         "control_budget": _control_budget(row),
     }
     view["comparison_group_key"] = _comparison_group_key(view)
-    view["family_full_label_reference_key"] = _family_full_label_reference_key(view)
+    view["method_full_label_reference_key"] = _method_full_label_reference_key(view)
     view["observed_frontier_key"] = _observed_frontier_key(view)
     return view
 
@@ -478,7 +478,7 @@ def _best_rows_by_key(
         best = min(valid_group, key=lambda item: float(item.get("metric_value") or 0.0))
         out[str(key)] = {
             "metric_value": float(best.get("metric_value") or 0.0),
-            "method_family": str(best.get("method_family", "")),
+            "method_id": str(best.get("method_id", "")),
             "train_docs": best.get("train_docs"),
             "direct_label_budget": dict(best.get("direct_label_budget") or {}),
             "benchmark_scope_key": str(best.get("benchmark_scope_key", "")),
@@ -486,12 +486,12 @@ def _best_rows_by_key(
     return out
 
 
-def _family_full_label_baselines(
+def _method_full_label_baselines(
     views: Sequence[Mapping[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for view in views:
-        grouped[str(view.get("family_full_label_reference_key", ""))].append(view)
+        grouped[str(view.get("method_full_label_reference_key", ""))].append(view)
     out: dict[str, dict[str, Any]] = {}
     for key, group in grouped.items():
         if not group:
@@ -521,7 +521,7 @@ def _family_full_label_baselines(
         )
         out[str(key)] = {
             "metric_value": float(best.get("metric_value") or 0.0),
-            "method_family": str(best.get("method_family", "")),
+            "method_id": str(best.get("method_id", "")),
             "direct_label_budget": dict(best.get("direct_label_budget") or {}),
             "benchmark_scope_key": str(best.get("benchmark_scope_key", "")),
             "train_docs": best.get("train_docs"),
@@ -571,7 +571,7 @@ def _plot_caption_contract(spec: PlotSpec) -> Dict[str, str]:
         "reference_note": str(
             metadata.get(
                 "reference_note",
-                "Family baseline means the maximal direct-label run within the same family; frontier means the best observed comparable test MAE at this train-doc count.",
+                "Method baseline means the maximal direct-label run for the same method_id; frontier means the best observed comparable test MAE at this train-doc count.",
             )
         ),
         "example_note": example,
@@ -615,7 +615,7 @@ def _selected_plot_specs(views: Sequence[Mapping[str, Any]]) -> tuple[list[PlotS
                 comparison_domain=domain,
                 metric_name="test_mae",
                 match_policy="budget_matched_direct_labels",
-                reference_policy="family_full_label_plus_observed_frontier",
+                reference_policy="method_full_label_plus_observed_frontier",
                 facet_policy="by_direct_label_budget",
                 main_body=True,
                 scope_key=scope_key,
@@ -642,7 +642,7 @@ def _selected_plot_specs(views: Sequence[Mapping[str, Any]]) -> tuple[list[PlotS
                     comparison_domain=domain,
                     metric_name="test_mae",
                     match_policy="fixed_train_docs",
-                    reference_policy="family_full_label_plus_observed_frontier",
+                    reference_policy="method_full_label_plus_observed_frontier",
                     facet_policy="by_train_docs",
                     main_body=True,
                     scope_key=scope_key,
@@ -660,7 +660,7 @@ def _selected_plot_specs(views: Sequence[Mapping[str, Any]]) -> tuple[list[PlotS
                     comparison_domain=domain,
                     metric_name="test_mae",
                     match_policy="fixed_train_docs",
-                    reference_policy="family_full_label_plus_observed_frontier",
+                    reference_policy="method_full_label_plus_observed_frontier",
                     facet_policy="by_train_docs",
                     main_body=True,
                     scope_key=scope_key,
@@ -690,7 +690,7 @@ def _selected_plot_specs(views: Sequence[Mapping[str, Any]]) -> tuple[list[PlotS
                     comparison_domain=domain,
                     metric_name="test_mae",
                     match_policy="fixed_train_docs_and_direct_labels",
-                    reference_policy="family_full_label_plus_observed_frontier",
+                    reference_policy="method_full_label_plus_observed_frontier",
                     facet_policy="by_local_supervision_or_control",
                     main_body=False,
                     scope_key=scope_key,
@@ -713,7 +713,7 @@ def _selected_plot_specs(views: Sequence[Mapping[str, Any]]) -> tuple[list[PlotS
         appendix_specs.append(
             PlotSpec(
                 plot_kind="control_outcome",
-                comparison_domain="family_specific",
+                comparison_domain="problem_specific",
                 metric_name="control_outcome",
                 match_policy="within_family_only",
                 reference_policy="none",
@@ -748,11 +748,11 @@ def _selected_plot_specs(views: Sequence[Mapping[str, Any]]) -> tuple[list[PlotS
 
 
 def build_canonical_report_views(rows: Sequence[ResultRow]) -> dict[str, Any]:
-    method_families = sorted(
+    method_ids = sorted(
         {
-            str(row.method_ref.family or "")
+            str(row.method_ref.method_id or row.method_ref.family or "")
             for row in rows
-            if str(row.method_ref.family or "").strip()
+            if str(row.method_ref.method_id or row.method_ref.family or "").strip()
         }
     )
     metric_names = sorted(
@@ -802,15 +802,15 @@ def build_canonical_report_views(rows: Sequence[ResultRow]) -> dict[str, Any]:
     for metric_name, metric_rows in group_rows_by_metric(rows).items():
         families = sorted(
             {
-                str(row.method_ref.family or "")
+                str(row.method_ref.method_id or row.method_ref.family or "")
                 for row in metric_rows
-                if str(row.method_ref.family or "").strip()
+                if str(row.method_ref.method_id or row.method_ref.family or "").strip()
             }
         )
         if len(families) < 2:
             continue
         comparable_metrics[str(metric_name)] = {
-            "method_families": families,
+            "method_ids": families,
             "row_count": len(metric_rows),
             "benchmark_scopes": sorted(
                 {
@@ -834,14 +834,14 @@ def build_canonical_report_views(rows: Sequence[ResultRow]) -> dict[str, Any]:
                 }
             ),
         }
-    family_sections: dict[str, Any] = {}
-    for family in method_families:
+    method_sections: dict[str, Any] = {}
+    for method_id in method_ids:
         family_rows = [
             row
             for row in rows
-            if str(row.method_ref.family or "") == family
+            if str(row.method_ref.method_id or row.method_ref.family or "") == method_id
         ]
-        family_sections[family] = {
+        method_sections[method_id] = {
             "row_count": len(family_rows),
             "metric_names": sorted(
                 {
@@ -878,12 +878,12 @@ def build_canonical_report_views(rows: Sequence[ResultRow]) -> dict[str, Any]:
         if str(view.get("metric_semantics", "")) == "test_mae"
         and _safe_float(view.get("metric_value")) is not None
     ]
-    family_full_label_baselines = _family_full_label_baselines(primary_views)
+    method_full_label_baselines = _method_full_label_baselines(primary_views)
     observed_frontiers = _best_rows_by_key(primary_views, key_name="observed_frontier_key")
     main_body_specs, appendix_specs = _selected_plot_specs(row_views)
     return {
         "row_count": len(rows),
-        "method_families": method_families,
+        "method_ids": method_ids,
         "metric_names": metric_names,
         "benchmark_scopes": benchmark_scopes,
         "comparison_domains": comparison_domains,
@@ -891,10 +891,10 @@ def build_canonical_report_views(rows: Sequence[ResultRow]) -> dict[str, Any]:
         "control_families": control_families,
         "control_labels": control_labels,
         "comparable_metrics": comparable_metrics,
-        "family_sections": family_sections,
+        "method_sections": method_sections,
         "row_views": row_views,
         "reference_summaries": {
-            "family_full_label_baselines": family_full_label_baselines,
+            "method_full_label_baselines": method_full_label_baselines,
             "observed_frontiers": observed_frontiers,
         },
         "main_body_plot_specs": [spec.to_dict() for spec in main_body_specs],

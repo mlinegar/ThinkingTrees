@@ -38,7 +38,8 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from src.config.dspy_config import configure_dspy, create_vllm_lm, create_vllm_lm_multi
+from src.config.dspy_config import configure_dspy, create_local_engine_lm
+from src.config.local_inference import resolve_local_inference_config
 from src.core.protocols import format_merge_input
 from src.preprocessing.chunker import chunk_for_ops
 from src.tasks.manifesto import ManifestoDataset
@@ -302,7 +303,7 @@ def _build_pooled(mp_data_dir: Path, train_n: int, dev_n: int, test_n: int, seed
             r = records_by_mfesto.setdefault(
                 bkey, {"manifesto_id": mid, "benoit_key": bkey, "text": s.text, "labels": {}}
             )
-            r["labels"][dim.value] = float(row.expert_mean)
+            r["labels"][dim.value] = float(row.expert_mean_1_7)
 
     all_recs = list(records_by_mfesto.values())
     rng.shuffle(all_recs)
@@ -720,13 +721,8 @@ def main() -> int:
                         format="%(asctime)s %(levelname)s %(name)s | %(message)s")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    lm_kwargs = {"model": args.model, "temperature": 0.0, "cache": True}
-    if args.max_tokens is not None:
-        lm_kwargs["max_tokens"] = args.max_tokens
-    if args.ports:
-        lm = create_vllm_lm_multi(ports=args.ports, **lm_kwargs)
-    else:
-        lm = create_vllm_lm(port=args.port, **lm_kwargs)
+    local_inference = resolve_local_inference_config({**vars(args), "temperature": 0.0})
+    lm = create_local_engine_lm(**local_inference.dspy_kwargs(cache=True))
     configure_dspy(lm=lm)
 
     logger.info("Building pooled examples (6 dims)")
@@ -847,10 +843,10 @@ def main() -> int:
                 "cache": True,
                 "max_tokens": int(args.reflection_max_tokens),
             }
-            reflection_lm = (
-                create_vllm_lm_multi(ports=args.ports, **reflection_kwargs)
-                if args.ports
-                else create_vllm_lm(port=args.port, **reflection_kwargs)
+            reflection_lm = create_local_engine_lm(
+                engine=local_inference.engine,
+                endpoints=local_inference.endpoints,
+                **reflection_kwargs,
             )
             gepa_kwargs: dict[str, Any] = {
                 "metric": _make_gepa_metric(mode=args.metric_mode, feedback_mode=args.feedback_mode),

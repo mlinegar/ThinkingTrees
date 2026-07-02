@@ -167,6 +167,7 @@ class TreePOOptimizerExportMetadata:
     discount_gamma: float = 1.0
     sample_weight_source: str = "effective_weight"
     rl_role: Optional[str] = None
+    local_law_adjustment: Optional[Mapping[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -186,6 +187,8 @@ class TreePOOptimizerExportMetadata:
         }
         if self.rl_role is not None:
             payload["rl_role"] = self.rl_role
+        if self.local_law_adjustment is not None:
+            payload["local_law_adjustment"] = dict(self.local_law_adjustment)
         return payload
 
 
@@ -206,6 +209,7 @@ def build_treepo_optimizer_export_metadata(
     ipw_weight_override: Optional[float] = None,
     joint_propensity_override: Optional[float] = None,
     joint_propensity_source: Optional[str] = None,
+    local_law_adjustment: Optional[Mapping[str, Any]] = None,
 ) -> TreePOOptimizerExportMetadata:
     mode = validate_tree_objective_weighting_mode(weighting_mode)
     gamma = validate_discount_gamma(discount_gamma)
@@ -262,6 +266,9 @@ def build_treepo_optimizer_export_metadata(
         weighting_mode=mode,
         discount_gamma=float(gamma),
         rl_role=rl_role,
+        local_law_adjustment=(
+            dict(local_law_adjustment) if local_law_adjustment is not None else None
+        ),
     )
 
 

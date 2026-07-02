@@ -20,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
         ("tutorial_supervision_00_numeric_gradient_descent.py", "numeric_gradient_descent_methods"),
         ("tutorial_supervision_01_dense_scalar_regression.py", "dense_scalar_regression"),
         ("tutorial_supervision_02_grouped_comparative.py", "grouped_comparative_from_scalar_scores"),
-        ("tutorial_supervision_03_human_feedback.py", "human_feedback_store_export"),
+        ("tutorial_supervision_03_human_preference.py", "human_preference_store_export"),
         ("tutorial_supervision_04_markov_style.py", "markov_style_document_regression"),
         ("tutorial_supervision_05_ipw_mean_simulation.py", "ipw_mean_simulation_easy"),
         ("tutorial_supervision_06_ipw_regression_simulation.py", "ipw_regression_simulation"),

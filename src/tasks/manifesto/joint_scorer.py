@@ -43,9 +43,9 @@ class JointDimensionScorer(dspy.Module):
         super().__init__()
         self.max_output_tokens = int(max_output_tokens)
         if use_cot:
-            self.score = dspy.ChainOfThought(DimensionScoreSignature)
+            self.scorer = dspy.ChainOfThought(DimensionScoreSignature)
         else:
-            self.score = dspy.Predict(DimensionScoreSignature)
+            self.scorer = dspy.Predict(DimensionScoreSignature)
 
     def forward(
         self,
@@ -70,7 +70,21 @@ class JointDimensionScorer(dspy.Module):
                 raise ValueError("Need dimension_spec, dimension, or task_context.")
             task_context = get_scoring_context(dimension_spec.dimension)
 
-        result = self.score(
+        # Keep the predictor off the name ``score``. DSPy examples and
+        # predictions also use a ``score`` field, and some optimizers can leave
+        # that name bound to a float on compiled modules. Legacy artifacts may
+        # still contain a callable ``score`` predictor, so support it as a
+        # fallback.
+        predictor = getattr(self, "scorer", None)
+        if not callable(predictor):
+            legacy_predictor = getattr(self, "score", None)
+            if callable(legacy_predictor):
+                predictor = legacy_predictor
+        if not callable(predictor):
+            predictor = dspy.Predict(DimensionScoreSignature)
+            self.scorer = predictor
+
+        result = predictor(
             task_context=task_context,
             summary=summary,
             config={"max_tokens": self.max_output_tokens},

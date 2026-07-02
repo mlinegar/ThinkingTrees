@@ -1,13 +1,16 @@
-"""Universal inference engine contract spanning chat, diffusion, and symbolic execution."""
+"""Universal inference engine contract for text, embedding, operator, and symbolic execution."""
 
 from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, Protocol, Sequence
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from src.core.async_utils import to_thread
 from src.core.engines import (
@@ -16,15 +19,17 @@ from src.core.engines import (
     resolve_engine_base_url,
     resolve_engine_for_usage,
 )
-from src.core.llm_client import LLMClient, LLMConfig, MockLLMClient
+from src.core.llm_client import LLMClient, LLMConfig, LLMResponse, MockLLMClient
 from src.runtime.contracts import (
     ChatInput,
-    DiffusionInput,
+    EmbeddingInput,
+    EmbeddingOutput,
     InferenceRequest,
     InferenceResponse,
+    OperatorInput,
+    OperatorOutput,
     StructuredOutput,
     SymbolicInput,
-    TextListOutput,
     TextOutput,
 )
 
@@ -32,25 +37,22 @@ logger = logging.getLogger(__name__)
 
 
 class InferenceEngine(Protocol):
-    """Common execution contract for chat, diffusion, and symbolic engines."""
+    """Common execution contract for active inference surfaces."""
 
     engine_type: EngineType
     surface: EngineSurface
 
-    async def aexecute(self, request: InferenceRequest) -> InferenceResponse:
-        ...
+    async def aexecute(self, request: InferenceRequest) -> InferenceResponse: ...
 
-    async def asubmit(self, request: InferenceRequest) -> "InferenceHandle":
-        ...
+    async def asubmit(self, request: InferenceRequest) -> "InferenceHandle": ...
 
-    async def aexecute_many(self, requests: Sequence[InferenceRequest]) -> list[InferenceResponse]:
-        ...
+    async def aexecute_many(
+        self, requests: Sequence[InferenceRequest]
+    ) -> list[InferenceResponse]: ...
 
-    def execute(self, request: InferenceRequest) -> InferenceResponse:
-        ...
+    def execute(self, request: InferenceRequest) -> InferenceResponse: ...
 
-    async def aclose(self) -> None:
-        ...
+    async def aclose(self) -> None: ...
 
 
 @dataclass
@@ -103,7 +105,9 @@ class BaseInferenceEngine:
             asyncio.get_running_loop()
         except RuntimeError:
             return asyncio.run(self.aexecute(request))
-        raise RuntimeError("InferenceEngine.execute() cannot be used from an active event loop; use aexecute().")
+        raise RuntimeError(
+            "InferenceEngine.execute() cannot be used from an active event loop; use aexecute()."
+        )
 
     async def aclose(self) -> None:
         return None
@@ -112,8 +116,90 @@ class BaseInferenceEngine:
 class ChatCompatibleClient(Protocol):
     config: LLMConfig
 
-    def chat(self, messages: list[dict[str, str]], **kwargs: Any):
-        ...
+    def chat(self, messages: list[dict[str, str]], **kwargs: Any): ...
+
+
+class GenerateChatClient:
+    """Chat-compatible adapter over a genuine `/generate` backend.
+
+    This keeps `/generate` as a transport detail under the canonical text
+    generation surface. It intentionally returns the same `LLMResponse` shape as
+    `LLMClient.chat`.
+    """
+
+    supports_batch_client = False
+
+    def __init__(self, *, config: LLMConfig, backend: Any) -> None:
+        self.config = config
+        self.backend = backend
+
+    def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> LLMResponse:
+        prompt = self._messages_to_prompt(messages)
+        sampling_params = dict(kwargs)
+        batch = self.backend.generate(
+            [prompt],
+            sampling_params=sampling_params,
+            engine_options=None,
+        )
+        text = str(batch.texts[0] if batch.texts else "")
+        return LLMResponse(
+            content=text,
+            model=str(batch.model or self.config.model),
+            prompt_tokens=0,
+            completion_tokens=0,
+            raw_response=batch.raw_response,
+        )
+
+    def chat_many(
+        self,
+        message_batches: Sequence[list[dict[str, str]]],
+        kwargs_batches: Sequence[Mapping[str, Any]],
+    ) -> list[LLMResponse]:
+        if len(message_batches) != len(kwargs_batches):
+            raise ValueError("GenerateChatClient.chat_many requires aligned messages/kwargs batches.")
+        if not message_batches:
+            return []
+        rendered_kwargs = [json.dumps(dict(item), sort_keys=True, default=str) for item in kwargs_batches]
+        if len(set(rendered_kwargs)) != 1:
+            return [
+                self.chat(list(messages), **dict(kwargs))
+                for messages, kwargs in zip(message_batches, kwargs_batches)
+            ]
+        prompts = [self._messages_to_prompt(messages) for messages in message_batches]
+        batch = self.backend.generate(
+            prompts,
+            sampling_params=dict(kwargs_batches[0]),
+            engine_options=None,
+        )
+        generations = list(batch.generations)
+        if len(generations) != len(prompts):
+            raise ValueError(
+                f"GenerateChatClient.chat_many response size mismatch: expected {len(prompts)} "
+                f"outputs, received {len(generations)}."
+            )
+        return [
+            LLMResponse(
+                content=str(generation.output_text),
+                model=str(batch.model or self.config.model),
+                prompt_tokens=0,
+                completion_tokens=0,
+                raw_response=getattr(generation, "raw", None) or batch.raw_response,
+            )
+            for generation in generations
+        ]
+
+    @staticmethod
+    def _messages_to_prompt(messages: Sequence[Mapping[str, Any]]) -> str:
+        if len(messages) == 1:
+            return str(dict(messages[0]).get("content", "") or "")
+        parts: list[str] = []
+        for message in messages:
+            item = dict(message)
+            role = str(item.get("role", "user") or "user")
+            content = str(item.get("content", "") or "")
+            parts.append(f"<{role}>\n{content}\n</{role}>")
+        parts.append("<assistant>\n")
+        return "\n\n".join(parts)
 
 
 class ChatInferenceEngine(BaseInferenceEngine):
@@ -135,18 +221,42 @@ class ChatInferenceEngine(BaseInferenceEngine):
         self.config = config
         self.mock = bool(mock)
         self._client = llm_client or (
-            MockLLMClient(config)
-            if self.mock
-            else LLMClient(config, enable_cache=enable_cache)
+            MockLLMClient(config) if self.mock else LLMClient(config, enable_cache=enable_cache)
+        )
+        self._force_sync_client = bool(
+            llm_client is not None and getattr(llm_client, "supports_batch_client", True) is False
         )
         self._async_batch_client = async_batch_client
         self._batch_client_factory = batch_client_factory
         self._batch_client_lock: Optional[asyncio.Lock] = None
+        self._batch_client_loop: Optional[asyncio.AbstractEventLoop] = None
         self._batch_client_started = False
+
+    @staticmethod
+    def _kwargs_from_chat_input(chat_input: ChatInput) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {
+            "max_tokens": int(chat_input.max_tokens),
+            "temperature": float(chat_input.temperature),
+        }
+        if chat_input.stop:
+            kwargs["stop"] = list(chat_input.stop)
+        if chat_input.extra:
+            kwargs.update(dict(chat_input.extra))
+        return kwargs
 
     async def _ensure_batch_client(self) -> Any:
         if self.mock:
             return None
+        loop = asyncio.get_running_loop()
+        if self._batch_client_loop is not None and self._batch_client_loop is not loop:
+            # Runtime sync shims may call into the async engine through repeated
+            # asyncio.run() calls. AsyncBatchLLMClient owns queues/background
+            # tasks for the loop it started in, so discard it when a new loop is
+            # used instead of reusing a stale worker.
+            self._async_batch_client = None
+            self._batch_client_lock = None
+            self._batch_client_started = False
+            self._batch_client_loop = None
         if self._batch_client_lock is None:
             self._batch_client_lock = asyncio.Lock()
         async with self._batch_client_lock:
@@ -154,18 +264,18 @@ class ChatInferenceEngine(BaseInferenceEngine):
                 if self._batch_client_factory is not None:
                     self._async_batch_client = self._batch_client_factory()
                 else:
-                    from src.core.batch_processor import AsyncBatchLLMClient
+                    from src.core.batch_client_factory import build_batch_client
 
-                    model_name = None if self.config.model == "default" else self.config.model
-                    self._async_batch_client = AsyncBatchLLMClient(
+                    self._async_batch_client = build_batch_client(
                         base_url=self.config.base_url,
-                        model=model_name,
+                        model=self.config.model,
                         request_timeout=float(self.config.timeout),
                         api_key=self.config.api_key,
                     )
             if not self._batch_client_started:
                 await self._async_batch_client.start()
                 self._batch_client_started = True
+                self._batch_client_loop = loop
             return self._async_batch_client
 
     def _validate_request(self, request: InferenceRequest) -> ChatInput:
@@ -175,20 +285,15 @@ class ChatInferenceEngine(BaseInferenceEngine):
                 f"received {request.surface.value}."
             )
         if not isinstance(request.input, ChatInput):
-            raise TypeError(f"ChatInferenceEngine requires ChatInput, received {type(request.input).__name__}.")
+            raise TypeError(
+                f"ChatInferenceEngine requires ChatInput, received {type(request.input).__name__}."
+            )
         return request.input
 
     def _execute_sync(self, request: InferenceRequest) -> InferenceResponse:
         chat_input = self._validate_request(request)
         started = time.time()
-        kwargs: Dict[str, Any] = {
-            "max_tokens": int(chat_input.max_tokens),
-            "temperature": float(chat_input.temperature),
-        }
-        if chat_input.stop:
-            kwargs["stop"] = list(chat_input.stop)
-        if chat_input.extra:
-            kwargs.update(dict(chat_input.extra))
+        kwargs = self._kwargs_from_chat_input(chat_input)
         response = self._client.chat(chat_input.messages, **kwargs)
         latency_ms = (time.time() - started) * 1000.0
         usage = {
@@ -208,10 +313,71 @@ class ChatInferenceEngine(BaseInferenceEngine):
             raw=getattr(response, "raw_response", None),
         )
 
+    def _response_from_llm_response(
+        self,
+        *,
+        response: Any,
+        request: InferenceRequest,
+        latency_ms: float,
+        batched: bool,
+    ) -> InferenceResponse:
+        usage = {
+            "prompt_tokens": int(getattr(response, "prompt_tokens", 0) or 0),
+            "completion_tokens": int(getattr(response, "completion_tokens", 0) or 0),
+        }
+        usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+        return InferenceResponse(
+            surface=self.surface,
+            engine=self.engine_type,
+            model_id=str(getattr(response, "model", "") or self.config.model),
+            output=TextOutput(text=str(getattr(response, "content", ""))),
+            usage=usage,
+            latency_ms=latency_ms,
+            telemetry={"batched": bool(batched)},
+            request_id=request.request_id,
+            raw=getattr(response, "raw_response", None),
+        )
+
+    def _execute_sync_many(self, requests: Sequence[InferenceRequest]) -> list[InferenceResponse]:
+        request_list = list(requests)
+        if not request_list:
+            return []
+        chat_inputs = [self._validate_request(request) for request in request_list]
+        kwargs_batches = [self._kwargs_from_chat_input(chat_input) for chat_input in chat_inputs]
+        started = time.time()
+        chat_many = getattr(self._client, "chat_many", None)
+        if callable(chat_many):
+            llm_responses = list(
+                chat_many(
+                    [list(chat_input.messages) for chat_input in chat_inputs],
+                    kwargs_batches,
+                )
+            )
+        else:
+            llm_responses = [
+                self._client.chat(chat_input.messages, **kwargs)
+                for chat_input, kwargs in zip(chat_inputs, kwargs_batches)
+            ]
+        if len(llm_responses) != len(request_list):
+            raise ValueError(
+                f"ChatInferenceEngine.aexecute_many response size mismatch: expected {len(request_list)} "
+                f"outputs, received {len(llm_responses)}."
+            )
+        latency_each = ((time.time() - started) * 1000.0) / float(max(1, len(request_list)))
+        return [
+            self._response_from_llm_response(
+                response=response,
+                request=request,
+                latency_ms=latency_each,
+                batched=True,
+            )
+            for request, response in zip(request_list, llm_responses)
+        ]
+
     async def asubmit(self, request: InferenceRequest) -> InferenceHandle:
         chat_input = self._validate_request(request)
         request_id = request.resolved_request_id()
-        if self.mock:
+        if self.mock or self._force_sync_client:
             task = asyncio.create_task(to_thread(self._execute_sync, request))
             return InferenceHandle(
                 request_id=request_id,
@@ -228,9 +394,17 @@ class ChatInferenceEngine(BaseInferenceEngine):
             messages=list(chat_input.messages),
             max_tokens=int(chat_input.max_tokens),
             temperature=float(chat_input.temperature),
-            chat_template_kwargs=dict(chat_input.extra.get("chat_template_kwargs", {}))
-            if isinstance(chat_input.extra.get("chat_template_kwargs"), Mapping)
-            else None,
+            chat_template_kwargs=(
+                dict(chat_input.extra.get("chat_template_kwargs", {}))
+                if isinstance(chat_input.extra.get("chat_template_kwargs"), Mapping)
+                else None
+            ),
+            extra_request_params={
+                str(key): value
+                for key, value in dict(chat_input.extra or {}).items()
+                if key != "chat_template_kwargs"
+            }
+            or None,
             document_id=request.document_id or None,
             routing_key=request.routing_key or request.document_id or None,
             request_type=str(request.metadata.get("request_type", "chat")),
@@ -245,14 +419,24 @@ class ChatInferenceEngine(BaseInferenceEngine):
             _future=task,
         )
 
-    async def _await_batch_response(self, batch_client: Any, batch_request: Any, request: InferenceRequest) -> InferenceResponse:
+    async def aexecute_many(self, requests: Sequence[InferenceRequest]) -> list[InferenceResponse]:
+        if self.mock or self._force_sync_client:
+            return await to_thread(self._execute_sync_many, list(requests))
+        return await super().aexecute_many(requests)
+
+    async def _await_batch_response(
+        self, batch_client: Any, batch_request: Any, request: InferenceRequest
+    ) -> InferenceResponse:
         response = await batch_client.await_response(batch_request.request_id)
         if response.error:
             raise RuntimeError(
                 f"Chat inference request {batch_request.request_id} failed on {self.engine_type.value}: {response.error}"
             )
         usage = dict(getattr(response, "usage", {}) or {})
-        usage.setdefault("total_tokens", int(usage.get("prompt_tokens", 0) or 0) + int(usage.get("completion_tokens", 0) or 0))
+        usage.setdefault(
+            "total_tokens",
+            int(usage.get("prompt_tokens", 0) or 0) + int(usage.get("completion_tokens", 0) or 0),
+        )
         return InferenceResponse(
             surface=self.surface,
             engine=self.engine_type,
@@ -271,56 +455,269 @@ class ChatInferenceEngine(BaseInferenceEngine):
             self._batch_client_started = False
 
 
-class DiffusionInferenceEngine(BaseInferenceEngine):
-    """Unified diffusion engine backed by the existing backend protocol."""
+class EmbeddingInferenceEngine(BaseInferenceEngine):
+    """Unified embedding engine backed by an OpenAI-compatible embeddings surface."""
 
     def __init__(
         self,
         *,
         engine_type: EngineType,
-        backend: Any,
-        model_id: str = "",
+        base_url: str,
+        model: str = "default",
+        api_key: str = "EMPTY",
+        timeout: float = 60.0,
+        mock: bool = False,
+        embedding_client: Optional[Any] = None,
     ) -> None:
         self.engine_type = engine_type
-        self.surface = EngineSurface.DIFFUSION_GENERATE
-        self.backend = backend
-        self.model_id = model_id
+        self.surface = EngineSurface.EMBEDDING
+        self.base_url = str(base_url or "").rstrip("/")
+        self.model = str(model or "default")
+        self.api_key = str(api_key or "EMPTY")
+        self.timeout = float(timeout)
+        self.mock = bool(mock)
+        if embedding_client is not None:
+            self.client = embedding_client
+        else:
+            from treepo.llm import build_embedding_client
 
-    def _validate_request(self, request: InferenceRequest) -> DiffusionInput:
-        if request.surface is not EngineSurface.DIFFUSION_GENERATE:
+            self.client = build_embedding_client(
+                "hashing" if mock else engine_type.value,
+                api_base=self.base_url,
+                model=None if self.model == "default" else self.model,
+                api_key=self.api_key,
+                timeout_seconds=self.timeout,
+                embedding_dim=8,
+            )
+
+    def _validate_request(self, request: InferenceRequest) -> EmbeddingInput:
+        if request.surface is not EngineSurface.EMBEDDING:
             raise ValueError(
-                f"DiffusionInferenceEngine requires surface={EngineSurface.DIFFUSION_GENERATE.value}, "
+                f"EmbeddingInferenceEngine requires surface={EngineSurface.EMBEDDING.value}, "
                 f"received {request.surface.value}."
             )
-        if not isinstance(request.input, DiffusionInput):
+        if not isinstance(request.input, EmbeddingInput):
             raise TypeError(
-                f"DiffusionInferenceEngine requires DiffusionInput, received {type(request.input).__name__}."
+                f"EmbeddingInferenceEngine requires EmbeddingInput, received {type(request.input).__name__}."
             )
         return request.input
 
     def _execute_sync(self, request: InferenceRequest) -> InferenceResponse:
-        diffusion_input = self._validate_request(request)
-        batch = self.backend.generate(
-            diffusion_input.texts,
-            sampling_params=diffusion_input.sampling_params,
-            engine_options=request.engine_options,
-        )
-        finish_reasons = [generation.finish_reason for generation in batch.generations]
+        embedding_input = self._validate_request(request)
+        started = time.time()
+        vectors = self.client.embed_texts(list(embedding_input.texts))
+        latency_ms = (time.time() - started) * 1000.0
+        model_id = self.model
+        if not self.mock and hasattr(self.client, "resolve_model"):
+            try:
+                model_id = str(self.client.resolve_model())
+            except Exception:
+                model_id = self.model
         return InferenceResponse(
             surface=self.surface,
             engine=self.engine_type,
-            model_id=str(batch.model or self.model_id or ""),
-            output=TextListOutput(texts=list(batch.texts), finish_reasons=finish_reasons),
-            usage={},
-            latency_ms=float(batch.latency_seconds) * 1000.0,
-            telemetry=dict(getattr(batch, "telemetry", {}) or {}),
-            artifacts={"request_payload": dict(batch.request_payload)},
+            model_id=model_id,
+            output=EmbeddingOutput(vectors=[list(map(float, vec)) for vec in vectors]),
+            usage={"input_count": len(embedding_input.texts)},
+            latency_ms=latency_ms,
+            telemetry={"embedding_dim": len(vectors[0]) if vectors else 0},
             request_id=request.request_id,
-            raw=batch.raw_response,
+            raw=None,
         )
 
     async def aexecute(self, request: InferenceRequest) -> InferenceResponse:
         return await to_thread(self._execute_sync, request)
+
+
+@dataclass(frozen=True)
+class NativeOperator:
+    """One registered in-process runtime operator."""
+
+    name: str
+    handler: Callable[[OperatorInput], Any]
+    description: str = ""
+
+
+class NativeOperatorRegistry:
+    """Registry for native Python/PyTorch runtime operators."""
+
+    _operators: Dict[str, NativeOperator] = {}
+
+    @classmethod
+    def register(
+        cls,
+        name: str,
+        handler: Callable[[OperatorInput], Any],
+        *,
+        description: str = "",
+    ) -> None:
+        cls._operators[str(name)] = NativeOperator(
+            name=str(name),
+            handler=handler,
+            description=str(description),
+        )
+
+    @classmethod
+    def resolve(cls, name: str) -> NativeOperator:
+        try:
+            return cls._operators[str(name)]
+        except KeyError as exc:
+            supported = ", ".join(sorted(cls._operators)) or "<none>"
+            raise ValueError(
+                f"Unknown native operator '{name}'. Registered operators: {supported}."
+            ) from exc
+
+    @classmethod
+    def available(cls) -> tuple[str, ...]:
+        return tuple(sorted(cls._operators))
+
+    @classmethod
+    def clear(cls) -> None:
+        cls._operators.clear()
+
+
+def _coerce_operator_output(value: Any) -> OperatorOutput:
+    if isinstance(value, OperatorOutput):
+        return value
+    if isinstance(value, Mapping):
+        if "data" in value or "artifacts" in value:
+            return OperatorOutput(
+                data=value.get("data"),
+                artifacts=dict(value.get("artifacts") or {}),
+            )
+    return OperatorOutput(data=value, artifacts={})
+
+
+class OperatorInferenceEngine(BaseInferenceEngine):
+    """Unified generic operator engine for native or served operator calls."""
+
+    def __init__(
+        self,
+        *,
+        engine_type: EngineType,
+        model_id: str = "default",
+        base_url: Optional[str] = None,
+        api_key: str = "EMPTY",
+        timeout: float = 120.0,
+        operator_client: Optional[Any] = None,
+    ) -> None:
+        self.engine_type = engine_type
+        self.surface = EngineSurface.OPERATOR
+        self.model_id = str(model_id or "default")
+        self.base_url = str(base_url or "").rstrip("/")
+        self.api_key = str(api_key or "EMPTY")
+        self.timeout = float(timeout)
+        self.operator_client = operator_client
+
+    def _validate_request(self, request: InferenceRequest) -> OperatorInput:
+        if request.surface is not EngineSurface.OPERATOR:
+            raise ValueError(
+                f"OperatorInferenceEngine requires surface={EngineSurface.OPERATOR.value}, "
+                f"received {request.surface.value}."
+            )
+        if not isinstance(request.input, OperatorInput):
+            raise TypeError(
+                f"OperatorInferenceEngine requires OperatorInput, received {type(request.input).__name__}."
+            )
+        return request.input
+
+    def _execute_native(
+        self, operator_input: OperatorInput
+    ) -> tuple[OperatorOutput, Dict[str, Any]]:
+        if self.operator_client is not None:
+            if hasattr(self.operator_client, "execute"):
+                value = self.operator_client.execute(operator_input)
+            elif callable(self.operator_client):
+                value = self.operator_client(operator_input)
+            else:
+                raise TypeError(
+                    "Native operator backend must be callable or expose execute(operator_input)."
+                )
+        else:
+            operator = NativeOperatorRegistry.resolve(operator_input.operation)
+            value = operator.handler(operator_input)
+        return _coerce_operator_output(value), {}
+
+    def _execute_served(
+        self, operator_input: OperatorInput, request: InferenceRequest
+    ) -> tuple[OperatorOutput, Dict[str, Any]]:
+        if self.operator_client is not None:
+            if hasattr(self.operator_client, "execute"):
+                value = self.operator_client.execute(operator_input)
+            elif callable(self.operator_client):
+                value = self.operator_client(operator_input)
+            else:
+                raise TypeError(
+                    "Served operator client must be callable or expose execute(operator_input)."
+                )
+            return _coerce_operator_output(value), {}
+
+        if not self.base_url:
+            raise ValueError("Served operator execution requires base_url.")
+        payload = {
+            "model": self.model_id,
+            "operation": operator_input.operation,
+            "inputs": dict(operator_input.inputs),
+            "batch": list(operator_input.batch),
+            "options": dict(operator_input.options),
+            "engine_options": dict(request.engine_options),
+            "metadata": dict(request.metadata),
+        }
+        body = json.dumps(payload).encode("utf-8")
+        http_request = Request(
+            self.base_url.rstrip("/") + "/operators/execute",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(http_request, timeout=max(1.0, self.timeout)) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Served operator request failed with HTTP {exc.code}: {detail}"
+            ) from exc
+        except (URLError, OSError, ValueError) as exc:
+            raise RuntimeError(f"Served operator request failed: {exc}") from exc
+
+        output = _coerce_operator_output(data)
+        telemetry = dict(data.get("telemetry") or {}) if isinstance(data, Mapping) else {}
+        if isinstance(data, Mapping) and data.get("model"):
+            self.model_id = str(data.get("model"))
+        return output, telemetry
+
+    async def aexecute(self, request: InferenceRequest) -> InferenceResponse:
+        operator_input = self._validate_request(request)
+        started = time.time()
+
+        def _run() -> tuple[OperatorOutput, Dict[str, Any]]:
+            if self.engine_type is EngineType.NATIVE_OPERATOR:
+                return self._execute_native(operator_input)
+            return self._execute_served(operator_input, request)
+
+        output, telemetry = await to_thread(_run)
+        latency_ms = (time.time() - started) * 1000.0
+        merged_artifacts = dict(output.artifacts)
+        merged_artifacts.setdefault("operation", operator_input.operation)
+        return InferenceResponse(
+            surface=self.surface,
+            engine=self.engine_type,
+            model_id=self.model_id,
+            output=OperatorOutput(data=output.data, artifacts=merged_artifacts),
+            usage={
+                "batch_count": len(operator_input.batch),
+                "input_count": len(operator_input.inputs),
+            },
+            latency_ms=latency_ms,
+            telemetry={"operation": operator_input.operation, **telemetry},
+            artifacts=merged_artifacts,
+            request_id=request.request_id,
+            raw=output.data,
+        )
 
 
 @dataclass(frozen=True)
@@ -359,7 +756,9 @@ class SymbolicOperationRegistry:
             return cls._operations[str(name)]
         except KeyError as exc:
             supported = ", ".join(sorted(cls._operations))
-            raise ValueError(f"Unknown symbolic operation '{name}'. Registered operations: {supported}.") from exc
+            raise ValueError(
+                f"Unknown symbolic operation '{name}'. Registered operations: {supported}."
+            ) from exc
 
     @classmethod
     def available(cls) -> tuple[str, ...]:
@@ -395,7 +794,9 @@ class SymbolicInferenceEngine(BaseInferenceEngine):
         def _run() -> Any:
             payload = operation.handler(dict(symbolic_input.inputs))
             if inspect.isawaitable(payload):
-                raise TypeError(f"Symbolic operation '{operation.name}' must return a concrete result, not an awaitable.")
+                raise TypeError(
+                    f"Symbolic operation '{operation.name}' must return a concrete result, not an awaitable."
+                )
             return payload
 
         data = await to_thread(_run)
@@ -480,20 +881,34 @@ def build_inference_engine(
     session: Optional[Any] = None,
     generate_path: Optional[str] = None,
     default_payload: Optional[Mapping[str, Any]] = None,
+    transport: Optional[str] = None,
     require_managed: bool = False,
 ) -> InferenceEngine:
     """Build a universal inference engine for the requested engine/surface pair."""
+
+    if surface is EngineSurface.DIFFUSION_GENERATE:
+        raise ValueError(
+            "EngineSurface.DIFFUSION_GENERATE has been retired as a public inference "
+            "surface. Use surface=EngineSurface.CHAT_OPENAI with transport='generate' "
+            "for genuine /generate engines."
+        )
 
     allowed_by_surface = {
         EngineSurface.CHAT_OPENAI: (
             EngineType.VLLM,
             EngineType.SGLANG,
+            EngineType.VLLM_OMNI,
             EngineType.OPENAI,
             EngineType.CUSTOM_HTTP,
         ),
-        EngineSurface.DIFFUSION_GENERATE: (
+        EngineSurface.EMBEDDING: (
+            EngineType.VLLM,
             EngineType.SGLANG,
-            EngineType.VLLM_OMNI,
+            EngineType.OPENAI,
+            EngineType.CUSTOM_HTTP,
+        ),
+        EngineSurface.OPERATOR: (
+            EngineType.NATIVE_OPERATOR,
             EngineType.CUSTOM_HTTP,
         ),
         EngineSurface.SYMBOLIC_EXACT: (EngineType.SYMBOLIC_LOCAL,),
@@ -508,15 +923,49 @@ def build_inference_engine(
     engine_type = spec.engine
 
     if surface is EngineSurface.CHAT_OPENAI:
-        config = llm_config or LLMConfig.from_engine(
-            engine_type,
-            model=model,
-            host=host,
-            port=port,
-            base_url=base_url,
-            api_key=api_key,
-            timeout=timeout,
-        )
+        transport_name = str(transport or "").strip().lower().replace("-", "_")
+        use_generate_transport = engine_type is EngineType.VLLM_OMNI or transport_name in {
+            "generate",
+            "http_generate",
+            "diffusion_generate",
+        }
+        if use_generate_transport:
+            resolved_base_url = base_url or resolve_engine_base_url(
+                engine_type,
+                surface=EngineSurface.DIFFUSION_GENERATE,
+                host=host,
+                port=port,
+            )
+            if backend is None:
+                from src.diffusion.backends import build_raw_diffusion_backend
+
+                backend = build_raw_diffusion_backend(
+                    engine_type,
+                    base_url=resolved_base_url,
+                    model=model if model != "default" else None,
+                    timeout=timeout,
+                    session=session,
+                    surface=EngineSurface.DIFFUSION_GENERATE,
+                    generate_path=generate_path,
+                    default_payload=default_payload,
+                )
+            config = llm_config or LLMConfig(
+                base_url=str(resolved_base_url or ""),
+                model=model,
+                api_key=api_key or "EMPTY",
+                timeout=timeout,
+            )
+            llm_client = llm_client or GenerateChatClient(config=config, backend=backend)
+        else:
+            config = llm_config or LLMConfig.from_engine(
+                engine_type,
+                model=model,
+                host=host,
+                port=port,
+                base_url=base_url,
+                api_key=api_key,
+                timeout=timeout,
+            )
         return ChatInferenceEngine(
             engine_type=engine_type,
             config=config,
@@ -527,30 +976,41 @@ def build_inference_engine(
             batch_client_factory=batch_client_factory,
         )
 
-    if surface is EngineSurface.DIFFUSION_GENERATE:
+    if surface is EngineSurface.EMBEDDING:
         resolved_base_url = base_url or resolve_engine_base_url(
             engine_type,
             surface=surface,
             host=host,
             port=port,
         )
-        if backend is None:
-            from src.diffusion.backends import build_raw_diffusion_backend
-
-            backend = build_raw_diffusion_backend(
-                engine_type,
-                base_url=resolved_base_url,
-                model=model if model != "default" else None,
-                timeout=timeout,
-                session=session,
-                surface=surface,
-                generate_path=generate_path,
-                default_payload=default_payload,
+        if resolved_base_url is None:
+            raise ValueError(
+                f"Could not resolve embedding endpoint for engine '{engine_type.value}'."
             )
-        return DiffusionInferenceEngine(
+        return EmbeddingInferenceEngine(
             engine_type=engine_type,
-            backend=backend,
-            model_id=model if model != "default" else "",
+            base_url=resolved_base_url,
+            model=model,
+            api_key=api_key or "EMPTY",
+            timeout=timeout,
+            mock=mock,
+            embedding_client=backend,
+        )
+
+    if surface is EngineSurface.OPERATOR:
+        resolved_base_url = base_url or resolve_engine_base_url(
+            engine_type,
+            surface=surface,
+            host=host,
+            port=port,
+        )
+        return OperatorInferenceEngine(
+            engine_type=engine_type,
+            model_id=model,
+            base_url=resolved_base_url,
+            api_key=api_key or "EMPTY",
+            timeout=timeout,
+            operator_client=backend,
         )
 
     if surface is EngineSurface.SYMBOLIC_EXACT:
@@ -563,7 +1023,11 @@ __all__ = [
     "InferenceEngine",
     "InferenceHandle",
     "ChatInferenceEngine",
-    "DiffusionInferenceEngine",
+    "GenerateChatClient",
+    "EmbeddingInferenceEngine",
+    "NativeOperator",
+    "NativeOperatorRegistry",
+    "OperatorInferenceEngine",
     "SymbolicInferenceEngine",
     "SymbolicOperation",
     "SymbolicOperationRegistry",

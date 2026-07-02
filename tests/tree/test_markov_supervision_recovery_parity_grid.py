@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 import scripts.run_markov_supervision_recovery_parity_grid as mod
+from src.ctreepo.sim.core import markov_parity_grid_io as parity_io
+from src.ctreepo.sim.core.tree_reference_presets import resolve_tree_reference_preset_config
 
 
 def _args(tmp_path: Path) -> argparse.Namespace:
@@ -156,11 +158,11 @@ def test_epoch_cap_caps_total_epochs_and_preserves_exact_collapse_surface(
     assert matched_root.config.n_epochs == 10
     assert matched_root.config.tree_stage1_epochs == 0
     assert matched_root.config.tree_stage2_epochs == 0
-    assert matched_root.config.tree_local_law_weight == pytest.approx(0.8)
-    assert matched_root.config.tree_task_objective_weight == pytest.approx(1.0)
-    assert matched_root.config.tree_c1_relative_weight == pytest.approx(1.0)
-    assert matched_root.config.tree_c2_relative_weight == pytest.approx(1.0)
-    assert matched_root.config.tree_c3_relative_weight == pytest.approx(1.0)
+    assert matched_root.config.tree_local_law_weight == pytest.approx(0.0)
+    assert matched_root.config.tree_task_objective_weight is None
+    assert matched_root.config.tree_c1_relative_weight == pytest.approx(0.0)
+    assert matched_root.config.tree_c2_relative_weight == pytest.approx(0.0)
+    assert matched_root.config.tree_c3_relative_weight == pytest.approx(0.0)
 
     exact_collapse = next(
         entry
@@ -179,12 +181,12 @@ def test_epoch_cap_caps_total_epochs_and_preserves_exact_collapse_surface(
         )
         == {}
     )
-    assert exact_mapping["tree_root_supervision_kind"] == "mse"
+    assert exact_mapping["tree_root_supervision_kind"] == "count_ce"
     assert exact_mapping["fixed_leaf_tokens"] == 128
-    assert exact_mapping["tree_leaf_fno_width"] == 128
-    assert exact_mapping["tree_leaf_fno_n_modes"] == 8
+    assert exact_mapping["tree_leaf_fno_width"] == 256
+    assert exact_mapping["tree_leaf_fno_n_modes"] == 16
     assert exact_mapping["local_law_weight"] == pytest.approx(0.0)
-    assert exact_mapping["task_objective_weight"] == pytest.approx(1.0)
+    assert "task_objective_weight" not in exact_mapping
     assert exact_mapping["c1_relative_weight"] == pytest.approx(0.0)
     assert exact_mapping["c2_relative_weight"] == pytest.approx(0.0)
     assert exact_mapping["c3_relative_weight"] == pytest.approx(0.0)
@@ -371,10 +373,7 @@ def test_lean_faithful_diagnostic_matrix_builds_expected_12_job_cohort(
         entry.config.tree_local_law_weight == pytest.approx(0.8)
         for entry in local_entries
     )
-    assert all(
-        entry.config.tree_task_objective_weight == pytest.approx(1.0)
-        for entry in local_entries
-    )
+    assert all(entry.config.tree_task_objective_weight is None for entry in local_entries)
     assert {
         entry.nominal_recipe_metadata["nominal_recipe_budget_total_calls_per_doc"]
         for entry in local_entries
@@ -422,12 +421,12 @@ def test_exact_collapse_repair_diagnostic_matrix_builds_expected_4_job_cohort(
     official_fno = next(entry for entry in entries if entry.job.family == "official_fno")
     exact_mapping = mod._config_mapping_for_run_config(config_matched.config)
     assert config_matched.claim_level == mod.CLAIM_LEVEL_EXACT_COLLAPSE
-    assert exact_mapping["tree_root_supervision_kind"] == "mse"
+    assert exact_mapping["tree_root_supervision_kind"] == "count_ce"
     assert exact_mapping["fixed_leaf_tokens"] == 128
-    assert exact_mapping["tree_leaf_fno_width"] == 128
-    assert exact_mapping["tree_leaf_fno_n_modes"] == 8
+    assert exact_mapping["tree_leaf_fno_width"] == 256
+    assert exact_mapping["tree_leaf_fno_n_modes"] == 16
     assert exact_mapping["local_law_weight"] == pytest.approx(0.0)
-    assert exact_mapping["task_objective_weight"] == pytest.approx(1.0)
+    assert "task_objective_weight" not in exact_mapping
     assert exact_mapping["leaf_supervision_kind"] == "count_only"
     assert exact_mapping["leaf_label_rate"] == pytest.approx(0.0)
     assert exact_mapping["internal_supervision_kind"] == "none"
@@ -498,17 +497,22 @@ def test_full_local_laws_topology_diagnostic_4096_builds_expected_8_job_cohort(
         == mod.SUPERVISION_RECOVERY_COMMON_TREE_REFERENCE_PRESET
         for entry in tree_entries
     )
+    expected_batch_size = int(
+        resolve_tree_reference_preset_config(
+            mod.SUPERVISION_RECOVERY_COMMON_TREE_REFERENCE_PRESET
+        )["batch_size"]
+    )
     for entry in tree_entries:
         mapping = mod._config_mapping_for_run_config(entry.config)
         assert mapping["n_epochs"] == 20
-        assert mapping["batch_size"] == 64
+        assert mapping["batch_size"] == expected_batch_size
         assert mapping["fixed_leaf_tokens"] in {64, 128}
         assert mapping["tree_theorem_surface_mode"] == "factorized_score_fiber"
         assert mapping["tree_summary_spec_root_mode"] == "factored_theorem_readout"
         assert mapping["summary_spec_name"] == "markov_count_sketch"
         assert mapping["tree_task_head_mode"] == "theorem_feature_scalar"
         assert mapping["local_law_weight"] == pytest.approx(0.8)
-        assert mapping["task_objective_weight"] == pytest.approx(1.0)
+        assert "task_objective_weight" not in mapping
         assert mapping["c1_relative_weight"] == pytest.approx(1.0)
         assert mapping["c2_relative_weight"] == pytest.approx(1.0)
         assert mapping["c3_relative_weight"] == pytest.approx(1.0)
@@ -604,12 +608,12 @@ def test_lean_faithful_weight_balance_sweep_augments_diagnostic_matrix(
         )
         for entry in weight_entries
     } == {
-        (0.10, 0.90, 1.0, 1.0, "bounded_full_sketch", "fixed_k_hajek"),
-        (0.10, 0.90, 2.0, 1.0, "bounded_full_sketch", "fixed_k_hajek"),
-        (0.25, 0.75, 1.0, 1.0, "bounded_full_sketch", "fixed_k_hajek"),
-        (0.25, 0.75, 2.0, 1.0, "bounded_full_sketch", "fixed_k_hajek"),
-        (0.50, 0.50, 1.0, 1.0, "bounded_full_sketch", "fixed_k_hajek"),
-        (0.50, 0.50, 2.0, 1.0, "bounded_full_sketch", "fixed_k_hajek"),
+        (0.10, None, 1.0, 1.0, "bounded_full_sketch", "fixed_k_hajek"),
+        (0.10, None, 2.0, 1.0, "bounded_full_sketch", "fixed_k_hajek"),
+        (0.25, None, 1.0, 1.0, "bounded_full_sketch", "fixed_k_hajek"),
+        (0.25, None, 2.0, 1.0, "bounded_full_sketch", "fixed_k_hajek"),
+        (0.50, None, 1.0, 1.0, "bounded_full_sketch", "fixed_k_hajek"),
+        (0.50, None, 2.0, 1.0, "bounded_full_sketch", "fixed_k_hajek"),
     }
     assert all(entry.config.package_semantics == "local_only" for entry in weight_entries)
     assert all(
@@ -690,9 +694,9 @@ def test_row_from_manifest_job_carries_local_objective_diagnostics(
             "design_name": "deterministic_fixed_k_uniform",
         },
     }
-    monkeypatch.setattr(mod, "_summary_metrics_for_job", lambda _job_output_dir: dict(metrics))
+    monkeypatch.setattr(parity_io, "summary_metrics_for_job", lambda _job_output_dir: dict(metrics))
 
-    row = mod._row_from_manifest_job(
+    row = parity_io.row_from_manifest_job(
         manifest_job,
         failed_job_names=set(),
     )
@@ -816,15 +820,15 @@ def test_row_from_manifest_job_requires_exact_collapse_provenance(
     }
 
     monkeypatch.setattr(
-        mod,
-        "_summary_metrics_for_job",
+        parity_io,
+        "summary_metrics_for_job",
         lambda _job_output_dir: dict(
             metrics,
             bundle_source="",
             config={**dict(metrics["config"]), "base_bundle_path": ""},
         ),
     )
-    row_missing = mod._row_from_manifest_job(
+    row_missing = parity_io.row_from_manifest_job(
         manifest_job,
         failed_job_names=set(),
     )
@@ -832,14 +836,14 @@ def test_row_from_manifest_job_requires_exact_collapse_provenance(
     assert row_missing["strict_collapse_pass"] is False
 
     monkeypatch.setattr(
-        mod,
-        "_summary_metrics_for_job",
+        parity_io,
+        "summary_metrics_for_job",
         lambda _job_output_dir: dict(
             metrics,
             bundle_source="/tmp/bundle_train10240.pkl",
         ),
     )
-    row_present = mod._row_from_manifest_job(
+    row_present = parity_io.row_from_manifest_job(
         manifest_job,
         failed_job_names=set(),
     )
@@ -880,7 +884,7 @@ def test_summary_metrics_for_job_preserves_run_level_provenance_under_aggregates
         encoding="utf-8",
     )
 
-    metrics = mod._summary_metrics_for_job(job_dir)
+    metrics = parity_io.summary_metrics_for_job(job_dir)
 
     assert metrics["bundle_source"] == "/tmp/bundle.pkl"
     assert metrics["train_corpus_signature"] == "train-fixed"

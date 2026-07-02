@@ -24,6 +24,7 @@ from src.training.supervision import (
     SupervisionDataset,
     fit_dense_scalar_regressor,
     fit_dense_scalar_ridge_regressor,
+    predict_dense_scalar_regressor,
     predict_dense_scalar_ridge_regressor,
 )
 from src.ctreepo.sim.core.markov_changepoint_ops_count import (

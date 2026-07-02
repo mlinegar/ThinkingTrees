@@ -21,7 +21,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts import run_tree_neural_learning_push as lp  # noqa: E402
-from scripts import run_tree_neural_full_doc_mig as mig  # noqa: E402
+from src.ctreepo.sim.core.tree_neural_facade import RunConfigSpec  # noqa: E402
 
 
 def _parser():
@@ -44,7 +44,7 @@ def _make_unifiedf_config(
     leaf_supervision_kind: str,
     internal_supervision_kind: str,
     internal_label_rate: float,
-) -> mig._RunConfigSpec:
+) -> RunConfigSpec:
     return lp._make_slot_config(
         args,
         train_doc_count=int(train_doc_count),
@@ -57,10 +57,10 @@ def _make_unifiedf_config(
     )
 
 
-def _phase1_configs(args) -> List[tuple[int, mig._RunConfigSpec]]:
+def _phase1_configs(args) -> List[tuple[int, RunConfigSpec]]:
     small = int(args.phase1_train_small)
     large = int(args.phase1_train_large)
-    specs: List[tuple[int, mig._RunConfigSpec]] = []
+    specs: List[tuple[int, RunConfigSpec]] = []
 
     def add(
         train_doc_count: int,
@@ -134,8 +134,8 @@ def _phase1_configs(args) -> List[tuple[int, mig._RunConfigSpec]]:
 def _promotion_configs(
     args,
     phase1_runs: Sequence[Mapping[str, Any]],
-) -> List[tuple[int, mig._RunConfigSpec]]:
-    label_to_config: Dict[str, mig._RunConfigSpec] = {
+) -> List[tuple[int, RunConfigSpec]]:
+    label_to_config: Dict[str, RunConfigSpec] = {
         config.label: config for _, config in _phase1_configs(args)
     }
     promoted_small = lp._select_promotions(
@@ -153,7 +153,7 @@ def _promotion_configs(
         if label not in unique_labels:
             unique_labels.append(label)
 
-    promotions: List[tuple[int, mig._RunConfigSpec]] = []
+    promotions: List[tuple[int, RunConfigSpec]] = []
     for label in unique_labels:
         base = label_to_config.get(label)
         if base is None:

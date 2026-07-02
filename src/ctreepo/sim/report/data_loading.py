@@ -10,6 +10,12 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from src.ctreepo.contracts import (
+    LAW_ID_LEAF_PRESERVATION,
+    LAW_ID_MERGE_PRESERVATION,
+    LAW_ID_ON_RANGE_IDEMPOTENCE,
+    canonical_law_component_weights,
+)
 from src.ctreepo.sim.core.law_stress_common import (
     classify_law_stress,
     law_bundle_score,
@@ -131,8 +137,8 @@ def _resolve_markov_law_package(payload: dict) -> str:
             return value
 
     objective_weights = dict(
-        objective.get("local_law_weights", {})
-        or metadata_objective.get("local_law_weights", {})
+        objective.get("local_law_component_weights", {})
+        or metadata_objective.get("local_law_component_weights", {})
         or {}
     )
     if objective_weights:
@@ -533,7 +539,7 @@ def load_learnability_records(
     """Load seed_*.json → flat dicts with canonical learnability keys.
 
     Each dict has:
-      path, seed, sweep_value (lambda_local / tau / ...),
+      path, seed, sweep_value (local_law_weight / tau / ...),
       learned_root_mae_n, learned_leaf_mae_n, learned_merge_mae_n,
       learned_spread_n, learned_law_score_n,
       train_root_mae_n, train_leaf_mae_n, train_merge_mae_n,
@@ -637,30 +643,75 @@ def _load_markov_learnability(
         )
 
         objective = payload.get("objective", {}) or {}
+        objective_metadata = dict(objective.get("metadata", {}) or {})
+        legacy_objective_fields = sorted(
+            field
+            for field in (
+                "lambda_local",
+                "selected_lambda_local",
+                "task_objective_weight",
+                "configured_task_objective_weight",
+                "optimization_root_weight",
+                "root_weight",
+                "law_package",
+                "local_law_weights",
+                "leaf_weight",
+                "c1_weight",
+                "c2_weight",
+                "c3_weight",
+            )
+            if field in objective
+        )
+        if legacy_objective_fields:
+            raise ValueError(
+                f"{path} uses legacy objective report fields: "
+                + ", ".join(legacy_objective_fields)
+                + ". Regenerate with local_law_weight/root_share."
+            )
+        if "local_law_weight" not in objective and "local_law_weight" not in cfg:
+            raise ValueError(f"{path} missing canonical local_law_weight")
         local_law_weight = float(objective.get("local_law_weight", cfg.get("local_law_weight", 0.0)))
-        task_objective_weight = safe_float_key(objective, "task_objective_weight")
-        configured_task_weight = safe_float_key(objective, "configured_task_objective_weight")
-        optimization_root_weight = safe_float_key(objective, "optimization_root_weight")
-        local_law_c1_weight = safe_float_key(objective, "local_law_c1_weight")
-        local_law_c2_weight = safe_float_key(objective, "local_law_c2_weight")
-        local_law_c3_weight = safe_float_key(objective, "local_law_c3_weight")
-        law_package = _resolve_markov_law_package(payload)
+        root_share = safe_float_key(objective, "root_share")
+        component_weights = canonical_law_component_weights(
+            dict(objective.get("local_law_component_weights", {}) or {}),
+            allow_aliases=True,
+        )
+        local_law_leaf_weight = float(component_weights.get(LAW_ID_LEAF_PRESERVATION, 0.0))
+        local_law_idempotence_weight = float(component_weights.get(LAW_ID_ON_RANGE_IDEMPOTENCE, 0.0))
+        local_law_merge_weight = float(component_weights.get(LAW_ID_MERGE_PRESERVATION, 0.0))
+        if "law_set_id" not in objective and "law_set_id" not in cfg:
+            if "law_set_id" not in objective_metadata:
+                raise ValueError(f"{path} missing canonical law_set_id")
+        law_set_id = str(
+            objective.get("law_set_id")
+            or objective_metadata.get("law_set_id")
+            or cfg.get("law_set_id")
+        )
+        method_id = str(
+            objective.get("method_id")
+            or objective_metadata.get("method_id")
+            or cfg.get("method_id")
+            or payload.get("method_id")
+            or ""
+        )
+        if not method_id:
+            raise ValueError(f"{path} missing canonical method_id")
 
         rows.append({
             "path": str(path),
+            "method_id": method_id,
             "seed": int(cfg.get("effective_data_seed", cfg.get("seed", 0))),
             "effective_data_seed": int(cfg.get("effective_data_seed", cfg.get("seed", 0))),
             "effective_model_seed": int(cfg.get("effective_model_seed", cfg.get("seed", 0))),
             # Sweep variable
             "sweep_value": float(local_law_weight),
             "local_law_weight": float(local_law_weight),
-            "lambda_local": float(local_law_weight),
             # Config fields
             "train_docs": int(train_docs),
             "audit_fraction": float(audit_fraction),
-            "law_package": str(law_package),
+            "law_set_id": str(law_set_id),
             "schedule_consistency_weight": float(cfg.get("schedule_consistency_weight", 0.0)),
-            "root_weight": float(cfg.get("root_weight", 1.0)),
+            "root_share": float(root_share),
             "state_dim": int(cfg.get("state_dim", 0)),
             "hidden_dim": int(cfg.get("hidden_dim", 0)),
             "n_epochs": int(cfg.get("n_epochs", 0)),
@@ -672,13 +723,11 @@ def _load_markov_learnability(
             "package_semantics": str(cfg.get("package_semantics", "")),
             "leaf_label_rate": float(cfg.get("leaf_label_rate", 0.0)),
             "objective_weighting_scheme": str(objective.get("weighting_scheme", "") or ""),
-            "objective_task_weight_source": str(objective.get("task_objective_weight_source", "") or ""),
-            "task_objective_weight": float(task_objective_weight),
-            "configured_task_objective_weight": float(configured_task_weight),
-            "optimization_root_weight": float(optimization_root_weight),
-            "objective_local_law_c1_weight": float(local_law_c1_weight),
-            "objective_local_law_c2_weight": float(local_law_c2_weight),
-            "objective_local_law_c3_weight": float(local_law_c3_weight),
+            "root_share_source": str(objective.get("root_share_source", "") or ""),
+            "objective_local_law_component_weights": {
+                str(key): float(value)
+                for key, value in dict(component_weights).items()
+            },
             # Learned held-out metrics (canonical names)
             "learned_root_mae_n": float(learned_root),
             "learned_leaf_mae_n": float(learned_leaf),

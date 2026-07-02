@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import inspect
 import json
 import importlib.util
 import math
 from pathlib import Path
 import subprocess
 import sys
+
+import pytest
 
 from src.ctreepo.distillation import (
     DistillationContractConfig,
@@ -37,6 +40,7 @@ from src.training.ctreepo_trainer import (
 )
 from src.tree.ctreepo_model import CTreePOConfig
 from src.tree.embedding_tree import build_embedding_tree
+from src.tree.labeled import LabeledNode, LabeledTree
 
 
 class FakeEmbeddingClient:
@@ -104,6 +108,50 @@ def _ctreepo_config() -> CTreePOTrainingConfig:
     )
 
 
+def _full_doc_anchor_tree() -> LabeledTree:
+    tree = LabeledTree(
+        doc_id="doc_anchor",
+        document_text="stored full pipeline summary",
+        document_score=4.0,
+        metadata={
+            "split": "train",
+            "expert_score_1_7": 6.0,
+            "teacher_score_1_7_existing_root": 4.5,
+            "tree_text_source": "existing_summary",
+        },
+        label_source="teacher",
+    )
+    left = LabeledNode(
+        node_id="leaf_0",
+        doc_id=tree.doc_id,
+        level=0,
+        text="left span",
+        score=3.0,
+        metadata={"is_leaf": True, "teacher_summary": "left summary"},
+    )
+    right = LabeledNode(
+        node_id="leaf_1",
+        doc_id=tree.doc_id,
+        level=0,
+        text="right span",
+        score=5.0,
+        metadata={"is_leaf": True, "teacher_summary": "right summary"},
+    )
+    root = LabeledNode(
+        node_id="root",
+        doc_id=tree.doc_id,
+        level=1,
+        text="root span",
+        score=4.0,
+        left_child_id=left.node_id,
+        right_child_id=right.node_id,
+        metadata={"is_leaf": False, "teacher_summary": "root teacher summary"},
+    )
+    for node in (left, right, root):
+        tree.add_node(node)
+    return tree
+
+
 def test_teacher_trace_labeled_tree_round_trip(tmp_path):
     tree = build_labeled_tree_from_text(
         doc_id="doc1",
@@ -138,6 +186,291 @@ def test_teacher_trace_labeled_tree_round_trip(tmp_path):
     assert loaded[0].doc_id == "doc1"
     assert loaded[0].metadata["artifact_version"] == "ctreepo_labeled_node_distillation_v1"
     assert len(loaded[0].nodes) == len(tree.nodes)
+
+
+def test_full_doc_anchor_records_default_off_preserves_node_records():
+    tree = _full_doc_anchor_tree()
+
+    g_records = build_g_sft_records([tree], target_min=1.0, target_max=7.0)
+    f_records = build_f_lm_regression_records([tree], target_min=1.0, target_max=7.0)
+
+    assert len(g_records) == 3
+    assert len(f_records) == 3
+    assert {row["metadata"]["law_role"] for row in g_records} == {"leaf_g", "merge_g"}
+    assert {row["metadata"]["law_role"] for row in f_records} == {"leaf_f", "merge_f"}
+    assert all(row["weight"] == 1.0 for row in g_records + f_records)
+
+
+def test_full_doc_anchor_records_observed_only_with_expert_target():
+    tree = _full_doc_anchor_tree()
+
+    g_records = build_g_sft_records(
+        [tree],
+        target_min=1.0,
+        target_max=7.0,
+        root_label_sources=("stored_summary",),
+        root_label_target="expert",
+        local_law_weight=0.0,
+    )
+    f_records = build_f_lm_regression_records(
+        [tree],
+        target_min=1.0,
+        target_max=7.0,
+        root_label_sources=("stored_summary",),
+        root_label_target="expert",
+        local_law_weight=0.0,
+    )
+
+    assert [row["metadata"]["law_role"] for row in g_records] == ["full_doc_g_anchor"]
+    assert [row["metadata"]["law_role"] for row in f_records] == ["full_doc_f_anchor"]
+    assert g_records[0]["completion"] == "stored full pipeline summary"
+    assert f_records[0]["response"] == "stored full pipeline summary"
+    assert g_records[0]["metadata"]["target_score_raw"] == 6.0
+    assert f_records[0]["score"] == (6.0 - 1.0) / 6.0
+    assert g_records[0]["metadata"]["observed_target"] is True
+
+
+def test_full_doc_anchor_records_can_use_native_expert_target_with_scorer_nodes():
+    tree = _full_doc_anchor_tree()
+    tree.metadata["expert_score_native"] = 8.0
+
+    f_records = build_f_lm_regression_records(
+        [tree],
+        target_min=0.0,
+        target_max=10.0,
+        scorer_output_min=1.0,
+        scorer_output_max=7.0,
+        root_label_sources=("stored_summary",),
+        root_label_target="expert",
+        local_law_weight=0.0,
+    )
+    g_records = build_g_sft_records(
+        [tree],
+        target_min=0.0,
+        target_max=10.0,
+        scorer_output_min=1.0,
+        scorer_output_max=7.0,
+        root_label_sources=("stored_summary",),
+        root_label_target="expert",
+        local_law_weight=0.0,
+    )
+
+    assert len(f_records) == 1
+    assert len(g_records) == 1
+    assert f_records[0]["metadata"]["target_score_raw"] == 8.0
+    assert f_records[0]["score"] == pytest.approx(0.8)
+    assert f_records[0]["metadata"]["target_score_scale"] == "expert_target"
+    assert f_records[0]["metadata"]["target_min"] == 0.0
+    assert f_records[0]["metadata"]["target_max"] == 10.0
+    assert g_records[0]["metadata"]["target_score_normalized"] == pytest.approx(0.8)
+
+
+def test_teacher_node_records_normalize_with_scorer_bounds_under_native_objective():
+    tree = _full_doc_anchor_tree()
+
+    records = build_f_lm_regression_records(
+        [tree],
+        target_min=0.0,
+        target_max=10.0,
+        scorer_output_min=1.0,
+        scorer_output_max=7.0,
+        root_label_sources=("stored_summary",),
+        local_law_weight=0.6,
+        node_weight_normalization="per_tree",
+    )
+
+    root_records = [
+        row
+        for row in records
+        if row["metadata"]["law_role"] == "merge_f"
+        and row["metadata"]["node_id"] == "root"
+    ]
+    assert len(root_records) == 1
+    assert root_records[0]["metadata"]["target_score_raw"] == 4.0
+    assert root_records[0]["score"] == pytest.approx(0.5)
+    assert root_records[0]["metadata"]["target_score_scale"] == "scorer_output"
+    assert root_records[0]["metadata"]["target_min"] == 1.0
+    assert root_records[0]["metadata"]["target_max"] == 7.0
+
+
+def test_full_doc_anchor_records_per_tree_node_lambda_scaling():
+    tree = _full_doc_anchor_tree()
+
+    records = build_f_lm_regression_records(
+        [tree],
+        target_min=1.0,
+        target_max=7.0,
+        root_label_sources=("stored_summary",),
+        local_law_weight=0.6,
+        node_weight_normalization="per_tree",
+    )
+
+    node_records = [row for row in records if row["metadata"]["law_role"] != "full_doc_f_anchor"]
+    anchor_records = [row for row in records if row["metadata"]["law_role"] == "full_doc_f_anchor"]
+    assert len(node_records) == 3
+    assert len(anchor_records) == 1
+    assert math.isclose(sum(float(row["weight"]) for row in node_records), 0.6)
+    assert anchor_records[0]["weight"] == pytest.approx(0.4)
+    assert anchor_records[0]["metadata"]["root_share"] == pytest.approx(0.4)
+    assert anchor_records[0]["metadata"]["local_law_weight"] == pytest.approx(0.6)
+    assert anchor_records[0]["metadata"]["local_law_component_weights"] == pytest.approx(
+        {"teacher_node": 0.6}
+    )
+
+
+def test_local_law_weight_sets_root_and_local_masses():
+    tree = _full_doc_anchor_tree()
+
+    records = build_f_lm_regression_records(
+        [tree],
+        target_min=1.0,
+        target_max=7.0,
+        root_label_sources=("stored_summary",),
+        local_law_weight=0.6,
+        node_weight_normalization="per_tree",
+    )
+
+    node_records = [row for row in records if row["metadata"]["law_role"] != "full_doc_f_anchor"]
+    anchor_records = [row for row in records if row["metadata"]["law_role"] == "full_doc_f_anchor"]
+    assert sum(float(row["weight"]) for row in node_records) == pytest.approx(0.6)
+    assert sum(float(row["weight"]) for row in anchor_records) == pytest.approx(0.4)
+    assert anchor_records[0]["metadata"]["root_share"] == pytest.approx(0.4)
+    assert anchor_records[0]["metadata"]["local_law_weight"] == pytest.approx(0.6)
+
+
+def test_removed_objective_weight_knobs_are_not_public_parameters():
+    removed = {
+        "gold_standard_lambda",
+        "full_doc_anchor_weight",
+        "teacher_node_lambda",
+        "full_doc_anchor_mode",
+        "full_doc_anchor_target",
+    }
+    f_params = set(inspect.signature(build_f_lm_regression_records).parameters)
+    g_params = set(inspect.signature(build_g_sft_records).parameters)
+
+    assert not removed.intersection(f_params)
+    assert not removed.intersection(g_params)
+
+
+def test_legacy_full_doc_anchor_kwargs_fail_fast():
+    tree = _full_doc_anchor_tree()
+
+    with pytest.raises(TypeError, match="full_doc_anchor"):
+        build_f_lm_regression_records(
+            [tree],
+            full_doc_anchor_mode="stored_summary",
+            local_law_weight=0.5,
+        )
+
+
+def test_full_doc_anchor_both_keeps_each_anchor_source_weighted():
+    tree = _full_doc_anchor_tree()
+    tree.metadata["raw_document_text"] = "raw manifesto document text"
+
+    records = build_g_sft_records(
+        [tree],
+        target_min=1.0,
+        target_max=7.0,
+        root_label_sources=("stored_summary", "raw_document"),
+        local_law_weight=0.6,
+        node_weight_normalization="per_tree",
+    )
+
+    anchor_records = [row for row in records if row["metadata"]["law_role"] == "full_doc_g_anchor"]
+    node_records = [row for row in records if row["metadata"]["law_role"] != "full_doc_g_anchor"]
+    assert len(anchor_records) == 2
+    assert sum(float(row["weight"]) for row in anchor_records) == pytest.approx(0.8)
+    assert {row["metadata"]["anchor_text_source"] for row in anchor_records} == {
+        "stored_summary",
+        "raw_document",
+    }
+    assert all(row["weight"] == pytest.approx(0.4) for row in anchor_records)
+    assert all(row["metadata"]["root_share"] == pytest.approx(0.4) for row in anchor_records)
+    assert sum(float(row["weight"]) for row in node_records) == pytest.approx(0.6)
+
+
+def test_expert_anchored_objective_plan_weights_for_f_and_g():
+    tree = _full_doc_anchor_tree()
+    tree.metadata["expert_score_native"] = 8.25
+    tree.metadata["expert_score_1_7"] = 5.95
+
+    common_kwargs = dict(
+        target_min=1.0,
+        target_max=7.0,
+        scorer_output_min=1.0,
+        scorer_output_max=7.0,
+        root_label_sources=("stored_summary",),
+        root_label_target="expert",
+        local_law_weight=0.25,
+        node_weight_normalization="per_tree",
+    )
+    f_records = build_f_lm_regression_records([tree], **common_kwargs)
+    g_records = build_g_sft_records([tree], **common_kwargs)
+
+    for role, records in (("f", f_records), ("g", g_records)):
+        anchor_role = f"full_doc_{role}_anchor"
+        node_records = [row for row in records if row["metadata"]["law_role"] != anchor_role]
+        anchor_records = [row for row in records if row["metadata"]["law_role"] == anchor_role]
+
+        assert len(node_records) == 3
+        assert len(anchor_records) == 1
+        assert sum(float(row["weight"]) for row in node_records) == pytest.approx(0.25)
+        assert anchor_records[0]["weight"] == pytest.approx(0.75)
+        assert anchor_records[0]["metadata"]["target_score_raw"] == pytest.approx(5.95)
+        assert anchor_records[0]["metadata"]["target_min"] == 1.0
+        assert anchor_records[0]["metadata"]["target_max"] == 7.0
+        assert anchor_records[0]["metadata"]["target_score_scale"] == "expert_target"
+        assert anchor_records[0]["metadata"]["observed_target"] is True
+
+    assert f_records[-1]["score"] == pytest.approx((5.95 - 1.0) / 6.0)
+    assert g_records[-1]["metadata"]["target_score_normalized"] == pytest.approx((5.95 - 1.0) / 6.0)
+
+
+def test_local_law_weight_endpoints_and_validation():
+    tree = _full_doc_anchor_tree()
+
+    root_only = build_f_lm_regression_records(
+        [tree],
+        target_min=1.0,
+        target_max=7.0,
+        root_label_sources=("stored_summary",),
+        local_law_weight=0.0,
+    )
+    assert {row["metadata"]["law_role"] for row in root_only} == {"full_doc_f_anchor"}
+    assert sum(float(row["weight"]) for row in root_only) == pytest.approx(1.0)
+
+    teacher_only = build_f_lm_regression_records(
+        [tree],
+        target_min=1.0,
+        target_max=7.0,
+        root_label_sources=("stored_summary",),
+        local_law_weight=1.0,
+        node_weight_normalization="per_tree",
+    )
+    assert "full_doc_f_anchor" not in {row["metadata"]["law_role"] for row in teacher_only}
+    assert sum(float(row["weight"]) for row in teacher_only) == pytest.approx(1.0)
+
+    with pytest.raises(ValueError, match="local_law_weight"):
+        build_f_lm_regression_records(
+            [tree],
+            root_label_sources=("stored_summary",),
+            local_law_weight=1.5,
+        )
+
+
+def test_raw_full_doc_anchor_skips_when_raw_text_absent():
+    tree = _full_doc_anchor_tree()
+
+    records = build_g_sft_records(
+        [tree],
+        target_min=1.0,
+        target_max=7.0,
+        root_label_sources=("raw_document",),
+        local_law_weight=0.0,
+    )
+
+    assert records == []
 
 
 def test_labeled_tree_scores_attach_to_runtime_nodes():

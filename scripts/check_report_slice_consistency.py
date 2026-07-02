@@ -87,7 +87,7 @@ def _segment_q1(output_root: Path) -> Tuple[float, float]:
         m = p.get("metrics", {}) or {}
         if int(c.get("train_docs", -1)) != FIXED_SEG_TRAIN_DOCS:
             continue
-        lam = _as_float(c.get("lambda_multiplier"))
+        lam = _as_float(c.get("quadratic_utility_weight"))
         if lam is None or abs(float(lam) - FIXED_SEG_LAMBDA) > 1e-12:
             continue
         q = _as_float(c.get("audit_fraction"))

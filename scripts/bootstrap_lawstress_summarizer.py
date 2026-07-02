@@ -17,7 +17,8 @@ sys.path.insert(0, str(project_root))
 
 import dspy
 
-from src.config.dspy_config import configure_dspy, create_vllm_lm
+from src.config.dspy_config import configure_dspy, create_local_engine_lm
+from src.config.local_inference import resolve_local_inference_config
 from src.tasks.manifesto.lawstress_eval import LawStressEvalConfig, RILE_RUBRIC
 from src.tasks.manifesto.lawstress_generator import load_lawstress_records_jsonl
 from src.tasks.manifesto.lawstress_proxy import (
@@ -216,22 +217,24 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     student_max_tokens = int(args.student_max_tokens)
     student_max_tokens_resolved = student_max_tokens if student_max_tokens > 0 else None
-    student_lm = create_vllm_lm(
-        port=int(args.student_port),
-        model=args.student_model,
-        temperature=float(args.student_temperature),
-        max_tokens=student_max_tokens_resolved,
-        cache=True,
-        **llm_extra_kwargs,
+    student_inference = resolve_local_inference_config(
+        {
+            "port": int(args.student_port),
+            "model": args.student_model,
+            "temperature": float(args.student_temperature),
+            "max_tokens": student_max_tokens_resolved,
+        }
     )
+    student_lm = create_local_engine_lm(**student_inference.dspy_kwargs(cache=True), **llm_extra_kwargs)
     configure_dspy(lm=student_lm)
 
     # Reflection often needs a much larger token budget than summarization.
     # Keep it separate to avoid GEPA truncation at student max_tokens.
     reflection_max_tokens = int(args.gepa_reflection_max_tokens)
     reflection_max_tokens_resolved = reflection_max_tokens if reflection_max_tokens > 0 else None
-    reflection_lm = create_vllm_lm(
-        port=int(args.student_port),
+    reflection_lm = create_local_engine_lm(
+        engine=student_inference.engine,
+        endpoints=student_inference.endpoints,
         model=(str(args.gepa_reflection_model) if args.gepa_reflection_model else args.student_model),
         temperature=float(args.gepa_reflection_temperature),
         max_tokens=reflection_max_tokens_resolved,

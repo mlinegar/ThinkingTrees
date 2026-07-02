@@ -29,7 +29,7 @@ python scripts/run_tree_neural_full_doc_mig.py budget_frontier \
   --n-epochs 32 \
   --batch-size 64 \
   --lr 5e-4 \
-  --tree-local-law-weight 0.3 \
+  --local-law-weight 0.3 \
   2>&1 | tee "$LIVE_LOG"
 
 if [[ -f "$OUTPUT_ROOT/summary.json" ]]; then

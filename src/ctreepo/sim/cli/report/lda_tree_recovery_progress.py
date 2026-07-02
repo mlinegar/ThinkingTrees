@@ -186,7 +186,7 @@ def _expected_counts(spec: Dict[str, str]) -> Dict[str, int]:
 
 
 def _quadratic_weight(cfg: dict) -> float:
-    return _safe_float(cfg.get("quadratic_utility_weight", cfg.get("lambda_multiplier")))
+    return _safe_float(cfg.get("quadratic_utility_weight"))
 
 
 def _load_exact_rows(root: Path) -> List[dict]:

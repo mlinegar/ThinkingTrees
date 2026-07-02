@@ -22,6 +22,12 @@ Verified: re-computing their Figure 1 correlations from
 `data_llms_all_reported.rds` × `data_experts.rda` reproduces the published
 numbers to within 0.005 (Economic .872 vs .87; Decentralization .495 vs
 .49; etc.). See `scripts/reproduce_benoit_figure1.py`.
+
+Important scale convention: Benoit's headline correlations use the released
+``expert_mean`` values directly. Those values are not all bounded to 1-7
+(the codebook describes expert-survey ranges as varying by survey/issue).
+For calibration or supervised targets that require the LLM's 1-7 range, use
+the derived ``expert_mean_1_7`` column added by ``load_benoit_expert_means``.
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ from typing import Iterable, Optional
 import pandas as pd
 
 from .dimensions import BENOIT_DIMENSIONS, PolicyDimension
+from .expert_scale import normalize_benoit_expert_mean
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +83,7 @@ def load_benoit_experts(
 ) -> pd.DataFrame:
     """
     Load `data_experts.rda`. Returns one row per (manifesto, issue, expert_survey),
-    preserving their native 1-7 rescaled `expert_mean` column.
+    preserving Benoit's released `expert_mean` column.
 
     Parameters
     ----------
@@ -104,9 +111,10 @@ def load_benoit_expert_means(
     """
     Per-manifesto expert mean for one dimension.
 
-    Returns columns: manifesto, issue, expert_mean. `manifesto` is Benoit's
-    verbose string key; join against `load_benoit_mp_crosswalk()` to get
-    (party, year) for further joining onto `ManifestoDataset`.
+    Returns columns: manifesto, issue, expert_mean, expert_mean_raw, and
+    expert_mean_1_7. `expert_mean` is kept as Benoit's released raw benchmark
+    value for exact replication. `expert_mean_1_7` is the explicit derived
+    target on the same 1-7 range as LLM scores.
     """
     issue_code = BENOIT_DIMENSIONS[dimension].benoit_issue_code
     df = load_benoit_experts(dataverse_dir=dataverse_dir, issues={issue_code})
@@ -114,6 +122,10 @@ def load_benoit_expert_means(
         df.dropna(subset=["expert_mean"])
         .groupby(["manifesto", "issue"], as_index=False)["expert_mean"]
         .mean()
+    )
+    collapsed["expert_mean_raw"] = collapsed["expert_mean"]
+    collapsed["expert_mean_1_7"] = collapsed["expert_mean"].map(
+        lambda value: normalize_benoit_expert_mean(value, dimension)
     )
     return collapsed
 
@@ -254,7 +266,7 @@ def _train_lookup_for_pool(dim: PolicyDimension, pool: str) -> dict:
     if pool == "expert":
         experts = load_benoit_expert_means(dim)
         return {
-            str(r.manifesto).removesuffix(".txt"): float(r.expert_mean)
+            str(r.manifesto).removesuffix(".txt"): float(r.expert_mean_1_7)
             for r in experts.itertuples()
         }
     raise ValueError(f"unknown pool {pool!r}")

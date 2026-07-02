@@ -21,6 +21,12 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.ctreepo.contracts import validate_run_manifest  # noqa: E402
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -315,12 +321,46 @@ def _fig4_c1c3_threshold(summary: Dict[str, Any], output_dir: Path) -> None:
     print(f"  Wrote fig4_c1c3_threshold.pdf/png")
 
 
-def main() -> int:
+def _load_run_manifest(path: Path) -> Dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"RunManifest file must be a JSON object: {path}")
+    if isinstance(payload.get("run_manifest"), dict):
+        payload = payload["run_manifest"]
+    return payload
+
+
+def _validate_run_manifest_inputs(paths: List[str], *, allow_unaudited: bool) -> None:
+    if allow_unaudited:
+        return
+    if not paths:
+        raise SystemExit(
+            "Publication figure inputs require at least one publication-ready RunManifest. "
+            "Use --run-manifest or explicit --allow-unaudited for legacy compatibility."
+        )
+    for raw in paths:
+        path = Path(raw)
+        validate_run_manifest(_load_run_manifest(path), require_publication_ready=True)
+
+
+def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build publication figures")
     parser.add_argument("--cross-dgp-summary", type=str, default="")
     parser.add_argument("--ablation-summary", type=str, default="")
     parser.add_argument("--output-dir", type=str, required=True)
-    args = parser.parse_args()
+    parser.add_argument(
+        "--run-manifest",
+        action="append",
+        default=[],
+        help="Publication-ready RunManifest v1 proving the inputs are audited.",
+    )
+    parser.add_argument(
+        "--allow-unaudited",
+        action="store_true",
+        help="Compatibility mode for legacy figure rebuilds without RunManifest v1.",
+    )
+    args = parser.parse_args(argv)
+    _validate_run_manifest_inputs(args.run_manifest, allow_unaudited=bool(args.allow_unaudited))
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

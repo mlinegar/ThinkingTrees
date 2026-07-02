@@ -8,10 +8,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+if str(Path(__file__).resolve().parents[1]) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.ctreepo.data.prep_common import ensure_repo_on_path  # noqa: E402
+
+REPO_ROOT = ensure_repo_on_path()
+
+from src.ctreepo.data.splits import SPLIT_SCHEMA_VERSION  # noqa: E402
 from src.ctreepo.sim.core.full_doc_anchor_diagnostics import (  # noqa: E402
     STICKY_STRUCTURAL_V2_CELL_SPECS,
     prepare_markov_full_doc_anchor_diagnostics_data,
@@ -135,6 +139,7 @@ def main() -> int:
         "seeds": [int(value) for value in list(args.seeds or [])],
         "prepared_data_root_override": str(args.prepared_data_root or ""),
         "prepared": prepared_payloads,
+        "shared_split_schema_version": SPLIT_SCHEMA_VERSION,
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
 

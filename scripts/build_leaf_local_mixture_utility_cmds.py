@@ -43,22 +43,13 @@ def _fraction_dir_label(text: str) -> str:
 def _apply_law_objective_path_labels(
     base: Path,
     *,
-    law_package: str,
-    law_c1_weight: float,
-    law_c2_proxy_weight: float,
-    law_c3_weight: float,
+    law_set_id: str,
+    local_law_weight: float,
 ) -> Path:
-    if str(law_package).strip() and str(law_package).strip() != "all_laws":
-        base = base / f"pkg_{str(law_package).strip()}"
-    if any(
-        abs(float(weight) - float(DEFAULT_LAW_WEIGHT)) > 1e-12
-        for weight in (law_c1_weight, law_c2_proxy_weight, law_c3_weight)
-    ):
-        base = base / (
-            f"laws_c1_{_fmt_float(law_c1_weight)}"
-            f"__c2_{_fmt_float(law_c2_proxy_weight)}"
-            f"__c3_{_fmt_float(law_c3_weight)}"
-        )
+    if str(law_set_id).strip() and str(law_set_id).strip() != "all":
+        base = base / f"lawset_{str(law_set_id).strip()}"
+    if abs(float(local_law_weight) - 0.5) > 1e-12:
+        base = base / f"llw_{_fmt_float(local_law_weight)}"
     return base
 
 
@@ -69,15 +60,12 @@ def _iter_commands(
     leaf_fractions: Iterable[str],
     doc_topic_concentrations: Iterable[float],
     taus: Iterable[float],
-    lambda_grid: Iterable[float],
+    quadratic_utility_weights: Iterable[float],
     budgets: Iterable[float],
     budget_regimes: Iterable[str],
     latent_leaf_tokens_list: Iterable[int],
-    law_task_objective_weights: Iterable[float],
-    law_package: str,
-    law_c1_weight: float,
-    law_c2_proxy_weight: float,
-    law_c3_weight: float,
+    local_law_weights: Iterable[float],
+    law_set_id: str,
     seeds: Iterable[int],
     skip_existing: bool,
     doc_tokens: int,
@@ -86,9 +74,9 @@ def _iter_commands(
 ) -> List[str]:
     script = "scripts/run_leaf_local_mixture_utility_simulation.py"
     cmds: List[str] = []
-    task_weight_values = [float(x) for x in law_task_objective_weights]
-    if not task_weight_values:
-        task_weight_values = [1.0]
+    local_law_weight_values = [float(x) for x in local_law_weights]
+    if not local_law_weight_values:
+        local_law_weight_values = [0.5]
     for latent_leaf_tok in latent_leaf_tokens_list:
         if int(doc_tokens) % int(latent_leaf_tok) != 0:
             continue
@@ -102,13 +90,13 @@ def _iter_commands(
             leaf_label = _fraction_dir_label(leaf_frac)
             for alpha in doc_topic_concentrations:
                 for tau in taus:
-                    for lam in lambda_grid:
+                    for qweight in quadratic_utility_weights:
                         for regime in budget_regimes:
                             active_budgets = (
                                 [0.0] if str(regime) == "all_leaves_labeled" else list(budgets)
                             )
                             for budget in active_budgets:
-                                for task_weight in task_weight_values:
+                                for local_law_weight in local_law_weight_values:
                                     for seed in seeds:
                                         base = (
                                             output_root
@@ -116,22 +104,15 @@ def _iter_commands(
                                             / leaf_label
                                             / f"dtc_{alpha:g}"
                                             / f"tau_{tau:g}"
-                                            / f"lam_{lam:g}"
+                                            / f"qweight_{qweight:g}"
                                             / str(regime)
                                             / f"budget_{budget:g}"
                                         )
                                         base = _apply_law_objective_path_labels(
                                             base,
-                                            law_package=str(law_package).strip() or "all_laws",
-                                            law_c1_weight=float(law_c1_weight),
-                                            law_c2_proxy_weight=float(law_c2_proxy_weight),
-                                            law_c3_weight=float(law_c3_weight),
+                                            law_set_id=str(law_set_id).strip() or "all",
+                                            local_law_weight=float(local_law_weight),
                                         )
-                                        if (
-                                            len(task_weight_values) > 1
-                                            or abs(float(task_weight) - 1.0) > 1e-12
-                                        ):
-                                            base = base / f"taskw_{_fmt_float(task_weight)}"
                                         base = base / f"seed_{seed}"
                                         out_json = base.with_suffix(".json")
                                         out_csv = base.with_suffix(".csv")
@@ -144,14 +125,11 @@ def _iter_commands(
                                             f"--latent-leaf-tokens {int(latent_leaf_tok)} "
                                             f"--leaf-fraction {leaf_frac} "
                                             f"--local-mixture-concentration {float(tau)} "
-                                            f"--lambda-multiplier {float(lam)} "
+                                            f"--quadratic-utility-weight {float(qweight)} "
                                             f"--budget-regime {regime} "
                                             f"--leaf-label-budget {float(budget if budget > 0.0 else 8.0)} "
-                                            f"--law-task-objective-weight {float(task_weight)} "
-                                            f"--law-package {str(law_package).strip() or 'all_laws'} "
-                                            f"--law-c1-weight {float(law_c1_weight)} "
-                                            f"--law-c2-proxy-weight {float(law_c2_proxy_weight)} "
-                                            f"--law-c3-weight {float(law_c3_weight)} "
+                                            f"--law-set-id {str(law_set_id).strip() or 'all'} "
+                                            f"--local-law-weight {float(local_law_weight)} "
                                             f"--train-docs {int(train_docs)} --test-docs {int(test_docs)} "
                                             f"--seed {int(seed)} "
                                             f"--json-summary {out_json} --csv-summary {out_csv}"
@@ -171,14 +149,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--leaf-fractions", type=str, default="1 1/2 1/4 1/24")
     p.add_argument("--doc-topic-concentrations", type=str, default="0.2 0.6 1.5")
     p.add_argument("--local-mixture-concentrations", type=str, default="64 8 1 0.25")
-    p.add_argument("--lambda-grid", type=str, default="0 1 2")
+    p.add_argument("--quadratic-utility-weights", type=str, default="0 1 2")
     p.add_argument("--budget-regimes", type=str, default="all_leaves_labeled fixed_oracle_budget")
     p.add_argument("--leaf-label-budgets", type=str, default="2 4 8 16 24")
-    p.add_argument("--law-task-objective-weights", type=str, default="1.0")
-    p.add_argument("--law-package", type=str, default="all_laws")
-    p.add_argument("--law-c1-weight", type=float, default=1.0 / 3.0)
-    p.add_argument("--law-c2-proxy-weight", type=float, default=1.0 / 3.0)
-    p.add_argument("--law-c3-weight", type=float, default=1.0 / 3.0)
+    p.add_argument("--local-law-weights", type=str, default="0.5")
+    p.add_argument("--law-set-id", type=str, default="all")
     p.add_argument("--seeds", type=str, default="0 1 2 3 4")
     p.add_argument("--doc-tokens", type=int, default=384)
     p.add_argument("--train-docs", type=int, default=512)
@@ -198,15 +173,12 @@ def main() -> int:
         leaf_fractions=_parse_items(args.leaf_fractions),
         doc_topic_concentrations=_parse_floats(args.doc_topic_concentrations),
         taus=_parse_floats(args.local_mixture_concentrations),
-        lambda_grid=_parse_floats(args.lambda_grid),
+        quadratic_utility_weights=_parse_floats(args.quadratic_utility_weights),
         budgets=_parse_floats(args.leaf_label_budgets),
         budget_regimes=_parse_items(args.budget_regimes),
         latent_leaf_tokens_list=_parse_ints(args.latent_leaf_tokens),
-        law_task_objective_weights=_parse_floats(args.law_task_objective_weights),
-        law_package=str(args.law_package).strip() or "all_laws",
-        law_c1_weight=float(args.law_c1_weight),
-        law_c2_proxy_weight=float(args.law_c2_proxy_weight),
-        law_c3_weight=float(args.law_c3_weight),
+        local_law_weights=_parse_floats(args.local_law_weights),
+        law_set_id=str(args.law_set_id).strip() or "all",
         seeds=_parse_ints(args.seeds),
         skip_existing=bool(args.skip_existing),
         doc_tokens=int(args.doc_tokens),

@@ -16,6 +16,7 @@ from __future__ import annotations
 from src.ctreepo.sim.core.fno_doc_baselines import (  # noqa: F401
     HAS_NEURAL_OPERATOR,
     FNOTokenEncoder,
+    apply_fno_token_encoder,
     FNOCountPredictor,
     DeepONetCountPredictor,
     MLPBigramCountPredictor,
@@ -110,6 +111,7 @@ from src.ctreepo.sim.core.markov_changepoint_ops_count import (
     VALID_TREE_SCORE_MERGE_MODES,
     VALID_TREE_TRAINING_SCHEDULES,
     VALID_SCHEDULES,
+    _condition_error_diagnostics,
     _eval_root_predictions,
     _exact_match_rate,
     _predict_count_from_summary,
@@ -152,9 +154,15 @@ from src.tree.full_tree_ipw import (
     summarize_full_tree_ipw,
 )
 from src.tree.ipw import NodeType
+from src.tree.state_tree import StateNode, StateTree
 from src.tree.tree_model_v2 import (
     TreeModelV2View,
     normalize_tree_model_version,
+)
+from treepo.training.local_law import (
+    LOCAL_LAW_OBJECTIVE_CORRECTED,
+    local_law_objective_target_mse,
+    normalize_local_law_objective_mode,
 )
 
 _CUDA_FAST_MATH_CONFIGURED = False
@@ -179,6 +187,8 @@ class _FNOCountDoc:
     merge_sizes_balanced: Tuple[int, ...]
     merge_token_lengths: Tuple[int, ...]
     root_count: float
+    proxy_leaf_counts: Tuple[float, ...] = tuple()
+    proxy_merge_counts_balanced: Tuple[float, ...] = tuple()
 
 
 @dataclass(frozen=True)
@@ -2259,6 +2269,26 @@ def _encode_dense_leaf_token_tensor_batch(
             if model.use_opaque_carrier_exact_sketch_surface:
                 packed = model._opaque_carrier_leaf_state_from_carrier(h)
                 return packed.reshape(batch_size, n_leaves, -1)
+            if model.use_carrier_projection_surface:
+                x_seq = x.permute(0, 2, 1)
+                if token_mask_tensor is not None:
+                    last_idx = flat_mask.sum(dim=-1).long().clamp(min=1) - 1
+                else:
+                    last_idx = torch.full(
+                        (int(x_seq.shape[0]),),
+                        int(x_seq.shape[1]) - 1,
+                        device=x_seq.device,
+                        dtype=torch.long,
+                    )
+                packed = model._carrier_leaf_state_from_leaf_features(
+                    pooled=pooled,
+                    first_features=x_seq[:, 0, :],
+                    last_features=x_seq[
+                        torch.arange(int(x_seq.shape[0]), device=x_seq.device),
+                        last_idx,
+                    ],
+                )
+                return packed.reshape(batch_size, n_leaves, -1)
             if model.use_shared_theorem_surface:
                 return h.reshape(batch_size, n_leaves, -1)
             if (
@@ -3360,6 +3390,7 @@ class FNOCountSketch(nn.Module):
         fno_width: int = 64,
         fno_n_modes: int = 8,
         fno_n_layers: int = 2,
+        leaf_fno_pooling: str = "mean",
         root_supervision_kind: str = "mse",
         root_count_class_values: Sequence[int] = (),
         aligned_sketch_surface: str = "",
@@ -3394,6 +3425,7 @@ class FNOCountSketch(nn.Module):
         oracle_same_threshold: float = 0.0,
         oracle_diff_threshold: float = 0.0,
         tree_model_version: str = "legacy",
+        runtime_count_discretization: str = "continuous",
     ) -> None:
         super().__init__()
         if _NeuralOpFNO is None:
@@ -3413,6 +3445,22 @@ class FNOCountSketch(nn.Module):
         self.state_dim = int(self.requested_state_dim)
         self.default_head = "count"
         self.tree_model_version = normalize_tree_model_version(tree_model_version)
+        self.runtime_count_discretization = (
+            str(runtime_count_discretization or "continuous").strip().lower()
+            or "continuous"
+        )
+        if self.runtime_count_discretization not in {
+            "continuous",
+            "none",
+            "st_round",
+        }:
+            raise ValueError(
+                "unsupported runtime_count_discretization="
+                f"{runtime_count_discretization!r}; expected one of "
+                "('continuous', 'none', 'st_round')"
+            )
+        if self.runtime_count_discretization == "none":
+            self.runtime_count_discretization = "continuous"
         self.leaf_tokens = int(leaf_tokens)
         self.pad_id = int(vocab_size)
         self.root_supervision_kind = normalized_root_supervision
@@ -3711,6 +3759,15 @@ class FNOCountSketch(nn.Module):
                     )
                 if int(self.slot_count) != 4:
                     raise ValueError("explicit theorem dims require slot_count == 4")
+                if self.use_direct_markov_sketch_slots and requested_dims != (
+                    1,
+                    int(self.n_regimes),
+                    int(self.n_regimes),
+                ):
+                    raise ValueError(
+                        "direct Markov sketch slots require theorem_count_dim=1 "
+                        "and theorem_first_dim=theorem_last_dim=n_regimes"
+                    )
                 if sum(requested_dims) > int(self.state_dim):
                     raise ValueError(
                         "sum of explicit theorem dims must not exceed state_dim"
@@ -3800,14 +3857,23 @@ class FNOCountSketch(nn.Module):
             persistent=True,
         )
 
+        _resolved_pooling = str(leaf_fno_pooling or "mean").strip().lower() or "mean"
+        if _resolved_pooling not in {"mean", "sum"}:
+            raise ValueError(
+                f"unsupported leaf_fno_pooling={leaf_fno_pooling!r}; expected 'mean' or 'sum'"
+            )
+        self.leaf_fno_pooling = _resolved_pooling
         # Leaf encoder: shared FNOTokenEncoder (token embedding -> FNO -> pool)
         # Note: we keep token_embedding and fno_encoder as direct attributes
-        # so existing checkpoint state_dict keys remain valid.
+        # so existing checkpoint state_dict keys remain valid. Pooling logic
+        # is applied inside _encode_token_batch (see self.leaf_fno_pooling)
+        # so the FNOTokenEncoder pooling_mode kwarg is unused here.
         _leaf_encoder = FNOTokenEncoder(
             vocab_size=int(vocab_size),
             width=int(fno_width),
             n_modes=int(fno_n_modes),
             n_layers=int(fno_n_layers),
+            pooling_mode=self.leaf_fno_pooling,
         )
         self.token_embedding = _leaf_encoder.token_embedding
         self.fno_encoder = _leaf_encoder.fno
@@ -3818,6 +3884,7 @@ class FNOCountSketch(nn.Module):
             width=int(fno_width),
             n_modes=int(fno_n_modes),
             n_layers=max(4, int(fno_n_layers)),
+            pooling_mode=self.leaf_fno_pooling,
         )
         self.doc_sequence_input_proj = nn.Linear(int(fno_width), int(fno_width))
         self.doc_sequence_fno = _doc_seq_encoder.fno
@@ -4318,6 +4385,36 @@ class FNOCountSketch(nn.Module):
             return 0
         return int(self.residual_dim)
 
+    @property
+    def uses_unified_g_learned_merge(self) -> bool:
+        """Whether runtime merge is learned as ``compose -> g``.
+
+        Unified-g merges through the learned ``unified_g_merge_summary_proj``
+        and the shared ``g`` encoder.  Exact Markov sketch composition is only
+        a diagnostic/oracle path unless the runtime merge kind says otherwise.
+        """
+        return bool(
+            self.tree_model_version == "unified_g"
+            and self.unified_g_merge_summary_proj is not None
+        )
+
+    @property
+    def exact_projected_merge_is_runtime_merge(self) -> bool:
+        return bool(
+            self.use_exact_projected_sketch_merge
+            and not self.uses_unified_g_learned_merge
+        )
+
+    @property
+    def runtime_merge_kind(self) -> str:
+        if self.uses_unified_g_learned_merge:
+            return "learned_unified_g"
+        if self.exact_projected_merge_is_runtime_merge:
+            return "exact_projected_sketch"
+        if self.use_summary_spec:
+            return "summary_spec_learned"
+        return "legacy_learned"
+
     def _carrier_count_slot(self, state: torch.Tensor) -> torch.Tensor:
         if not self.use_direct_markov_sketch_slots:
             raise RuntimeError("carrier count slot requested outside direct-sketch mode")
@@ -4332,6 +4429,22 @@ class FNOCountSketch(nn.Module):
         if not self.use_direct_markov_sketch_slots:
             raise RuntimeError("carrier last logits requested outside direct-sketch mode")
         return self._last_slot(state)
+
+    def _canonical_direct_endpoint_slot(self, logits: torch.Tensor) -> torch.Tensor:
+        if not self.use_direct_markov_sketch_slots:
+            return logits
+        return _straight_through_one_hot_from_logits(logits)
+
+    def _runtime_count_slot(self, count_norm: torch.Tensor) -> torch.Tensor:
+        mode = str(getattr(self, "runtime_count_discretization", "continuous"))
+        if mode != "st_round":
+            return count_norm
+        count = count_norm * float(self.target_scale)
+        rounded_norm = torch.round(count).clamp(
+            min=0.0,
+            max=float(self.target_scale),
+        ) / float(self.target_scale)
+        return count_norm + (rounded_norm - count_norm).detach()
 
     def _opaque_carrier_from_state(self, state: torch.Tensor) -> torch.Tensor:
         if not self.use_opaque_carrier_exact_sketch_surface:
@@ -4941,7 +5054,7 @@ class FNOCountSketch(nn.Module):
     ) -> torch.Tensor:
         if not self.use_markov_summary_spec or self.join_bit_head is None:
             raise RuntimeError("join-bit head requested without markov summary spec")
-        if self.use_exact_projected_sketch_merge:
+        if self.exact_projected_merge_is_runtime_merge:
             left_last_logits = self._split_state(left_state)[2]
             right_first_logits = self._split_state(right_state)[1]
             join_prob = 1.0 - torch.sum(
@@ -4960,10 +5073,15 @@ class FNOCountSketch(nn.Module):
                 dim=-1,
             )
         else:
+            left_last = self._last_surface_from_state(left_state)
+            right_first = self._first_surface_from_state(right_state)
+            if self.use_direct_markov_sketch_slots:
+                left_last = self._canonical_direct_endpoint_slot(left_last)
+                right_first = self._canonical_direct_endpoint_slot(right_first)
             join_features = torch.cat(
                 [
-                    self._last_surface_from_state(left_state),
-                    self._first_surface_from_state(right_state),
+                    left_last,
+                    right_first,
                 ],
                 dim=-1,
             )
@@ -5096,10 +5214,22 @@ class FNOCountSketch(nn.Module):
                     return self._opaque_carrier_leaf_state_from_carrier(h)
                 if self.use_carrier_projection_surface:
                     x_seq = x.permute(0, 2, 1)
+                    if token_mask is not None:
+                        last_idx = token_mask.sum(dim=-1).long().clamp(min=1) - 1
+                    else:
+                        last_idx = torch.full(
+                            (int(x_seq.shape[0]),),
+                            int(x_seq.shape[1]) - 1,
+                            device=x_seq.device,
+                            dtype=torch.long,
+                        )
                     return self._carrier_leaf_state_from_leaf_features(
                         pooled=pooled,
                         first_features=x_seq[:, 0, :],
-                        last_features=x_seq[:, -1, :],
+                        last_features=x_seq[
+                            torch.arange(int(x_seq.shape[0]), device=x_seq.device),
+                            last_idx,
+                        ],
                     )
                 if self.use_shared_theorem_surface:
                     return h
@@ -5254,12 +5384,13 @@ class FNOCountSketch(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if tokens.ndim != 2 or token_mask.ndim != 2:
             raise ValueError("tokens and token_mask must both be rank-2")
-        emb = self.token_embedding(tokens)  # (B, L, fno_width)
-        x = emb.permute(0, 2, 1)  # (B, fno_width, L)
-        x = self.fno_encoder(x)  # (B, fno_width, L)
-        mask = token_mask.unsqueeze(1)  # (B, 1, L)
-        pooled = (x * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1)  # (B, fno_width)
-        return x, pooled
+        return apply_fno_token_encoder(
+            tokens,
+            token_mask=token_mask,
+            token_embedding=self.token_embedding,
+            fno=self.fno_encoder,
+            pooling_mode=self.leaf_fno_pooling,
+        )
 
     def predict_doc_sequence_logits(
         self,
@@ -5269,11 +5400,14 @@ class FNOCountSketch(nn.Module):
     ) -> torch.Tensor:
         if tokens.ndim != 2 or token_mask.ndim != 2:
             raise ValueError("tokens and token_mask must both be rank-2")
-        emb = self.token_embedding(tokens)  # (B, L, fno_width)
-        x = self.doc_sequence_input_proj(emb).permute(0, 2, 1)  # (B, fno_width, L)
-        x = self.doc_sequence_fno(x)  # (B, fno_width, L)
-        mask = token_mask.unsqueeze(1)
-        pooled = (x * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1)
+        _x, pooled = apply_fno_token_encoder(
+            tokens,
+            token_mask=token_mask,
+            token_embedding=self.token_embedding,
+            fno=self.doc_sequence_fno,
+            pooling_mode=self.leaf_fno_pooling,
+            input_proj=self.doc_sequence_input_proj,
+        )
         return self.doc_sequence_classifier(pooled)
 
     def predict_doc_sequence_expected_normalized_from_logits(
@@ -5482,6 +5616,28 @@ class FNOCountSketch(nn.Module):
         x = summary
         if x.ndim == 0:
             x = x.unsqueeze(0)
+        if (
+            self.use_summary_spec
+            and self.use_direct_markov_sketch_slots
+            and x.shape[-1] == int(self.summary_dim)
+        ):
+            count_norm = x[..., 0]
+            first_logits = x[..., 1 : 1 + int(self.n_regimes)]
+            last_logits = x[..., 1 + int(self.n_regimes) :]
+            if self.use_opaque_carrier_exact_sketch_surface:
+                carrier = self.summary_encoder(x)
+                return self._canonical_summary_state_from_components(
+                    count_norm=count_norm,
+                    first_logits=first_logits,
+                    last_logits=last_logits,
+                    residual=carrier,
+                )
+            if self.use_carrier_projection_surface:
+                return self._canonical_summary_state_from_components(
+                    count_norm=count_norm,
+                    first_logits=first_logits,
+                    last_logits=last_logits,
+                )
         # Unified-g: wide summary surface → state via g.
         if self.tree_model_version == "unified_g" and self.unified_g_summary_dim > 0:
             if x.shape[-1] == int(self.unified_g_summary_dim):
@@ -5628,7 +5784,7 @@ class FNOCountSketch(nn.Module):
     ) -> torch.Tensor:
         if not self.use_summary_spec:
             raise RuntimeError("summary spec merge requested without slot-structured modules")
-        if self.use_exact_projected_sketch_merge:
+        if self.exact_projected_merge_is_runtime_merge:
             return self._exact_projected_merge_state(left_state, right_state)
         if self.use_shared_theorem_surface:
             if self.summary_state_merger is None:
@@ -5640,17 +5796,28 @@ class FNOCountSketch(nn.Module):
             )
         if self.count_slot_merger is None:
             raise RuntimeError("summary spec merge requested without slot-structured modules")
+        left_first = self._first_slot(left_state)
+        left_last = self._last_slot(left_state)
+        right_first = self._first_slot(right_state)
+        right_last = self._last_slot(right_state)
+        if self.use_direct_markov_sketch_slots:
+            left_first = self._canonical_direct_endpoint_slot(left_first)
+            left_last = self._canonical_direct_endpoint_slot(left_last)
+            right_first = self._canonical_direct_endpoint_slot(right_first)
+            right_last = self._canonical_direct_endpoint_slot(right_last)
         merged_count = self.count_slot_merger(
             torch.cat(
                 [
                     self._count_slot(left_state),
                     self._count_slot(right_state),
-                    self._last_slot(left_state),
-                    self._first_slot(right_state),
+                    left_last,
+                    right_first,
                 ],
                 dim=-1,
             )
         )
+        if self.use_direct_markov_sketch_slots:
+            merged_count = self._runtime_count_slot(merged_count)
         if self.residual_slot_merger is None or int(self.residual_dim) <= 0:
             merged_residual = merged_count.new_zeros((*merged_count.shape[:-1], 0))
         else:
@@ -5665,8 +5832,8 @@ class FNOCountSketch(nn.Module):
             )
         return self._pack_summary_spec_state(
             merged_count,
-            self._first_slot(left_state),
-            self._last_slot(right_state),
+            left_first,
+            right_last,
             merged_residual,
         )
 
@@ -6771,8 +6938,20 @@ class FNOCountSketch(nn.Module):
         sampled_internal_indices: Optional[set] = None,
         leaf_propensity: float = 1.0,
         internal_propensity: float = 1.0,
+        proxy_leaf_counts: Optional[Sequence[float]] = None,
+        proxy_merge_counts_balanced: Optional[Sequence[float]] = None,
         use_residual_decomposition: bool = True,
+        collect_full_trace: bool = False,
     ) -> Dict[str, Any]:
+        # collect_full_trace: when True, build per-node FullTreeNodeRecord
+        # objects, the document_record, and the StateNode trace tree. Each of
+        # these requires a GPU->CPU sync, so the per-node loop becomes the
+        # bottleneck on long merge chains (e.g. recoverable_v5_t2048 leaf=16
+        # is 255 syncs/doc). Default is False so that training/eval/anything
+        # that only consumes the GPU tensors (`document_pred_norm`,
+        # `all_node_preds`, etc.) stays CPU-launch-bound only by its own
+        # logic. Telemetry consumers (phi-feature collection, eval reports,
+        # diagnostic dumps) must pass collect_full_trace=True explicitly.
         """Unified IPW forward pass: all nodes in one pool with propensity weights.
 
         When *use_residual_decomposition* is True, merge-node loss terms use
@@ -6805,18 +6984,44 @@ class FNOCountSketch(nn.Module):
 
         # Oracle counts in global order: leaves, then merges (root included last).
         all_oracle = [float(c) for c in leaf_counts] + [float(c) for c in merge_counts_balanced]
+        effective_proxy_leaf_counts = (
+            tuple(float(c) for c in proxy_leaf_counts)
+            if proxy_leaf_counts is not None
+            else tuple(float(c) for c in leaf_counts)
+        )
+        effective_proxy_merge_counts = (
+            tuple(float(c) for c in proxy_merge_counts_balanced)
+            if proxy_merge_counts_balanced is not None
+            else tuple(float(c) for c in merge_counts_balanced)
+        )
+        if len(effective_proxy_leaf_counts) != int(n_leaves):
+            raise ValueError(
+                "proxy_leaf_counts must include one proxy target per leaf "
+                f"(expected {n_leaves}, got {len(effective_proxy_leaf_counts)})"
+            )
+        if len(effective_proxy_merge_counts) != int(n_merges):
+            raise ValueError(
+                "proxy_merge_counts_balanced must include one proxy target per realized merge "
+                f"(expected {n_merges}, got {len(effective_proxy_merge_counts)})"
+            )
+        all_proxy = list(effective_proxy_leaf_counts) + list(effective_proxy_merge_counts)
 
         # Compute g(state) for ALL nodes (needed for residuals even if unsampled).
-        all_preds_raw: List[torch.Tensor] = []
-        for st in states:
-            all_preds_raw.append(self.predict_norm_from_state(st))
-        for st in merge_states:
-            all_preds_raw.append(self.predict_norm_from_state(st))
+        # Batched: stack all states into one tensor and call predict_norm once.
+        # Avoids 255 sequential nn.Linear calls per doc at leaf=16.
+        _all_states_stacked = torch.stack(list(states) + list(merge_states), dim=0)
+        _all_preds_stacked = self.predict_norm_from_state(_all_states_stacked)
+        if _all_preds_stacked.ndim == 0:
+            _all_preds_stacked = _all_preds_stacked.unsqueeze(0)
+        all_preds_raw: List[torch.Tensor] = [
+            _all_preds_stacked[i] for i in range(int(_all_preds_stacked.shape[0]))
+        ]
 
         layout = self._balanced_tree_layout(n_leaves)
         children_map = (
             dict(layout["children_map"]) if bool(use_residual_decomposition) else {}
         )
+        trace_children_map = dict(layout["children_map"])
         root_global_idx = int(layout["root_global_idx"])
         depth_by_global_idx = dict(layout["depth_by_global_idx"])
         node_id_by_global_idx = dict(layout["node_id_by_global_idx"])
@@ -6824,7 +7029,18 @@ class FNOCountSketch(nn.Module):
         node_preds: List[torch.Tensor] = []
         node_targets: List[float] = []
         node_weights: List[float] = []
+        all_node_preds: List[torch.Tensor] = []
+        all_node_proxy_targets: List[float] = []
+        all_node_oracle_targets: List[float] = []
+        all_node_observed: List[float] = []
+        all_node_propensities: List[float] = []
+        all_node_depths: List[float] = []
         node_records: List[FullTreeNodeRecord] = []
+        # Telemetry deferral buffers (only populated when collect_full_trace=True).
+        # We collect the GPU tensors during the per-node loop and do a single
+        # batched .cpu() after the loop to avoid 255 sync points per doc.
+        _record_metadata_buf: List[Dict[str, Any]] = []
+        _record_objective_preds: List[torch.Tensor] = []
 
         for global_idx, raw_pred in enumerate(all_preds_raw):
             is_leaf = global_idx < n_leaves
@@ -6845,8 +7061,10 @@ class FNOCountSketch(nn.Module):
                 propensity = float(internal_propensity)
 
             direct_target = float(all_oracle[global_idx]) / float(target_scale)
+            direct_proxy_target = float(all_proxy[global_idx]) / float(target_scale)
             objective_pred = raw_pred
             objective_target = float(direct_target)
+            proxy_objective_target = float(direct_proxy_target)
             target_mode = "direct"
             metadata: Dict[str, Any] = {
                 "depth": int(depth_by_global_idx.get(global_idx, 0)),
@@ -6854,6 +7072,7 @@ class FNOCountSketch(nn.Module):
                 "logged_propensity": float(propensity),
                 "target_mode": str(target_mode),
                 "direct_node_target": float(direct_target),
+                "direct_proxy_node_target": float(direct_proxy_target),
             }
 
             if not is_leaf:
@@ -6870,31 +7089,79 @@ class FNOCountSketch(nn.Module):
                         - float(all_oracle[left_gidx])
                         - float(all_oracle[right_gidx])
                     ) / float(target_scale)
+                    proxy_objective_target = (
+                        float(all_proxy[global_idx])
+                        - float(all_proxy[left_gidx])
+                        - float(all_proxy[right_gidx])
+                    ) / float(target_scale)
                     target_mode = "residual"
                     metadata["left_child_id"] = str(node_id_by_global_idx[left_gidx])
                     metadata["right_child_id"] = str(node_id_by_global_idx[right_gidx])
                     metadata["target_mode"] = str(target_mode)
+                    metadata["proxy_target_mode"] = str(target_mode)
 
-            node_records.append(
-                FullTreeNodeRecord(
-                    doc_id=str(doc_id),
-                    node_id=str(node_id_by_global_idx[global_idx]),
-                    depth=int(depth_by_global_idx.get(global_idx, 0)),
-                    node_type=node_type,
-                    is_root=bool(is_root),
-                    prediction=float(raw_pred.detach().cpu()),
-                    target=float(objective_target),
-                    sampled=bool(sampled),
-                    propensity=float(propensity),
-                    objective_prediction=float(objective_pred.detach().cpu()),
-                    metadata=metadata,
-                )
-            )
+            all_node_preds.append(objective_pred)
+            all_node_proxy_targets.append(float(proxy_objective_target))
+            all_node_oracle_targets.append(float(objective_target))
+            all_node_observed.append(1.0 if bool(sampled) and float(propensity) > 0.0 else 0.0)
+            all_node_propensities.append(float(propensity))
+            all_node_depths.append(float(depth_by_global_idx.get(global_idx, 0)))
+
+            if collect_full_trace:
+                # Stash the metadata needed to build a FullTreeNodeRecord after
+                # the loop. The actual GPU->CPU sync for raw_pred / objective_pred
+                # is deferred to a single batched .cpu() call below; per-node
+                # syncs were the leaf=16 hot path bottleneck (255 syncs/doc).
+                _record_metadata_buf.append({
+                    "global_idx": int(global_idx),
+                    "node_id": str(node_id_by_global_idx[global_idx]),
+                    "depth": int(depth_by_global_idx.get(global_idx, 0)),
+                    "node_type": node_type,
+                    "is_root": bool(is_root),
+                    "objective_target": float(objective_target),
+                    "proxy_objective_target": float(proxy_objective_target),
+                    "sampled": bool(sampled),
+                    "propensity": float(propensity),
+                    "metadata": metadata,
+                    "_raw_pred_idx": int(global_idx),
+                    "_objective_pred_pos": len(_record_objective_preds),
+                })
+                _record_objective_preds.append(objective_pred)
 
             if bool(sampled) and float(propensity) > 0.0:
                 node_preds.append(objective_pred)
                 node_targets.append(float(objective_target))
                 node_weights.append(1.0 / max(float(propensity), 1e-12))
+
+        # Batched telemetry materialization: one .cpu() call per tensor list
+        # instead of one per node. Skipped entirely when collect_full_trace=False.
+        if collect_full_trace and _record_metadata_buf:
+            _objective_pred_cpu = (
+                torch.stack(_record_objective_preds, dim=0).detach().cpu().reshape(-1).tolist()
+            )
+            _raw_pred_cpu = _all_preds_stacked.detach().cpu().reshape(-1).tolist()
+            for _meta in _record_metadata_buf:
+                _obj_pred_val = float(_objective_pred_cpu[int(_meta["_objective_pred_pos"])])
+                _raw_pred_val = float(_raw_pred_cpu[int(_meta["_raw_pred_idx"])])
+                _proxy_loss = (_obj_pred_val - float(_meta["proxy_objective_target"])) ** 2
+                _oracle_loss = (_obj_pred_val - float(_meta["objective_target"])) ** 2
+                node_records.append(
+                    FullTreeNodeRecord(
+                        doc_id=str(doc_id),
+                        node_id=str(_meta["node_id"]),
+                        depth=int(_meta["depth"]),
+                        node_type=_meta["node_type"],
+                        is_root=bool(_meta["is_root"]),
+                        prediction=_raw_pred_val,
+                        target=float(_meta["objective_target"]),
+                        sampled=bool(_meta["sampled"]),
+                        propensity=float(_meta["propensity"]),
+                        objective_prediction=_obj_pred_val,
+                        proxy_loss=float(_proxy_loss),
+                        oracle_loss=float(_oracle_loss),
+                        metadata=dict(_meta["metadata"]),
+                    )
+                )
 
         root_pred_norm = all_preds_raw[root_global_idx]
         if node_preds:
@@ -6906,21 +7173,127 @@ class FNOCountSketch(nn.Module):
             target_t = torch.empty((0,), device=device, dtype=root_pred_norm.dtype)
             weight_t = torch.empty((0,), device=device, dtype=root_pred_norm.dtype)
 
+        if all_node_preds:
+            all_pred_stack = torch.stack(all_node_preds, dim=0)
+            all_proxy_target_t = torch.tensor(
+                all_node_proxy_targets, device=device, dtype=all_pred_stack.dtype,
+            )
+            all_oracle_target_t = torch.tensor(
+                all_node_oracle_targets, device=device, dtype=all_pred_stack.dtype,
+            )
+            all_observed_t = torch.tensor(
+                all_node_observed, device=device, dtype=all_pred_stack.dtype,
+            )
+            all_propensity_t = torch.tensor(
+                all_node_propensities, device=device, dtype=all_pred_stack.dtype,
+            )
+            all_depth_t = torch.tensor(
+                all_node_depths, device=device, dtype=all_pred_stack.dtype,
+            )
+        else:
+            all_pred_stack = torch.empty((0,), device=device, dtype=root_pred_norm.dtype)
+            all_proxy_target_t = torch.empty((0,), device=device, dtype=root_pred_norm.dtype)
+            all_oracle_target_t = torch.empty((0,), device=device, dtype=root_pred_norm.dtype)
+            all_observed_t = torch.empty((0,), device=device, dtype=root_pred_norm.dtype)
+            all_propensity_t = torch.empty((0,), device=device, dtype=root_pred_norm.dtype)
+            all_depth_t = torch.empty((0,), device=device, dtype=root_pred_norm.dtype)
+
         document_target_norm = float(root_count) / float(target_scale)
-        document_record = DocumentLevelPredictionRecord(
-            doc_id=str(doc_id),
-            prediction=float(root_pred_norm.detach().cpu()),
-            target=float(document_target_norm),
-            metadata={
-                "raw_prediction": float((root_pred_norm * float(target_scale)).detach().cpu()),
-                "raw_target": float(root_count),
-                "final_summary_prediction": float(root_pred_norm.detach().cpu()),
-            },
-        )
+        document_record: Optional[DocumentLevelPredictionRecord] = None
+        state_tree: Optional[StateTree] = None
+        if collect_full_trace:
+            # One batched .cpu() for the document scalar (was 3 separate syncs).
+            _root_pred_norm_val = float(root_pred_norm.detach().cpu())
+            document_record = DocumentLevelPredictionRecord(
+                doc_id=str(doc_id),
+                prediction=_root_pred_norm_val,
+                target=float(document_target_norm),
+                metadata={
+                    "raw_prediction": float(_root_pred_norm_val * float(target_scale)),
+                    "raw_target": float(root_count),
+                    "final_summary_prediction": _root_pred_norm_val,
+                },
+            )
+            state_by_global_idx = list(states) + list(merge_states)
+            max_depth = max((int(v) for v in depth_by_global_idx.values()), default=0)
+            record_by_node_id = {str(record.node_id): record for record in node_records}
+            # One batched state .cpu() for all global indices, instead of
+            # 255 sequential syncs.
+            _all_states_cpu = (
+                torch.stack(state_by_global_idx, dim=0).detach().cpu()
+                if state_by_global_idx else None
+            )
+            trace_nodes: Dict[int, StateNode[Any, Any]] = {}
+            for global_idx in range(len(state_by_global_idx)):
+                node_id = str(node_id_by_global_idx.get(global_idx, f"node_{global_idx}"))
+                record = record_by_node_id.get(node_id)
+                metadata = dict(record.metadata if record is not None else {})
+                is_root = bool(global_idx == root_global_idx)
+                is_leaf = bool(global_idx < n_leaves)
+                if record is not None:
+                    metadata.update(
+                        {
+                            "doc_id": str(doc_id),
+                            "source_node_id": node_id,
+                            "node_type": "root" if is_root else str(record.node_type.value),
+                            "is_root": bool(is_root),
+                            "is_leaf": bool(is_leaf),
+                            "depth": int(record.depth),
+                            "prediction": float(record.loss_prediction),
+                            "readout_prediction": float(record.loss_prediction),
+                            "target": float(record.target),
+                            "proxy_loss": record.proxy_loss,
+                            "oracle_loss": record.oracle_loss,
+                            "observed": bool(record.sampled),
+                            "sampled": bool(record.sampled),
+                            "propensity": float(record.propensity),
+                            "node_weight": 1.0,
+                            "law_channel": "root" if is_root else ("leaf" if is_leaf else "merge"),
+                            "state_kind": "markov_fno_state",
+                        }
+                    )
+                _state_cpu_slice = (
+                    _all_states_cpu[global_idx]
+                    if _all_states_cpu is not None
+                    else state_by_global_idx[global_idx].detach().cpu()
+                )
+                trace_nodes[global_idx] = StateNode[Any, Any](
+                    id=node_id,
+                    level=max(0, int(max_depth - int(depth_by_global_idx.get(global_idx, 0)))),
+                    span={
+                        "global_index": int(global_idx),
+                        "token_ids": list(leaf_token_ids[global_idx]) if is_leaf else [],
+                    },
+                    state=_state_cpu_slice,
+                    rendered=str(metadata.get("target_mode", "")),
+                    metadata=metadata,
+                )
+            for merge_local_idx, (left_gidx, right_gidx) in trace_children_map.items():
+                parent_gidx = int(n_leaves) + int(merge_local_idx)
+                parent = trace_nodes.get(parent_gidx)
+                if parent is None:
+                    continue
+                parent.left_child = trace_nodes.get(int(left_gidx))
+                parent.right_child = trace_nodes.get(int(right_gidx))
+                if parent.left_child is not None:
+                    parent.left_child.parent = parent
+                if parent.right_child is not None:
+                    parent.right_child.parent = parent
+            state_tree = StateTree(
+                root=trace_nodes[int(root_global_idx)],
+                metadata={
+                    "doc_id": str(doc_id),
+                    "method_family": "markov_fno",
+                    "state_kind": "markov_fno_state",
+                    "trace_schema": "state_tree_full_trace_v1",
+                    "schedule": str(schedule),
+                },
+            )
 
         return {
             "node_records": tuple(node_records),
             "document_record": document_record,
+            "state_tree": state_tree,
             "document_pred_norm": root_pred_norm,
             "document_target_norm": torch.tensor(
                 float(document_target_norm), device=device, dtype=root_pred_norm.dtype
@@ -6928,6 +7301,12 @@ class FNOCountSketch(nn.Module):
             "node_preds": pred_stack,
             "node_targets": target_t,
             "node_weights": weight_t,
+            "all_node_preds": all_pred_stack,
+            "all_node_proxy_targets": all_proxy_target_t,
+            "all_node_oracle_targets": all_oracle_target_t,
+            "all_node_observed": all_observed_t,
+            "all_node_propensities": all_propensity_t,
+            "all_node_depths": all_depth_t,
             "root_pred_count": self.predict_count_from_state(root_state),
             "n_nodes": len(node_records),
             "n_sampled_nodes": len(node_preds),
@@ -7641,6 +8020,55 @@ def _summary_spec_supervision_terms(
     }
 
 
+def _shared_feature_local_supervision_terms(
+    model: FNOCountSketch,
+    state: torch.Tensor,
+    *,
+    truth_count: float,
+    truth_first: int | None = None,
+    truth_last: int | None = None,
+    supervise_endpoints: bool = False,
+    bounded_endpoints: bool = False,
+) -> Dict[str, torch.Tensor]:
+    theorem_feature = model.theorem_feature_from_state(state)
+    pred_norm = model.predict_task_norm_from_theorem_feature(theorem_feature)
+    target_norm = torch.tensor(
+        float(truth_count) / float(model.target_scale),
+        device=pred_norm.device,
+        dtype=pred_norm.dtype,
+    )
+    count_loss = (pred_norm - target_norm) ** 2
+    first_loss = torch.zeros((), device=state.device, dtype=count_loss.dtype)
+    last_loss = torch.zeros((), device=state.device, dtype=count_loss.dtype)
+    active_terms = 1.0
+    if bool(supervise_endpoints):
+        if truth_first is None or truth_last is None:
+            raise ValueError("truth_first and truth_last are required for endpoint supervision")
+        first_surface = model._first_surface_from_theorem_feature(theorem_feature)
+        last_surface = model._last_surface_from_theorem_feature(theorem_feature)
+        first_logits = model.first_endpoint_proj(first_surface)
+        last_logits = model.last_endpoint_proj(last_surface)
+        first_target = torch.tensor([int(truth_first)], dtype=torch.long, device=state.device)
+        last_target = torch.tensor([int(truth_last)], dtype=torch.long, device=state.device)
+        if bool(bounded_endpoints):
+            first_loss = _bounded_endpoint_surprise_loss(first_logits, first_target).reshape(())
+            last_loss = _bounded_endpoint_surprise_loss(last_logits, last_target).reshape(())
+            active_terms += 2.0
+        else:
+            ep_scale = float(model.endpoint_loss_scale)
+            first_loss = ep_scale * F.cross_entropy(first_logits.unsqueeze(0), first_target)
+            last_loss = ep_scale * F.cross_entropy(last_logits.unsqueeze(0), last_target)
+    total_loss = count_loss + first_loss + last_loss
+    if bool(bounded_endpoints):
+        total_loss = total_loss / float(active_terms)
+    return {
+        "count_loss": count_loss,
+        "first_loss": first_loss,
+        "last_loss": last_loss,
+        "total_loss": total_loss,
+    }
+
+
 def _theorem_feature_task_supervision_terms(
     model: FNOCountSketch,
     state: torch.Tensor,
@@ -7671,6 +8099,17 @@ def _local_supervision_terms(
 ) -> Dict[str, torch.Tensor]:
     kind = str(supervision_kind or "count_only").strip().lower() or "count_only"
     if kind == "full_sketch":
+        if model.use_shared_feature_surface:
+            return _shared_feature_local_supervision_terms(
+                model,
+                state,
+                truth_count=float(truth_count),
+                truth_first=truth_first,
+                truth_last=truth_last,
+                supervise_endpoints=(
+                    truth_first is not None and truth_last is not None
+                ),
+            )
         if model.use_summary_spec:
             return _summary_spec_supervision_terms(
                 model,
@@ -7709,6 +8148,18 @@ def _local_supervision_terms(
             "total_loss": count_loss + first_loss + last_loss,
         }
     if kind == "bounded_full_sketch":
+        if model.use_shared_feature_surface:
+            return _shared_feature_local_supervision_terms(
+                model,
+                state,
+                truth_count=float(truth_count),
+                truth_first=truth_first,
+                truth_last=truth_last,
+                supervise_endpoints=(
+                    truth_first is not None and truth_last is not None
+                ),
+                bounded_endpoints=True,
+            )
         if model.use_summary_spec:
             return _summary_spec_bounded_supervision_terms(
                 model,
@@ -7750,6 +8201,14 @@ def _local_supervision_terms(
     if kind != "count_only":
         raise ValueError(
             "supervision_kind must be one of {'count_only','bounded_full_sketch','full_sketch'}"
+        )
+    if model.use_shared_feature_surface:
+        return _shared_feature_local_supervision_terms(
+            model,
+            state,
+            truth_count=float(truth_count),
+            supervise_endpoints=False,
+            bounded_endpoints=True,
         )
     if model.use_summary_spec:
         return _summary_spec_bounded_supervision_terms(
@@ -7800,7 +8259,7 @@ def _summary_spec_merge_consistency_terms(
     """
     if not model.use_markov_summary_spec:
         raise RuntimeError("summary spec merge consistency requested without markov summary spec")
-    if model.use_exact_projected_sketch_merge:
+    if bool(getattr(model, "exact_projected_merge_is_runtime_merge", False)):
         zero = torch.zeros((), device=parent_state.device, dtype=parent_state.dtype)
         join_prob = model.predict_join_prob_from_states(left_state, right_state)
         return {
@@ -7836,10 +8295,9 @@ def _summary_spec_merge_consistency_terms(
     if truth_join_bit is not None:
         join_loss = F.binary_cross_entropy_with_logits(
             join_logit,
-            torch.tensor(
+            torch.full_like(
+                join_logit,
                 float(int(truth_join_bit)),
-                device=parent_state.device,
-                dtype=join_logit.dtype,
             ),
         )
     return {
@@ -8237,19 +8695,25 @@ def _empty_exact_sketch_direct_metrics() -> Dict[str, Any]:
 def _selection_uses_exact_projected_merge(model: Any) -> bool:
     """Return whether theorem-facing selection should treat a model as exact-merge.
 
-    Some eval paths reconstruct lightweight wrappers where
-    ``use_exact_projected_sketch_merge`` is absent even though the serialized
-    config still carries ``score_merge_mode='exact_projected_sketch'``. Selection
-    should follow the effective lane semantics rather than a single optional
-    boolean.
+    Selection follows runtime semantics.  Exact Markov sketch composition can be
+    used as a diagnostic/oracle reference without being the learned tree merge.
     """
+    runtime_merge_kind = str(getattr(model, "runtime_merge_kind", "")).strip().lower()
+    if runtime_merge_kind:
+        return runtime_merge_kind == "exact_projected_sketch"
+    if bool(getattr(model, "uses_unified_g_learned_merge", False)):
+        return False
+    tree_model_version = str(
+        getattr(model, "tree_model_version", "")
+        or getattr(model, "tree_tree_model_version", "")
+    ).strip().lower()
+    if tree_model_version == "unified_g":
+        return False
+    if hasattr(model, "exact_projected_merge_is_runtime_merge"):
+        return bool(getattr(model, "exact_projected_merge_is_runtime_merge"))
     if bool(getattr(model, "use_exact_projected_sketch_merge", False)):
         return True
     score_merge_mode = str(getattr(model, "score_merge_mode", "")).strip().lower()
-    if not score_merge_mode:
-        score_merge_mode = str(
-            getattr(model, "tree_score_merge_mode", "")
-        ).strip().lower()
     if score_merge_mode == "exact_projected_sketch":
         return True
     theorem_surface_mode = str(
@@ -9977,7 +10441,7 @@ def _fixed_fused_training_batch_forward(
             leaf_count_loss = leaf_task_loss
             leaf_first_loss = torch.zeros_like(leaf_task_loss)
             leaf_last_loss = torch.zeros_like(leaf_task_loss)
-            if bool(model.use_factorized_score_fiber_surface) and bool(model.use_summary_spec):
+            if bool(model.use_summary_spec):
                 leaf_summary_terms = _local_supervision_terms_batched(
                     model,
                     flat_leaf_states,
@@ -10077,7 +10541,7 @@ def _fixed_fused_training_batch_forward(
             merge_count_loss = merge_task_loss
             merge_first_loss = torch.zeros_like(merge_task_loss)
             merge_last_loss = torch.zeros_like(merge_task_loss)
-            if bool(model.use_factorized_score_fiber_surface) and bool(model.use_summary_spec):
+            if bool(model.use_summary_spec):
                 merge_summary_terms = _local_supervision_terms_batched(
                     model,
                     flat_merge_states_real,
@@ -16743,8 +17207,18 @@ def train_fno_tree(
                     "theorem_aux_dim": int(
                         getattr(model, "factorized_aux_dim", 0)
                     ),
-                    "score_merge_mode": str(
-                        getattr(model, "score_merge_mode", "")
+                    "runtime_merge_kind": str(
+                        getattr(model, "runtime_merge_kind", "")
+                    ),
+                    "exact_projected_merge_is_runtime_merge": bool(
+                        getattr(
+                            model,
+                            "exact_projected_merge_is_runtime_merge",
+                            False,
+                        )
+                    ),
+                    "uses_unified_g_learned_merge": bool(
+                        getattr(model, "uses_unified_g_learned_merge", False)
                     ),
                     "n_regimes": int(getattr(model, "n_regimes", 0)),
                     "vocab_size": int(getattr(model, "pad_id", 0)),
@@ -17299,6 +17773,43 @@ def _doc_sequence_loss_for_doc(
     return loss
 
 
+def _validate_fno_objective_shares(
+    *,
+    root_objective_share: float,
+    local_law_objective_share: float,
+) -> Tuple[float, float]:
+    """Validate resolved convex root/local-law shares for unified FNO training."""
+
+    root_share = float(root_objective_share)
+    local_share = float(local_law_objective_share)
+    if not math.isfinite(root_share) or not math.isfinite(local_share):
+        raise ValueError("FNO objective shares must be finite")
+    if root_share < 0.0 or local_share < 0.0:
+        raise ValueError("FNO objective shares must be non-negative")
+    if not math.isclose(root_share + local_share, 1.0, rel_tol=1e-6, abs_tol=1e-6):
+        raise ValueError(
+            "FNO objective shares must form a convex root/local-law objective; "
+            f"got root={root_share:g}, local_law={local_share:g}"
+        )
+    return root_share, local_share
+
+
+def _fno_single_lambda_objective_loss(
+    *,
+    root_loss: torch.Tensor,
+    local_law_loss: torch.Tensor,
+    root_objective_share: float,
+    local_law_objective_share: float,
+) -> torch.Tensor:
+    """Return ``(1-lambda) * L_root + lambda * L_corrected`` for FNO."""
+
+    root_share, local_share = _validate_fno_objective_shares(
+        root_objective_share=float(root_objective_share),
+        local_law_objective_share=float(local_law_objective_share),
+    )
+    return float(root_share) * root_loss + float(local_share) * local_law_loss
+
+
 @torch.no_grad()
 def _eval_fno_doc_sequence_view(
     model: FNOCountSketch,
@@ -17322,7 +17833,7 @@ def _eval_fno_doc_sequence_view(
     return _eval_root_predictions(preds, truths, tau=float(tau))
 
 
-def train_fno_tree_ipw(
+def train_fno_tree_local_law(
     *,
     model: FNOCountSketch,
     train_docs: Sequence[_FNOCountDoc],
@@ -17334,7 +17845,10 @@ def train_fno_tree_ipw(
     weight_decay: float = 1e-5,
     leaf_sample_rate: float = 1.0,
     internal_sample_rate: float = 1.0,
-    document_loss_weight: float = 1.0,
+    root_objective_share: float,
+    local_law_objective_share: float,
+    local_law_objective_mode: str = LOCAL_LAW_OBJECTIVE_CORRECTED,
+    depth_discount_gamma: float = 1.0,
     use_residual_decomposition: bool = True,
     doc_sequence_train_fraction: float = 0.0,
     doc_sequence_objective: str = "count_ce_only",
@@ -17342,12 +17856,13 @@ def train_fno_tree_ipw(
     grad_clip_norm: float = 1.0,
     seed: int = 42,
 ) -> Dict[str, object]:
-    """Train FNO tree-merge operator with sampled-node IPW plus top supervision.
+    """Train FNO tree-merge operator with the single-lambda local-law objective.
 
-    The shared readout ``g`` is applied at every realized node. Sampled node
-    labels supervise the full-tree objective through a Hajek-normalized loss,
-    while the full-document label remains available at the top for every
-    document regardless of whether the root node is sampled.
+    The shared readout ``g`` is applied at every realized node. The objective is
+    ``root_objective_share * L_root + local_law_objective_share * L_local_law``.
+    In paper-facing runs ``L_local_law`` is the bundled corrected full-tree loss:
+    a dense proxy population plus sparse oracle residuals. ``sampled_ipw`` is
+    retained as an ablation mode and uses observed oracle rows only.
 
     When *use_residual_decomposition* is True, merge-node losses use
     residuals (g(merge) - g(left) - g(right)) vs boundary correction
@@ -17355,6 +17870,13 @@ def train_fno_tree_ipw(
     """
     import random as _random
 
+    normalized_local_law_objective_mode = normalize_local_law_objective_mode(
+        str(local_law_objective_mode)
+    )
+    root_share, local_share = _validate_fno_objective_shares(
+        root_objective_share=float(root_objective_share),
+        local_law_objective_share=float(local_law_objective_share),
+    )
     rng = _random.Random(int(seed))
     opt = torch.optim.AdamW(
         model.parameters(), lr=float(lr), weight_decay=float(weight_decay),
@@ -17424,22 +17946,38 @@ def train_fno_tree_ipw(
                     sampled_internal_indices=sampled_internal_indices,
                     leaf_propensity=leaf_propensity,
                     internal_propensity=internal_propensity,
+                    proxy_leaf_counts=(
+                        doc.proxy_leaf_counts if doc.proxy_leaf_counts else None
+                    ),
+                    proxy_merge_counts_balanced=(
+                        doc.proxy_merge_counts_balanced
+                        if doc.proxy_merge_counts_balanced
+                        else None
+                    ),
                     use_residual_decomposition=use_residual_decomposition,
+                    collect_full_trace=False,
                 )
 
-                preds = out["node_preds"]
-                targets = out["node_targets"]
-                weights = out["node_weights"]
-                if int(out["n_sampled_nodes"]) > 0:
-                    mse_per_node = (preds - targets) ** 2
-                    node_loss = (weights * mse_per_node).sum() / weights.sum().clamp(min=1e-12)
-                else:
-                    node_loss = torch.zeros((), device=device, dtype=torch.float32)
-                document_loss = float(document_loss_weight) * F.mse_loss(
+                node_loss = local_law_objective_target_mse(
+                    predictions=out["all_node_preds"],
+                    proxy_targets=out["all_node_proxy_targets"],
+                    oracle_targets=out["all_node_oracle_targets"],
+                    observed=out["all_node_observed"],
+                    propensity=out["all_node_propensities"],
+                    depths=out["all_node_depths"],
+                    gamma_depth=float(depth_discount_gamma),
+                    objective_mode=str(normalized_local_law_objective_mode),
+                )
+                document_loss = F.mse_loss(
                     out["document_pred_norm"],
                     out["document_target_norm"],
                 )
-                doc_loss = document_loss + node_loss
+                doc_loss = _fno_single_lambda_objective_loss(
+                    root_loss=document_loss,
+                    local_law_loss=node_loss,
+                    root_objective_share=float(root_share),
+                    local_law_objective_share=float(local_share),
+                )
                 batch_loss = batch_loss + doc_loss
 
             batch_loss = batch_loss / float(len(batch_idx))
@@ -17498,7 +18036,16 @@ def train_fno_tree_ipw(
                     doc.merge_counts_balanced, doc.root_count,
                     doc_id="eval_doc",
                     schedule="balanced", device=device,
+                    proxy_leaf_counts=(
+                        doc.proxy_leaf_counts if doc.proxy_leaf_counts else None
+                    ),
+                    proxy_merge_counts_balanced=(
+                        doc.proxy_merge_counts_balanced
+                        if doc.proxy_merge_counts_balanced
+                        else None
+                    ),
                     use_residual_decomposition=use_residual_decomposition,
+                    collect_full_trace=False,
                 )
                 preds.append(float(out["root_pred_count"].detach().cpu()))
                 truths.append(float(doc.root_count))
@@ -17526,6 +18073,10 @@ def train_fno_tree_ipw(
         ),
         "loss_curve": loss_curve,
         "doc_sequence_train_docs_used": int(len(doc_sequence_train_indices)),
+        "root_objective_share": float(root_share),
+        "local_law_objective_share": float(local_share),
+        "local_law_objective_mode": str(normalized_local_law_objective_mode),
+        "depth_discount_gamma": float(depth_discount_gamma),
         "n_params": sum(p.numel() for p in model.parameters()),
     }
 
@@ -17683,6 +18234,7 @@ def _eval_fno_model(
     *,
     device: torch.device,
     tau: float,
+    condition_ids: Sequence[str] | None = None,
 ) -> SketchMetrics:
     """Evaluate FNOCountSketch on a set of FNO docs, returning SketchMetrics."""
     if len(docs) == 0:
@@ -17815,6 +18367,7 @@ def _eval_fno_model(
     tau = float(tau)
     root_abs_arr = np.asarray(root_abs, dtype=np.float64)
     spreads_arr = np.asarray(spreads, dtype=np.float64)
+    condition_metrics = _condition_error_diagnostics(root_abs_arr, condition_ids)
 
     root_sq_arr = (root_abs_arr) ** 2  # abs_arr is already |pred - truth|, so sq = abs^2
     return SketchMetrics(
@@ -17885,6 +18438,10 @@ def _eval_fno_model(
             count=c2_count,
             default=0.0,
         ),
+        condition_root_mae=dict(condition_metrics["condition_root_mae"]),
+        condition_root_n_docs=dict(condition_metrics["condition_root_n_docs"]),
+        condition_root_macro_mae=float(condition_metrics["condition_root_macro_mae"]),
+        condition_root_worst_mae=float(condition_metrics["condition_root_worst_mae"]),
     )
 
 
@@ -17933,7 +18490,14 @@ def _eval_fno_full_tree_ipw_metrics(
             sampled_internal_indices=sampled_internal_indices,
             leaf_propensity=float(leaf_propensity),
             internal_propensity=float(internal_propensity),
+            proxy_leaf_counts=(doc.proxy_leaf_counts if doc.proxy_leaf_counts else None),
+            proxy_merge_counts_balanced=(
+                doc.proxy_merge_counts_balanced
+                if doc.proxy_merge_counts_balanced
+                else None
+            ),
             use_residual_decomposition=bool(use_residual_decomposition),
+            collect_full_trace=True,  # consumer reads node_records/document_record
         )
         for record in list(out["node_records"]):
             accumulator.update_node_record(record)

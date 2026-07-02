@@ -26,7 +26,6 @@ import math
 import random
 import sys
 from dataclasses import replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -51,9 +50,28 @@ from src.ctreepo.distillation import (
     build_g_sft_records,
     write_labeled_trees_jsonl,
 )
+from src.ctreepo.treepo_bridge.manifesto_finetune import (
+    add_manifesto_finetune_args,
+    export_manifesto_finetune_bundle_from_args,
+    finetune_export_config,
+)
+from src.tasks.manifesto.script_utils import (
+    now_iso as _now_iso,
+    now_stamp as _now_stamp,
+    read_jsonl as _read_jsonl,
+    safe_float as _safe_float,
+    write_json as _write_json,
+)
 from src.preprocessing.chunker import chunk_for_ops
 from src.tasks.manifesto.corpus_metrics import compute_corpus_pearson_r
 from src.tasks.manifesto.dimensions import PolicyDimension, get_preservation_rubric
+from src.tasks.manifesto.expert_scale import (
+    EXPERT_SCALE_CHOICES,
+    EXPERT_SCALE_NORMALIZED_1_7,
+    expert_scale_metadata,
+    raw_benoit_expert_from_row,
+    resolve_benoit_expert_target,
+)
 from src.tasks.manifesto import ManifestoDataset
 from src.training.config_sections import (
     OptimizerConfig,
@@ -71,42 +89,6 @@ from src.tree.treepo_stack import TreePOContractSpec, TreePOModelSpec
 LOGGER = logging.getLogger(__name__)
 _DIM_FROM_NAME = {dim.value: dim for dim in PolicyDimension}
 
-
-def _now_stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _write_json(path: Path, payload: Mapping[str, Any]) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
-    return path
-
-
-def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    with Path(path).open("r", encoding="utf-8") as handle:
-        for line in handle:
-            text = line.strip()
-            if not text:
-                continue
-            rows.append(json.loads(text))
-    return rows
-
-
-def _safe_float(value: Any) -> Optional[float]:
-    try:
-        if value is None:
-            return None
-        converted = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(converted):
-        return None
-    return converted
 
 
 def _normalize_score_1_7(value: float) -> float:
@@ -138,14 +120,13 @@ def _row_teacher_score(row: Mapping[str, Any], *, dimension: str) -> Optional[fl
     return _safe_float(row.get("pred"))
 
 
-def _row_expert_score(row: Mapping[str, Any], *, dimension: str) -> Optional[float]:
-    direct = _safe_float(row.get("benoit_expert_mean"))
-    if direct is not None:
-        return direct
-    expert_means = row.get("expert_means")
-    if isinstance(expert_means, Mapping):
-        return _safe_float(expert_means.get(dimension))
-    return _safe_float(row.get("expert_mean"))
+def _row_expert_score(
+    row: Mapping[str, Any],
+    *,
+    dimension: str,
+    expert_scale: str = EXPERT_SCALE_NORMALIZED_1_7,
+) -> Optional[float]:
+    return resolve_benoit_expert_target(row, dimension=dimension, scale=expert_scale)
 
 
 def _row_target_score(
@@ -153,11 +134,12 @@ def _row_target_score(
     *,
     dimension: str,
     target_source: str,
+    expert_scale: str = EXPERT_SCALE_NORMALIZED_1_7,
 ) -> Optional[float]:
     if target_source == "teacher":
         return _row_teacher_score(row, dimension=dimension)
     if target_source == "expert":
-        return _row_expert_score(row, dimension=dimension)
+        return _row_expert_score(row, dimension=dimension, expert_scale=expert_scale)
     raise ValueError(f"Unsupported target_source={target_source!r}")
 
 
@@ -491,14 +473,21 @@ def _build_partial_labeled_tree(
     split: str,
     dimension: str,
     target_source: str,
+    expert_target_scale: str,
     chunk_chars: int,
     source_results_path: Path,
 ) -> Optional[LabeledTree]:
     mid = _row_manifesto_id(row)
     summary = _row_summary(row)
-    target = _row_target_score(row, dimension=dimension, target_source=target_source)
+    target = _row_target_score(
+        row,
+        dimension=dimension,
+        target_source=target_source,
+        expert_scale=expert_target_scale,
+    )
     teacher_score = _row_teacher_score(row, dimension=dimension)
-    expert_score = _row_expert_score(row, dimension=dimension)
+    expert_score = _row_expert_score(row, dimension=dimension, expert_scale=expert_target_scale)
+    expert_raw = raw_benoit_expert_from_row(row, dimension=dimension)
     if not mid or not text.strip() or not summary or target is None:
         return None
 
@@ -517,6 +506,8 @@ def _build_partial_labeled_tree(
             "target_source": str(target_source),
             "teacher_score_1_7": teacher_score,
             "expert_score_1_7": expert_score,
+            "expert_score_raw_benoit": expert_raw,
+            **expert_scale_metadata(dimension=dimension, scale=expert_target_scale),
             "leaf_size_chars": int(chunk_chars),
             "chunking_source": "src.preprocessing.chunker.chunk_for_ops(strategy='axis')",
             "topology_policy": {
@@ -612,6 +603,7 @@ def _build_labeled_trees(
     split_ids: Mapping[str, Mapping[str, str]],
     dimension: str,
     target_source: str,
+    expert_target_scale: str,
     chunk_chars: int,
     source_results_path: Path,
     mp_data_dir: Optional[Path],
@@ -640,6 +632,7 @@ def _build_labeled_trees(
                 split=str(split),
                 dimension=dimension,
                 target_source=target_source,
+                expert_target_scale=expert_target_scale,
                 chunk_chars=int(chunk_chars),
                 source_results_path=source_results_path,
             )
@@ -792,6 +785,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Output directory. Defaults to outputs/manifesto_dimension_fit_existing/<timestamp>.",
     )
     parser.add_argument("--target-source", choices=["teacher", "expert"], default="teacher")
+    parser.add_argument(
+        "--expert-target-scale",
+        choices=EXPERT_SCALE_CHOICES,
+        default=EXPERT_SCALE_NORMALIZED_1_7,
+        help=(
+            "Scale used when materializing expert_score_1_7. "
+            "normalized_1_7 derives a 1-7 target from Benoit's released expert_mean; "
+            "raw_benoit preserves the older/raw behavior."
+        ),
+    )
     parser.add_argument("--split-source", choices=["phase3", "results-order"], default="phase3")
     parser.add_argument("--train-pool", choices=["expert-split", "openweight", "expert"], default="expert-split")
     parser.add_argument("--split-strategy", choices=["random", "label-stratified"], default="label-stratified")
@@ -810,6 +813,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--run-f-lm-regression", action="store_true")
     parser.add_argument("--f-lm-model-name", type=str, default=None)
     parser.add_argument("--include-identity-targets", action=argparse.BooleanOptionalAction, default=False)
+    add_manifesto_finetune_args(
+        parser,
+        kind="generic",
+        help_text="Write treepo PreferenceDataset/fine-tune adapter bundle next to labeled_trees.jsonl.",
+    )
 
     parser.add_argument("--embedding-backend", choices=["local-hf", "vllm", "hashing"], default="local-hf")
     parser.add_argument("--embedding-model", type=str, default="/mnt/data/models/Qwen/Qwen3-Embedding-0.6B")
@@ -888,6 +896,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         split_ids=split_ids,
         dimension=dim.value,
         target_source=str(args.target_source),
+        expert_target_scale=str(args.expert_target_scale),
         chunk_chars=chunk_chars,
         source_results_path=args.source_results,
         mp_data_dir=args.mp_data_dir,
@@ -918,6 +927,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "source_results": str(args.source_results),
             "source_report": str(args.source_report) if args.source_report else None,
             "target_source": str(args.target_source),
+            "expert_target_scale": str(args.expert_target_scale),
             "chunk_chars": int(chunk_chars),
             "split_source": str(args.split_source),
         },
@@ -936,6 +946,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "labeled_trees": str(labeled_tree_path),
         "split_ids": str(output_dir / "split_ids.json"),
     }
+    finetune_bundle = export_manifesto_finetune_bundle_from_args(
+        args=args,
+        trees=trees,
+        output_dir=output_dir / "treepo_finetune",
+        kind="generic",
+    )
+    if finetune_bundle:
+        artifacts["finetune_bundle"] = str(output_dir / "treepo_finetune")
     results: Dict[str, Any] = {}
 
     if not args.skip_g_export:
@@ -1093,6 +1111,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "include_identity_targets": bool(args.include_identity_targets),
             "run_g_sft": bool(args.run_g_sft),
             "run_f_lm_regression": bool(args.run_f_lm_regression),
+            "finetune_export": finetune_export_config(args),
         },
         "tree_counts": tree_counts,
         "dataset_counts": {
@@ -1113,6 +1132,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "target_scale": [1.0, 7.0],
         },
         "artifacts": artifacts,
+        "finetune": finetune_bundle,
         "results": results,
     }
     _write_json(output_dir / "manifest.json", manifest)

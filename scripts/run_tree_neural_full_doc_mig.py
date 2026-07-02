@@ -10,8 +10,7 @@ from the shared output root.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass, replace
-import hashlib
+from dataclasses import asdict, replace
 from itertools import product
 import json
 import math
@@ -30,7 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.markov_gpu_scheduler import (  # noqa: E402
+from src.experiments.scheduler import (  # noqa: E402
     SchedulerConfig,
     SchedulerItem,
     SchedulerRunError,
@@ -46,27 +45,23 @@ from src.ctreepo.sim.core.tree_reference_presets import (  # noqa: E402
     resolve_tree_reference_preset_config,
     tree_reference_preset_names,
 )
+from src.ctreepo.contracts import (  # noqa: E402
+    LAW_SET_ALL,
+    LAW_SET_MERGE_AND_ON_RANGE_IDEMPOTENCE,
+    LAW_SET_ON_RANGE_IDEMPOTENCE_ONLY,
+    RunAxisSpec,
+    canonical_law_set_id,
+)
 TREE_NEURAL_FAMILIES = frozenset(
     {"tree_neural_c2", "tree_neural_c2c3", "tree_neural"}
 )
-CLOSED_FORM_CONTROL_FAMILIES = frozenset({"tree_ridge_leaf", "tree_doc_ridge"})
 
 
-def _default_tree_batch_pack_mode(benchmark: str) -> str:
-    return "fixed_fused" if str(benchmark).strip().lower() == "recoverable_v4" else "structure_bucket"
-
-
-def _resolved_tree_batch_pack_mode(*, benchmark: str, raw_value: str | None) -> str:
-    raw = str(raw_value or "").strip()
-    if raw:
-        return raw
-    return _default_tree_batch_pack_mode(benchmark)
 
 from src.ctreepo.sim.core.full_doc_anchor_diagnostics import (  # noqa: E402
     FAIR_FNO_PARITY_CONFIG_LABEL,
     ORACLE_BUDGET_STUDY_NAME,
     VALID_BASELINE_FAMILIES,
-    _base_config_for_benchmark,
     estimate_tree_worker_runtime_preflight,
     load_markov_full_doc_anchor_diagnostics_from_output_dir,
     prepare_markov_full_doc_anchor_diagnostics_data,
@@ -75,16 +70,52 @@ from src.ctreepo.sim.core.full_doc_anchor_diagnostics import (  # noqa: E402
     resolve_full_doc_diagnostic_grid,
     run_markov_full_doc_anchor_diagnostics,
 )
-from src.ctreepo.sim.core.full_doc_config_codec import (  # noqa: E402
-    runtime_config_overrides_from_config_like,
-    write_tree_run_config_json,
+from src.ctreepo.sim.core.tree_neural_config_recipes import (  # noqa: E402
+    default_tree_batch_pack_mode as _default_tree_batch_pack_mode,
+    fair_fno_tree_config_for_train_doc_count as _public_fair_fno_tree_config_for_train_doc_count,
+    resolve_benchmark_leaf_tokens as _public_resolve_benchmark_leaf_tokens,
+    resolved_tree_batch_pack_mode as _public_resolved_tree_batch_pack_mode,
+    slot_exact_sanity_config as _public_slot_exact_sanity_config,
 )
-from src.ctreepo.sim.core.run_config import (  # noqa: E402
-    run_config_from_mapping as _shared_run_config_from_mapping,
+from src.ctreepo.sim.core.tree_neural_facade import (  # noqa: E402
+    CLOSED_FORM_CONTROL_FAMILIES,
+    JobSpec,
+    RunConfigSpec,
+    build_jobs_for_configs as _build_jobs_for_configs,
+    config_mapping_for_run_config,
+    discover_mig_uuids as _discover_mig_uuids,
+    discover_scheduler_devices as _discover_scheduler_devices,
+    job_output_dir_name as _job_output_dir_name,
+    job_priority as _job_priority,
+    parse_mig_uuids as _parse_mig_uuids,
+    run_config_from_mapping as _run_config_from_mapping,
+    with_run_intent_overrides,
+    write_run_config_spec,
 )
-from src.ctreepo.sim.core.run_intent import (  # noqa: E402
-    VALID_TOPOLOGIES,
-    resolve_package_semantics,
+from src.ctreepo.sim.core.tree_neural_exact_sanity import (  # noqa: E402
+    EXACT_SANITY_COMPONENT_METRICS,
+    EXACT_SANITY_FAMILY,
+    EXACT_SANITY_LAW_METRICS,
+    EXACT_SANITY_LEVELS,
+    EXACT_SANITY_MERGE_CONSISTENCY_METRICS,
+    EXACT_SANITY_STUDY_NAME,
+    finite_summary_stats as _finite_summary_stats,
+    nested_mapping_value as _nested_mapping_value,
+    render_exact_sanity_summary_markdown as _render_exact_sanity_summary_markdown,
+    tree_neural_exact_sanity_summary as _tree_neural_exact_sanity_summary,
+)
+from src.ctreepo.sim.core.tree_neural_execution import (  # noqa: E402
+    job_completion_keys as _job_completion_keys,
+    run_job_batch as _public_run_job_batch,
+    load_completed_run_keys as _load_completed_run_keys,
+    run_scheduler_bundle as _public_run_scheduler_bundle,
+    scheduler_cli_payload as _scheduler_cli_payload,
+    scheduler_item_for_job as _scheduler_item_for_job,
+    scheduler_result_from_summary as _scheduler_result_from_summary,
+    worker_command_for_job as _worker_command_for_job,
+    worker_env_for_token as _worker_env_for_token,
+    write_combined_runs_output as _public_write_combined_runs_output,
+    write_memory_probe_summary as _write_memory_probe_summary,
 )
 from src.ctreepo.sim.suite.markov_observed_token_policy import (  # noqa: E402
     resolve_markov_observed_token_policy,
@@ -113,6 +144,43 @@ CAPACITY_PROFILE_CHOICES = (
     ROOT_ONLY_CAPACITY_PROFILE_MATCHED_ROOT,
     ROOT_ONLY_CAPACITY_PROFILE_STRUCTURAL_MATCHED_ROOT,
 )
+
+
+def _backend_family_from_method_run_token(token: str, *, role: str) -> str:
+    text = str(token or "").strip()
+    if not text:
+        return ""
+    if ":" in text:
+        method_id, law_set_id = text.split(":", 1)
+    else:
+        method_id, law_set_id = text, LAW_SET_ALL
+    spec = RunAxisSpec(
+        problem_id="markov_ops_count",
+        method_id=str(method_id).strip(),
+        law_set_id=canonical_law_set_id(str(law_set_id).strip() or LAW_SET_ALL),
+        role=role,
+    )
+    axis = spec.to_dict()
+    method = str(axis.get("method_id") or "").strip()
+    law_set = str(axis.get("law_set_id") or LAW_SET_ALL).strip()
+    if method == "tree_neural":
+        if law_set == LAW_SET_ON_RANGE_IDEMPOTENCE_ONLY:
+            return "tree_neural_c2"
+        if law_set == LAW_SET_MERGE_AND_ON_RANGE_IDEMPOTENCE:
+            return "tree_neural_c2c3"
+    return method
+
+
+def _backend_families_from_method_runs(
+    tokens: Sequence[str] | None,
+    *,
+    role: str,
+) -> List[str]:
+    families = [
+        _backend_family_from_method_run_token(str(token), role=role)
+        for token in list(tokens or ())
+    ]
+    return [family for family in families if family]
 CAPACITY_PROFILE_PRESETS: Dict[str, Dict[str, Any]] = {
     ROOT_ONLY_CAPACITY_PROFILE_DEFAULT: {},
     ROOT_ONLY_CAPACITY_PROFILE_HISTORICAL_REPLAY: {
@@ -199,28 +267,6 @@ BUDGET_FRONTIER_FULL_DOC_SHARES = (0.0, 0.25, 0.5, 0.75, 1.0)
 BUDGET_FRONTIER_DOC_CONSUMPTION_MODES = ("root_only", "doc_sequence")
 BUDGET_FRONTIER_LOCAL_SPLIT_MODES = ("balanced", "leaf_heavy", "internal_heavy")
 BUDGET_FRONTIER_ALLOCATION_POLICY = "breadth_first"
-EXACT_SANITY_STUDY_NAME = "tree_neural_exact_sanity"
-EXACT_SANITY_FAMILY = "tree_neural"
-EXACT_SANITY_LEVELS = ("leaf", "merge", "root")
-EXACT_SANITY_COMPONENT_METRICS = (
-    "count_mae",
-    "count_match_rate",
-    "first_accuracy",
-    "last_accuracy",
-    "exact_summary_match_rate",
-)
-EXACT_SANITY_MERGE_CONSISTENCY_METRICS = (
-    "merge_join_bit_accuracy",
-    "merge_decoded_consistency_count_mae",
-    "merge_decoded_consistency_first_accuracy",
-    "merge_decoded_consistency_last_accuracy",
-)
-EXACT_SANITY_LAW_METRICS = (
-    "root_mae",
-    "leaf_mae",
-    "c2_idempotence_mae",
-    "merge_mae",
-)
 REPRESENTATION_SUFFICIENCY_STUDY_NAME = "tree_neural_representation_sufficiency"
 REPRESENTATION_SUFFICIENCY_FAMILY = "tree_neural"
 REPRESENTATION_SUFFICIENCY_SELECTION_METRIC = "val_exact_sketch_direct"
@@ -260,315 +306,13 @@ REPRESENTATION_LEARNABILITY_DEFAULT_BENCHMARK_CELLS = (
 )
 
 
-@dataclass(frozen=True)
-class _RunConfigSpec:
-    label: str
-    state_dim: int
-    hidden_dim: int
-    n_epochs: int
-    batch_size: int
-    lr: float
-    weight_decay: float
-    baseline_family: str = ""
-    topology: str = ""
-    fixed_leaf_tokens: int | None = None
-    tree_local_law_weight: float | None = None
-    tree_task_objective_weight: float | None = None
-    tree_local_weighting_mode: str = "fixed_k_hajek"
-    tree_exact_collapse_mode: str = ""
-    tree_c1_relative_weight: float = 1.0
-    tree_c2_relative_weight: float = 1.0
-    tree_c3_relative_weight: float = 1.0
-    official_fno_preserve_requested_leaf_tokens: bool = False
-    preserve_requested_leaf_tokens: bool = False
-    comparison_mode: str = "legacy"
-    tree_leaf_fno_width: int | None = None
-    tree_leaf_fno_n_modes: int | None = None
-    tree_leaf_fno_n_layers: int | None = None
-    tree_model_version: str = ""
-    tree_batch_runtime_mode: str = ""
-    tree_root_supervision_kind: str = "mse"
-    tree_document_loss_normalization_mode: str = "auto"
-    tree_supervision_source: str = "rate"
-    tree_checkpoint_metric: str = "val_root_mae"
-    tree_stage1_checkpoint_metric: str = "val_root_mae"
-    tree_stage1_eval_mode: str = "per_epoch"
-    tree_stage1_screen_doc_limit: int = 0
-    tree_stage1_final_exact_doc_limit: int = 0
-    exact_metric_selection_doc_limit: int = 0
-    exact_metric_selection_interval: int = 1
-    tree_exact_eval_max_docs: int = 0
-    tree_posttrain_train_doc_limit: int = 0
-    tree_batch_pack_mode: str = "structure_bucket"
-    tree_batch_token_budget: int = 0
-    tree_batch_node_budget: int = 0
-    tree_batch_autotune: bool = True
-    tree_batch_structural_pad_limit: float = 0.5
-    tree_batch_auto_queue_min_docs: int = 8
-    tree_batch_auto_queue_min_fill_ratio: float = 0.5
-    tree_eval_workers_per_mig: int = 0
-    gpu_runtime_data_mode: str = "resident"
-    gpu_runtime_bucket_mode: str = "exact_then_bucketed"
-    gpu_runtime_preload_splits: tuple[str, ...] = ("train", "val", "test")
-    gpu_runtime_preload_targets: bool = True
-    gpu_runtime_workers_per_mig: int = 1
-    gpu_runtime_allow_multi_worker_screen: bool = True
-    gpu_runtime_capacity_workers_per_mig: int = 2
-    tree_stage1_artifact_dir: str = ""
-    prepared_data_root: str = ""
-    prepared_data_allow_create: bool = True
-    base_bundle_path: str = ""
-    diagnostic_detail_mode: str = "summary"
-    posttrain_diagnostics_mode: str = ""
-    raw_diagnostic_artifact_dir: str = ""
-    tree_stage1_root_weight: float = 0.0
-    tree_join_bit_weight: float = 0.0
-    tree_training_schedule: str = "two_stage"
-    tree_stage1_epochs: int = 12
-    tree_stage2_epochs: int = 20
-    tree_task_head_mode: str = "full_state_scalar"
-    tree_theorem_surface_mode: str = "slotwise"
-    tree_theorem_count_head_mode: str = "scalar_mse"
-    tree_theorem_count_ordinal_weight: float = 1.0
-    tree_theorem_count_scalar_aux_weight: float = 0.25
-    tree_theorem_count_threshold_balance: bool = True
-    tree_theorem_feature_dim: int = 48
-    tree_theorem_feature_hidden_dim: int = 256
-    tree_merge_hidden_dim: int = 0
-    tree_phi_compose_weight: float = 1.0
-    tree_phi_contrastive_weight: float = 0.25
-    tree_phi_alignment_loss: str = "cosine_mse"
-    tree_c2_mode: str = "reconstruction"
-    oracle_metric_name: str = ""
-    oracle_same_threshold: float = 0.0
-    oracle_diff_threshold: float = 0.0
-    theorem_feature_adapter: str = "markov_count_sketch"
-    theorem_pair_same_threshold: float | None = None
-    theorem_pair_diff_threshold: float | None = None
-    tree_summary_spec_root_mode: str = "task_split_ablation"
-    doc_sequence_train_fraction: float = 0.0
-    aligned_sketch_surface: str = ""
-    summary_spec_name: str = ""
-    slot_count: int = 0
-    tree_theorem_score_dim: int = 0
-    tree_theorem_fiber_dim: int = 0
-    tree_theorem_aux_dim: int = 0
-    tree_score_merge_mode: str = "gated_affine"
-    tree_theorem_count_dim: int = 0
-    tree_theorem_first_dim: int = 0
-    tree_theorem_last_dim: int = 0
-    leaf_supervision_kind: str = "full_sketch"
-    internal_supervision_kind: str = "none"
-    internal_label_rate: float = 0.0
-    max_internal_depth: int = 0
-    leaf_exact_supervision: bool = False
-    leaf_label_rate: float = 1.0
-    root_weight: float = 1.0
-    schedule_consistency_weight: float = 0.0
-    endpoint_loss_scale: float = 1.0
-    budget_total_calls: int = 0
-    budget_total_calls_per_doc: float = 0.0
-    mass_target_per_doc: float = float("nan")
-    full_doc_budget_share: float = 1.0
-    doc_consumption_mode: str = ""
-    local_split_mode: str = ""
-    local_allocation_policy: str = ""
-    package_semantics: str = ""
-    depth_discount_gamma: float = 1.0
-
-    def __post_init__(self) -> None:
-        topology = str(self.topology or "").strip()
-        if topology not in VALID_TOPOLOGIES:
-            raise ValueError(
-                f"topology must be one of {sorted(VALID_TOPOLOGIES)}, got {topology!r}"
-            )
-
-
-@dataclass(frozen=True)
-class _JobSpec:
-    family: str
-    train_doc_count: int
-    benchmark: str
-    hardness_grid: str
-    grid_cell_ids: tuple[str, ...]
-    seeds: tuple[int, ...]
-    config: _RunConfigSpec
-    tuning_stage: str = ""
-    test_metrics_hidden_during_selection: bool = False
-    study_name: str = ""
-    study_axis: str = ""
-    axis_value: str = ""
-    locked_tree_neural_config_label: str = ""
-    selection_metric: str = ""
-
-    def __post_init__(self) -> None:
-        family = str(self.family or "").strip()
-        if not family:
-            raise ValueError("_JobSpec.family must be non-empty")
-        config_family = str(getattr(self.config, "baseline_family", "") or "").strip()
-        if config_family and config_family != family:
-            raise ValueError(
-                f"_JobSpec family/config mismatch: job.family={family!r} "
-                f"config.baseline_family={config_family!r}"
-            )
-        if not config_family:
-            object.__setattr__(
-                self,
-                "config",
-                replace(self.config, baseline_family=family),
-            )
-
-    @property
-    def job_name(self) -> str:
-        scope = self.hardness_grid or self.benchmark
-        cell_suffix = ""
-        if self.grid_cell_ids:
-            cell_suffix = "__" + "_".join(str(cell) for cell in self.grid_cell_ids)
-        leaf_suffix = ""
-        if self.config.fixed_leaf_tokens is not None:
-            leaf_suffix = f"__leaf_{int(self.config.fixed_leaf_tokens)}"
-        seed_suffix = ""
-        if len(self.seeds) == 1:
-            seed_suffix = f"__seed_{int(self.seeds[0])}"
-        stage_suffix = ""
-        if str(self.tuning_stage).strip():
-            stage_suffix = f"__stage_{str(self.tuning_stage)}"
-        config_suffix = ""
-        if str(self.config.label).strip():
-            config_suffix = f"__cfg_{str(self.config.label)}"
-        study_suffix = ""
-        study_axis = _sanitize_label(str(self.study_axis))
-        axis_value = _sanitize_label(str(self.axis_value))
-        if study_axis and axis_value:
-            study_suffix = f"__{study_axis}_{axis_value}"
-        return (
-            f"{scope}__{self.family}__train_{int(self.train_doc_count)}"
-            f"{cell_suffix}{leaf_suffix}{stage_suffix}{config_suffix}{study_suffix}{seed_suffix}"
-        )
-
-    @property
-    def budget_total_calls(self) -> int:
-        return int(self.config.budget_total_calls)
-
-    @property
-    def budget_total_calls_per_doc(self) -> float:
-        return float(self.config.budget_total_calls_per_doc)
-
-    @property
-    def mass_target_per_doc(self) -> float:
-        return float(self.config.mass_target_per_doc)
-
-    @property
-    def full_doc_budget_share(self) -> float:
-        return float(self.config.full_doc_budget_share)
-
-    @property
-    def doc_consumption_mode(self) -> str:
-        return str(self.config.doc_consumption_mode)
-
-    @property
-    def local_split_mode(self) -> str:
-        return str(self.config.local_split_mode)
-
-    @property
-    def local_allocation_policy(self) -> str:
-        return str(self.config.local_allocation_policy)
-
-    @property
-    def package_semantics(self) -> str:
-        return str(self.config.package_semantics)
-
-
-def _with_run_intent_overrides(
-    config: _RunConfigSpec,
-    *,
-    budget_total_calls: int | None = None,
-    budget_total_calls_per_doc: float | None = None,
-    mass_target_per_doc: float | None = None,
-    full_doc_budget_share: float | None = None,
-    doc_consumption_mode: str | None = None,
-    local_split_mode: str | None = None,
-    local_allocation_policy: str | None = None,
-    package_semantics: str | None = None,
-    depth_discount_gamma: float | None = None,
-) -> _RunConfigSpec:
-    updated = replace(
-        config,
-        budget_total_calls=(
-            int(budget_total_calls)
-            if budget_total_calls is not None
-            else int(config.budget_total_calls)
-        ),
-        budget_total_calls_per_doc=(
-            float(budget_total_calls_per_doc)
-            if budget_total_calls_per_doc is not None
-            else float(config.budget_total_calls_per_doc)
-        ),
-        mass_target_per_doc=(
-            float(mass_target_per_doc)
-            if mass_target_per_doc is not None
-            else float(config.mass_target_per_doc)
-        ),
-        full_doc_budget_share=(
-            float(full_doc_budget_share)
-            if full_doc_budget_share is not None
-            else float(config.full_doc_budget_share)
-        ),
-        doc_consumption_mode=(
-            str(doc_consumption_mode)
-            if doc_consumption_mode is not None
-            else str(config.doc_consumption_mode)
-        ),
-        local_split_mode=(
-            str(local_split_mode)
-            if local_split_mode is not None
-            else str(config.local_split_mode)
-        ),
-        local_allocation_policy=(
-            str(local_allocation_policy)
-            if local_allocation_policy is not None
-            else str(config.local_allocation_policy)
-        ),
-        package_semantics=(
-            str(package_semantics)
-            if package_semantics is not None
-            else str(config.package_semantics)
-        ),
-        depth_discount_gamma=(
-            float(depth_discount_gamma)
-            if depth_discount_gamma is not None
-            else float(config.depth_discount_gamma)
-        ),
-    )
-    recompute_package_semantics = package_semantics is None and any(
-        value is not None
-        for value in (
-            budget_total_calls,
-            budget_total_calls_per_doc,
-            mass_target_per_doc,
-            full_doc_budget_share,
-            doc_consumption_mode,
-            local_split_mode,
-            local_allocation_policy,
-        )
-    )
-    if recompute_package_semantics or not str(updated.package_semantics).strip():
-        package_semantics_mapping = asdict(updated)
-        if recompute_package_semantics:
-            package_semantics_mapping["package_semantics"] = ""
-        updated = replace(
-            updated,
-            package_semantics=str(resolve_package_semantics(package_semantics_mapping)),
-        )
-    return updated
-
-
-def _config_mapping_for_run_config(config: _RunConfigSpec) -> Dict[str, Any]:
-    return runtime_config_overrides_from_config_like(config)
-
-
-def _write_run_config_spec(path: Path, config: _RunConfigSpec) -> None:
-    write_tree_run_config_json(path, config)
+# Compatibility names for older script callers. The actual config/job surface
+# lives in src.ctreepo.sim.core.run_config.
+_RunConfigSpec = RunConfigSpec
+_JobSpec = JobSpec
+_with_run_intent_overrides = with_run_intent_overrides
+_config_mapping_for_run_config = config_mapping_for_run_config
+_write_run_config_spec = write_run_config_spec
 
 
 def _tree_base_config_preset(args: argparse.Namespace) -> Dict[str, Any]:
@@ -609,14 +353,6 @@ def _arg_or_preset(
     return default
 
 
-def _parse_mig_uuids(value: str) -> List[str]:
-    tokens = [
-        token.strip()
-        for token in str(value or "").replace(",", " ").split()
-        if token.strip()
-    ]
-    return tokens
-
 
 def _parse_name_list(value: Sequence[str] | str | None, default: Sequence[str]) -> List[str]:
     if value is None:
@@ -637,21 +373,6 @@ def _parse_optional_name_tuple(value: Sequence[str] | str | None) -> tuple[str, 
         return None
     return tuple(_parse_name_list(value, ()))
 
-
-def _discover_mig_uuids() -> List[str]:
-    result = subprocess.run(
-        ["nvidia-smi", "-L"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    uuids: List[str] = []
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if "MIG" not in line or "UUID:" not in line:
-            continue
-        uuids.append(line.split("UUID: ", 1)[1].rstrip(")"))
-    return uuids
 
 
 def _parse_mig_layout_from_nvidia_smi_listing(listing: str) -> List[Dict[str, Any]]:
@@ -842,20 +563,6 @@ def _format_float_label(value: float) -> str:
     return _sanitize_label(text.replace("-", "m").replace(".", "p"))
 
 
-def _job_output_dir_name(
-    job_name: str,
-    *,
-    max_component_length: int = 180,
-) -> str:
-    name = str(job_name).strip() or "job"
-    if len(name) <= int(max_component_length):
-        return name
-    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:12]
-    suffix = f"__h_{digest}"
-    prefix_budget = max(1, int(max_component_length) - len(suffix))
-    prefix = name[:prefix_budget].rstrip("_") or name[:prefix_budget]
-    return f"{prefix}{suffix}"
-
 
 def _default_run_config(args: argparse.Namespace, *, label: str = "default") -> _RunConfigSpec:
     preset = _tree_base_config_preset(args)
@@ -891,7 +598,7 @@ def _default_run_config(args: argparse.Namespace, *, label: str = "default") -> 
     tree_task_objective_weight = _value(
         "tree_task_objective_weight",
         None,
-        preset_key="task_objective_weight",
+        preset_key="root_share",
     )
     tree_local_weighting_mode = _value(
         "tree_local_weighting_mode",
@@ -1144,45 +851,19 @@ def _tuning_grid(args: argparse.Namespace) -> List[_RunConfigSpec]:
     return configs
 
 
-def _resolve_benchmark_leaf_tokens(
-    *,
-    benchmark_name: str,
-    train_doc_count: int,
-    state_dim: int,
-    hidden_dim: int,
-    n_epochs: int,
-    batch_size: int,
-    lr: float,
-    weight_decay: float,
-) -> int:
-    benchmark = resolve_full_doc_diagnostic_benchmark(str(benchmark_name))
-    config = _base_config_for_benchmark(
+
+
+
+
+def _resolved_tree_batch_pack_mode(*, benchmark: str, raw_value: str | None) -> str:
+    return _public_resolved_tree_batch_pack_mode(
         benchmark=benchmark,
-        train_docs=int(train_doc_count),
-        use_cuda=False,
-        cuda_device=None,
-        torch_threads=1,
-        seed=0,
-        config_overrides={
-            "state_dim": int(state_dim),
-            "hidden_dim": int(hidden_dim),
-            "n_epochs": int(n_epochs),
-            "batch_size": int(batch_size),
-            "lr": float(lr),
-            "weight_decay": float(weight_decay),
-        },
+        raw_value=raw_value,
     )
-    return int(config.fixed_leaf_tokens)
 
 
-def _resolved_benchmark_payload(benchmark_name: str) -> Dict[str, Any]:
-    benchmark = resolve_full_doc_diagnostic_benchmark(str(benchmark_name))
-    return {
-        "benchmark": str(benchmark_name),
-        "resolved_benchmark_name": str(benchmark.name),
-        "benchmark_cell_id": str(benchmark.cell_id or ""),
-        "benchmark_grid_name": str(benchmark.grid_name or ""),
-    }
+def _resolve_benchmark_leaf_tokens(**kwargs: Any) -> int:
+    return int(_public_resolve_benchmark_leaf_tokens(**kwargs))
 
 
 def _fair_fno_tree_config_for_train_doc_count(
@@ -1191,78 +872,11 @@ def _fair_fno_tree_config_for_train_doc_count(
     train_doc_count: int,
     label: str = FAIR_FNO_PARITY_CONFIG_LABEL,
 ) -> _RunConfigSpec:
-    preload_splits = tuple(
-        str(item)
-        for item in list(getattr(args, "gpu_runtime_preload_splits", ("train", "val", "test")))
-        if str(item).strip()
-    )
-    fixed_leaf_tokens = _resolve_benchmark_leaf_tokens(
-        benchmark_name=str(args.benchmark),
-        train_doc_count=int(train_doc_count),
-        state_dim=int(args.state_dim),
-        hidden_dim=int(args.hidden_dim),
-        n_epochs=int(args.n_epochs),
-        batch_size=int(args.batch_size),
-        lr=float(args.lr),
-        weight_decay=float(args.weight_decay),
-    )
-    return _RunConfigSpec(
-        label=str(label),
-        state_dim=int(args.state_dim),
-        hidden_dim=int(args.hidden_dim),
-        n_epochs=int(args.n_epochs),
-        batch_size=int(args.batch_size),
-        lr=float(args.lr),
-        weight_decay=float(args.weight_decay),
-        fixed_leaf_tokens=None,
-        tree_local_law_weight=(
-            None
-            if args.tree_local_law_weight is None
-            else float(args.tree_local_law_weight)
-        ),
-        tree_task_objective_weight=(
-            None
-            if args.tree_task_objective_weight is None
-            else float(args.tree_task_objective_weight)
-        ),
-        tree_leaf_fno_width=max(64, int(args.state_dim)),
-        tree_leaf_fno_n_modes=min(16, max(1, fixed_leaf_tokens // 2)),
-        tree_leaf_fno_n_layers=4,
-        tree_root_supervision_kind="count_ce",
-        gpu_runtime_data_mode=str(
-            getattr(args, "gpu_runtime_data_mode", "resident")
-        ),
-        gpu_runtime_bucket_mode=str(
-            getattr(args, "gpu_runtime_bucket_mode", "exact_then_bucketed")
-        ),
-        gpu_runtime_preload_splits=preload_splits or ("train", "val", "test"),
-        gpu_runtime_preload_targets=bool(
-            getattr(args, "gpu_runtime_preload_targets", True)
-        ),
-        gpu_runtime_workers_per_mig=int(
-            getattr(args, "gpu_runtime_workers_per_mig", 1)
-        ),
-        gpu_runtime_allow_multi_worker_screen=bool(
-            getattr(args, "gpu_runtime_allow_multi_worker_screen", True)
-        ),
-        gpu_runtime_capacity_workers_per_mig=int(
-            getattr(args, "gpu_runtime_capacity_workers_per_mig", 2)
-        ),
-        doc_sequence_train_fraction=0.0,
-    )
-
-
-def _fair_fno_parity_tree_config(args: argparse.Namespace) -> _RunConfigSpec:
-    return _fair_fno_tree_config_for_train_doc_count(
+    return _public_fair_fno_tree_config_for_train_doc_count(
         args,
-        train_doc_count=int(
-            getattr(
-                args,
-                "gate_train_doc_count",
-                getattr(args, "train_doc_count", PARITY_GATE_TRAIN_DOC_COUNT),
-            )
-        ),
-        label=FAIR_FNO_PARITY_CONFIG_LABEL,
+        train_doc_count=int(train_doc_count),
+        label=str(label),
+        leaf_token_resolver=_resolve_benchmark_leaf_tokens,
     )
 
 
@@ -1279,144 +893,48 @@ def _slot_exact_sanity_config(
     leaf_exact_supervision: bool = False,
     tree_summary_spec_root_mode: str | None = None,
 ) -> _RunConfigSpec:
-    fair_base = _fair_fno_tree_config_for_train_doc_count(
+    return _public_slot_exact_sanity_config(
         args,
         train_doc_count=int(train_doc_count),
-        label=str(config_label),
-    )
-    return replace(
-        fair_base,
-        label=str(config_label),
-        tree_root_supervision_kind="mse",
-        tree_checkpoint_metric=str(
-            getattr(args, "tree_checkpoint_metric", "val_root_mae")
-        ),
-        tree_stage1_checkpoint_metric=str(
-            getattr(args, "tree_stage1_checkpoint_metric", "val_root_mae")
-        ),
-        tree_stage1_eval_mode=str(
-            getattr(args, "tree_stage1_eval_mode", "per_epoch")
-        ),
-        tree_stage1_screen_doc_limit=int(
-            getattr(args, "tree_stage1_screen_doc_limit", 0)
-        ),
-        tree_stage1_final_exact_doc_limit=int(
-            getattr(args, "tree_stage1_final_exact_doc_limit", 0)
-        ),
-        exact_metric_selection_doc_limit=int(
-            getattr(args, "exact_metric_selection_doc_limit", 0)
-        ),
-        exact_metric_selection_interval=int(
-            getattr(args, "exact_metric_selection_interval", 1)
-        ),
-        tree_batch_pack_mode=str(
-            _resolved_tree_batch_pack_mode(
-                benchmark=str(getattr(args, "benchmark", "")),
-                raw_value=getattr(args, "tree_batch_pack_mode", ""),
-            )
-        ),
-        tree_batch_token_budget=int(
-            getattr(args, "tree_batch_token_budget", 0)
-        ),
-        tree_batch_node_budget=int(
-            getattr(args, "tree_batch_node_budget", 0)
-        ),
-        tree_batch_autotune=bool(
-            getattr(args, "tree_batch_autotune", True)
-        ),
-        tree_batch_structural_pad_limit=float(
-            getattr(args, "tree_batch_structural_pad_limit", 0.5)
-        ),
-        tree_batch_auto_queue_min_docs=int(
-            getattr(args, "tree_batch_auto_queue_min_docs", 8)
-        ),
-        tree_batch_auto_queue_min_fill_ratio=float(
-            getattr(args, "tree_batch_auto_queue_min_fill_ratio", 0.5)
-        ),
-        tree_eval_workers_per_mig=int(
-            getattr(args, "tree_eval_workers_per_mig", 0)
-        ),
-        tree_stage1_artifact_dir=str(
-            getattr(args, "tree_stage1_artifact_dir", "")
-        ),
-        tree_stage1_root_weight=float(
-            getattr(args, "tree_stage1_root_weight", 0.0)
-        ),
-        tree_join_bit_weight=float(
-            getattr(args, "tree_join_bit_weight", 0.0)
-        ),
-        tree_training_schedule=str(
-            getattr(args, "tree_training_schedule", "two_stage")
-        ),
-        tree_stage1_epochs=int(getattr(args, "tree_stage1_epochs", 12)),
-        tree_stage2_epochs=int(getattr(args, "tree_stage2_epochs", 20)),
-        tree_task_head_mode=str(
-            getattr(args, "tree_task_head_mode", "theorem_feature_scalar")
-        ),
-        tree_theorem_surface_mode=str(
-            getattr(args, "tree_theorem_surface_mode", "shared_bottleneck")
-        ),
-        tree_theorem_count_head_mode=str(
-            getattr(args, "tree_theorem_count_head_mode", "scalar_mse")
-        ),
-        tree_theorem_feature_dim=int(
-            getattr(args, "tree_theorem_feature_dim", 48)
-        ),
-        tree_theorem_feature_hidden_dim=int(
-            getattr(args, "tree_theorem_feature_hidden_dim", 256)
-        ),
-        tree_merge_hidden_dim=int(
-            getattr(args, "tree_merge_hidden_dim", 0)
-        ),
-        tree_theorem_score_dim=int(
-            getattr(args, "tree_theorem_score_dim", 0)
-        ),
-        tree_theorem_fiber_dim=int(
-            getattr(args, "tree_theorem_fiber_dim", 0)
-        ),
-        tree_theorem_aux_dim=int(
-            getattr(args, "tree_theorem_aux_dim", 0)
-        ),
-        tree_score_merge_mode=str(
-            getattr(args, "tree_score_merge_mode", "gated_affine")
-        ),
-        tree_phi_compose_weight=float(
-            getattr(args, "tree_phi_compose_weight", 1.0)
-        ),
-        tree_phi_contrastive_weight=float(
-            getattr(args, "tree_phi_contrastive_weight", 0.25)
-        ),
-        tree_phi_alignment_loss=str(
-            getattr(args, "tree_phi_alignment_loss", "cosine_mse")
-        ),
-        tree_theorem_count_ordinal_weight=float(
-            getattr(args, "tree_theorem_count_ordinal_weight", 1.0)
-        ),
-        tree_theorem_count_scalar_aux_weight=float(
-            getattr(args, "tree_theorem_count_scalar_aux_weight", 0.25)
-        ),
-        tree_theorem_count_threshold_balance=bool(
-            getattr(args, "tree_theorem_count_threshold_balance", True)
-        ),
-        tree_summary_spec_root_mode=str(
-            tree_summary_spec_root_mode
-            if tree_summary_spec_root_mode is not None
-            else getattr(args, "tree_summary_spec_root_mode", "factored_theorem_readout")
-        ),
-        doc_sequence_train_fraction=0.0,
-        aligned_sketch_surface="",
-        summary_spec_name="markov_count_sketch",
-        slot_count=4,
-        tree_theorem_count_dim=int(getattr(args, "tree_theorem_count_dim", 8)),
-        tree_theorem_first_dim=int(getattr(args, "tree_theorem_first_dim", 8)),
-        tree_theorem_last_dim=int(getattr(args, "tree_theorem_last_dim", 8)),
+        config_label=str(config_label),
+        leaf_label_rate=float(leaf_label_rate),
         leaf_supervision_kind=str(leaf_supervision_kind),
         internal_supervision_kind=str(internal_supervision_kind),
         internal_label_rate=float(internal_label_rate),
-        leaf_exact_supervision=bool(leaf_exact_supervision),
-        leaf_label_rate=float(leaf_label_rate),
         endpoint_loss_scale=float(endpoint_loss_scale),
+        leaf_exact_supervision=bool(leaf_exact_supervision),
+        tree_summary_spec_root_mode=tree_summary_spec_root_mode,
+        fair_config_func=_fair_fno_tree_config_for_train_doc_count,
+        batch_pack_resolver=_resolved_tree_batch_pack_mode,
     )
+
+
+def _resolved_benchmark_payload(benchmark_name: str) -> Dict[str, Any]:
+    benchmark = resolve_full_doc_diagnostic_benchmark(str(benchmark_name))
+    return {
+        "benchmark": str(benchmark_name),
+        "resolved_benchmark_name": str(benchmark.name),
+        "benchmark_cell_id": str(benchmark.cell_id or ""),
+        "benchmark_grid_name": str(benchmark.grid_name or ""),
+    }
+
+
+
+
+def _fair_fno_parity_tree_config(args: argparse.Namespace) -> _RunConfigSpec:
+    return _fair_fno_tree_config_for_train_doc_count(
+        args,
+        train_doc_count=int(
+            getattr(
+                args,
+                "gate_train_doc_count",
+                getattr(args, "train_doc_count", PARITY_GATE_TRAIN_DOC_COUNT),
+            )
+        ),
+        label=FAIR_FNO_PARITY_CONFIG_LABEL,
+    )
+
+
 
 
 def _exact_sanity_configs_for_train_doc_count(
@@ -2954,161 +2472,6 @@ def _memory_probe_callback_from_jsonl(path: Path):
     return _callback
 
 
-def _read_jsonl_rows(path: Path) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    try:
-        text = path.read_text(encoding="utf-8")
-    except Exception:
-        return rows
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(payload, Mapping):
-            rows.append({str(key): value for key, value in dict(payload).items()})
-    return rows
-
-
-def _summarize_memory_probe_file(path: Path) -> Dict[str, Any]:
-    rows = _read_jsonl_rows(path)
-    job_dir = path.parent
-    first_event = str(rows[0].get("event", "")) if rows else ""
-    last_event = str(rows[-1].get("event", "")) if rows else ""
-    max_private_dirty_kib = 0
-    max_private_dirty_event = ""
-    max_rss_kib = 0
-    max_rss_event = ""
-    max_swap_kib = 0
-    max_swap_event = ""
-    largest_private_dirty_delta_kib = 0
-    largest_private_dirty_delta_from_event = ""
-    largest_private_dirty_delta_to_event = ""
-    largest_private_dirty_delta_from_kib = 0
-    largest_private_dirty_delta_to_kib = 0
-    reached_pre_exact_eval_batch = False
-    reached_post_exact_eval_batch = False
-    reached_post_exact_eval_batch_trim = False
-    previous_row: Dict[str, Any] | None = None
-    for row in rows:
-        event = str(row.get("event", ""))
-        private_dirty_kib = int(row.get("private_dirty_kib", 0) or 0)
-        rss_kib = int(row.get("rss_kib", 0) or 0)
-        swap_kib = int(row.get("swap_kib", 0) or 0)
-        if private_dirty_kib >= max_private_dirty_kib:
-            max_private_dirty_kib = int(private_dirty_kib)
-            max_private_dirty_event = event
-        if rss_kib >= max_rss_kib:
-            max_rss_kib = int(rss_kib)
-            max_rss_event = event
-        if swap_kib >= max_swap_kib:
-            max_swap_kib = int(swap_kib)
-            max_swap_event = event
-        if event == "pre_exact_eval_batch":
-            reached_pre_exact_eval_batch = True
-        elif event == "post_exact_eval_batch":
-            reached_post_exact_eval_batch = True
-        elif event == "post_exact_eval_batch_trim":
-            reached_post_exact_eval_batch_trim = True
-        if previous_row is not None:
-            previous_private_dirty_kib = int(
-                previous_row.get("private_dirty_kib", 0) or 0
-            )
-            delta_kib = int(private_dirty_kib - previous_private_dirty_kib)
-            if delta_kib >= largest_private_dirty_delta_kib:
-                largest_private_dirty_delta_kib = int(delta_kib)
-                largest_private_dirty_delta_from_event = str(
-                    previous_row.get("event", "")
-                )
-                largest_private_dirty_delta_to_event = event
-                largest_private_dirty_delta_from_kib = int(previous_private_dirty_kib)
-                largest_private_dirty_delta_to_kib = int(private_dirty_kib)
-        previous_row = row
-    return {
-        "job_dir": str(job_dir),
-        "job_dir_name": str(job_dir.name),
-        "probe_jsonl": str(path),
-        "n_rows": int(len(rows)),
-        "first_event": first_event,
-        "last_event": last_event,
-        "reached_pre_exact_eval_batch": bool(reached_pre_exact_eval_batch),
-        "reached_post_exact_eval_batch": bool(reached_post_exact_eval_batch),
-        "reached_post_exact_eval_batch_trim": bool(reached_post_exact_eval_batch_trim),
-        "max_private_dirty_kib": int(max_private_dirty_kib),
-        "max_private_dirty_event": max_private_dirty_event,
-        "max_rss_kib": int(max_rss_kib),
-        "max_rss_event": max_rss_event,
-        "max_swap_kib": int(max_swap_kib),
-        "max_swap_event": max_swap_event,
-        "largest_private_dirty_delta_kib": int(largest_private_dirty_delta_kib),
-        "largest_private_dirty_delta_from_event": largest_private_dirty_delta_from_event,
-        "largest_private_dirty_delta_to_event": largest_private_dirty_delta_to_event,
-        "largest_private_dirty_delta_from_kib": int(
-            largest_private_dirty_delta_from_kib
-        ),
-        "largest_private_dirty_delta_to_kib": int(
-            largest_private_dirty_delta_to_kib
-        ),
-    }
-
-
-def _write_memory_probe_summary(output_root: Path) -> Dict[str, Any]:
-    probe_paths = sorted(output_root.rglob("memory_probe.jsonl"))
-    worker_summaries = [
-        _summarize_memory_probe_file(path)
-        for path in probe_paths
-    ]
-    peak_private_dirty = sorted(
-        worker_summaries,
-        key=lambda row: int(row.get("max_private_dirty_kib", 0) or 0),
-        reverse=True,
-    )
-    peak_private_dirty_deltas = sorted(
-        worker_summaries,
-        key=lambda row: int(row.get("largest_private_dirty_delta_kib", 0) or 0),
-        reverse=True,
-    )
-    payload = {
-        "output_root": str(output_root),
-        "probe_files_found": int(len(probe_paths)),
-        "jobs_with_rows": int(
-            sum(1 for row in worker_summaries if int(row.get("n_rows", 0) or 0) > 0)
-        ),
-        "jobs_reaching_pre_exact_eval_batch": int(
-            sum(
-                1
-                for row in worker_summaries
-                if bool(row.get("reached_pre_exact_eval_batch", False))
-            )
-        ),
-        "jobs_reaching_post_exact_eval_batch": int(
-            sum(
-                1
-                for row in worker_summaries
-                if bool(row.get("reached_post_exact_eval_batch", False))
-            )
-        ),
-        "jobs_reaching_post_exact_eval_batch_trim": int(
-            sum(
-                1
-                for row in worker_summaries
-                if bool(row.get("reached_post_exact_eval_batch_trim", False))
-            )
-        ),
-        "peak_private_dirty_jobs": list(peak_private_dirty[:8]),
-        "largest_private_dirty_delta_jobs": list(peak_private_dirty_deltas[:8]),
-        "workers": list(worker_summaries),
-    }
-    summary_path = output_root / "memory_probe_summary.json"
-    summary_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    payload["summary_json"] = str(summary_path)
-    return payload
 
 
 def _execute_worker_invocation(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
@@ -3204,7 +2567,7 @@ def _worker_run_config_for_preflight(
     }
     alias_pairs = (
         ("local_law_weight", "tree_local_law_weight"),
-        ("task_objective_weight", "tree_task_objective_weight"),
+        ("root_share", "tree_task_objective_weight"),
         ("c1_relative_weight", "tree_c1_relative_weight"),
         ("c2_relative_weight", "tree_c2_relative_weight"),
         ("c3_relative_weight", "tree_c3_relative_weight"),
@@ -3235,7 +2598,7 @@ def _worker_payload(args: argparse.Namespace) -> Dict[str, Any]:
     if args.tree_local_law_weight is not None:
         config_overrides["local_law_weight"] = float(args.tree_local_law_weight)
     if args.tree_task_objective_weight is not None:
-        config_overrides["task_objective_weight"] = float(
+        config_overrides["root_share"] = float(
             args.tree_task_objective_weight
         )
     config_overrides["tree_local_weighting_mode"] = str(
@@ -3876,274 +3239,6 @@ def _job_seeds_for_family(args: argparse.Namespace, family: str) -> List[int]:
     return [int(args.seeds[0])]
 
 
-def _job_priority(job: _JobSpec, *, family_order: Mapping[str, int]) -> tuple[int, int, int, str, int]:
-    is_control = 1 if str(job.family) in CLOSED_FORM_CONTROL_FAMILIES else 0
-    min_seed = int(min(job.seeds)) if job.seeds else 0
-    return (
-        is_control,
-        -int(job.train_doc_count),
-        family_order.get(str(job.family), 0),
-        str(job.config.label),
-        min_seed,
-    )
-
-
-def _job_completion_keys(
-    job: _JobSpec,
-) -> Set[
-    Tuple[
-        str,
-        str,
-        int,
-        int,
-        str,
-        str,
-        int,
-        str,
-        str,
-        str,
-        int,
-        float,
-        float,
-        str,
-        str,
-        str,
-    ]
-]:
-    scope_ids = tuple(str(cell) for cell in job.grid_cell_ids) or (str(job.benchmark),)
-    leaf_token_key = (
-        0
-        if job.config.fixed_leaf_tokens is None
-        else int(job.config.fixed_leaf_tokens)
-    )
-    return {
-        (
-            str(scope_id),
-            str(job.family),
-            int(job.train_doc_count),
-            int(seed),
-            str(job.config.label),
-            str(job.tuning_stage),
-            int(leaf_token_key),
-            str(job.study_name),
-            str(job.study_axis),
-            str(job.axis_value),
-            int(job.budget_total_calls),
-            float(job.budget_total_calls_per_doc),
-            float(job.full_doc_budget_share),
-            str(job.doc_consumption_mode),
-            str(job.local_split_mode),
-            str(job.local_allocation_policy),
-        )
-        for scope_id in scope_ids
-        for seed in job.seeds
-    }
-
-
-def _load_completed_run_keys(
-    output_root: Path,
-) -> Set[
-    Tuple[
-        str,
-        str,
-        int,
-        int,
-        str,
-        str,
-        int,
-        str,
-        str,
-        str,
-        int,
-        float,
-        float,
-        str,
-        str,
-        str,
-    ]
-]:
-    completed: Set[
-        Tuple[
-            str,
-            str,
-            int,
-            int,
-            str,
-            str,
-            int,
-            str,
-            str,
-            str,
-            int,
-            float,
-            float,
-            str,
-            str,
-            str,
-        ]
-    ] = set()
-    for path in sorted(Path(output_root).glob("**/runs/*.json")):
-        try:
-            run = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        scope_id = str(run.get("cell_id") or run.get("benchmark") or "").strip()
-        family = str(run.get("baseline_family") or "").strip()
-        if not scope_id or not family:
-            continue
-        try:
-            train_doc_count = int(run.get("train_doc_count"))
-            seed = int(run.get("seed"))
-        except (TypeError, ValueError):
-            continue
-        stored_leaf_tokens = (
-            int(run.get("fixed_leaf_tokens"))
-            if run.get("fixed_leaf_tokens") not in {"", None}
-            else 0
-        )
-        leaf_token_keys = {int(stored_leaf_tokens)}
-        if int(stored_leaf_tokens) > 0:
-            leaf_token_keys.add(0)
-        for leaf_token_key in leaf_token_keys:
-            raw_budget_total_calls = run.get("budget_total_calls", 0)
-            raw_budget_calls_per_doc = run.get("budget_total_calls_per_doc", 0.0)
-            raw_full_doc_budget_share = run.get("full_doc_budget_share", 1.0)
-            completed.add(
-                (
-                    scope_id,
-                    family,
-                    train_doc_count,
-                    seed,
-                    str(run.get("config_label", "")),
-                    str(run.get("tuning_stage", "")),
-                    int(leaf_token_key),
-                    str(run.get("study_name", "")),
-                    str(run.get("study_axis", "")),
-                    str(run.get("axis_value", "")),
-                    (
-                        0
-                        if raw_budget_total_calls in {"", None}
-                        else int(raw_budget_total_calls)
-                    ),
-                    (
-                        0.0
-                        if raw_budget_calls_per_doc in {"", None}
-                        else float(raw_budget_calls_per_doc)
-                    ),
-                    (
-                        1.0
-                        if raw_full_doc_budget_share in {"", None}
-                        else float(raw_full_doc_budget_share)
-                    ),
-                    str(run.get("doc_consumption_mode", "")),
-                    str(run.get("local_split_mode", "")),
-                    str(run.get("local_allocation_policy", "")),
-                )
-            )
-    return completed
-
-
-def _build_jobs_for_configs(
-    *,
-    families: Sequence[str],
-    train_doc_counts: Sequence[int],
-    benchmark: str,
-    hardness_grid: str,
-    grid_cell_ids: Sequence[str],
-    seeds: Sequence[int],
-    job_granularity: str,
-    repeat_closed_form_controls: bool,
-    configs: Sequence[_RunConfigSpec],
-    tuning_stage: str = "",
-    test_metrics_hidden_during_selection: bool = False,
-    study_name: str = "",
-    study_axis: str = "",
-    axis_value: str = "",
-    locked_tree_neural_config_label: str = "",
-    selection_metric: str = "",
-    budget_total_calls: int = 0,
-    budget_total_calls_per_doc: float = 0.0,
-    mass_target_per_doc: float = float("nan"),
-    full_doc_budget_share: float = 1.0,
-    doc_consumption_mode: str = "",
-    local_split_mode: str = "",
-    local_allocation_policy: str = "",
-    package_semantics: str = "",
-    depth_discount_gamma: float = 1.0,
-) -> List[_JobSpec]:
-    jobs: List[_JobSpec] = []
-    family_list = [str(family) for family in families]
-    family_order = {
-        str(family): idx for idx, family in enumerate(family_list)
-    }
-    seed_values = [int(seed) for seed in seeds]
-    for config in configs:
-        effective_config = _with_run_intent_overrides(
-            config,
-            budget_total_calls=int(budget_total_calls),
-            budget_total_calls_per_doc=float(budget_total_calls_per_doc),
-            mass_target_per_doc=float(mass_target_per_doc),
-            full_doc_budget_share=float(full_doc_budget_share),
-            doc_consumption_mode=str(doc_consumption_mode),
-            local_split_mode=str(local_split_mode),
-            local_allocation_policy=str(local_allocation_policy),
-            package_semantics=str(package_semantics),
-            depth_discount_gamma=float(depth_discount_gamma),
-        )
-        for train_doc_count in [int(value) for value in train_doc_counts]:
-            for family in family_list:
-                if bool(repeat_closed_form_controls) or str(family) not in CLOSED_FORM_CONTROL_FAMILIES:
-                    job_seeds = list(seed_values)
-                else:
-                    job_seeds = [int(seed_values[0])]
-                if str(job_granularity) == "family_train_seed":
-                    for seed in job_seeds:
-                        jobs.append(
-                            _JobSpec(
-                                family=str(family),
-                                train_doc_count=int(train_doc_count),
-                                benchmark=str(benchmark),
-                                hardness_grid=str(hardness_grid),
-                                grid_cell_ids=tuple(str(cell) for cell in grid_cell_ids),
-                                seeds=(int(seed),),
-                                config=effective_config,
-                                tuning_stage=str(tuning_stage),
-                                test_metrics_hidden_during_selection=bool(
-                                    test_metrics_hidden_during_selection
-                                ),
-                                study_name=str(study_name),
-                                study_axis=str(study_axis),
-                                axis_value=str(axis_value),
-                                locked_tree_neural_config_label=str(
-                                    locked_tree_neural_config_label
-                                ),
-                                selection_metric=str(selection_metric),
-                            )
-                        )
-                    continue
-                jobs.append(
-                    _JobSpec(
-                        family=str(family),
-                        train_doc_count=int(train_doc_count),
-                        benchmark=str(benchmark),
-                        hardness_grid=str(hardness_grid),
-                        grid_cell_ids=tuple(str(cell) for cell in grid_cell_ids),
-                        seeds=tuple(int(seed) for seed in job_seeds),
-                        config=effective_config,
-                        tuning_stage=str(tuning_stage),
-                        test_metrics_hidden_during_selection=bool(
-                            test_metrics_hidden_during_selection
-                        ),
-                        study_name=str(study_name),
-                        study_axis=str(study_axis),
-                        axis_value=str(axis_value),
-                        locked_tree_neural_config_label=str(
-                            locked_tree_neural_config_label
-                        ),
-                        selection_metric=str(selection_metric),
-                    )
-                )
-    return sorted(jobs, key=lambda job: _job_priority(job, family_order=family_order))
 
 
 def _build_jobs(args: argparse.Namespace) -> List[_JobSpec]:
@@ -4314,13 +3409,25 @@ def finalize_budget_frontier_output(output_root: Path) -> Dict[str, Any]:
 
 def build_parity_job_bundle(args: argparse.Namespace) -> Dict[str, Any]:
     output_root = Path(str(args.output_root))
-    parity_tree_families = _parse_name_list(
-        getattr(args, "tree_families", None),
-        PARITY_TREE_FAMILIES,
+    parity_tree_families = (
+        _backend_families_from_method_runs(
+            getattr(args, "method_runs", None),
+            role="primary",
+        )
+        or _parse_name_list(
+            getattr(args, "tree_families", None),
+            PARITY_TREE_FAMILIES,
+        )
     )
-    parity_fno_families = _parse_name_list(
-        getattr(args, "fno_families", None),
-        PARITY_FNO_FAMILIES,
+    parity_fno_families = (
+        _backend_families_from_method_runs(
+            getattr(args, "reference_method_runs", None),
+            role="reference",
+        )
+        or _parse_name_list(
+            getattr(args, "fno_families", None),
+            PARITY_FNO_FAMILIES,
+        )
     )
     parity_comparison_families = [
         *parity_fno_families,
@@ -7220,1011 +6327,36 @@ def _load_or_write_summary_outputs(output_root: Path) -> Dict[str, Any]:
     return payload
 
 
-def _worker_command_for_job(
-    job: _JobSpec,
-    *,
-    output_dir: Path,
-    torch_threads: int,
-    use_cuda: bool,
-) -> list[str]:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    config_family = str(getattr(job.config, "baseline_family", "") or "").strip()
-    if config_family != str(job.family).strip():
-        raise ValueError(
-            "job config baseline_family must match job.family before worker launch "
-            f"(config={config_family!r}, job={str(job.family).strip()!r})"
-        )
-    config_spec_path = output_dir / "requested_run_config.json"
-    _write_run_config_spec(config_spec_path, job.config)
-    cmd = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "worker",
-        "--job-name",
-        str(job.job_name),
-        "--output-dir",
-        str(output_dir),
-        "--memory-probe-jsonl",
-        str(output_dir / "memory_probe.jsonl"),
-        "--family",
-        str(job.family),
-        "--train-doc-count",
-        str(int(job.train_doc_count)),
-        "--benchmark",
-        str(job.benchmark),
-        "--hardness-grid",
-        str(job.hardness_grid),
-        "--state-dim",
-        str(int(job.config.state_dim)),
-        "--hidden-dim",
-        str(int(job.config.hidden_dim)),
-        "--n-epochs",
-        str(int(job.config.n_epochs)),
-        "--batch-size",
-        str(int(job.config.batch_size)),
-        "--lr",
-        str(float(job.config.lr)),
-        "--weight-decay",
-        str(float(job.config.weight_decay)),
-        "--torch-threads",
-        str(int(torch_threads)),
-        "--config-label",
-        str(job.config.label),
-        "--config-spec-json-path",
-        str(config_spec_path),
-        "--tuning-stage",
-        str(job.tuning_stage),
-    ]
-    if bool(job.grid_cell_ids):
-        cmd.extend(["--grid-cell-ids", *[str(cell) for cell in job.grid_cell_ids]])
-    if job.config.tree_local_law_weight is not None:
-        cmd.extend(
-            ["--tree-local-law-weight", str(float(job.config.tree_local_law_weight))]
-        )
-    if job.config.fixed_leaf_tokens is not None:
-        cmd.extend(
-            ["--fixed-leaf-tokens", str(int(job.config.fixed_leaf_tokens))]
-        )
-    if job.config.tree_task_objective_weight is not None:
-        cmd.extend(
-            [
-                "--tree-task-objective-weight",
-                str(float(job.config.tree_task_objective_weight)),
-            ]
-        )
-    if str(job.config.tree_local_weighting_mode).strip():
-        cmd.extend(
-            [
-                "--tree-local-weighting-mode",
-                str(job.config.tree_local_weighting_mode),
-            ]
-        )
-    if str(job.config.tree_exact_collapse_mode).strip():
-        cmd.extend(
-            [
-                "--tree-exact-collapse-mode",
-                str(job.config.tree_exact_collapse_mode),
-            ]
-        )
-    if bool(job.config.official_fno_preserve_requested_leaf_tokens):
-        cmd.append("--official-fno-preserve-requested-leaf-tokens")
-    if bool(job.config.preserve_requested_leaf_tokens):
-        cmd.append("--preserve-requested-leaf-tokens")
-    if str(job.config.comparison_mode).strip():
-        cmd.extend(["--comparison-mode", str(job.config.comparison_mode)])
-    if float(job.config.tree_c1_relative_weight) != 1.0:
-        cmd.extend(
-            [
-                "--tree-c1-relative-weight",
-                str(float(job.config.tree_c1_relative_weight)),
-            ]
-        )
-    if float(job.config.tree_c2_relative_weight) != 1.0:
-        cmd.extend(
-            [
-                "--tree-c2-relative-weight",
-                str(float(job.config.tree_c2_relative_weight)),
-            ]
-        )
-    if float(job.config.tree_c3_relative_weight) != 1.0:
-        cmd.extend(
-            [
-                "--tree-c3-relative-weight",
-                str(float(job.config.tree_c3_relative_weight)),
-            ]
-        )
-    if job.config.tree_leaf_fno_width is not None:
-        cmd.extend(
-            ["--tree-leaf-fno-width", str(int(job.config.tree_leaf_fno_width))]
-        )
-    if job.config.tree_leaf_fno_n_modes is not None:
-        cmd.extend(
-            [
-                "--tree-leaf-fno-n-modes",
-                str(int(job.config.tree_leaf_fno_n_modes)),
-            ]
-        )
-    if job.config.tree_leaf_fno_n_layers is not None:
-        cmd.extend(
-            [
-                "--tree-leaf-fno-n-layers",
-                str(int(job.config.tree_leaf_fno_n_layers)),
-            ]
-        )
-    if str(job.config.tree_model_version).strip():
-        cmd.extend(
-            [
-                "--tree-model-version",
-                str(job.config.tree_model_version),
-            ]
-        )
-    if str(job.config.tree_batch_runtime_mode).strip():
-        cmd.extend(
-            [
-                "--tree-batch-runtime-mode",
-                str(job.config.tree_batch_runtime_mode),
-            ]
-        )
-    if str(job.config.tree_root_supervision_kind).strip():
-        cmd.extend(
-            [
-                "--tree-root-supervision-kind",
-                str(job.config.tree_root_supervision_kind),
-            ]
-        )
-    if str(job.config.tree_document_loss_normalization_mode).strip():
-        cmd.extend(
-            [
-                "--tree-document-loss-normalization-mode",
-                str(job.config.tree_document_loss_normalization_mode),
-            ]
-        )
-    if str(job.config.tree_supervision_source).strip():
-        cmd.extend(
-            [
-                "--tree-supervision-source",
-                str(job.config.tree_supervision_source),
-            ]
-        )
-    if str(job.config.tree_checkpoint_metric).strip():
-        cmd.extend(
-            [
-                "--tree-checkpoint-metric",
-                str(job.config.tree_checkpoint_metric),
-            ]
-        )
-    if str(job.config.tree_stage1_checkpoint_metric).strip():
-        cmd.extend(
-            [
-                "--tree-stage1-checkpoint-metric",
-                str(job.config.tree_stage1_checkpoint_metric),
-            ]
-        )
-    if str(job.config.tree_stage1_eval_mode).strip():
-        cmd.extend(
-            [
-                "--tree-stage1-eval-mode",
-                str(job.config.tree_stage1_eval_mode),
-            ]
-        )
-    if int(job.config.tree_stage1_screen_doc_limit) != 0:
-        cmd.extend(
-            [
-                "--tree-stage1-screen-doc-limit",
-                str(int(job.config.tree_stage1_screen_doc_limit)),
-            ]
-        )
-    if int(job.config.tree_stage1_final_exact_doc_limit) != 0:
-        cmd.extend(
-            [
-                "--tree-stage1-final-exact-doc-limit",
-                str(int(job.config.tree_stage1_final_exact_doc_limit)),
-            ]
-        )
-    if int(job.config.exact_metric_selection_doc_limit) != 0:
-        cmd.extend(
-            [
-                "--exact-metric-selection-doc-limit",
-                str(int(job.config.exact_metric_selection_doc_limit)),
-            ]
-        )
-    if int(job.config.exact_metric_selection_interval) != 1:
-        cmd.extend(
-            [
-                "--exact-metric-selection-interval",
-                str(int(job.config.exact_metric_selection_interval)),
-            ]
-        )
-    if int(job.config.tree_exact_eval_max_docs) != 0:
-        cmd.extend(
-            [
-                "--tree-exact-eval-max-docs",
-                str(int(job.config.tree_exact_eval_max_docs)),
-            ]
-        )
-    if int(job.config.tree_posttrain_train_doc_limit) != 0:
-        cmd.extend(
-            [
-                "--tree-posttrain-train-doc-limit",
-                str(int(job.config.tree_posttrain_train_doc_limit)),
-            ]
-        )
-    if str(job.config.tree_batch_pack_mode).strip():
-        cmd.extend(
-            [
-                "--tree-batch-pack-mode",
-                str(job.config.tree_batch_pack_mode),
-            ]
-        )
-    if int(job.config.tree_batch_token_budget) != 0:
-        cmd.extend(
-            [
-                "--tree-batch-token-budget",
-                str(int(job.config.tree_batch_token_budget)),
-            ]
-        )
-    if int(job.config.tree_batch_node_budget) != 0:
-        cmd.extend(
-            [
-                "--tree-batch-node-budget",
-                str(int(job.config.tree_batch_node_budget)),
-            ]
-        )
-    cmd.append(
-        "--tree-batch-autotune"
-        if bool(job.config.tree_batch_autotune)
-        else "--no-tree-batch-autotune"
-    )
-    if float(job.config.tree_batch_structural_pad_limit) != 0.5:
-        cmd.extend(
-            [
-                "--tree-batch-structural-pad-limit",
-                str(float(job.config.tree_batch_structural_pad_limit)),
-            ]
-        )
-    if int(job.config.tree_batch_auto_queue_min_docs) != 8:
-        cmd.extend(
-            [
-                "--tree-batch-auto-queue-min-docs",
-                str(int(job.config.tree_batch_auto_queue_min_docs)),
-            ]
-        )
-    if float(job.config.tree_batch_auto_queue_min_fill_ratio) != 0.5:
-        cmd.extend(
-            [
-                "--tree-batch-auto-queue-min-fill-ratio",
-                str(float(job.config.tree_batch_auto_queue_min_fill_ratio)),
-            ]
-        )
-    if int(job.config.tree_eval_workers_per_mig) != 0:
-        cmd.extend(
-            [
-                "--tree-eval-workers-per-mig",
-                str(int(job.config.tree_eval_workers_per_mig)),
-            ]
-        )
-    cmd.extend(
-        [
-            "--gpu-runtime-data-mode",
-            str(job.config.gpu_runtime_data_mode),
-            "--gpu-runtime-bucket-mode",
-            str(job.config.gpu_runtime_bucket_mode),
-            "--gpu-runtime-preload-splits",
-            *[str(value) for value in job.config.gpu_runtime_preload_splits],
-            (
-                "--gpu-runtime-preload-targets"
-                if bool(job.config.gpu_runtime_preload_targets)
-                else "--no-gpu-runtime-preload-targets"
-            ),
-            "--gpu-runtime-workers-per-mig",
-            str(int(job.config.gpu_runtime_workers_per_mig)),
-            (
-                "--gpu-runtime-allow-multi-worker-screen"
-                if bool(job.config.gpu_runtime_allow_multi_worker_screen)
-                else "--no-gpu-runtime-allow-multi-worker-screen"
-            ),
-            "--gpu-runtime-capacity-workers-per-mig",
-            str(int(job.config.gpu_runtime_capacity_workers_per_mig)),
-        ]
-    )
-    if str(job.config.tree_stage1_artifact_dir).strip():
-        cmd.extend(
-            [
-                "--tree-stage1-artifact-dir",
-                str(job.config.tree_stage1_artifact_dir),
-            ]
-        )
-    if str(job.config.prepared_data_root).strip():
-        cmd.extend(
-            [
-                "--prepared-data-root",
-                str(job.config.prepared_data_root),
-            ]
-        )
-    cmd.append(
-        "--prepared-data-allow-create"
-        if bool(job.config.prepared_data_allow_create)
-        else "--no-prepared-data-allow-create"
-    )
-    if str(job.config.base_bundle_path).strip():
-        cmd.extend(
-            [
-                "--base-bundle-path",
-                str(job.config.base_bundle_path),
-            ]
-        )
-    if str(job.config.diagnostic_detail_mode).strip():
-        cmd.extend(
-            [
-                "--diagnostic-detail-mode",
-                str(job.config.diagnostic_detail_mode),
-            ]
-        )
-    if str(job.config.posttrain_diagnostics_mode).strip():
-        cmd.extend(
-            [
-                "--posttrain-diagnostics-mode",
-                str(job.config.posttrain_diagnostics_mode),
-            ]
-        )
-    if str(job.config.raw_diagnostic_artifact_dir).strip():
-        cmd.extend(
-            [
-                "--raw-diagnostic-artifact-dir",
-                str(job.config.raw_diagnostic_artifact_dir),
-            ]
-        )
-    if float(job.config.tree_stage1_root_weight) > 0.0:
-        cmd.extend(
-            [
-                "--tree-stage1-root-weight",
-                str(float(job.config.tree_stage1_root_weight)),
-            ]
-        )
-    if float(job.config.tree_join_bit_weight) > 0.0:
-        cmd.extend(
-            [
-                "--tree-join-bit-weight",
-                str(float(job.config.tree_join_bit_weight)),
-            ]
-        )
-    if str(job.config.tree_training_schedule).strip():
-        cmd.extend(
-            [
-                "--tree-training-schedule",
-                str(job.config.tree_training_schedule),
-                "--tree-stage1-epochs",
-                str(int(job.config.tree_stage1_epochs)),
-                "--tree-stage2-epochs",
-                str(int(job.config.tree_stage2_epochs)),
-                "--tree-task-head-mode",
-                str(job.config.tree_task_head_mode),
-                "--tree-theorem-surface-mode",
-                str(job.config.tree_theorem_surface_mode),
-                "--tree-theorem-count-head-mode",
-                str(job.config.tree_theorem_count_head_mode),
-                "--tree-theorem-count-ordinal-weight",
-                str(float(job.config.tree_theorem_count_ordinal_weight)),
-                "--tree-theorem-count-scalar-aux-weight",
-                str(float(job.config.tree_theorem_count_scalar_aux_weight)),
-                "--tree-theorem-feature-dim",
-                str(int(job.config.tree_theorem_feature_dim)),
-                "--tree-theorem-feature-hidden-dim",
-                str(int(job.config.tree_theorem_feature_hidden_dim)),
-                "--tree-merge-hidden-dim",
-                str(int(job.config.tree_merge_hidden_dim)),
-                "--tree-theorem-score-dim",
-                str(int(job.config.tree_theorem_score_dim)),
-                "--tree-theorem-fiber-dim",
-                str(int(job.config.tree_theorem_fiber_dim)),
-                "--tree-theorem-aux-dim",
-                str(int(job.config.tree_theorem_aux_dim)),
-                "--tree-score-merge-mode",
-                str(job.config.tree_score_merge_mode),
-                "--tree-phi-compose-weight",
-                str(float(job.config.tree_phi_compose_weight)),
-                "--tree-phi-contrastive-weight",
-                str(float(job.config.tree_phi_contrastive_weight)),
-                "--tree-phi-alignment-loss",
-                str(job.config.tree_phi_alignment_loss),
-                "--tree-c2-mode",
-                str(job.config.tree_c2_mode),
-                "--tree-summary-spec-root-mode",
-                str(job.config.tree_summary_spec_root_mode),
-                "--leaf-supervision-kind",
-                str(job.config.leaf_supervision_kind),
-            ]
-        )
-        if not bool(job.config.tree_theorem_count_threshold_balance):
-            cmd.append("--no-tree-theorem-count-threshold-balance")
-    if str(job.config.aligned_sketch_surface).strip():
-        cmd.extend(
-            [
-                "--aligned-sketch-surface",
-                str(job.config.aligned_sketch_surface),
-            ]
-        )
-    if str(job.config.summary_spec_name).strip():
-        cmd.extend(
-            [
-                "--summary-spec-name",
-                str(job.config.summary_spec_name),
-                "--slot-count",
-                str(int(job.config.slot_count)),
-                "--tree-theorem-count-dim",
-                str(int(job.config.tree_theorem_count_dim)),
-                "--tree-theorem-first-dim",
-                str(int(job.config.tree_theorem_first_dim)),
-                "--tree-theorem-last-dim",
-                str(int(job.config.tree_theorem_last_dim)),
-                "--leaf-label-rate",
-                str(float(job.config.leaf_label_rate)),
-            ]
-        )
-    cmd.extend(
-        [
-            "--theorem-feature-adapter",
-            str(job.config.theorem_feature_adapter),
-        ]
-    )
-    if str(job.config.oracle_metric_name).strip():
-        cmd.extend(
-            [
-                "--oracle-metric-name",
-                str(job.config.oracle_metric_name),
-                "--oracle-same-threshold",
-                str(float(job.config.oracle_same_threshold)),
-                "--oracle-diff-threshold",
-                str(float(job.config.oracle_diff_threshold)),
-            ]
-        )
-    if job.config.theorem_pair_same_threshold is not None:
-        cmd.extend(
-            [
-                "--theorem-pair-same-threshold",
-                str(float(job.config.theorem_pair_same_threshold)),
-            ]
-        )
-    if job.config.theorem_pair_diff_threshold is not None:
-        cmd.extend(
-            [
-                "--theorem-pair-diff-threshold",
-                str(float(job.config.theorem_pair_diff_threshold)),
-            ]
-        )
-    cmd.extend(
-        [
-            "--internal-supervision-kind",
-            str(job.config.internal_supervision_kind),
-            "--internal-label-rate",
-            str(float(job.config.internal_label_rate)),
-            "--max-internal-depth",
-            str(int(job.config.max_internal_depth)),
-        ]
-    )
-    if bool(job.config.leaf_exact_supervision):
-        cmd.append("--leaf-exact-supervision")
-    if float(job.config.root_weight) != 1.0:
-        cmd.extend(["--root-weight", str(float(job.config.root_weight))])
-    if float(job.config.schedule_consistency_weight) != 0.0:
-        cmd.extend(
-            [
-                "--schedule-consistency-weight",
-                str(float(job.config.schedule_consistency_weight)),
-            ]
-        )
-    if float(job.config.endpoint_loss_scale) != 1.0:
-        cmd.extend(
-            ["--endpoint-loss-scale", str(float(job.config.endpoint_loss_scale))]
-        )
-    if bool(job.test_metrics_hidden_during_selection):
-        cmd.append("--test-metrics-hidden-during-selection")
-    if str(job.study_name).strip():
-        cmd.extend(["--study-name", str(job.study_name)])
-    if str(job.study_axis).strip():
-        cmd.extend(["--study-axis", str(job.study_axis)])
-    if str(job.axis_value).strip():
-        cmd.extend(["--axis-value", str(job.axis_value)])
-    if str(job.locked_tree_neural_config_label).strip():
-        cmd.extend(
-            [
-                "--locked-tree-neural-config-label",
-                str(job.locked_tree_neural_config_label),
-            ]
-        )
-    if str(job.selection_metric).strip():
-        cmd.extend(["--selection-metric", str(job.selection_metric)])
-    if int(job.budget_total_calls) > 0:
-        cmd.extend(["--budget-total-calls", str(int(job.budget_total_calls))])
-    if float(job.budget_total_calls_per_doc) > 0.0:
-        cmd.extend(
-            [
-                "--budget-total-calls-per-doc",
-                str(float(job.budget_total_calls_per_doc)),
-            ]
-        )
-    if math.isfinite(float(job.mass_target_per_doc)):
-        cmd.extend(["--mass-target-per-doc", str(float(job.mass_target_per_doc))])
-    cmd.extend(
-        [
-            "--full-doc-budget-share",
-            str(float(job.full_doc_budget_share)),
-            "--doc-consumption-mode",
-            str(job.doc_consumption_mode),
-            "--local-split-mode",
-            str(job.local_split_mode),
-            "--local-allocation-policy",
-            str(job.local_allocation_policy),
-        ]
-    )
-    if str(job.package_semantics).strip():
-        cmd.extend(["--package-semantics", str(job.package_semantics)])
-    if not math.isclose(
-        float(job.config.depth_discount_gamma),
-        1.0,
-        rel_tol=0.0,
-        abs_tol=1e-12,
-    ):
-        cmd.extend(
-            ["--depth-discount-gamma", str(float(job.config.depth_discount_gamma))]
-        )
-    cmd.extend(["--seeds", *[str(seed) for seed in job.seeds]])
-    if bool(use_cuda):
-        cmd.append("--use-cuda")
-    return cmd
 
 
-def _worker_env_for_token(
-    token: str,
-    *,
-    use_cuda: bool,
-) -> dict[str, str]:
-    env = dict(os.environ)
-    if bool(use_cuda):
-        env["CUDA_VISIBLE_DEVICES"] = str(token)
-    else:
-        env.pop("CUDA_VISIBLE_DEVICES", None)
-    return env
 
 
-def _run_job_batch(
+def _run_scheduler_bundle(**kwargs: Any) -> Dict[str, Any]:
+    return dict(
+        _public_run_scheduler_bundle(
+            **kwargs,
+            run_scheduler_func=run_scheduler,
+            memory_probe_summary_writer=_write_memory_probe_summary,
+        )
+    )
+
+
+def _write_combined_runs_output(
     *,
     output_root: Path,
-    jobs: Sequence[_JobSpec],
-    mig_uuids: Sequence[str],
-    resume_enabled: bool,
-    use_cuda: bool,
-    torch_threads: int,
-    manifest_payload: Mapping[str, Any],
+    runs: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Any]:
-    output_root.mkdir(parents=True, exist_ok=True)
-    job_root = output_root / "jobs"
-    job_root.mkdir(parents=True, exist_ok=True)
-    (output_root / "mig_job_manifest.json").write_text(
-        json.dumps(dict(manifest_payload), indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-
-    completed_run_keys = _load_completed_run_keys(output_root) if bool(resume_enabled) else set()
-    skipped_jobs: List[Dict[str, Any]] = []
-    pending: List[_JobSpec] = []
-    for job in jobs:
-        required_keys = _job_completion_keys(job)
-        if required_keys and required_keys.issubset(completed_run_keys):
-            skipped_jobs.append(
-                {
-                    "job_name": job.job_name,
-                    "family": job.family,
-                    "train_doc_count": int(job.train_doc_count),
-                    "config_label": str(job.config.label),
-                    "tuning_stage": str(job.tuning_stage),
-                    "seeds": [int(seed) for seed in job.seeds],
-                    "reason": "already_completed",
-                }
-            )
-            continue
-        pending.append(job)
-
-    active: List[Dict[str, Any]] = []
-    completed: List[Dict[str, Any]] = []
-    failed: List[Dict[str, Any]] = []
-    available_tokens = list(mig_uuids)
-    stop_requested = False
-    force_terminate_requested = False
-
-    def _request_stop(signum: int, _frame: Any) -> None:
-        nonlocal stop_requested, force_terminate_requested
-        if not stop_requested:
-            stop_requested = True
-            print(
-                f"received signal {int(signum)}; pausing launch queue and waiting for active jobs to finish",
-                flush=True,
-            )
-            return
-        if force_terminate_requested:
-            return
-        force_terminate_requested = True
-        print(
-            f"received signal {int(signum)} again; terminating {len(active)} active workers",
-            flush=True,
+    return dict(
+        _public_write_combined_runs_output(
+            output_root=output_root,
+            runs=runs,
+            write_summary_outputs_func=_write_summary_outputs,
         )
-        for entry in active:
-            proc = entry.get("proc")
-            if proc is not None and proc.poll() is None:
-                try:
-                    proc.terminate()
-                except ProcessLookupError:
-                    continue
-
-    signal.signal(signal.SIGINT, _request_stop)
-    signal.signal(signal.SIGTERM, _request_stop)
-
-    if skipped_jobs:
-        print(
-            f"skipping {len(skipped_jobs)} completed jobs already present under {output_root}",
-            flush=True,
-        )
-
-    while pending or active:
-        while pending and available_tokens and not stop_requested:
-            token = available_tokens.pop(0)
-            job = pending.pop(0)
-            job_output_dir = job_root / _job_output_dir_name(job.job_name)
-            job_output_dir.mkdir(parents=True, exist_ok=True)
-            log_path = job_output_dir / "worker.log"
-            log_fh = open(log_path, "w", encoding="utf-8")
-            cmd = _worker_command_for_job(
-                job,
-                output_dir=job_output_dir,
-                torch_threads=int(torch_threads),
-                use_cuda=bool(use_cuda),
-            )
-            env = dict(os.environ)
-            env["CUDA_VISIBLE_DEVICES"] = str(token)
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=log_fh,
-                cwd=str(REPO_ROOT),
-                env=env,
-                text=True,
-            )
-            active.append(
-                {
-                    "job": job,
-                    "proc": proc,
-                    "log_path": log_path,
-                    "log_fh": log_fh,
-                    "mig_uuid": token,
-                }
-            )
-            print(
-                f"launched {job.job_name} seeds={list(job.seeds)} on {token[:18]} pid={proc.pid}",
-                flush=True,
-            )
-
-        time.sleep(1.0)
-        still_active: List[Dict[str, Any]] = []
-        for entry in active:
-            proc = entry["proc"]
-            if proc.poll() is None:
-                still_active.append(entry)
-                continue
-            stdout_text = proc.stdout.read() if proc.stdout is not None else ""
-            entry["log_fh"].close()
-            available_tokens.append(str(entry["mig_uuid"]))
-            if int(proc.returncode) != 0:
-                failed.append(
-                    {
-                        "job_name": entry["job"].job_name,
-                        "family": entry["job"].family,
-                        "train_doc_count": int(entry["job"].train_doc_count),
-                        "config_label": str(entry["job"].config.label),
-                        "tuning_stage": str(entry["job"].tuning_stage),
-                        "returncode": int(proc.returncode),
-                        "log_path": str(entry["log_path"]),
-                        "stdout_tail": stdout_text[-500:],
-                    }
-                )
-                print(
-                    f"failed {entry['job'].job_name} rc={proc.returncode} log={entry['log_path']}",
-                    flush=True,
-                )
-                continue
-            result = json.loads(stdout_text.strip().splitlines()[-1])
-            completed.append(result)
-            seed_label = ",".join(str(seed) for seed in list(result.get("job_seeds") or []))
-            if bool(result.get("test_metrics_hidden_during_selection", False)):
-                print(
-                    "completed "
-                    f"{result['job_name']} "
-                    f"seeds=[{seed_label}] "
-                    f"val_root_mae={result['val_root_mae']:.6g} "
-                    f"selection={result['selection_metric_name'] or 'val_root_mae'} "
-                    f"cfg={result['config_label']} "
-                    "(test hidden for selection)",
-                    flush=True,
-                )
-            elif bool(result.get("objective_weights_active", False)):
-                print(
-                    "completed "
-                    f"{result['job_name']} "
-                    f"seeds=[{seed_label}] "
-                    f"root_mae={result['test_root_mae']:.6g} "
-                    f"param={result['parameterization']} "
-                    f"weights=({result['local_law_c1_weight']:.4g},"
-                    f"{result['local_law_c2_weight']:.4g},"
-                    f"{result['local_law_c3_weight']:.4g})",
-                    flush=True,
-                )
-            else:
-                print(
-                    "completed "
-                    f"{result['job_name']} "
-                    f"seeds=[{seed_label}] "
-                    f"root_mae={result['test_root_mae']:.6g} "
-                    "(closed_form_control; local-law weights inactive)",
-                    flush=True,
-                )
-        active = still_active
-
-    controller_summary = {
-        "completed_jobs": completed,
-        "failed_jobs": failed,
-        "skipped_jobs": skipped_jobs,
-        "resume_enabled": bool(resume_enabled),
-        "stop_requested": bool(stop_requested),
-    }
-    (output_root / "controller_results.json").write_text(
-        json.dumps(controller_summary, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-
-    try:
-        payload = _write_summary_outputs(output_root)
-    except FileNotFoundError:
-        payload = {"runs": [], "aggregate_rows": []}
-    return {
-        "payload": payload,
-        "summary_json": str(output_root / "summary.json"),
-        "summary_md": str(output_root / "summary.md"),
-        "completed_jobs": completed,
-        "failed_jobs": failed,
-        "skipped_jobs": skipped_jobs,
-        "resume_enabled": bool(resume_enabled),
-        "stop_requested": bool(stop_requested),
-        "output_root": str(output_root),
-    }
-
-
-def _scheduler_item_for_job(
-    *,
-    phase: str,
-    item_id: str,
-    output_root: Path,
-    job: _JobSpec,
-    torch_threads: int,
-    use_cuda: bool,
-    gpu_slots: int = 1,
-    allowed_devices: Sequence[str] = (),
-) -> SchedulerItem:
-    def _scheduler_scope() -> str:
-        if str(job.hardness_grid).strip():
-            return str(job.hardness_grid)
-        return str(job.benchmark)
-
-    def _scheduler_package() -> str:
-        cfg = job.config
-        if float(job.full_doc_budget_share) < 0.999999:
-            return ""
-        if str(job.doc_consumption_mode or "root_only") not in {"", "root_only"}:
-            return ""
-        if str(job.local_split_mode or "balanced") not in {"", "balanced"}:
-            return ""
-        if str(cfg.leaf_supervision_kind or "count_only") != "count_only":
-            return ""
-        if abs(float(cfg.leaf_label_rate)) > 1e-9:
-            return ""
-        if str(cfg.internal_supervision_kind or "none") != "none":
-            return ""
-        if abs(float(cfg.internal_label_rate)) > 1e-9:
-            return ""
-        return "full100"
-
-    job_output_dir = output_root / "jobs" / _job_output_dir_name(str(job.job_name))
-    metadata: Dict[str, Any] = {
-        "job_name": str(job.job_name),
-        "task_name": str(job.job_name),
-        "train_docs": int(job.train_doc_count),
-        "model_family": str(job.family),
-        "worker_kind": "full_doc_diagnostics",
-        "n_epochs": int(job.config.n_epochs),
-    }
-    scope = _scheduler_scope().strip()
-    if scope:
-        metadata["scope"] = scope
-    package = _scheduler_package().strip()
-    if package:
-        metadata["package"] = package
-    return SchedulerItem(
-        item_id=str(item_id),
-        phase=str(phase),
-        kind="gpu_command",
-        expected_outputs=(str(job_output_dir / "summary.json"),),
-        command=tuple(
-            str(arg)
-            for arg in _worker_command_for_job(
-                job,
-                output_dir=job_output_dir,
-                torch_threads=int(torch_threads),
-                use_cuda=bool(use_cuda),
-            )
-        ),
-        log_path=str(job_output_dir / "worker.log"),
-        metadata=metadata,
-        gpu_slots=max(1, int(gpu_slots)),
-        allowed_devices=tuple(str(token) for token in allowed_devices if str(token).strip()),
     )
 
 
-def _scheduler_result_from_summary(
-    *,
-    output_root: Path,
-    scheduler_summary: Mapping[str, Any],
-    resume_enabled: bool,
-) -> Dict[str, Any]:
-    def _iter_item_infos(name: str) -> List[Mapping[str, Any]]:
-        raw = dict(scheduler_summary).get(name)
-        if isinstance(raw, Mapping):
-            return [dict(info) for info in raw.values()]
-        if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)):
-            return [dict(info) for info in raw if isinstance(info, Mapping)]
-        return []
-
-    completed_jobs: List[Dict[str, Any]] = []
-    skipped_jobs: List[Dict[str, Any]] = []
-    failed_jobs: List[Dict[str, Any]] = []
-    for info in _iter_item_infos("completed_items"):
-        if str(info.get("kind", "")) != "gpu_command":
-            continue
-        payload = {
-            "item_id": str(info.get("item_id", "")),
-            "phase": str(info.get("phase", "")),
-            "job_name": str(dict(info.get("metadata") or {}).get("job_name", "")),
-            "log_path": str(info.get("log_path", "")),
-            "expected_outputs": [str(path) for path in list(info.get("expected_outputs") or [])],
-            "gpu_slots": int(info.get("gpu_slots", 1) or 1),
-        }
-        if bool(info.get("reused", False)):
-            payload["reason"] = "already_completed"
-            skipped_jobs.append(payload)
-        else:
-            completed_jobs.append(payload)
-    for info in _iter_item_infos("failed_items"):
-        if str(info.get("kind", "")) != "gpu_command":
-            continue
-        failed_jobs.append(
-            {
-                "item_id": str(info.get("item_id", "")),
-                "phase": str(info.get("phase", "")),
-                "job_name": str(dict(info.get("metadata") or {}).get("job_name", "")),
-                "returncode": int(info.get("returncode", 1) or 1),
-                "log_path": str(info.get("log_path", "")),
-                "expected_outputs": [
-                    str(path) for path in list(info.get("expected_outputs") or [])
-                ],
-                "gpu_slots": int(info.get("gpu_slots", 1) or 1),
-            }
-        )
-    return {
-        "payload": (
-            json.loads((output_root / "summary.json").read_text(encoding="utf-8"))
-            if (output_root / "summary.json").exists()
-            else {}
-        ),
-        "summary_json": str(output_root / "summary.json"),
-        "summary_md": str(output_root / "summary.md"),
-        "completed_jobs": completed_jobs,
-        "failed_jobs": failed_jobs,
-        "skipped_jobs": skipped_jobs,
-        "resume_enabled": bool(resume_enabled),
-        "stop_requested": False,
-        "output_root": str(output_root),
-        "scheduler_summary": dict(scheduler_summary),
-    }
 
 
-def _run_scheduler_bundle(
-    *,
-    output_root: Path,
-    items: Sequence[SchedulerItem],
-    devices: Sequence[str],
-    max_gpu_items_per_mig: int,
-    launch_stagger_seconds: float,
-    cleanup_stale_children: bool,
-    resume_enabled: bool,
-    manifest_payload: Mapping[str, Any],
-    min_mem_available_kib: int = 128 * 1024 * 1024,
-    min_swap_free_kib: int = 2 * 1024 * 1024,
-    cancel_on_failure: bool = True,
-) -> Dict[str, Any]:
-    output_root.mkdir(parents=True, exist_ok=True)
-    manifest_path = output_root / "mig_job_manifest.json"
-    scheduler_status_path = output_root / "scheduler_status.json"
-    scheduler_event_log_path = output_root / "scheduler_events.jsonl"
-    scheduler_failure_snapshot_path = output_root / "scheduler_failure_snapshot.json"
-    manifest_path.write_text(
-        json.dumps(dict(manifest_payload), indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    try:
-        scheduler_summary = run_scheduler(
-            items,
-            config=SchedulerConfig(
-                devices=tuple(str(device) for device in devices),
-                max_gpu_items_per_mig=int(max(1, int(max_gpu_items_per_mig))),
-                launch_stagger_seconds=float(max(0.0, float(launch_stagger_seconds))),
-                cleanup_stale_children=bool(cleanup_stale_children),
-                cancel_on_failure=bool(cancel_on_failure),
-                min_mem_available_kib=int(max(0, int(min_mem_available_kib))),
-                min_swap_free_kib=int(max(0, int(min_swap_free_kib))),
-                root_markers=(str(output_root),),
-                status_path=str(scheduler_status_path),
-                event_log_path=str(scheduler_event_log_path),
-                failure_snapshot_path=str(scheduler_failure_snapshot_path),
-            ),
-        )
-    except SchedulerRunError as exc:
-        scheduler_summary = dict(exc.summary)
-    result = _scheduler_result_from_summary(
-        output_root=output_root,
-        scheduler_summary=scheduler_summary,
-        resume_enabled=bool(resume_enabled),
-    )
-    memory_probe_summary = _write_memory_probe_summary(output_root)
-    controller_summary = {
-        "completed_jobs": list(result["completed_jobs"]),
-        "failed_jobs": list(result["failed_jobs"]),
-        "skipped_jobs": list(result["skipped_jobs"]),
-        "resume_enabled": bool(result["resume_enabled"]),
-        "stop_requested": bool(result["stop_requested"]),
-        "scheduler": dict(scheduler_summary),
-        "scheduler_status_json": str(scheduler_status_path),
-        "scheduler_events_jsonl": str(scheduler_event_log_path),
-        "scheduler_failure_snapshot_json": str(scheduler_failure_snapshot_path),
-        "memory_probe_summary_json": str(memory_probe_summary["summary_json"]),
-    }
-    (output_root / "controller_results.json").write_text(
-        json.dumps(controller_summary, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    result["memory_probe_summary_json"] = str(memory_probe_summary["summary_json"])
-    return result
-
-
-def _scheduler_cli_payload(
-    *,
-    items: Sequence[SchedulerItem],
-    devices: Sequence[str],
-    max_gpu_items_per_mig: int,
-    launch_stagger_seconds: float,
-    min_mem_available_kib: int,
-    min_swap_free_kib: int,
-    manifest_payload: Mapping[str, Any],
-) -> Dict[str, Any]:
-    return {
-        "scheduler": {
-            **summarize_scheduler_plan(
-                items,
-                devices=tuple(str(device) for device in devices),
-                max_gpu_items_per_mig=int(max(1, int(max_gpu_items_per_mig))),
-                launch_stagger_seconds=float(max(0.0, float(launch_stagger_seconds))),
-            ),
-            "min_mem_available_kib": int(max(0, int(min_mem_available_kib))),
-            "min_swap_free_kib": int(max(0, int(min_swap_free_kib))),
-        },
-        "manifest": dict(manifest_payload),
-    }
 
 
 def _launch_controller(args: argparse.Namespace) -> int:
@@ -8293,10 +6425,6 @@ def _rank_config_rows(
     )
     return rows
 
-
-def _run_config_from_mapping(mapping: Mapping[str, Any]) -> _RunConfigSpec:
-    shared = _shared_run_config_from_mapping(mapping)
-    return _RunConfigSpec(**asdict(shared))
 
 
 def _load_tuning_summary(tuning_root: Path) -> Dict[str, Any]:
@@ -8505,38 +6633,21 @@ def _select_representative_structural_cells(
     }
 
 
-def _write_combined_runs_output(
-    *,
-    output_root: Path,
-    runs: Sequence[Mapping[str, Any]],
-) -> Dict[str, Any]:
-    runs_dir = output_root / "runs"
-    runs_dir.mkdir(parents=True, exist_ok=True)
-    for index, run in enumerate(runs):
-        family = str(run.get("baseline_family", "run"))
-        seed = int(run.get("seed", index))
-        config_label = _sanitize_label(str(run.get("config_label", "")) or "default")
-        stage_label = _sanitize_label(str(run.get("tuning_stage", "")) or "final")
-        cell_id = _sanitize_label(str(run.get("cell_id", "") or run.get("benchmark", "")))
-        study_axis = _sanitize_label(str(run.get("study_axis", "")))
-        axis_value = _sanitize_label(str(run.get("axis_value", "")))
-        leaf_tokens = (
-            ""
-            if run.get("fixed_leaf_tokens") in {"", None}
-            else f"__leaf_{int(run.get('fixed_leaf_tokens', 0))}"
+
+
+
+
+def _run_job_batch(**kwargs: Any) -> Dict[str, Any]:
+    return dict(
+        _public_run_job_batch(
+            **kwargs,
+            write_summary_outputs_func=_write_summary_outputs,
+            worker_command_func=_worker_command_for_job,
+            load_completed_run_keys_func=_load_completed_run_keys,
+            job_completion_keys_func=_job_completion_keys,
+            cwd=REPO_ROOT,
         )
-        study_suffix = ""
-        if study_axis and axis_value:
-            study_suffix = f"__{study_axis}_{axis_value}"
-        stem = (
-            f"{family}__{cell_id}__cfg_{config_label}__stage_{stage_label}"
-            f"{leaf_tokens}{study_suffix}__seed_{seed}"
-        )
-        (runs_dir / f"{stem}.json").write_text(
-            json.dumps(dict(run), indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-    return _write_summary_outputs(output_root)
+    )
 
 
 def _render_tuning_summary_markdown(summary: Mapping[str, Any]) -> str:
@@ -9288,18 +7399,6 @@ def _gpu_slots_for_workers_per_mig(
     _ = int(workers_per_mig)
     return 1
 
-
-def _discover_scheduler_devices(args: argparse.Namespace) -> List[str]:
-    mig_uuids = (
-        _parse_mig_uuids(args.mig_uuids)
-        if str(getattr(args, "mig_uuids", "")).strip()
-        else _discover_mig_uuids()
-    )
-    if not mig_uuids:
-        raise RuntimeError(
-            "No MIG UUIDs discovered. Pass --mig-uuids explicitly or configure MIGs first."
-        )
-    return list(mig_uuids)
 
 
 def _build_scheduler_graph(
@@ -10390,1218 +8489,6 @@ def _run_scheduler_mode(args: argparse.Namespace) -> Dict[str, Any]:
     )
 
 
-def _nested_mapping_value(
-    mapping: Mapping[str, Any],
-    path: Sequence[str],
-    *,
-    default: Any = float("nan"),
-) -> Any:
-    cur: Any = mapping
-    for key in path:
-        if not isinstance(cur, Mapping):
-            return default
-        cur = cur.get(str(key))
-    return cur if cur is not None else default
-
-
-def _finite_summary_stats(values: Sequence[Any]) -> Dict[str, Any]:
-    arr = np.asarray([float(value) for value in values], dtype=np.float64)
-    finite = arr[np.isfinite(arr)]
-    if finite.size <= 0:
-        return {"mean": float("nan"), "std": float("nan"), "n": 0}
-    return {
-        "mean": float(np.mean(finite)),
-        "std": float(np.std(finite)),
-        "n": int(finite.size),
-    }
-
-
-def _exact_sanity_metric_summary(
-    runs: Sequence[Mapping[str, Any]],
-    path: Sequence[str],
-) -> Dict[str, Any]:
-    return _finite_summary_stats(
-        [_nested_mapping_value(run, path) for run in runs]
-    )
-
-
-def _exact_sanity_condition_kind(run: Mapping[str, Any]) -> str:
-    config_label = str(run.get("config_label", "")).strip()
-    task_split_suffix = "_task_split_ablation"
-    task_split_ablation = config_label.endswith(task_split_suffix)
-    base_config_label = (
-        config_label[: -len(task_split_suffix)]
-        if task_split_ablation and len(config_label) > len(task_split_suffix)
-        else config_label
-    )
-    exact_label_map = {
-        FAIR_FNO_PARITY_CONFIG_LABEL: "legacy_fair_fno_root_only",
-        "tree_neural_slot_align_v1_root_only": "slot_root_only",
-        "tree_neural_slot_align_v1_leaf_sampled": "slot_leaf_sampled_r0p25",
-        "tree_neural_slot_align_v1_leaf_dense": "slot_leaf_dense",
-        "tree_neural_slot_align_v1_internal_count_r0p25": "slot_internal_count_only_r0p25",
-        "tree_neural_slot_align_v1_internal_full_r0p25": "slot_internal_full_sketch_r0p25",
-        "tree_neural_slot_align_v1_internal_count_dense": "slot_internal_count_only_dense",
-        "tree_neural_slot_align_v1_internal_full_dense": "slot_internal_full_sketch_dense",
-        "tree_neural_slot_align_v1_internal_full_r0p5": "slot_internal_full_sketch_r0p5",
-    }
-    if base_config_label in exact_label_map:
-        base_kind = exact_label_map[base_config_label]
-        return (
-            f"{base_kind}__task_split_ablation"
-            if task_split_ablation
-            else base_kind
-        )
-    summary_spec_name = str(run.get("summary_spec_name", "")).strip()
-    leaf_label_rate = float(run.get("leaf_label_rate", 1.0) or 0.0)
-    internal_kind = str(run.get("internal_supervision_kind", "none")).strip() or "none"
-    internal_rate = float(run.get("internal_label_rate", 0.0) or 0.0)
-    if summary_spec_name != "markov_count_sketch":
-        return config_label or "legacy_unknown"
-    if internal_kind == "none" and leaf_label_rate <= 0.0:
-        return "slot_root_only"
-    if internal_kind == "none":
-        rate_label = _format_float_label(float(leaf_label_rate))
-        if rate_label == "1":
-            return "slot_leaf_dense"
-        return f"slot_leaf_sampled_r{rate_label}"
-    rate_label = _format_float_label(float(internal_rate))
-    if internal_kind == "count_only":
-        if rate_label == "1":
-            return "slot_internal_count_only_dense"
-        return f"slot_internal_count_only_r{rate_label}"
-    if internal_kind == "full_sketch":
-        if rate_label == "1":
-            base_kind = "slot_internal_full_sketch_dense"
-        else:
-            base_kind = f"slot_internal_full_sketch_r{rate_label}"
-        return (
-            f"{base_kind}__task_split_ablation"
-            if task_split_ablation
-            else base_kind
-        )
-    return config_label or "aligned_unknown"
-
-
-def _exact_sanity_condition_id(run: Mapping[str, Any]) -> str:
-    config_label = str(run.get("config_label", "")).strip()
-    if config_label:
-        return config_label
-    return _exact_sanity_condition_kind(run)
-
-
-def _exact_sanity_condition_title(condition_id: str) -> str:
-    fixed_titles = {
-        FAIR_FNO_PARITY_CONFIG_LABEL: "Legacy Fair-FNO Root-Only",
-        "tree_neural_slot_align_v1_root_only": "Slot-Aligned Root-Only",
-        "tree_neural_slot_align_v1_leaf_sampled": "Slot-Aligned Leaf Sampled @ 0.25",
-        "tree_neural_slot_align_v1_leaf_dense": "Slot-Aligned Leaf Dense",
-        "tree_neural_slot_align_v1_internal_count_r0p25": "Slot-Aligned Internal Count-Only @ 0.25",
-        "tree_neural_slot_align_v1_internal_full_r0p25": "Slot-Aligned Internal Full-Sketch @ 0.25",
-        "tree_neural_slot_align_v1_internal_count_dense": "Slot-Aligned Internal Count-Only Dense",
-        "tree_neural_slot_align_v1_internal_full_dense": "Slot-Aligned Internal Full-Sketch Dense",
-        "tree_neural_slot_align_v1_internal_full_r0p5": "Slot-Aligned Internal Full-Sketch @ 0.5",
-        "tree_neural_slot_align_v1_internal_full_r0p25_task_split_ablation": (
-            "Slot-Aligned Internal Full-Sketch @ 0.25 (Task-Split Ablation)"
-        ),
-        "tree_neural_slot_align_v1_balanced_full_r0p25": "Slot-Aligned Rebalanced Full-Sketch @ 0.25",
-        "tree_neural_slot_align_v1_leaf_ep_count_r0p25": "Slot-Aligned Leaf Full-Sketch + Internal Count @ 0.25",
-        "legacy_fair_fno_root_only": "Legacy Fair-FNO Root-Only",
-        "slot_root_only": "Slot-Aligned Root-Only",
-        "slot_leaf_sampled_r0p25": "Slot-Aligned Leaf Sampled @ 0.25",
-        "slot_leaf_dense": "Slot-Aligned Leaf Dense",
-        "slot_internal_count_only_r0p25": "Slot-Aligned Internal Count-Only @ 0.25",
-        "slot_internal_full_sketch_r0p25": "Slot-Aligned Internal Full-Sketch @ 0.25",
-        "slot_internal_full_sketch_r0p25__task_split_ablation": (
-            "Slot-Aligned Internal Full-Sketch @ 0.25 (Task-Split Ablation)"
-        ),
-        "slot_internal_count_only_dense": "Slot-Aligned Internal Count-Only Dense",
-        "slot_internal_full_sketch_dense": "Slot-Aligned Internal Full-Sketch Dense",
-        "slot_internal_full_sketch_r0p5": "Slot-Aligned Internal Full-Sketch @ 0.5",
-    }
-    normalized = str(condition_id)
-    if normalized in fixed_titles:
-        return fixed_titles[normalized]
-    if normalized.startswith("slot_leaf_sampled_r"):
-        return f"Slot-Aligned Leaf Sampled @ {normalized.split('_r', 1)[1].replace('p', '.')}"
-    if normalized.startswith("slot_internal_count_only_r"):
-        return f"Slot-Aligned Internal Count-Only @ {normalized.split('_r', 1)[1].replace('p', '.')}"
-    if normalized.startswith("slot_internal_full_sketch_r"):
-        if normalized.endswith("__task_split_ablation"):
-            base_id = normalized[: -len("__task_split_ablation")]
-            return (
-                f"{_exact_sanity_condition_title(base_id)} "
-                "(Task-Split Ablation)"
-            )
-        return f"Slot-Aligned Internal Full-Sketch @ {normalized.split('_r', 1)[1].replace('p', '.')}"
-    return normalized
-
-
-def _exact_sanity_condition_summary(
-    runs: Sequence[Mapping[str, Any]],
-) -> Dict[str, Any]:
-    if not runs:
-        return {}
-    exemplar = dict(runs[0])
-    failure_bucket_counts: Dict[str, int] = {}
-    for run in runs:
-        bucket = str(run.get("exact_sketch_failure_bucket", "")).strip()
-        if bucket:
-            failure_bucket_counts[bucket] = failure_bucket_counts.get(bucket, 0) + 1
-    tree_neural: Dict[str, Any] = {}
-    for split in ("train", "val", "test"):
-        tree_neural[split] = {}
-        for level in EXACT_SANITY_LEVELS:
-            tree_neural[split][level] = {
-                branch: {
-                    metric: _exact_sanity_metric_summary(
-                        runs,
-                        (
-                            "exact_sketch_diagnostics",
-                            "tree_neural",
-                            split,
-                            level,
-                            branch,
-                            metric,
-                        ),
-                    )
-                    for metric in EXACT_SANITY_COMPONENT_METRICS
-                }
-                for branch in ("direct", "probe")
-            }
-            if level == "merge":
-                tree_neural[split][level]["decoded_consistency"] = {
-                    metric: _exact_sanity_metric_summary(
-                        runs,
-                        (
-                            "exact_sketch_diagnostics",
-                            "tree_neural",
-                            split,
-                            level,
-                            "decoded_consistency",
-                            metric,
-                        ),
-                    )
-                    for metric in EXACT_SANITY_MERGE_CONSISTENCY_METRICS
-                }
-    test_tree = dict(tree_neural.get("test") or {})
-    test_leaf_probe = dict((test_tree.get("leaf") or {}).get("probe") or {})
-    test_merge_probe = dict((test_tree.get("merge") or {}).get("probe") or {})
-    test_root_direct = dict((test_tree.get("root") or {}).get("direct") or {})
-    test_root_probe = dict((test_tree.get("root") or {}).get("probe") or {})
-    test_merge_consistency = dict(
-        ((test_tree.get("merge") or {}).get("decoded_consistency") or {})
-    )
-    condition_id = _exact_sanity_condition_id(exemplar)
-    condition_kind = _exact_sanity_condition_kind(exemplar)
-    return {
-        "condition_id": condition_id,
-        "condition_kind": condition_kind,
-        "condition_title": _exact_sanity_condition_title(condition_id),
-        "config_label": str(exemplar.get("config_label", "")),
-        "n_runs": int(len(runs)),
-        "seed_values": sorted(
-            {int(run.get("seed", 0)) for run in runs if "seed" in run}
-        ),
-        "aligned_sketch_surface": str(exemplar.get("aligned_sketch_surface", "")),
-        "weighting_scheme": str(exemplar.get("weighting_scheme", "")),
-        "optimization_root_weight": float(
-            exemplar.get("optimization_root_weight", float("nan"))
-        ),
-        "local_law_c1_weight": float(exemplar.get("local_law_c1_weight", float("nan"))),
-        "local_law_c2_weight": float(exemplar.get("local_law_c2_weight", float("nan"))),
-        "local_law_c3_weight": float(exemplar.get("local_law_c3_weight", float("nan"))),
-        "summary_spec_name": str(exemplar.get("summary_spec_name", "")),
-        "slot_count": int(exemplar.get("slot_count", 0)),
-        "tree_theorem_count_dim": int(exemplar.get("tree_theorem_count_dim", 0)),
-        "tree_theorem_first_dim": int(exemplar.get("tree_theorem_first_dim", 0)),
-        "tree_theorem_last_dim": int(exemplar.get("tree_theorem_last_dim", 0)),
-        "tree_theorem_count_head_mode": str(
-            exemplar.get("tree_theorem_count_head_mode", "")
-        ),
-        "tree_theorem_count_ordinal_weight": float(
-            exemplar.get("tree_theorem_count_ordinal_weight", 1.0)
-        ),
-        "tree_theorem_count_scalar_aux_weight": float(
-            exemplar.get("tree_theorem_count_scalar_aux_weight", 0.25)
-        ),
-        "tree_theorem_count_threshold_balance": bool(
-            exemplar.get("tree_theorem_count_threshold_balance", True)
-        ),
-        "leaf_supervision_kind": str(exemplar.get("leaf_supervision_kind", "")),
-        "internal_supervision_kind": str(
-            exemplar.get("internal_supervision_kind", "none")
-        ),
-        "internal_label_rate": float(exemplar.get("internal_label_rate", 0.0)),
-        "leaf_exact_supervision": bool(exemplar.get("leaf_exact_supervision", False)),
-        "leaf_label_rate": float(exemplar.get("leaf_label_rate", 1.0)),
-        "tree_training_schedule": str(exemplar.get("tree_training_schedule", "")),
-        "tree_stage1_epochs": int(exemplar.get("tree_stage1_epochs", 0)),
-        "tree_stage2_epochs": int(exemplar.get("tree_stage2_epochs", 0)),
-        "tree_root_supervision_kind": str(
-            exemplar.get("tree_root_supervision_kind", "")
-        ),
-        "tree_checkpoint_metric": str(exemplar.get("tree_checkpoint_metric", "")),
-        "tree_stage1_checkpoint_metric": str(
-            exemplar.get("tree_stage1_checkpoint_metric", "")
-        ),
-        "tree_stage1_eval_mode": str(exemplar.get("tree_stage1_eval_mode", "")),
-        "tree_stage1_screen_doc_limit": int(
-            exemplar.get("tree_stage1_screen_doc_limit", 0)
-        ),
-        "tree_stage1_final_exact_doc_limit": int(
-            exemplar.get("tree_stage1_final_exact_doc_limit", 0)
-        ),
-        "tree_stage1_artifact_dir": str(
-            exemplar.get("tree_stage1_artifact_dir", "")
-        ),
-        "tree_stage1_root_weight": float(
-            exemplar.get("tree_stage1_root_weight", 0.0)
-        ),
-        "tree_summary_spec_root_mode": str(
-            exemplar.get("tree_summary_spec_root_mode", "")
-        ),
-        "failure_bucket_counts": dict(failure_bucket_counts),
-        "failure_gap_scores": {
-            "leaf_boundary_encoding_gap_score": _finite_summary_stats(
-                [run.get("exact_sketch_leaf_gap_score", float("nan")) for run in runs]
-            ),
-            "count_composition_gap_score": _finite_summary_stats(
-                [run.get("exact_sketch_merge_gap_score", float("nan")) for run in runs]
-            ),
-            "subtree_label_value_gap_score": _finite_summary_stats(
-                [
-                    (
-                        _nested_mapping_value(
-                            run,
-                            (
-                                "exact_sketch_diagnostics",
-                                "failure_attribution",
-                                "subtree_label_value_gap_score",
-                            ),
-                        )
-                        if np.isfinite(
-                            float(
-                                _nested_mapping_value(
-                                    run,
-                                    (
-                                        "exact_sketch_diagnostics",
-                                        "failure_attribution",
-                                        "subtree_label_value_gap_score",
-                                    ),
-                                )
-                            )
-                        )
-                        else _nested_mapping_value(
-                            run,
-                            (
-                                "exact_sketch_diagnostics",
-                                "failure_attribution",
-                                "internal_label_value_gap_score",
-                            ),
-                        )
-                    )
-                    for run in runs
-                ]
-            ),
-            "legacy_readout_gap_score": _finite_summary_stats(
-                [run.get("exact_sketch_readout_gap_score", float("nan")) for run in runs]
-            ),
-        },
-        "tree_neural": tree_neural,
-        "acceptance_readout": {
-            "test_probe_leaf_exact_summary_match_rate_mean": float(
-                (test_leaf_probe.get("exact_summary_match_rate") or {}).get(
-                    "mean",
-                    float("nan"),
-                )
-            ),
-            "test_probe_merge_exact_summary_match_rate_mean": float(
-                (test_merge_probe.get("exact_summary_match_rate") or {}).get(
-                    "mean",
-                    float("nan"),
-                )
-            ),
-            "test_direct_root_count_mae_mean": float(
-                (test_root_direct.get("count_mae") or {}).get("mean", float("nan"))
-            ),
-            "test_task_root_mae_ablation_mean": float(
-                _exact_sanity_metric_summary(
-                    runs,
-                    (
-                        "exact_sketch_diagnostics",
-                        "direct_selection_metrics",
-                        "test",
-                        "task_root_mae_ablation",
-                    ),
-                ).get("mean", float("nan"))
-            ),
-            "test_task_root_mae_mean": float(
-                _exact_sanity_metric_summary(
-                    runs,
-                    (
-                        "exact_sketch_diagnostics",
-                        "direct_selection_metrics",
-                        "test",
-                        "task_root_mae",
-                    ),
-                ).get("mean", float("nan"))
-            ),
-            "test_probe_root_count_mae_mean": float(
-                (test_root_probe.get("count_mae") or {}).get("mean", float("nan"))
-            ),
-            "test_merge_join_bit_accuracy_mean": float(
-                (test_merge_consistency.get("merge_join_bit_accuracy") or {}).get(
-                    "mean",
-                    float("nan"),
-                )
-            ),
-            "test_c2_on_range_exact_match_mean": float(
-                _exact_sanity_metric_summary(
-                    runs,
-                    (
-                        "exact_sketch_diagnostics",
-                        "direct_selection_metrics",
-                        "test",
-                        "c2_on_range_exact_match",
-                    ),
-                ).get("mean", float("nan"))
-            ),
-            "test_theorem_bootstrap_direct_mean": float(
-                _exact_sanity_metric_summary(
-                    runs,
-                    (
-                        "exact_sketch_diagnostics",
-                        "direct_selection_metrics",
-                        "test",
-                        "val_theorem_bootstrap_direct",
-                    ),
-                ).get("mean", float("nan"))
-            ),
-            "test_probe_merge_count_match_rate_mean": float(
-                (test_merge_probe.get("count_match_rate") or {}).get(
-                    "mean",
-                    float("nan"),
-                )
-            ),
-            "test_probe_merge_first_accuracy_mean": float(
-                (test_merge_probe.get("first_accuracy") or {}).get(
-                    "mean",
-                    float("nan"),
-                )
-            ),
-            "test_probe_merge_last_accuracy_mean": float(
-                (test_merge_probe.get("last_accuracy") or {}).get(
-                    "mean",
-                    float("nan"),
-                )
-            ),
-            "test_probe_merge_count_mae_mean": float(
-                (test_merge_probe.get("count_mae") or {}).get(
-                    "mean",
-                    float("nan"),
-                )
-            ),
-        },
-    }
-
-
-def _condition_acceptance_value(
-    condition: Mapping[str, Any],
-    key: str,
-) -> float:
-    return float(
-        dict(condition.get("acceptance_readout") or {}).get(key, float("nan"))
-    )
-
-
-def _tree_neural_exact_sanity_summary(
-    payload: Mapping[str, Any],
-) -> Dict[str, Any]:
-    all_runs = [
-        dict(run)
-        for run in list(payload.get("runs") or [])
-        if str(run.get("study_name", "")).strip() == EXACT_SANITY_STUDY_NAME
-    ]
-    runs = [
-        dict(run)
-        for run in all_runs
-        if str(run.get("baseline_family", "")) == EXACT_SANITY_FAMILY
-        and isinstance(run.get("exact_sketch_diagnostics"), Mapping)
-    ]
-    if not runs:
-        return {}
-
-    grouped: Dict[int, List[Dict[str, Any]]] = {}
-    for run in runs:
-        grouped.setdefault(int(run.get("train_doc_count", 0)), []).append(run)
-
-    groups: List[Dict[str, Any]] = []
-    for train_doc_count in sorted(grouped):
-        group_runs = list(grouped[train_doc_count])
-        fno_reference_runs = [
-            run
-            for run in all_runs
-            if int(run.get("train_doc_count", 0)) == int(train_doc_count)
-            and str(run.get("baseline_family", "")) == "official_fno"
-            and isinstance(run.get("root_summary_probe_audit"), Mapping)
-        ]
-        failure_bucket_counts: Dict[str, int] = {}
-        for run in group_runs:
-            bucket = str(run.get("exact_sketch_failure_bucket", "")).strip()
-            if bucket:
-                failure_bucket_counts[bucket] = failure_bucket_counts.get(bucket, 0) + 1
-        runs_by_condition: Dict[str, List[Dict[str, Any]]] = {}
-        for run in group_runs:
-            runs_by_condition.setdefault(_exact_sanity_condition_id(run), []).append(run)
-        exact_witness: Dict[str, Any] = {}
-        for split in ("train", "val", "test"):
-            exact_witness[split] = {
-                "law_metrics": {
-                    metric: _exact_sanity_metric_summary(
-                        group_runs,
-                        (
-                            "exact_sketch_diagnostics",
-                            "exact_witness",
-                            split,
-                            "law_metrics",
-                            metric,
-                        ),
-                    )
-                    for metric in EXACT_SANITY_LAW_METRICS
-                }
-            }
-            for level in EXACT_SANITY_LEVELS:
-                exact_witness[split][level] = {
-                    "direct": {
-                        metric: _exact_sanity_metric_summary(
-                            group_runs,
-                            (
-                                "exact_sketch_diagnostics",
-                                "exact_witness",
-                                split,
-                                level,
-                                "direct",
-                                metric,
-                            ),
-                        )
-                        for metric in EXACT_SANITY_COMPONENT_METRICS
-                    },
-                    "probe_control": {
-                        metric: _exact_sanity_metric_summary(
-                            group_runs,
-                            (
-                                "exact_sketch_diagnostics",
-                                "exact_witness",
-                                split,
-                                level,
-                                "probe_control",
-                                metric,
-                            ),
-                        )
-                        for metric in EXACT_SANITY_COMPONENT_METRICS
-                    },
-                }
-        conditions = [
-            _exact_sanity_condition_summary(condition_runs)
-            for _condition_id, condition_runs in sorted(runs_by_condition.items())
-        ]
-        condition_by_id = {
-            str(condition.get("condition_id", "")): condition for condition in conditions
-        }
-        condition_by_kind = {
-            str(condition.get("condition_kind", "")): condition for condition in conditions
-        }
-        exact_test_laws = exact_witness["test"]["law_metrics"]
-        exact_witness_near_zero = all(
-            abs(float(exact_test_laws[metric]["mean"])) <= 1e-9
-            for metric in EXACT_SANITY_LAW_METRICS
-            if np.isfinite(float(exact_test_laws[metric]["mean"]))
-        )
-        legacy_condition = condition_by_kind.get("legacy_fair_fno_root_only")
-        slot_root_only = condition_by_kind.get("slot_root_only")
-        slot_leaf_sampled = condition_by_kind.get("slot_leaf_sampled_r0p25")
-        slot_leaf_dense = condition_by_kind.get("slot_leaf_dense")
-        legacy_vs_slot_root_only: Dict[str, Any] = {}
-        if legacy_condition is not None and slot_root_only is not None:
-            legacy_vs_slot_root_only = {
-                "merge_probe_exact_summary_match_rate_delta": float(
-                    _condition_acceptance_value(
-                        slot_root_only,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                    - _condition_acceptance_value(
-                        legacy_condition,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                ),
-                "leaf_probe_exact_summary_match_rate_delta": float(
-                    _condition_acceptance_value(
-                        slot_root_only,
-                        "test_probe_leaf_exact_summary_match_rate_mean",
-                    )
-                    - _condition_acceptance_value(
-                        legacy_condition,
-                        "test_probe_leaf_exact_summary_match_rate_mean",
-                    )
-                ),
-                "direct_root_count_mae_delta": float(
-                    _condition_acceptance_value(
-                        slot_root_only,
-                        "test_direct_root_count_mae_mean",
-                    )
-                    - _condition_acceptance_value(
-                        legacy_condition,
-                        "test_direct_root_count_mae_mean",
-                    )
-                ),
-                "slot_root_only_improves_over_legacy": bool(
-                    np.isfinite(
-                        _condition_acceptance_value(
-                            slot_root_only,
-                            "test_probe_merge_exact_summary_match_rate_mean",
-                        )
-                    )
-                    and np.isfinite(
-                        _condition_acceptance_value(
-                            legacy_condition,
-                            "test_probe_merge_exact_summary_match_rate_mean",
-                        )
-                    )
-                    and np.isfinite(
-                        _condition_acceptance_value(
-                            slot_root_only,
-                            "test_direct_root_count_mae_mean",
-                        )
-                    )
-                    and np.isfinite(
-                        _condition_acceptance_value(
-                            legacy_condition,
-                            "test_direct_root_count_mae_mean",
-                        )
-                    )
-                    and _condition_acceptance_value(
-                        slot_root_only,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                    >= _condition_acceptance_value(
-                        legacy_condition,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                    and _condition_acceptance_value(
-                        slot_root_only,
-                        "test_direct_root_count_mae_mean",
-                    )
-                    <= _condition_acceptance_value(
-                        legacy_condition,
-                        "test_direct_root_count_mae_mean",
-                    )
-                ),
-            }
-        leaf_sampled_value: Dict[str, Any] = {}
-        leaf_value_by_rate: Dict[str, Any] = {}
-        for rate_label in ("0p25", "0p5", "0p75", "dense"):
-            leaf_condition = condition_by_kind.get(
-                "slot_leaf_dense"
-                if rate_label == "dense"
-                else f"slot_leaf_sampled_r{rate_label}"
-            )
-            if slot_root_only is None or leaf_condition is None:
-                continue
-            payload = {
-                "merge_probe_exact_summary_match_rate_delta": float(
-                    _condition_acceptance_value(
-                        leaf_condition,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                    - _condition_acceptance_value(
-                        slot_root_only,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                ),
-                "leaf_probe_exact_summary_match_rate_delta": float(
-                    _condition_acceptance_value(
-                        leaf_condition,
-                        "test_probe_leaf_exact_summary_match_rate_mean",
-                    )
-                    - _condition_acceptance_value(
-                        slot_root_only,
-                        "test_probe_leaf_exact_summary_match_rate_mean",
-                    )
-                ),
-                "root_probe_count_mae_delta": float(
-                    _condition_acceptance_value(
-                        leaf_condition,
-                        "test_probe_root_count_mae_mean",
-                    )
-                    - _condition_acceptance_value(
-                        slot_root_only,
-                        "test_probe_root_count_mae_mean",
-                    )
-                ),
-                "leaf_rate_improves_over_root_only": bool(
-                    np.isfinite(
-                        _condition_acceptance_value(
-                            leaf_condition,
-                            "test_probe_merge_exact_summary_match_rate_mean",
-                        )
-                    )
-                    and np.isfinite(
-                        _condition_acceptance_value(
-                            slot_root_only,
-                            "test_probe_merge_exact_summary_match_rate_mean",
-                        )
-                    )
-                    and np.isfinite(
-                        _condition_acceptance_value(
-                            leaf_condition,
-                            "test_probe_root_count_mae_mean",
-                        )
-                    )
-                    and np.isfinite(
-                        _condition_acceptance_value(
-                            slot_root_only,
-                            "test_probe_root_count_mae_mean",
-                        )
-                    )
-                    and _condition_acceptance_value(
-                        leaf_condition,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                    >= _condition_acceptance_value(
-                        slot_root_only,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                    and _condition_acceptance_value(
-                        leaf_condition,
-                        "test_probe_root_count_mae_mean",
-                    )
-                    <= _condition_acceptance_value(
-                        slot_root_only,
-                        "test_probe_root_count_mae_mean",
-                    )
-                ),
-            }
-            leaf_value_by_rate[rate_label] = payload
-            if rate_label == "0p25":
-                leaf_sampled_value = dict(payload)
-        dense_leaf_value: Dict[str, Any] = {}
-        if slot_leaf_sampled is not None and slot_leaf_dense is not None:
-            dense_leaf_value = {
-                "merge_probe_exact_summary_match_rate_delta": float(
-                    _condition_acceptance_value(
-                        slot_leaf_dense,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                    - _condition_acceptance_value(
-                        slot_leaf_sampled,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                ),
-                "root_probe_count_mae_delta": float(
-                    _condition_acceptance_value(
-                        slot_leaf_dense,
-                        "test_probe_root_count_mae_mean",
-                    )
-                    - _condition_acceptance_value(
-                        slot_leaf_sampled,
-                        "test_probe_root_count_mae_mean",
-                    )
-                ),
-                "leaf_dense_improves_over_leaf_sampled": bool(
-                    np.isfinite(
-                        _condition_acceptance_value(
-                            slot_leaf_dense,
-                            "test_probe_merge_exact_summary_match_rate_mean",
-                        )
-                    )
-                    and np.isfinite(
-                        _condition_acceptance_value(
-                            slot_leaf_sampled,
-                            "test_probe_merge_exact_summary_match_rate_mean",
-                        )
-                    )
-                    and np.isfinite(
-                        _condition_acceptance_value(
-                            slot_leaf_dense,
-                            "test_probe_root_count_mae_mean",
-                        )
-                    )
-                    and np.isfinite(
-                        _condition_acceptance_value(
-                            slot_leaf_sampled,
-                            "test_probe_root_count_mae_mean",
-                        )
-                    )
-                    and _condition_acceptance_value(
-                        slot_leaf_dense,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                    >= _condition_acceptance_value(
-                        slot_leaf_sampled,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                    and _condition_acceptance_value(
-                        slot_leaf_dense,
-                        "test_probe_root_count_mae_mean",
-                    )
-                    <= _condition_acceptance_value(
-                        slot_leaf_sampled,
-                        "test_probe_root_count_mae_mean",
-                    )
-                ),
-            }
-        subtree_label_value_by_rate: Dict[str, Any] = {}
-        for rate_label in ("0p25", "0p5", "0p75", "dense"):
-            count_condition = condition_by_kind.get(
-                "slot_internal_count_only_dense"
-                if rate_label == "dense"
-                else f"slot_internal_count_only_r{rate_label}"
-            )
-            full_condition = condition_by_kind.get(
-                "slot_internal_full_sketch_dense"
-                if rate_label == "dense"
-                else f"slot_internal_full_sketch_r{rate_label}"
-            )
-            if count_condition is None or full_condition is None:
-                continue
-            subtree_label_value_by_rate[rate_label] = {
-                "merge_probe_exact_summary_match_rate_delta": float(
-                    _condition_acceptance_value(
-                        full_condition,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                    - _condition_acceptance_value(
-                        count_condition,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                ),
-                "merge_join_bit_accuracy_delta": float(
-                    _condition_acceptance_value(
-                        full_condition,
-                        "test_merge_join_bit_accuracy_mean",
-                    )
-                    - _condition_acceptance_value(
-                        count_condition,
-                        "test_merge_join_bit_accuracy_mean",
-                    )
-                ),
-                "direct_root_count_mae_delta": float(
-                    _condition_acceptance_value(
-                        full_condition,
-                        "test_direct_root_count_mae_mean",
-                    )
-                    - _condition_acceptance_value(
-                        count_condition,
-                        "test_direct_root_count_mae_mean",
-                    )
-                ),
-                "full_sketch_improves_over_count_only": bool(
-                    np.isfinite(
-                        _condition_acceptance_value(
-                            full_condition,
-                            "test_probe_merge_exact_summary_match_rate_mean",
-                        )
-                    )
-                    and np.isfinite(
-                        _condition_acceptance_value(
-                            count_condition,
-                            "test_probe_merge_exact_summary_match_rate_mean",
-                        )
-                    )
-                    and np.isfinite(
-                        _condition_acceptance_value(
-                            full_condition,
-                            "test_direct_root_count_mae_mean",
-                        )
-                    )
-                    and np.isfinite(
-                        _condition_acceptance_value(
-                            count_condition,
-                            "test_direct_root_count_mae_mean",
-                        )
-                    )
-                    and _condition_acceptance_value(
-                        full_condition,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                    >= _condition_acceptance_value(
-                        count_condition,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                    and _condition_acceptance_value(
-                        full_condition,
-                        "test_direct_root_count_mae_mean",
-                    )
-                    <= _condition_acceptance_value(
-                        count_condition,
-                        "test_direct_root_count_mae_mean",
-                    )
-                ),
-            }
-        root_mode_alignment_by_base_config: Dict[str, Any] = {}
-        for condition in conditions:
-            condition_id = str(condition.get("condition_id", ""))
-            if not condition_id.endswith("_task_split_ablation"):
-                continue
-            base_condition_id = condition_id[: -len("_task_split_ablation")]
-            primary_condition = condition_by_id.get(base_condition_id)
-            if primary_condition is None:
-                continue
-            root_mode_alignment_by_base_config[base_condition_id] = {
-                "aligned_primary_condition_id": base_condition_id,
-                "theorem_primary_condition_id": base_condition_id,
-                "task_split_ablation_condition_id": condition_id,
-                "aligned_primary_root_mode": str(
-                    primary_condition.get("tree_summary_spec_root_mode", "")
-                ),
-                "theorem_primary_root_mode": str(
-                    primary_condition.get("tree_summary_spec_root_mode", "")
-                ),
-                "task_split_root_mode": str(
-                    condition.get("tree_summary_spec_root_mode", "")
-                ),
-                "theorem_root_count_mae_delta": float(
-                    _condition_acceptance_value(
-                        primary_condition,
-                        "test_direct_root_count_mae_mean",
-                    )
-                    - _condition_acceptance_value(
-                        condition,
-                        "test_direct_root_count_mae_mean",
-                    )
-                ),
-                "task_root_mae_ablation_delta": float(
-                    _condition_acceptance_value(
-                        primary_condition,
-                        "test_task_root_mae_ablation_mean",
-                    )
-                    - _condition_acceptance_value(
-                        condition,
-                        "test_task_root_mae_ablation_mean",
-                    )
-                ),
-                "merge_probe_exact_summary_match_rate_delta": float(
-                    _condition_acceptance_value(
-                        primary_condition,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                    - _condition_acceptance_value(
-                        condition,
-                        "test_probe_merge_exact_summary_match_rate_mean",
-                    )
-                ),
-                "aligned_primary_improves_or_matches_theorem_root": bool(
-                    np.isfinite(
-                        _condition_acceptance_value(
-                            primary_condition,
-                            "test_direct_root_count_mae_mean",
-                        )
-                    )
-                    and np.isfinite(
-                        _condition_acceptance_value(
-                            condition,
-                            "test_direct_root_count_mae_mean",
-                        )
-                    )
-                    and _condition_acceptance_value(
-                        primary_condition,
-                        "test_direct_root_count_mae_mean",
-                    )
-                    <= _condition_acceptance_value(
-                        condition,
-                        "test_direct_root_count_mae_mean",
-                    )
-                ),
-            }
-        groups.append(
-            {
-                "train_doc_count": int(train_doc_count),
-                "n_runs": int(len(group_runs)),
-                "seed_values": sorted(
-                    {int(run.get("seed", 0)) for run in group_runs if "seed" in run}
-                ),
-                "config_labels": sorted(
-                    {
-                        str(run.get("config_label", "")).strip()
-                        for run in group_runs
-                        if str(run.get("config_label", "")).strip()
-                    }
-                ),
-                "failure_bucket_counts": dict(failure_bucket_counts),
-                "failure_gap_scores": {
-                    "leaf_boundary_encoding_gap_score": _finite_summary_stats(
-                        [
-                            run.get("exact_sketch_leaf_gap_score", float("nan"))
-                            for run in group_runs
-                        ]
-                    ),
-                    "count_composition_gap_score": _finite_summary_stats(
-                        [
-                            run.get("exact_sketch_merge_gap_score", float("nan"))
-                            for run in group_runs
-                        ]
-                    ),
-                    "subtree_label_value_gap_score": _finite_summary_stats(
-                        [
-                            (
-                                _nested_mapping_value(
-                                    run,
-                                    (
-                                        "exact_sketch_diagnostics",
-                                        "failure_attribution",
-                                        "subtree_label_value_gap_score",
-                                    ),
-                                )
-                                if np.isfinite(
-                                    float(
-                                        _nested_mapping_value(
-                                            run,
-                                            (
-                                                "exact_sketch_diagnostics",
-                                                "failure_attribution",
-                                                "subtree_label_value_gap_score",
-                                            ),
-                                        )
-                                    )
-                                )
-                                else _nested_mapping_value(
-                                    run,
-                                    (
-                                        "exact_sketch_diagnostics",
-                                        "failure_attribution",
-                                        "internal_label_value_gap_score",
-                                    ),
-                                )
-                            )
-                            for run in group_runs
-                        ]
-                    ),
-                    "legacy_readout_gap_score": _finite_summary_stats(
-                        [
-                            run.get("exact_sketch_readout_gap_score", float("nan"))
-                            for run in group_runs
-                        ]
-                    ),
-                },
-                "exact_witness": exact_witness,
-                "conditions": conditions,
-                "full_doc_fno_reference": {
-                    split: {
-                        metric: _exact_sanity_metric_summary(
-                            fno_reference_runs,
-                            ("root_summary_probe_audit", split, metric),
-                        )
-                        for metric in EXACT_SANITY_COMPONENT_METRICS
-                    }
-                    for split in ("train", "val", "test")
-                }
-                if fno_reference_runs
-                else {},
-                "acceptance_readout": {
-                    "exact_witness_test_laws_near_zero": bool(exact_witness_near_zero),
-                    "legacy_vs_slot_root_only": legacy_vs_slot_root_only,
-                    "leaf_sampled_value": leaf_sampled_value,
-                    "leaf_value_by_rate": leaf_value_by_rate,
-                    "dense_leaf_value": dense_leaf_value,
-                    "subtree_label_value_by_rate": subtree_label_value_by_rate,
-                    "root_mode_alignment_by_base_config": root_mode_alignment_by_base_config,
-                },
-            }
-        )
-    return {
-        "study_name": EXACT_SANITY_STUDY_NAME,
-        "benchmark": str(payload.get("benchmark", "")),
-        "baseline_family": EXACT_SANITY_FAMILY,
-        "primary_question": (
-            "Can tree_neural fair root-only recover the Lean-style exact sketch "
-            "(count, first, last) well enough that the local-law gap is attributable?"
-        ),
-        "paper_to_lean_local_law_mapping": {
-            "C1": "L1",
-            "C2": "L3",
-            "C3": "L2",
-        },
-        "theorem_contract": dict(
-            ((runs[0].get("exact_sketch_diagnostics") or {}).get("theorem_contract") or {})
-        ),
-        "groups": groups,
-    }
-
-
-def _render_exact_sanity_summary_markdown(
-    summary: Mapping[str, Any],
-) -> str:
-    groups = list(summary.get("groups") or [])
-    lines = [
-        "# Tree-Neural Exact-Sketch Sanity Summary",
-        "",
-        f"- benchmark: `{str(summary.get('benchmark', ''))}`",
-        f"- baseline_family: `{str(summary.get('baseline_family', ''))}`",
-        f"- study_name: `{str(summary.get('study_name', ''))}`",
-        f"- primary_question: `{str(summary.get('primary_question', ''))}`",
-        f"- paper_to_lean_local_law_mapping: `{dict(summary.get('paper_to_lean_local_law_mapping') or {})}`",
-        f"- theorem_contract: `{dict(summary.get('theorem_contract') or {})}`",
-    ]
-    for group in groups:
-        acceptance = dict(group.get("acceptance_readout") or {})
-        exact_witness = dict(group.get("exact_witness") or {})
-        fno_reference = dict(group.get("full_doc_fno_reference") or {})
-        witness_test_laws = dict((exact_witness.get("test") or {}).get("law_metrics") or {})
-        lines.extend(
-            [
-                "",
-                f"## train_doc_count = {int(group.get('train_doc_count', 0))}",
-                "",
-                f"- n_runs: `{int(group.get('n_runs', 0))}`",
-                f"- seeds: `{list(group.get('seed_values') or [])}`",
-                f"- config_labels: `{list(group.get('config_labels') or [])}`",
-                f"- failure_bucket_counts: `{dict(group.get('failure_bucket_counts') or {})}`",
-                (
-                    "- exact witness test laws near zero: "
-                    f"`{bool(acceptance.get('exact_witness_test_laws_near_zero', False))}`"
-                ),
-                "",
-                "### Exact Witness Test Laws",
-                "",
-                "| metric | mean | std |",
-                "|---|---:|---:|",
-            ]
-        )
-        for metric in EXACT_SANITY_LAW_METRICS:
-            stats = dict(witness_test_laws.get(metric) or {})
-            lines.append(
-                "| "
-                f"{metric} | "
-                f"{float(stats.get('mean', float('nan'))):.6g} | "
-                f"{float(stats.get('std', float('nan'))):.6g} |"
-            )
-        for condition in list(group.get("conditions") or []):
-            condition = dict(condition)
-            tree_test = dict((condition.get("tree_neural") or {}).get("test") or {})
-            condition_acceptance = dict(condition.get("acceptance_readout") or {})
-            lines.extend(
-                [
-                    "",
-                    f"### {str(condition.get('condition_title', 'Condition'))}",
-                    "",
-                    f"- condition_id: `{str(condition.get('condition_id', ''))}`",
-                    f"- condition_kind: `{str(condition.get('condition_kind', ''))}`",
-                    f"- config_label: `{str(condition.get('config_label', ''))}`",
-                    f"- aligned_sketch_surface: `{str(condition.get('aligned_sketch_surface', ''))}`",
-                    f"- weighting_scheme: `{str(condition.get('weighting_scheme', ''))}`",
-                    f"- optimization_root_weight: `{float(condition.get('optimization_root_weight', float('nan'))):.6g}`",
-                    f"- local_law_c1_weight: `{float(condition.get('local_law_c1_weight', float('nan'))):.6g}`",
-                    f"- local_law_c2_weight: `{float(condition.get('local_law_c2_weight', float('nan'))):.6g}`",
-                    f"- local_law_c3_weight: `{float(condition.get('local_law_c3_weight', float('nan'))):.6g}`",
-                    f"- summary_spec_name: `{str(condition.get('summary_spec_name', ''))}`",
-                    f"- slot_count: `{int(condition.get('slot_count', 0))}`",
-                    f"- tree_theorem_count_dim: `{int(condition.get('tree_theorem_count_dim', 0))}`",
-                    f"- tree_theorem_first_dim: `{int(condition.get('tree_theorem_first_dim', 0))}`",
-                    f"- tree_theorem_last_dim: `{int(condition.get('tree_theorem_last_dim', 0))}`",
-                    f"- tree_theorem_count_head_mode: `{str(condition.get('tree_theorem_count_head_mode', ''))}`",
-                    f"- tree_theorem_count_ordinal_weight: `{float(condition.get('tree_theorem_count_ordinal_weight', 1.0)):.6g}`",
-                    f"- tree_theorem_count_scalar_aux_weight: `{float(condition.get('tree_theorem_count_scalar_aux_weight', 0.25)):.6g}`",
-                    f"- tree_theorem_count_threshold_balance: `{bool(condition.get('tree_theorem_count_threshold_balance', True))}`",
-                    f"- leaf_supervision_kind: `{str(condition.get('leaf_supervision_kind', ''))}`",
-                    f"- internal_supervision_kind: `{str(condition.get('internal_supervision_kind', ''))}`",
-                    f"- internal_label_rate: `{float(condition.get('internal_label_rate', 0.0)):.6g}`",
-                    f"- leaf_exact_supervision: `{bool(condition.get('leaf_exact_supervision', False))}`",
-                    f"- leaf_label_rate: `{float(condition.get('leaf_label_rate', 1.0)):.6g}`",
-                    f"- tree_training_schedule: `{str(condition.get('tree_training_schedule', ''))}`",
-                    f"- tree_stage1_epochs: `{int(condition.get('tree_stage1_epochs', 0))}`",
-                    f"- tree_stage2_epochs: `{int(condition.get('tree_stage2_epochs', 0))}`",
-                    f"- tree_root_supervision_kind: `{str(condition.get('tree_root_supervision_kind', ''))}`",
-                    f"- tree_checkpoint_metric: `{str(condition.get('tree_checkpoint_metric', ''))}`",
-                    f"- tree_stage1_checkpoint_metric: `{str(condition.get('tree_stage1_checkpoint_metric', ''))}`",
-                    f"- tree_stage1_root_weight: `{float(condition.get('tree_stage1_root_weight', 0.0)):.6g}`",
-                    f"- tree_task_head_mode: `{str(condition.get('tree_task_head_mode', ''))}`",
-                    f"- tree_theorem_surface_mode: `{str(condition.get('tree_theorem_surface_mode', ''))}`",
-                    f"- tree_summary_spec_root_mode: `{str(condition.get('tree_summary_spec_root_mode', ''))}`",
-                    f"- failure_bucket_counts: `{dict(condition.get('failure_bucket_counts') or {})}`",
-                    "",
-                    "| level | branch | count_mae | count_match | first_acc | last_acc | exact_match |",
-                    "|---|---|---:|---:|---:|---:|---:|",
-                ]
-            )
-            for level in EXACT_SANITY_LEVELS:
-                level_payload = dict(tree_test.get(level) or {})
-                for branch in ("direct", "probe"):
-                    branch_payload = dict(level_payload.get(branch) or {})
-                    lines.append(
-                        "| "
-                        f"{level} | "
-                        f"{branch} | "
-                        f"{float((branch_payload.get('count_mae') or {}).get('mean', float('nan'))):.6g} | "
-                        f"{float((branch_payload.get('count_match_rate') or {}).get('mean', float('nan'))):.6g} | "
-                        f"{float((branch_payload.get('first_accuracy') or {}).get('mean', float('nan'))):.6g} | "
-                        f"{float((branch_payload.get('last_accuracy') or {}).get('mean', float('nan'))):.6g} | "
-                        f"{float((branch_payload.get('exact_summary_match_rate') or {}).get('mean', float('nan'))):.6g} |"
-                    )
-            merge_consistency = dict((tree_test.get("merge") or {}).get("decoded_consistency") or {})
-            if merge_consistency:
-                lines.extend(
-                    [
-                        "",
-                        "| merge_consistency_metric | mean | std |",
-                        "|---|---:|---:|",
-                    ]
-                )
-                for metric in EXACT_SANITY_MERGE_CONSISTENCY_METRICS:
-                    stats = dict(merge_consistency.get(metric) or {})
-                    lines.append(
-                        "| "
-                        f"{metric} | "
-                        f"{float(stats.get('mean', float('nan'))):.6g} | "
-                        f"{float(stats.get('std', float('nan'))):.6g} |"
-                    )
-            lines.extend(
-                [
-                    "",
-                    f"- test probe leaf exact summary match rate mean: `{float(condition_acceptance.get('test_probe_leaf_exact_summary_match_rate_mean', float('nan'))):.6g}`",
-                    f"- test probe merge exact summary match rate mean: `{float(condition_acceptance.get('test_probe_merge_exact_summary_match_rate_mean', float('nan'))):.6g}`",
-                    f"- test theorem root direct count mae mean: `{float(condition_acceptance.get('test_direct_root_count_mae_mean', float('nan'))):.6g}`",
-                    f"- test task root mae ablation mean: `{float(condition_acceptance.get('test_task_root_mae_ablation_mean', float('nan'))):.6g}`",
-                    f"- test probe root count mae mean: `{float(condition_acceptance.get('test_probe_root_count_mae_mean', float('nan'))):.6g}`",
-                    f"- test merge join bit accuracy mean: `{float(condition_acceptance.get('test_merge_join_bit_accuracy_mean', float('nan'))):.6g}`",
-                    f"- test C2/L3 on-range exact match mean: `{float(condition_acceptance.get('test_c2_on_range_exact_match_mean', float('nan'))):.6g}`",
-                    f"- test theorem bootstrap direct mean: `{float(condition_acceptance.get('test_theorem_bootstrap_direct_mean', float('nan'))):.6g}`",
-                ]
-            )
-        if fno_reference:
-            ref_test = dict(fno_reference.get("test") or {})
-            lines.extend(
-                [
-                    "",
-                    "### Full-Doc FNO Root Probe Reference",
-                    "",
-                    "| metric | mean | std |",
-                    "|---|---:|---:|",
-                ]
-            )
-            for metric in EXACT_SANITY_COMPONENT_METRICS:
-                stats = dict(ref_test.get(metric) or {})
-                lines.append(
-                    "| "
-                    f"{metric} | "
-                    f"{float(stats.get('mean', float('nan'))):.6g} | "
-                    f"{float(stats.get('std', float('nan'))):.6g} |"
-                )
-        lines.extend(
-            [
-                "",
-                "### Acceptance Readout",
-                "",
-                f"- legacy_vs_slot_root_only: `{dict(acceptance.get('legacy_vs_slot_root_only') or {})}`",
-                f"- leaf_sampled_value: `{dict(acceptance.get('leaf_sampled_value') or {})}`",
-                f"- leaf_value_by_rate: `{dict(acceptance.get('leaf_value_by_rate') or {})}`",
-                f"- dense_leaf_value: `{dict(acceptance.get('dense_leaf_value') or {})}`",
-                f"- subtree_label_value_by_rate: `{dict(acceptance.get('subtree_label_value_by_rate') or {})}`",
-                f"- root_mode_alignment_by_base_config: `{dict(acceptance.get('root_mode_alignment_by_base_config') or {})}`",
-            ]
-        )
-    lines.append("")
-    return "\n".join(lines)
 
 
 def _budget_frontier_axis_value(
@@ -12214,8 +9101,8 @@ def _parser() -> argparse.ArgumentParser:
     controller.add_argument("--batch-size", type=int, default=64)
     controller.add_argument("--lr", type=float, default=5e-4)
     controller.add_argument("--weight-decay", type=float, default=0.0)
-    controller.add_argument("--tree-local-law-weight", type=float, default=None)
-    controller.add_argument("--tree-task-objective-weight", type=float, default=None)
+    controller.add_argument("--local-law-weight", dest="tree_local_law_weight", type=float, default=None)
+    controller.add_argument("--root-share", dest="tree_task_objective_weight", type=float, default=None)
     controller.add_argument("--doc-sequence-train-fraction", type=float, default=0.0)
     controller.add_argument("--torch-threads", type=int, default=1)
     controller.add_argument(
@@ -12273,8 +9160,8 @@ def _parser() -> argparse.ArgumentParser:
     exact_sanity.add_argument("--batch-size", type=int, default=64)
     exact_sanity.add_argument("--lr", type=float, default=5e-4)
     exact_sanity.add_argument("--weight-decay", type=float, default=0.0)
-    exact_sanity.add_argument("--tree-local-law-weight", type=float, default=0.8)
-    exact_sanity.add_argument("--tree-task-objective-weight", type=float, default=None)
+    exact_sanity.add_argument("--local-law-weight", dest="tree_local_law_weight", type=float, default=0.8)
+    exact_sanity.add_argument("--root-share", dest="tree_task_objective_weight", type=float, default=None)
     exact_sanity.add_argument("--tree-c1-relative-weight", type=float, default=1.0)
     exact_sanity.add_argument("--tree-c2-relative-weight", type=float, default=1.0)
     exact_sanity.add_argument("--tree-c3-relative-weight", type=float, default=1.0)
@@ -12456,12 +9343,14 @@ def _parser() -> argparse.ArgumentParser:
     representation_sufficiency.add_argument("--lr", type=float, default=5e-4)
     representation_sufficiency.add_argument("--weight-decay", type=float, default=0.0)
     representation_sufficiency.add_argument(
-        "--tree-local-law-weight",
+        "--local-law-weight",
+        dest="tree_local_law_weight",
         type=float,
         default=0.8,
     )
     representation_sufficiency.add_argument(
-        "--tree-task-objective-weight",
+        "--root-share",
+        dest="tree_task_objective_weight",
         type=float,
         default=None,
     )
@@ -12621,12 +9510,14 @@ def _parser() -> argparse.ArgumentParser:
     representation_learnability.add_argument("--lr", type=float, default=5e-4)
     representation_learnability.add_argument("--weight-decay", type=float, default=0.0)
     representation_learnability.add_argument(
-        "--tree-local-law-weight",
+        "--local-law-weight",
+        dest="tree_local_law_weight",
         type=float,
         default=0.8,
     )
     representation_learnability.add_argument(
-        "--tree-task-objective-weight",
+        "--root-share",
+        dest="tree_task_objective_weight",
         type=float,
         default=None,
     )
@@ -12819,8 +9710,8 @@ def _parser() -> argparse.ArgumentParser:
     budget_frontier.add_argument("--batch-size", type=int, default=64)
     budget_frontier.add_argument("--lr", type=float, default=5e-4)
     budget_frontier.add_argument("--weight-decay", type=float, default=0.0)
-    budget_frontier.add_argument("--tree-local-law-weight", type=float, default=0.3)
-    budget_frontier.add_argument("--tree-task-objective-weight", type=float, default=None)
+    budget_frontier.add_argument("--local-law-weight", dest="tree_local_law_weight", type=float, default=0.3)
+    budget_frontier.add_argument("--root-share", dest="tree_task_objective_weight", type=float, default=None)
     budget_frontier.add_argument("--doc-sequence-train-fraction", type=float, default=0.0)
     budget_frontier.add_argument("--torch-threads", type=int, default=1)
     budget_frontier.add_argument(
@@ -12860,6 +9751,18 @@ def _parser() -> argparse.ArgumentParser:
         nargs="*",
         type=int,
         default=(0, 1, 2, 3, 4),
+    )
+    parity.add_argument(
+        "--method-runs",
+        nargs="*",
+        type=str,
+        default=(),
+    )
+    parity.add_argument(
+        "--reference-method-runs",
+        nargs="*",
+        type=str,
+        default=(),
     )
     parity.add_argument(
         "--tree-families",
@@ -12914,8 +9817,8 @@ def _parser() -> argparse.ArgumentParser:
     parity.add_argument("--batch-size", type=int, default=64)
     parity.add_argument("--lr", type=float, default=5e-4)
     parity.add_argument("--weight-decay", type=float, default=0.0)
-    parity.add_argument("--tree-local-law-weight", type=float, default=None)
-    parity.add_argument("--tree-task-objective-weight", type=float, default=None)
+    parity.add_argument("--local-law-weight", dest="tree_local_law_weight", type=float, default=None)
+    parity.add_argument("--root-share", dest="tree_task_objective_weight", type=float, default=None)
     parity.add_argument("--doc-sequence-train-fraction", type=float, default=0.0)
     parity.add_argument("--torch-threads", type=int, default=1)
     parity.add_argument(
@@ -13013,8 +9916,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     tune.add_argument("--comparison-n-epochs", type=int, default=32)
     tune.add_argument("--comparison-lr", type=float, default=5e-4)
-    tune.add_argument("--comparison-tree-local-law-weight", type=float, default=0.3)
-    tune.add_argument("--tree-task-objective-weight", type=float, default=None)
+    tune.add_argument("--comparison-local-law-weight", dest="comparison_tree_local_law_weight", type=float, default=0.3)
+    tune.add_argument("--root-share", dest="tree_task_objective_weight", type=float, default=None)
     tune.add_argument("--doc-sequence-train-fraction", type=float, default=0.0)
     tune.add_argument("--torch-threads", type=int, default=1)
     tune.add_argument(
@@ -13167,8 +10070,8 @@ def _parser() -> argparse.ArgumentParser:
     capacity.add_argument("--batch-size", type=int, default=None)
     capacity.add_argument("--lr", type=float, default=None)
     capacity.add_argument("--weight-decay", type=float, default=None)
-    capacity.add_argument("--tree-local-law-weight", type=float, default=None)
-    capacity.add_argument("--tree-task-objective-weight", type=float, default=None)
+    capacity.add_argument("--local-law-weight", dest="tree_local_law_weight", type=float, default=None)
+    capacity.add_argument("--root-share", dest="tree_task_objective_weight", type=float, default=None)
     capacity.add_argument("--leaf-supervision-kind", type=str, default=None)
     capacity.add_argument("--leaf-label-rate", type=float, default=None)
     capacity.add_argument("--internal-supervision-kind", type=str, default=None)
@@ -13300,8 +10203,8 @@ def _parser() -> argparse.ArgumentParser:
     study.add_argument("--weight-decay", type=float, default=0.0)
     study.add_argument("--comparison-n-epochs", type=int, default=32)
     study.add_argument("--comparison-lr", type=float, default=5e-4)
-    study.add_argument("--comparison-tree-local-law-weight", type=float, default=0.3)
-    study.add_argument("--tree-task-objective-weight", type=float, default=None)
+    study.add_argument("--comparison-local-law-weight", dest="comparison_tree_local_law_weight", type=float, default=0.3)
+    study.add_argument("--root-share", dest="tree_task_objective_weight", type=float, default=None)
     study.add_argument("--doc-sequence-train-fraction", type=float, default=0.0)
     study.add_argument("--torch-threads", type=int, default=1)
     study.add_argument(
@@ -13353,8 +10256,8 @@ def _parser() -> argparse.ArgumentParser:
     worker.add_argument("--axis-value", type=str, default="")
     worker.add_argument("--locked-tree-neural-config-label", type=str, default="")
     worker.add_argument("--selection-metric", type=str, default="")
-    worker.add_argument("--tree-local-law-weight", type=float, default=None)
-    worker.add_argument("--tree-task-objective-weight", type=float, default=None)
+    worker.add_argument("--local-law-weight", dest="tree_local_law_weight", type=float, default=None)
+    worker.add_argument("--root-share", dest="tree_task_objective_weight", type=float, default=None)
     worker.add_argument(
         "--tree-local-weighting-mode",
         type=str,

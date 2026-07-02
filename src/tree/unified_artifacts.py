@@ -22,9 +22,8 @@ import numpy as np
 from src.core.data_models import Node, Tree
 
 
-class EmbeddingClient(Protocol):
-    def embed_texts(self, texts: Sequence[str]) -> List[List[float]]:  # pragma: no cover - protocol
-        ...
+# Canonical embedding interface lives in treepo.llm (single source of truth).
+from treepo.llm import EmbeddingClient  # noqa: E402,F401  (re-export for back-compat)
 
 
 def _l2_normalize(vec: np.ndarray) -> np.ndarray:

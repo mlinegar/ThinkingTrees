@@ -249,14 +249,9 @@ def test_markov_ops_cli_parses_theorem_feature_fields():
     assert float(args.theorem_pair_diff_threshold) == pytest.approx(0.75)
 
 
-def test_formal_local_law_parameterization_resolves_c1_and_c3_weights():
+def test_local_law_weight_parameterization_splits_active_laws_equally():
     cfg = OPSCountConfig(
         local_law_weight=0.75,
-        c1_relative_weight=1.0,
-        c2_relative_weight=0.0,
-        c3_relative_weight=2.0,
-        leaf_weight=9.0,
-        c3_weight=9.0,
         model_family="neural",
         include_root_query=False,
         schedule_consistency_weight=0.1,
@@ -264,18 +259,34 @@ def test_formal_local_law_parameterization_resolves_c1_and_c3_weights():
     )
     objective = _build_objective_summary(cfg)
 
-    assert objective["parameterization"] == "formal_local_law_weight"
+    assert objective["parameterization"] == "lambda"
     assert objective["local_law_weight"] == pytest.approx(0.75)
     assert objective["local_law_c1_weight"] == pytest.approx(0.25)
-    assert objective["local_law_c3_weight"] == pytest.approx(0.50)
-    assert objective["local_law_c2_weight"] == pytest.approx(0.0)
+    assert objective["local_law_c2_weight"] == pytest.approx(0.25)
+    assert objective["local_law_c3_weight"] == pytest.approx(0.25)
     assert objective["local_law_c1_share"] == pytest.approx(1.0 / 3.0)
-    assert objective["local_law_c3_share"] == pytest.approx(2.0 / 3.0)
-    assert objective["optimization_root_weight"] == pytest.approx(0.25)
+    assert objective["local_law_c2_share"] == pytest.approx(1.0 / 3.0)
+    assert objective["local_law_c3_share"] == pytest.approx(1.0 / 3.0)
+    assert objective["root_share"] == pytest.approx(0.25)
     assert objective["proxy_schedule_consistency_weight"] == pytest.approx(0.1)
     assert objective["theorem_terms"][0]["paper_condition"] == "C1"
     assert objective["theorem_terms"][1]["paper_condition"] == "C3"
     assert objective["proxy_terms"][0]["evidence_status"] == "proxy_only"
+
+
+def test_lambda_mode_rejects_explicit_or_relative_law_weights():
+    with pytest.raises(ValueError, match="explicit law weights"):
+        _build_objective_summary(
+            OPSCountConfig(local_law_weight=0.75, leaf_weight=9.0, use_cuda=False)
+        )
+    with pytest.raises(ValueError, match="equal active-law weights"):
+        _build_objective_summary(
+            OPSCountConfig(
+                local_law_weight=0.75,
+                c2_relative_weight=0.0,
+                use_cuda=False,
+            )
+        )
 
 
 def test_experiment_reports_objective_decomposition_in_summary():
@@ -310,7 +321,7 @@ def test_experiment_reports_objective_decomposition_in_summary():
     out = run_markov_changepoint_ops_count_experiment(cfg)
 
     objective = out.objective
-    assert objective["parameterization"] == "legacy_term_weights"
+    assert objective["parameterization"] == "explicit_normalized_weights"
     assert objective["training_scheme"] == "weighted_neural_objective"
     assert objective["local_law_weight"] == pytest.approx(float(cfg.leaf_weight + cfg.c3_weight))
     assert objective["local_law_c1_weight"] == pytest.approx(float(cfg.leaf_weight))
@@ -373,7 +384,9 @@ def test_experiment_emits_local_law_learnability_and_artifacts(tmp_path: Path):
     out = run_markov_changepoint_ops_count_experiment(cfg)
     payload = json.loads(out.to_json())
     learnability = dict(payload["local_law_learnability"])
-    assert learnability["family"] == "markov_ops_count"
+    assert learnability["method_id"] == "markov_ops_count"
+    assert "family" not in learnability
+    assert "law_package" not in json.dumps(payload)
     assert learnability["selection"]["selection_split"] == "val"
     assert learnability["selection"]["selection_metric"] == "configured_objective"
     policies = dict(learnability["policies"])
@@ -412,9 +425,6 @@ def test_markov_split_objective_exposes_hajek_selection_when_local_laws_are_esti
         lr=1e-3,
         weight_decay=0.0,
         local_law_weight=0.5,
-        c1_relative_weight=1.0,
-        c2_relative_weight=0.0,
-        c3_relative_weight=1.0,
         audit_policy="fraction",
         audit_fraction=0.5,
         c3_audit_strategy="uniform",
@@ -457,9 +467,6 @@ def test_markov_split_objective_falls_back_to_exact_when_c3_support_is_not_ident
         lr=1e-3,
         weight_decay=0.0,
         local_law_weight=0.5,
-        c1_relative_weight=0.0,
-        c2_relative_weight=0.0,
-        c3_relative_weight=1.0,
         audit_policy="fraction",
         audit_fraction=0.5,
         c3_audit_strategy="top_span",
@@ -485,7 +492,7 @@ def test_default_markov_ops_count_config_is_root_only_no_local_law_baseline():
 
     assert cfg.leaf_weight == pytest.approx(0.0)
     assert cfg.c3_weight == pytest.approx(0.0)
-    assert objective["parameterization"] == "legacy_term_weights"
+    assert objective["parameterization"] == "explicit_normalized_weights"
     assert objective["local_law_weight"] == pytest.approx(0.0)
     assert objective["local_law_c1_weight"] == pytest.approx(0.0)
     assert objective["local_law_c3_weight"] == pytest.approx(0.0)
@@ -501,35 +508,36 @@ def test_formal_local_law_defaults_to_equal_split_and_normalized_root_weight():
     )
     objective = _build_objective_summary(cfg)
 
-    assert objective["parameterization"] == "formal_local_law_weight"
+    assert objective["parameterization"] == "lambda"
     assert objective["weighting_scheme"] == "normalized_lambda_tradeoff"
     assert objective["local_law_c1_weight"] == pytest.approx(0.2)
     assert objective["local_law_c2_weight"] == pytest.approx(0.2)
     assert objective["local_law_c3_weight"] == pytest.approx(0.2)
-    assert objective["task_objective_weight"] == pytest.approx(0.4)
-    assert objective["task_objective_weight_source"] == "derived_from_local_law_weight"
-    assert objective["optimization_root_weight"] == pytest.approx(0.4)
+    assert objective["root_share"] == pytest.approx(0.4)
+    assert objective["root_share_source"] == "derived_from_local_law_weight"
     assert objective["optimization_weight_mass_no_proxy"] == pytest.approx(1.0)
 
 
-def test_formal_local_law_can_use_explicit_task_weight_override():
+def test_explicit_weight_mode_normalizes_task_and_law_weights():
     cfg = OPSCountConfig(
-        local_law_weight=0.6,
         task_objective_weight=1.5,
+        leaf_weight=0.2,
+        c2_weight=0.2,
+        c3_weight=0.2,
         model_family="neural",
         use_cuda=False,
     )
     objective = _build_objective_summary(cfg)
 
-    assert objective["parameterization"] == "formal_local_law_weight"
-    assert objective["weighting_scheme"] == "explicit_task_plus_local_law"
-    assert objective["task_objective_weight"] == pytest.approx(1.5)
-    assert objective["task_objective_weight_source"] == "explicit_task_objective_weight"
-    assert objective["local_law_c1_weight"] == pytest.approx(0.2)
-    assert objective["local_law_c2_weight"] == pytest.approx(0.2)
-    assert objective["local_law_c3_weight"] == pytest.approx(0.2)
-    assert objective["optimization_root_weight"] == pytest.approx(1.5)
-    assert objective["optimization_weight_mass_no_proxy"] == pytest.approx(2.1)
+    assert objective["parameterization"] == "explicit_normalized_weights"
+    assert objective["weighting_scheme"] == "normalized_explicit_weights"
+    assert objective["root_share"] == pytest.approx(1.5 / 2.1)
+    assert objective["root_share_source"] == "explicit_root_share"
+    assert objective["local_law_weight"] == pytest.approx(0.6 / 2.1)
+    assert objective["local_law_c1_weight"] == pytest.approx(0.2 / 2.1)
+    assert objective["local_law_c2_weight"] == pytest.approx(0.2 / 2.1)
+    assert objective["local_law_c3_weight"] == pytest.approx(0.2 / 2.1)
+    assert objective["optimization_weight_mass_no_proxy"] == pytest.approx(1.0)
 
 
 def test_formal_objective_reports_weighted_and_unweighted_metrics_separately():
@@ -568,20 +576,16 @@ def test_formal_objective_reports_weighted_and_unweighted_metrics_separately():
         OPSCountConfig(
             **common,
             local_law_weight=0.25,
-            c1_relative_weight=1.0,
-            c2_relative_weight=0.0,
-            c3_relative_weight=4.0,
         )
     )
 
     objective = out.objective
     learned = out.metrics["learned"]
-    assert objective["optimization_root_weight"] == pytest.approx(0.75)
-    assert objective["task_objective_weight"] == pytest.approx(0.75)
-    assert objective["task_objective_weight_source"] == "derived_from_local_law_weight"
-    assert objective["local_law_c1_weight"] == pytest.approx(0.05)
-    assert objective["local_law_c2_weight"] == pytest.approx(0.0)
-    assert objective["local_law_c3_weight"] == pytest.approx(0.20)
+    assert objective["root_share"] == pytest.approx(0.75)
+    assert objective["root_share_source"] == "derived_from_local_law_weight"
+    assert objective["local_law_c1_weight"] == pytest.approx(0.25 / 3.0)
+    assert objective["local_law_c2_weight"] == pytest.approx(0.25 / 3.0)
+    assert objective["local_law_c3_weight"] == pytest.approx(0.25 / 3.0)
     assert objective["optimization_weight_mass_no_proxy"] == pytest.approx(1.0)
     assert float(learned["train_objective_full_labels"]) == pytest.approx(
         float(learned["train_optimization_objective_full_labels"])
@@ -637,23 +641,22 @@ def test_formal_objective_explicit_task_weight_override_flows_into_metrics():
     out = run_markov_changepoint_ops_count_experiment(
         OPSCountConfig(
             **common,
-            local_law_weight=0.25,
             task_objective_weight=1.25,
-            c1_relative_weight=1.0,
-            c2_relative_weight=0.0,
-            c3_relative_weight=4.0,
+            leaf_weight=0.25,
+            c2_weight=0.25,
+            c3_weight=0.25,
         )
     )
 
     objective = out.objective
     learned = out.metrics["learned"]
-    assert objective["weighting_scheme"] == "explicit_task_plus_local_law"
-    assert objective["task_objective_weight_source"] == "explicit_task_objective_weight"
-    assert objective["task_objective_weight"] == pytest.approx(1.25)
-    assert objective["optimization_root_weight"] == pytest.approx(1.25)
-    assert objective["local_law_c1_weight"] == pytest.approx(0.05)
-    assert objective["local_law_c3_weight"] == pytest.approx(0.20)
-    assert objective["optimization_weight_mass_no_proxy"] == pytest.approx(1.50)
+    assert objective["weighting_scheme"] == "normalized_explicit_weights"
+    assert objective["root_share_source"] == "explicit_root_share"
+    assert objective["root_share"] == pytest.approx(1.25 / 2.00)
+    assert objective["local_law_c1_weight"] == pytest.approx(0.25 / 2.00)
+    assert objective["local_law_c2_weight"] == pytest.approx(0.25 / 2.00)
+    assert objective["local_law_c3_weight"] == pytest.approx(0.25 / 2.00)
+    assert objective["optimization_weight_mass_no_proxy"] == pytest.approx(1.0)
     assert float(learned["train_objective_task_objective_term"]) == pytest.approx(
         float(learned["train_objective_root_term"])
     )
@@ -1656,9 +1659,6 @@ def test_markov_data_bundle_reuse_preserves_split_signatures_across_comparisons(
         **{
             **base_cfg.__dict__,
             "local_law_weight": 0.5,
-            "c1_relative_weight": 1.0,
-            "c2_relative_weight": 0.0,
-            "c3_relative_weight": 1.0,
             "audit_fraction": 1.0,
             "leaf_query_rate": 1.0,
             "artifact_dir": str(tmp_path / "local_label_artifacts"),

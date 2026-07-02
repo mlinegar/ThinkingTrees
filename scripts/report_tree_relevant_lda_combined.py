@@ -47,7 +47,7 @@ def _safe_mean(xs: Iterable[float]) -> float:
 
 
 def _stage2_qweight(cfg: dict) -> float:
-    return _safe_float(cfg.get("quadratic_utility_weight", cfg.get("lambda_multiplier")))
+    return _safe_float(cfg.get("quadratic_utility_weight"))
 
 
 def _qweight_label(value: float) -> str:
@@ -228,7 +228,6 @@ def _flatten_stage2(summary: dict) -> List[dict]:
             "latent_leaf_tokens": int(cfg.get("latent_leaf_tokens", -1)),
             "local_mixture_concentration": _safe_float(cfg.get("local_mixture_concentration")),
             "quadratic_utility_weight": qweight,
-            "lambda_multiplier": qweight,
             "budget_regime": str(cfg.get("budget_regime", "")),
             "seed": int(cfg.get("seed", -1)),
             **{f"metric_{k}": v for k, v in metrics.items()},
@@ -350,7 +349,7 @@ def main() -> int:
 
     # ── Stage 2 helpers ──
     taus = sorted({float(r["local_mixture_concentration"]) for r in stage2_rows})
-    lambdas = sorted({float(r["lambda_multiplier"]) for r in stage2_rows})
+    lambdas = sorted({float(r["quadratic_utility_weight"]) for r in stage2_rows})
     llts = sorted({int(r["latent_leaf_tokens"]) for r in stage2_rows if int(r["latent_leaf_tokens"]) > 0})
     hero_lam = max(lambdas)
     best_llt = max(llts)
@@ -365,7 +364,7 @@ def main() -> int:
             and str(r.get("budget_regime")) == "all_leaves_labeled"
             and int(r.get("latent_leaf_tokens", -1)) == llt
             and float(r.get("local_mixture_concentration")) == tau
-            and float(r.get("lambda_multiplier")) == lam
+            and float(r.get("quadratic_utility_weight")) == lam
         ]
         return _safe_mean(vals)
 
@@ -726,7 +725,7 @@ def main() -> int:
             if row.get("method") != "pooled_doc_wrong_model" or str(row.get("budget_regime")) != "all_leaves_labeled":
                 continue
             key = (int(row.get("latent_leaf_tokens", -1)), str(row.get("leaf_label", "")),
-                   float(row.get("local_mixture_concentration")), float(row.get("lambda_multiplier")),
+                   float(row.get("local_mixture_concentration")), float(row.get("quadratic_utility_weight")),
                    int(row.get("seed", -1)))
             pooled_lookup[key] = _safe_float(row.get("metric_utility_abs_to_true_mean"))
 
@@ -740,7 +739,7 @@ def main() -> int:
                 if int(row.get("latent_leaf_tokens", -1)) != llt:
                     continue
                 key = (int(row.get("latent_leaf_tokens", -1)), str(row.get("leaf_label", "")),
-                       float(row.get("local_mixture_concentration")), float(row.get("lambda_multiplier")),
+                       float(row.get("local_mixture_concentration")), float(row.get("quadratic_utility_weight")),
                        int(row.get("seed", -1)))
                 pooled_err = pooled_lookup.get(key, float("nan"))
                 leaf_err = _safe_float(row.get("metric_utility_abs_to_true_mean"))

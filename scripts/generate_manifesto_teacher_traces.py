@@ -13,13 +13,17 @@ import re
 import sys
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-import requests
 
 # Add project root for direct script execution.
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.tasks.manifesto.data_loader import ManifestoDataset
+from src.tasks.manifesto.openai_chat import (
+    DEFAULT_MAIN_MODEL,
+    OpenAIChatClient,
+    http_error_detail as _http_error_detail,
+)
 from src.tasks.manifesto.teacher_trace_generator import (
     TeacherTraceRecord,
     build_benchmark_docs,
@@ -36,11 +40,19 @@ from src.ctreepo.distillation import (
     build_labeled_tree_from_text,
     write_labeled_trees_jsonl,
 )
+from src.experiments import (
+    ResultRow,
+    benchmark_ref_from_parts,
+    chat_role_ref,
+    metadata_with_roles,
+    method_ref_from_parts,
+    oracle_ref,
+    write_canonical_sidecars,
+)
 
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_MAIN_MODEL = "/mnt/data/models/nvidia/Qwen3.5-397B-A17B-NVFP4"
 
 try:
     import dspy
@@ -48,70 +60,6 @@ except Exception:  # pragma: no cover - optional runtime dependency guard
     dspy = None  # type: ignore[assignment]
 
 
-def _http_error_detail(exc: Exception) -> str:
-    if isinstance(exc, requests.HTTPError) and exc.response is not None:
-        body = str(exc.response.text or "").strip().replace("\n", " ")
-        if len(body) > 400:
-            body = body[:400] + "..."
-        return f"status={exc.response.status_code} body={body}"
-    return str(exc)
-
-
-class OpenAIChatClient:
-    """Minimal OpenAI-compatible chat client."""
-
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        model: str,
-        api_key: str,
-        timeout_seconds: float = 180.0,
-        enable_thinking: bool = False,
-    ):
-        self.base_url = str(base_url).rstrip("/")
-        self.model = str(model)
-        self.api_key = str(api_key)
-        self.timeout_seconds = float(timeout_seconds)
-        self.enable_thinking = bool(enable_thinking)
-
-    def chat(
-        self,
-        *,
-        system: str,
-        user: str,
-        temperature: float,
-        max_tokens: int,
-    ) -> str:
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": float(temperature),
-            "max_tokens": int(max_tokens),
-            "chat_template_kwargs": {
-                "enable_thinking": bool(self.enable_thinking),
-            },
-        }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        response = requests.post(
-            f"{self.base_url}/chat/completions",
-            json=payload,
-            headers=headers,
-            timeout=self.timeout_seconds,
-        )
-        response.raise_for_status()
-        data = response.json()
-        choices = data.get("choices") or []
-        if not choices:
-            return ""
-        message = choices[0].get("message") or {}
-        return str(message.get("content") or "").strip()
 
 
 _NUMERIC_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
@@ -1323,6 +1271,68 @@ def main(argv: Optional[List[str]] = None) -> int:
         },
     }
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    benchmark_ref = benchmark_ref_from_parts(
+        family="manifesto_teacher_traces",
+        scope="generation",
+        name="manifesto_teacher_traces",
+        dataset_id=str(output_dir),
+        metadata={"split_counts_effective": manifest["split_counts_effective"]},
+    )
+    method_ref = method_ref_from_parts(
+        family="teacher_trace_generation",
+        variant="manifesto",
+        adapter="teacher_trace_generation",
+        metadata=metadata_with_roles(
+            {"teacher_model": str(args.teacher_model), "scorer_model": str(scorer_model)},
+            roles={
+                "summarizer": chat_role_ref(
+                    role="summarizer",
+                    model=str(args.teacher_model),
+                    base_url=str(args.teacher_base_url),
+                ),
+                "scorer": chat_role_ref(
+                    role="scorer",
+                    model=str(scorer_model),
+                    base_url=str(scorer_base_url),
+                ),
+            },
+            oracle=oracle_ref(kind="teacher_scored_traces", source=str(scorer_model)),
+        ),
+    )
+    artifacts = {
+        "manifest_json": str(output_dir / "manifest.json"),
+        "records_jsonl": str(records_path),
+        "benchmark_docs_jsonl": str(benchmark_path),
+        "summary_training_pairs_jsonl": str(summary_pairs_path),
+        "trace_artifacts_jsonl": str(trace_rows_path),
+    }
+    if labeled_trees_path is not None:
+        artifacts["labeled_trees_jsonl"] = str(labeled_trees_path)
+    write_canonical_sidecars(
+        output_dir,
+        title="generate_manifesto_teacher_traces",
+        adapter_id="teacher_trace_generation",
+        benchmark_refs=(benchmark_ref,),
+        method_refs=(method_ref,),
+        phases=("generate",),
+        artifacts=artifacts,
+        result_rows=(
+            ResultRow(
+                experiment_id="",
+                phase="generate",
+                benchmark_ref=benchmark_ref,
+                method_ref=method_ref,
+                metric_name="accepted_docs",
+                metric_value=len(records),
+                artifact_refs=tuple(artifacts.keys()),
+                metadata={"rejected_docs": len(rejected_rows), "requested_docs": total_requested},
+            ),
+        ),
+        state="completed",
+        metadata={"teacher_model": str(args.teacher_model), "scorer_model": str(scorer_model)},
+        launch_command=sys.argv,
+        report_profiles=("runtime_eval_summary",),
+    )
 
     LOGGER.info("Teacher trace generation complete: accepted=%d rejected=%d", len(records), len(rejected_rows))
     LOGGER.info("Output directory: %s", output_dir)

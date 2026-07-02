@@ -58,8 +58,6 @@ def latent_quadratic_utility_objective_semantics(
         },
         metadata={
             "quadratic_utility_weight": float(quadratic_utility_weight),
-            # Keep the legacy key so old loaders and outputs remain comparable.
-            "lambda_multiplier": float(quadratic_utility_weight),
             **dict(metadata or {}),
         },
     )

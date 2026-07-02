@@ -90,6 +90,7 @@ class RunConfigSpec:
     tree_leaf_fno_width: int | None = None
     tree_leaf_fno_n_modes: int | None = None
     tree_leaf_fno_n_layers: int | None = None
+    tree_leaf_fno_pooling: str | None = None
     tree_model_version: str = ""
     tree_batch_runtime_mode: str = ""
     tree_root_supervision_kind: str = "mse"
@@ -186,6 +187,16 @@ class RunConfigSpec:
         if topology not in VALID_TOPOLOGIES:
             raise ValueError(
                 f"topology must be one of {sorted(VALID_TOPOLOGIES)}, got {topology!r}"
+            )
+        if self.tree_local_law_weight is not None:
+            local = float(self.tree_local_law_weight)
+            if local < 0.0 or local > 1.0:
+                raise ValueError("tree_local_law_weight must be in [0, 1]")
+        if self.tree_task_objective_weight is not None and float(self.tree_task_objective_weight) < 0.0:
+            raise ValueError("tree_task_objective_weight must be non-negative")
+        if self.tree_local_law_weight is not None and self.tree_task_objective_weight is not None:
+            raise ValueError(
+                "tree_local_law_weight is mutually exclusive with tree_task_objective_weight"
             )
 
 
@@ -386,6 +397,22 @@ def write_run_config_spec(path: Path, config: RunConfigSpec) -> None:
 
 def run_config_from_mapping(mapping: Mapping[str, Any]) -> RunConfigSpec:
     """Create a RunConfigSpec from a flat dict, applying defaults for missing fields."""
+    legacy_objective_fields = sorted(
+        key
+        for key in (
+            "task_objective_weight",
+            "tree_local_law_weight",
+            "tree_task_objective_weight",
+        )
+        if key in mapping and mapping.get(key) not in {"", None}
+    )
+    if legacy_objective_fields:
+        raise ValueError(
+            "legacy public objective config fields are not supported: "
+            + ", ".join(legacy_objective_fields)
+            + ". Use local_law_weight and root_share."
+        )
+
     def _first_present(*keys: str) -> Any:
         for key in keys:
             value = mapping.get(key)
@@ -420,22 +447,14 @@ def run_config_from_mapping(mapping: Mapping[str, Any]) -> RunConfigSpec:
         ),
         tree_local_law_weight=(
             None
-            if _first_present("tree_local_law_weight", "local_law_weight") is None
-            else float(_first_present("tree_local_law_weight", "local_law_weight"))
+            if _first_present("local_law_weight") is None
+            else float(_first_present("local_law_weight"))
         ),
         tree_task_objective_weight=(
             None
-            if _first_present(
-                "tree_task_objective_weight",
-                "task_objective_weight",
-            )
+            if _first_present("root_share")
             is None
-            else float(
-                _first_present(
-                    "tree_task_objective_weight",
-                    "task_objective_weight",
-                )
-            )
+            else float(_first_present("root_share"))
         ),
         tree_local_weighting_mode=str(
             mapping.get("tree_local_weighting_mode", "fixed_k_hajek")

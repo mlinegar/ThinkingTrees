@@ -1,10 +1,10 @@
 """
 Six policy dimensions from Benoit et al. (2026 AJPS).
 
-Each dimension is rescaled to a common 1-7 axis to match their LLM prompt
-output scale. Native expert-survey scales and mapping notes are documented
-per-dimension. See docs/benoit_notes_and_alignment_plan.md §1.3 for the
-table this is derived from.
+LLM outputs use the common 1-7 axis from Benoit's prompts. The released expert
+benchmark means are not uniformly stored on that axis; see
+src/tasks/manifesto/expert_scale.py for the explicit raw-vs-normalized target
+conversion used by our calibration and supervised-training paths.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ BENOIT_DIMENSIONS: Dict[PolicyDimension, DimensionSpec] = {
             "Economic left-right: public services vs reducing taxes (Benoit Table 2).",
         ),
         ches_variable="lrecon",
-        native_expert_scale="0-10 (CHES); rescaled to 1-7 for LLM prompts",
+        native_expert_scale="released expert_mean is survey-side/raw; derive 1-7 via expert_scale",
         benoit_issue_code="taxspend",
     ),
     PolicyDimension.SOCIAL: DimensionSpec(
@@ -67,7 +67,7 @@ BENOIT_DIMENSIONS: Dict[PolicyDimension, DimensionSpec] = {
         anchor_high="Strongly opposes liberal social policies",
         scale=_SEVEN_POINT("social", "Social liberalism (Benoit Table 2)."),
         ches_variable="galtan",
-        native_expert_scale="0-10 (CHES); rescaled to 1-7",
+        native_expert_scale="released expert_mean is survey-side/raw; derive 1-7 via expert_scale",
         benoit_issue_code="social",
     ),
     PolicyDimension.IMMIGRATION: DimensionSpec(
@@ -76,7 +76,7 @@ BENOIT_DIMENSIONS: Dict[PolicyDimension, DimensionSpec] = {
         anchor_high="Strongly favors tough immigration policy",
         scale=_SEVEN_POINT("immigration", "Immigration policy (Benoit Table 2)."),
         ches_variable="immigrate_policy",
-        native_expert_scale="0-10 (CHES); rescaled to 1-7",
+        native_expert_scale="released expert_mean is survey-side/raw; derive 1-7 via expert_scale",
         benoit_issue_code="immigration",
     ),
     PolicyDimension.EU: DimensionSpec(
@@ -85,7 +85,7 @@ BENOIT_DIMENSIONS: Dict[PolicyDimension, DimensionSpec] = {
         anchor_high="Strongly in favor of European integration",
         scale=_SEVEN_POINT("eu", "Party orientation toward EU (Benoit Table 2)."),
         ches_variable="eu_position",
-        native_expert_scale="1-7 (CHES native); used as-is",
+        native_expert_scale="released expert_mean is effectively native 1-7; expert_scale clamps to 1-7",
         benoit_issue_code="eu",
     ),
     PolicyDimension.ENVIRONMENT: DimensionSpec(
@@ -94,7 +94,7 @@ BENOIT_DIMENSIONS: Dict[PolicyDimension, DimensionSpec] = {
         anchor_high="Economic growth even at cost of environment",
         scale=_SEVEN_POINT("environment", "Environment vs growth (Benoit Table 2)."),
         ches_variable="enviro",
-        native_expert_scale="0-10 (CHES); rescaled to 1-7",
+        native_expert_scale="released expert_mean is survey-side/raw; derive 1-7 via expert_scale",
         benoit_issue_code="environment",
     ),
     PolicyDimension.DECENTRALIZATION: DimensionSpec(
@@ -103,7 +103,7 @@ BENOIT_DIMENSIONS: Dict[PolicyDimension, DimensionSpec] = {
         anchor_high="Strongly opposes political decentralization",
         scale=_SEVEN_POINT("decentralization", "Political decentralization (Benoit Table 2)."),
         ches_variable="regions",
-        native_expert_scale="0-10 (CHES); rescaled to 1-7. Known to have structural"
+        native_expert_scale="released expert_mean is survey-side/raw; derive 1-7 via expert_scale. Known to have structural"
         " manifesto-vs-expert mismatch (Benoit §4.4).",
         benoit_issue_code="decentralization",
     ),

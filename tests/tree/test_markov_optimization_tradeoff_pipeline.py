@@ -345,7 +345,7 @@ def test_root_only_parity_presets_are_registered() -> None:
     assert matched["c2_relative_weight"] == pytest.approx(0.0)
     assert matched["c3_relative_weight"] == pytest.approx(0.0)
     assert matched["tree_model_version"] == "unified_g"
-    assert matched["tree_score_merge_mode"] == "exact_projected_sketch"
+    assert "tree_score_merge_mode" not in matched
     assert matched["tree_theorem_surface_mode"] == "factorized_score_fiber"
     assert matched["tree_leaf_fno_width"] == 256
     assert matched["tree_leaf_fno_n_modes"] == 16
@@ -820,6 +820,64 @@ def test_ops_payload_aggregators_smoke() -> None:
     assert laws["tree_all_laws"]["wall_seconds"] == 12.0
 
 
+def test_supervision_recovery_aggregation_preserves_theorem_state_diagnostics() -> None:
+    payloads = _with_supervision_recovery_v3_payloads(
+        [
+            {
+                "config": {
+                    "pipeline_supervision_recovery_package": "r100_superset_local_eq_10p0",
+                    "pipeline_supervision_recovery_scope": "recoverable_v5_t128",
+                    "pipeline_supervision_recovery_scope_label": "recoverable_v5_t128",
+                    "train_docs": 1024,
+                    "data_seed": 0,
+                    "pipeline_tree_reference_mode": "preset",
+                    "pipeline_tree_reference_label": UNIFIED_G_FULL_LOCAL_LAWS_PRESET,
+                    "tree_model_version": "unified_g",
+                    "tree_runtime_merge_kind": "learned_unified_g",
+                    "fixed_leaf_tokens": 16,
+                },
+                "aggregate_rows": [
+                    {
+                        "cell_id": "recoverable_v5_t128",
+                        "baseline_family": "tree_neural",
+                        "train_doc_count": 1024,
+                        "test_root_mae_mean": 0.08,
+                        "leaf_direct_exact_match": 0.73,
+                        "merge_direct_exact_match": 0.41,
+                        "merge_join_bit_accuracy": 0.67,
+                        "phi_merge_alignment": 0.29,
+                        "tree_model_version": "unified_g",
+                        "tree_runtime_merge_kind": "learned_unified_g",
+                        "tree_exact_projected_merge_is_runtime_merge": False,
+                    }
+                ],
+            }
+        ]
+    )
+
+    summary = _aggregate_supervision_recovery_from_payloads(
+        payloads,
+        recoverable_benchmark="recoverable_v5_t128",
+        structural_grid="structural_core_v2_t128",
+        structural_cell="r12_p079",
+        package_order=["r100_superset_local_eq_10p0"],
+    )
+    row = summary["family_rows"][0]
+
+    assert "merge_direct_exact_match" in summary["theorem_state_diagnostic_metric_names"]
+    assert "root_mae is scalar task performance" in summary["lean_alignment_contract"]
+    assert row["test_root_mae_mean"] == pytest.approx(0.08)
+    assert row["leaf_direct_exact_match_mean"] == pytest.approx(0.73)
+    assert row["merge_direct_exact_match_mean"] == pytest.approx(0.41)
+    assert row["merge_join_bit_accuracy_mean"] == pytest.approx(0.67)
+    assert row["phi_merge_alignment_mean"] == pytest.approx(0.29)
+    assert row["tree_model_version"] == "unified_g"
+    assert "tree_score_merge_mode" not in row
+    assert "tree_effective_score_merge_mode" not in row
+    assert row["tree_runtime_merge_kind"] == "learned_unified_g"
+    assert row["tree_exact_projected_merge_is_runtime_merge_rate"] == pytest.approx(0.0)
+
+
 def test_full_doc_and_large_batch_aggregators_smoke(tmp_path: Path) -> None:
     upper = _aggregate_full_doc_upper_bound_from_payloads(
         [
@@ -932,7 +990,7 @@ def test_pipeline_selection_config_applies_defaults(tmp_path: Path, monkeypatch)
                 'preset = "smoke"',
                 'phases = ["law_packages", "support_grid"]',
                 "train_docs = 4096",
-                'law_package_names = ["tree_c2_only"]',
+                'law_set_ids = ["on_range_idempotence_only"]',
                 'support_modes = ["supported"]',
                 "",
                 "[tradeoff_pipeline.tree_reference]",
@@ -955,10 +1013,43 @@ def test_pipeline_selection_config_applies_defaults(tmp_path: Path, monkeypatch)
     assert args.preset == "smoke"
     assert args.phases == "law_packages support_grid"
     assert args.train_docs == 4096
-    assert args.law_package_names == "tree_c2_only"
+    assert args.law_set_ids == "on_range_idempotence_only"
     assert args.support_modes == "supported"
     assert args.tree_reference_mode == "capacity_locked"
     assert Path(args.tree_reference_capacity_root) == capacity_root
+
+
+def test_pipeline_selection_config_rejects_legacy_run_axis_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "legacy_selection.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[tradeoff_pipeline]",
+                'phases = ["law_packages"]',
+                'law_package_names = ["tree_c2_only"]',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_markov_optimization_tradeoff_pipeline.py",
+            "--selection-config",
+            str(config_path),
+        ],
+    )
+    with pytest.raises(ValueError, match="legacy public run-axis keys"):
+        _parse_args()
+
+
+def test_pipeline_method_run_tokens_reject_law_encoded_method_ids() -> None:
+    with pytest.raises(ValueError, match="encodes a law set"):
+        pipeline._run_axis_from_token("tree_neural_c2")
 
 
 def test_pipeline_selection_config_applies_tree_reference_preset(tmp_path: Path, monkeypatch) -> None:
@@ -1017,7 +1108,7 @@ def test_phase_builders_respect_selected_packages_and_support_modes(tmp_path: Pa
         fno_n_modes=8,
         fno_n_layers=2,
         device_mode="cpu",
-        law_package_names="c2_only all_laws",
+        law_set_ids="on_range_idempotence_only all",
         support_leaf_tokens="8",
         support_seeds="0",
         support_modes="supported",
@@ -1025,7 +1116,10 @@ def test_phase_builders_respect_selected_packages_and_support_modes(tmp_path: Pa
         support_epochs=5,
     )
     law_tasks, _ = _build_law_package_phase(args, tmp_path / "law")
-    assert [task.output_path.parent.name for task in law_tasks] == ["tree_c2_only", "tree_all_laws"]
+    assert [task.output_path.parent.name for task in law_tasks] == [
+        "on_range_idempotence_only",
+        "all",
+    ]
     support_tasks, _ = _build_support_phase(args, tmp_path / "support")
     assert all("supported" in task.output_path.parent.name for task in support_tasks)
     assert all("unsupported" not in task.output_path.parent.name for task in support_tasks)
@@ -1054,7 +1148,7 @@ def test_capacity_locked_tree_reference_overrides_tree_study_configs(tmp_path: P
         fno_n_modes=8,
         fno_n_layers=2,
         device_mode="cpu",
-        law_package_names="tree_all_laws",
+        law_set_ids="all",
         support_leaf_tokens="8",
         support_seeds="0",
         support_modes="supported",
@@ -2187,7 +2281,7 @@ def test_supervision_recovery_phase_supports_mass_matched_unified_g_packages(
     assert recoverable_config["pipeline_supervision_recovery_package"] == "r10_mass_local_eq_1p0"
     assert recoverable_config["pipeline_tree_reference_label"] == "unified_g_full_local_laws_v1"
     assert recoverable_config["tree_model_version"] == "unified_g"
-    assert recoverable_config["tree_score_merge_mode"] == "exact_projected_sketch"
+    assert "tree_score_merge_mode" not in recoverable_config
     assert recoverable_config["n_epochs"] == 40
     assert recoverable_config["tree_stage1_epochs"] == 10
     assert recoverable_config["tree_stage2_epochs"] == 30
@@ -3993,7 +4087,6 @@ def test_supervision_recovery_aggregator_carries_mass_matched_unified_g_metadata
                 "pipeline_tree_reference_label": "unified_g_full_local_laws_v1",
                 "tree_training_schedule": "two_stage",
                 "tree_model_version": "unified_g",
-                "tree_score_merge_mode": "exact_projected_sketch",
                 "tree_checkpoint_metric": "val_root_mae",
                 "tree_stage1_checkpoint_metric": "val_theorem_bootstrap_direct",
                 "summary_spec_name": "markov_count_sketch",
@@ -4128,7 +4221,6 @@ def test_supervision_recovery_aggregator_preserves_superset_package_semantics() 
                 "pipeline_tree_reference_label": "unified_g_full_local_laws_v1",
                 "tree_training_schedule": "two_stage",
                 "tree_model_version": "unified_g",
-                "tree_score_merge_mode": "exact_projected_sketch",
                 "tree_checkpoint_metric": "val_root_mae",
                 "tree_stage1_checkpoint_metric": "val_theorem_bootstrap_direct",
                 "fixed_leaf_tokens": 128,
@@ -4491,14 +4583,14 @@ def test_checked_in_leafgrid_canary_config_builds_plan() -> None:
 def test_t128_benchmark_geometry_resolves_from_surface_when_bundle_missing() -> None:
     pipeline._resolved_full_doc_bundle_token_geometry.cache_clear()
     assert pipeline._resolved_full_doc_bundle_token_geometry(
-        "recoverable_v4_t128",
+        "recoverable_v5_t128",
         "",
         tuple(),
     ) == (128, 128)
     assert pipeline._resolved_full_doc_bundle_token_geometry(
-        "structural_core_v1_t128::r12_seg10to12",
-        "structural_core_v1_t128",
-        ("r12_seg10to12",),
+        "structural_core_v2_t128::r12_p079",
+        "structural_core_v2_t128",
+        ("r12_p079",),
     ) == (128, 128)
     pipeline._resolved_full_doc_bundle_token_geometry.cache_clear()
 
@@ -4510,8 +4602,9 @@ def test_checked_in_t128_canary_config_builds_plan() -> None:
     args = _parse_args(["--config", str(config_path), "--plan-only"])
     plan = build_run_plan(args, devices=["MIG-a", "MIG-b"])
 
-    assert plan["resolved_selection"]["supervision_recovery_recoverable_benchmark"] == "recoverable_v4_t128"
-    assert plan["resolved_selection"]["supervision_recovery_structural_grid"] == "structural_core_v1_t128"
+    assert plan["resolved_selection"]["supervision_recovery_recoverable_benchmark"] == "recoverable_v5_t128"
+    assert plan["resolved_selection"]["supervision_recovery_structural_grid"] == "structural_core_v2_t128"
+    assert plan["resolved_selection"]["supervision_recovery_structural_cell"] == "r12_p079"
     assert plan["resolved_selection"]["supervision_recovery_leaf_token_ladder"] == [128]
     assert plan["phase_task_counts"]["supervision_recovery"]["worker_tasks"] == 12
     assert (
@@ -4521,8 +4614,8 @@ def test_checked_in_t128_canary_config_builds_plan() -> None:
         == [128]
     )
     assert plan["phase_task_counts"]["supervision_recovery"]["details"]["benchmarks"] == [
-        "recoverable_v4_t128",
-        "structural_core_v1_t128::r12_seg10to12",
+        "recoverable_v5_t128",
+        "structural_core_v2_t128::r12_p079",
     ]
 
 
@@ -4535,8 +4628,9 @@ def test_checked_in_t128_gamma_config_builds_plan() -> None:
     args = _parse_args(["--config", str(config_path), "--plan-only"])
     plan = build_run_plan(args, devices=["MIG-a", "MIG-b"])
 
-    assert plan["resolved_selection"]["supervision_recovery_recoverable_benchmark"] == "recoverable_v4_t128"
-    assert plan["resolved_selection"]["supervision_recovery_structural_grid"] == "structural_core_v1_t128"
+    assert plan["resolved_selection"]["supervision_recovery_recoverable_benchmark"] == "recoverable_v5_t128"
+    assert plan["resolved_selection"]["supervision_recovery_structural_grid"] == "structural_core_v2_t128"
+    assert plan["resolved_selection"]["supervision_recovery_structural_cell"] == "r12_p079"
     assert plan["resolved_selection"]["supervision_recovery_train_docs"] == [10240]
     assert plan["resolved_selection"]["supervision_recovery_seeds"] == [0]
     assert plan["resolved_selection"]["supervision_recovery_depth_discount_gammas"] == pytest.approx([1.0, 0.9, 0.75])
@@ -4549,8 +4643,8 @@ def test_checked_in_t128_gamma_config_builds_plan() -> None:
     ]
     assert plan["phase_task_counts"]["supervision_recovery"]["worker_tasks"] == 78
     assert plan["phase_task_counts"]["supervision_recovery"]["details"]["benchmarks"] == [
-        "recoverable_v4_t128",
-        "structural_core_v1_t128::r12_seg10to12",
+        "recoverable_v5_t128",
+        "structural_core_v2_t128::r12_p079",
     ]
 
 
@@ -4563,8 +4657,9 @@ def test_checked_in_t128_superset_gamma_config_builds_plan() -> None:
     args = _parse_args(["--config", str(config_path), "--plan-only"])
     plan = build_run_plan(args, devices=["MIG-a", "MIG-b"])
 
-    assert plan["resolved_selection"]["supervision_recovery_recoverable_benchmark"] == "recoverable_v4_t128"
-    assert plan["resolved_selection"]["supervision_recovery_structural_grid"] == "structural_core_v1_t128"
+    assert plan["resolved_selection"]["supervision_recovery_recoverable_benchmark"] == "recoverable_v5_t128"
+    assert plan["resolved_selection"]["supervision_recovery_structural_grid"] == "structural_core_v2_t128"
+    assert plan["resolved_selection"]["supervision_recovery_structural_cell"] == "r12_p079"
     assert plan["resolved_selection"]["supervision_recovery_train_docs"] == [10240]
     assert plan["resolved_selection"]["supervision_recovery_seeds"] == [0]
     assert plan["resolved_selection"]["supervision_recovery_depth_discount_gammas"] == pytest.approx([1.0, 0.9, 0.75])
@@ -4592,8 +4687,9 @@ def test_checked_in_leaf128_superset_debug_config_builds_plan() -> None:
     args = _parse_args(["--config", str(config_path), "--plan-only"])
     plan = build_run_plan(args, devices=["MIG-a", "MIG-b"])
 
-    assert plan["resolved_selection"]["supervision_recovery_recoverable_benchmark"] == "recoverable_v4_t128"
-    assert plan["resolved_selection"]["supervision_recovery_structural_grid"] == "structural_core_v1_t128"
+    assert plan["resolved_selection"]["supervision_recovery_recoverable_benchmark"] == "recoverable_v5_t128"
+    assert plan["resolved_selection"]["supervision_recovery_structural_grid"] == "structural_core_v2_t128"
+    assert plan["resolved_selection"]["supervision_recovery_structural_cell"] == "r12_p079"
     assert plan["resolved_selection"]["supervision_recovery_train_docs"] == [1024, 4096, 10240]
     assert plan["resolved_selection"]["supervision_recovery_seeds"] == [0]
     assert plan["resolved_selection"]["supervision_recovery_depth_discount_gammas"] == pytest.approx([1.0])
@@ -5104,13 +5200,13 @@ def test_tradeoff_run_plan_reports_resolved_task_counts(tmp_path: Path) -> None:
         learnability_profiles=None,
         weight_ablation_train_docs=None,
         weight_ablation_profiles=None,
-        law_package_names="tree_c2_only tree_all_laws",
+        law_set_ids="on_range_idempotence_only all",
         support_leaf_tokens="8 16",
         support_seeds="0",
         support_modes="supported",
         full_doc_anchor_train_docs=None,
         full_doc_anchor_seeds=None,
-        full_doc_anchor_families="official_fno official_fno_sumlen",
+        full_doc_anchor_reference_method_runs="official_fno official_fno_sumlen",
         efficiency_anchor_mode="both",
         efficiency_train_docs="2048 4096",
         efficiency_anchor_train_docs_dense="256 512 1024",
@@ -5119,8 +5215,8 @@ def test_tradeoff_run_plan_reports_resolved_task_counts(tmp_path: Path) -> None:
         efficiency_structural_cells="r4_seg4to6",
         oracle_budget_train_docs=4096,
         oracle_budget_seeds="0",
-        oracle_budget_tree_families="tree_neural",
-        oracle_budget_reference_families="official_fno official_fno_sumlen",
+        oracle_budget_method_runs="tree_neural",
+        oracle_budget_reference_method_runs="official_fno official_fno_sumlen",
         oracle_budget_calls_per_doc="1.0",
         oracle_budget_full_doc_shares="0.5 1.0",
         oracle_budget_doc_consumption_modes="root_only doc_sequence",
@@ -5194,13 +5290,13 @@ def test_tradeoff_run_plan_reports_supervision_recovery_counts(tmp_path: Path) -
         learnability_profiles=None,
         weight_ablation_train_docs=None,
         weight_ablation_profiles=None,
-        law_package_names=None,
+        law_set_ids=None,
         support_leaf_tokens=None,
         support_seeds=None,
         support_modes=None,
         full_doc_anchor_train_docs=None,
         full_doc_anchor_seeds=None,
-        full_doc_anchor_families="official_fno official_fno_sumlen",
+        full_doc_anchor_reference_method_runs="official_fno official_fno_sumlen",
         efficiency_anchor_mode="both",
         efficiency_train_docs="2048 4096",
         efficiency_anchor_train_docs_dense="256 512 1024",
@@ -5209,8 +5305,8 @@ def test_tradeoff_run_plan_reports_supervision_recovery_counts(tmp_path: Path) -
         efficiency_structural_cells="r4_seg4to6",
         oracle_budget_train_docs=4096,
         oracle_budget_seeds="0",
-        oracle_budget_tree_families="tree_neural",
-        oracle_budget_reference_families="official_fno official_fno_sumlen",
+        oracle_budget_method_runs="tree_neural",
+        oracle_budget_reference_method_runs="official_fno official_fno_sumlen",
         oracle_budget_calls_per_doc="1.0",
         oracle_budget_full_doc_shares="0.5 1.0",
         oracle_budget_doc_consumption_modes="root_only doc_sequence",
@@ -5759,8 +5855,9 @@ def test_checked_in_v3_tradeoff_config_builds_plan() -> None:
     )
 
     assert plan["resolved_selection"]["preset"] == "v3"
-    assert plan["resolved_selection"]["supervision_recovery_recoverable_benchmark"] == "recoverable_v4_t128"
-    assert plan["resolved_selection"]["supervision_recovery_structural_grid"] == "structural_core_v1_t128"
+    assert plan["resolved_selection"]["supervision_recovery_recoverable_benchmark"] == "recoverable_v5_t128"
+    assert plan["resolved_selection"]["supervision_recovery_structural_grid"] == "structural_core_v2_t128"
+    assert plan["resolved_selection"]["supervision_recovery_structural_cell"] == "r12_p079"
     assert plan["resolved_selection"]["supervision_recovery_train_docs"] == [1024, 4096, 10240]
     assert plan["resolved_selection"]["supervision_recovery_seeds"] == [0, 1]
     assert plan["resolved_selection"]["supervision_recovery_leaf_token_ladder"] == [32, 16, 8]
@@ -5772,14 +5869,30 @@ def test_checked_in_v3_tradeoff_config_builds_plan() -> None:
         "r100_superset_local_eq_20p0",
     ]
     assert plan["resolved_selection"]["tree_reference"]["preset"] == "comparison_grid_v3"
+    assert "tree_score_merge_mode" not in plan["resolved_selection"]["tree_reference"]["config"]
     assert (
         plan["resolved_selection"]["tree_reference"]["preset_recipe"]
         == "unified_g_full_local_laws_v1"
     )
     assert plan["resolved_selection"]["structural_tree_reference"]["preset"] == "comparison_grid_v3"
     assert (
+        "tree_score_merge_mode"
+        not in plan["resolved_selection"]["structural_tree_reference"]["config"]
+    )
+    assert (
         plan["resolved_selection"]["structural_tree_reference"]["preset_recipe"]
         == "unified_g_full_local_laws_v1"
+    )
+    assert plan["resolved_selection"]["runtime"]["data_mode"] == "resident"
+    assert plan["resolved_selection"]["runtime"]["bucket_mode"] == "leaf_count_auto_queue"
+    assert (
+        plan["resolved_selection"]["runtime"]["tree_batch_structural_pad_limit"]
+        == pytest.approx(0.5)
+    )
+    assert plan["resolved_selection"]["runtime"]["tree_batch_auto_queue_min_docs"] == 8
+    assert (
+        plan["resolved_selection"]["runtime"]["tree_batch_auto_queue_min_fill_ratio"]
+        == pytest.approx(0.5)
     )
     assert set(plan["phase_task_counts"]) == {"supervision_recovery", "report"}
 
@@ -5888,13 +6001,13 @@ def test_refresh_selected_source_statuses_marks_modified_staged_copy_stale(tmp_p
         learnability_profiles=None,
         weight_ablation_train_docs=None,
         weight_ablation_profiles=None,
-        law_package_names=None,
+        law_set_ids=None,
         support_leaf_tokens=None,
         support_seeds=None,
         support_modes=None,
         full_doc_anchor_train_docs=None,
         full_doc_anchor_seeds=None,
-        full_doc_anchor_families="official_fno official_fno_sumlen",
+        full_doc_anchor_reference_method_runs="official_fno official_fno_sumlen",
         efficiency_anchor_mode="both",
         efficiency_train_docs=None,
         efficiency_anchor_train_docs_dense=None,
@@ -5903,8 +6016,8 @@ def test_refresh_selected_source_statuses_marks_modified_staged_copy_stale(tmp_p
         efficiency_structural_cells=None,
         oracle_budget_train_docs=None,
         oracle_budget_seeds=None,
-        oracle_budget_tree_families=None,
-        oracle_budget_reference_families="official_fno official_fno_sumlen",
+        oracle_budget_method_runs=None,
+        oracle_budget_reference_method_runs="official_fno official_fno_sumlen",
         oracle_budget_calls_per_doc=None,
         oracle_budget_full_doc_shares=None,
         oracle_budget_doc_consumption_modes=None,

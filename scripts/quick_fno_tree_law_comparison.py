@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Quick comparison: FNO tree with/without local laws vs doc-level FNO baseline.
+"""Quick comparison: FNO tree with/without bundled local laws vs doc-level FNO baseline.
 
-Runs three configs on the same data:
+Runs two configs on the same data:
   1. tree_root_only  – FNO tree, root supervision only (no laws)
-  2. tree_all_laws   – FNO tree, C1+C2+C3 local law supervision
-  3. tree_c2_only    – FNO tree, C2-only (best single law from prior experiments)
+  2. tree_all_laws   – FNO tree, bundled corrected C1+C2+C3 local-law supervision
 
-Compares root MAE (the fair comparison metric) across all three,
+Compares root MAE (the fair comparison metric) across both configs,
 plus the doc-level FNO baseline that runs automatically.
 """
 from __future__ import annotations
@@ -15,6 +14,14 @@ import json
 import sys
 import time
 
+from src.ctreepo.contracts import (
+    LAW_ID_LEAF_PRESERVATION,
+    LAW_ID_MERGE_PRESERVATION,
+    LAW_ID_ON_RANGE_IDEMPOTENCE,
+    LAW_SET_ALL,
+    LAW_SET_ROOT_ONLY,
+    assert_public_contract_clean,
+)
 from src.ctreepo.sim.core.markov_changepoint_ops_count import (
     OPSCountConfig,
     run_markov_changepoint_ops_count_experiment,
@@ -61,17 +68,46 @@ CONFIGS = {
         **_SHARED,
         law_package="root_only",
     ),
-    "tree_c2_only": OPSCountConfig(
-        **_SHARED,
-        law_package="c2_only",
-        local_law_weight=0.5,
-    ),
     "tree_all_laws": OPSCountConfig(
         **_SHARED,
         law_package="all_laws",
         local_law_weight=0.5,
     ),
 }
+
+
+def _canonical_axis(name: str, objective: dict[str, object]) -> dict[str, object]:
+    if name == "tree_root_only":
+        law_set_id = LAW_SET_ROOT_ONLY
+        local_law_weight = 0.0
+        root_share = 1.0
+        component_weights = {
+            LAW_ID_LEAF_PRESERVATION: 0.0,
+            LAW_ID_ON_RANGE_IDEMPOTENCE: 0.0,
+            LAW_ID_MERGE_PRESERVATION: 0.0,
+        }
+    else:
+        law_set_id = str(objective.get("law_set_id") or LAW_SET_ALL)
+        local_law_weight = float(objective.get("local_law_weight", 0.0))
+        root_share = float(objective.get("root_share", 1.0 - local_law_weight))
+        component_weights = dict(objective.get("local_law_component_weights") or {})
+        if not component_weights:
+            share = local_law_weight / 3.0 if local_law_weight > 0.0 else 0.0
+            component_weights = {
+                LAW_ID_LEAF_PRESERVATION: float(share),
+                LAW_ID_ON_RANGE_IDEMPOTENCE: float(share),
+                LAW_ID_MERGE_PRESERVATION: float(share),
+            }
+    return {
+        "problem_id": "markov_ops_count",
+        "method_id": "tree_neural",
+        "law_set_id": law_set_id,
+        "root_share": float(root_share),
+        "local_law_weight": float(local_law_weight),
+        "local_law_component_weights": {
+            str(k): float(v) for k, v in component_weights.items()
+        },
+    }
 
 
 def main():
@@ -88,6 +124,7 @@ def main():
         obj = out.objective
 
         r = {
+            **_canonical_axis(name, obj),
             "test_root_mae": float(learned["root_mae"]),
             "test_leaf_mae": float(learned["leaf_mae"]),
             "test_merge_mae": float(learned["merge_mae"]),
@@ -97,9 +134,6 @@ def main():
             "train_merge_mae": float(learned["train_merge_mae"]),
             "epochs": int(learned["epochs_completed"]),
             "best_epoch": int(learned["training_selection_best_epoch"]),
-            "c1_weight": float(obj["local_law_c1_weight"]),
-            "c2_weight": float(obj["local_law_c2_weight"]),
-            "c3_weight": float(obj["local_law_c3_weight"]),
             "wall_seconds": round(elapsed, 1),
         }
 
@@ -156,6 +190,7 @@ def main():
             print(f"\n{name} loss curve (last 5): {r['loss_curve_last5']}")
 
     # Save results.
+    assert_public_contract_clean(results, surface="quick FNO/tree law comparison")
     with open("outputs/fno_tree_law_comparison.json", "w") as f:
         json.dump(results, f, indent=2)
     print("\nResults saved to outputs/fno_tree_law_comparison.json")

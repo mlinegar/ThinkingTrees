@@ -19,6 +19,14 @@ from src.experiments.contracts import (
     stable_hash,
 )
 from src.experiments.normalization import supervision_ref_from_markov_config
+from src.experiments.roles import (
+    ROLE_SCORER,
+    ROLE_STATE_MODEL,
+    metadata_with_roles,
+    oracle_ref,
+    role_ref,
+    state_model_role_ref,
+)
 
 
 _PAPER_TO_LEAN_LAW_IDS = {
@@ -238,7 +246,31 @@ def method_ref_from_markov_full_doc_run(
         ),
         mean_leaves_per_doc=resolved_mean_leaves,
     )
-    method_metadata = {
+    role_engine = str(family_api.get("shared_framework_group", "") or "")
+    roles = {
+        ROLE_SCORER: role_ref(
+            role=ROLE_SCORER,
+            surface="native",
+            engine=role_engine,
+            model=normalized_family,
+            metadata={
+                "family_api_group": str(family_api.get("family_api_group", "")),
+                "family_runner_kind": str(family_api.get("family_runner_kind", "")),
+            },
+        )
+    }
+    if normalized_family in TREE_NEURAL_BASELINE_FAMILIES or normalized_family in OFFICIAL_FNO_BASELINE_FAMILIES:
+        roles[ROLE_STATE_MODEL] = state_model_role_ref(
+            engine=role_engine,
+            model=normalized_family,
+            execution_mode=str(family_api.get("family_runner_kind", "") or ""),
+            metadata={
+                "family_api_group": str(family_api.get("family_api_group", "")),
+                "baseline_family": normalized_family,
+            },
+        )
+    method_metadata = metadata_with_roles(
+        {
         "baseline_family": str(normalized_family),
         "package_name": str(package_name or ""),
         "family_api_version": str(family_api.get("family_api_version", "")),
@@ -263,7 +295,14 @@ def method_ref_from_markov_full_doc_run(
         "family_api": dict(family_api),
         "law_contract": dict(law_contract.get("law_contract") or {}),
         **dict(metadata or {}),
-    }
+        },
+        roles=roles,
+        oracle=oracle_ref(
+            kind="markov_full_doc_targets",
+            source="synthetic_markov_generator",
+            metadata={"label_semantics": "full_doc_count_or_state_target"},
+        ),
+    )
     for key in (
         "comparison_mode",
         "comparison_semantics",

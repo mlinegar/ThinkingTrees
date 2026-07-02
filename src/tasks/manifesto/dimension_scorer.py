@@ -62,7 +62,7 @@ class DimensionScorer(dspy.Module):
         else:
             self.predictor = dspy.Predict(DimensionScoreSignature)
 
-    def load_state(self, state) -> None:
+    def load_state(self, state, **kwargs) -> None:
         """Load both current and legacy scorer states.
 
         Older artifacts stored the DSPy predictor under ``score``. MIPRO also
@@ -70,11 +70,20 @@ class DimensionScorer(dspy.Module):
         the callable predictor on full-program saves. Current artifacts store
         the predictor under ``predictor`` to keep the output field name and
         module attribute separate.
+
+        ``**kwargs`` forwards version-specific flags (e.g. dspy>=3.2's
+        ``allow_unsafe_lm_state`` passed down by ``Module.load``); older dspy
+        calls ``load_state(state)`` with no extra kwargs, so this stays
+        compatible across versions.
         """
         compat_state = dict(state)
         if "predictor" not in compat_state and "score" in compat_state:
             compat_state["predictor"] = compat_state["score"]
-        super().load_state(compat_state)
+        try:
+            super().load_state(compat_state, **kwargs)
+        except TypeError:
+            # Older dspy parents don't accept the newer kwargs.
+            super().load_state(compat_state)
 
     def forward(self, summary: str, task_context: Optional[str] = None) -> dict:
         ctx = task_context if task_context is not None else self._scoring_context

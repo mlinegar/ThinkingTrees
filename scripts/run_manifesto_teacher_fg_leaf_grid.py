@@ -13,13 +13,10 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import hashlib
 import json
 import logging
 import math
 import sys
-import threading
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -27,21 +24,26 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.generate_manifesto_teacher_traces import (  # noqa: E402
+from src.tasks.manifesto.openai_chat import (  # noqa: E402
     DEFAULT_MAIN_MODEL,
     OpenAIChatClient,
-    _http_error_detail,
+    http_error_detail as _http_error_detail,
 )
-from scripts.run_manifesto_dimension_fit_existing_results import (  # noqa: E402
-    _DIM_FROM_NAME,
-    _get_text_for_row,
-    _load_run_metadata,
-    _order_split_rows,
-    _phase3_split_examples,
-    _read_jsonl,
-    _row_expert_score,
-    _row_manifesto_id,
-    _row_teacher_score,
+from src.experiments.script_io import (  # noqa: E402
+    JsonlCallCache,
+    read_jsonl as _read_jsonl,
+    require_within_chars as _require_within_chars,
+    stable_hash as _stable_hash,
+)
+from src.tasks.manifesto.result_rows import (  # noqa: E402
+    DIMENSION_BY_NAME as _DIM_FROM_NAME,
+    get_text_for_row as _get_text_for_row,
+    load_run_metadata as _load_run_metadata,
+    order_split_rows as _order_split_rows,
+    phase3_split_examples as _phase3_split_examples,
+    row_expert_score as _row_expert_score,
+    row_manifesto_id as _row_manifesto_id,
+    row_teacher_score as _row_teacher_score,
 )
 from src.core.prompting import parse_numeric_score  # noqa: E402
 from src.ctreepo.distillation import (  # noqa: E402
@@ -51,8 +53,48 @@ from src.ctreepo.distillation import (  # noqa: E402
     write_labeled_trees_jsonl,
 )
 from src.ctreepo.fg_arity import auto_g_output_tokens  # noqa: E402
+from src.ctreepo.treepo_bridge.manifesto_finetune import (  # noqa: E402
+    add_manifesto_finetune_args,
+    export_manifesto_finetune_bundle_from_args,
+    finetune_export_config,
+)
+from src.ctreepo.contracts import (  # noqa: E402
+    LEAF_UNIT_TEXT_TOKEN,
+    LOCAL_LAW_ESTIMATOR_NONE,
+    REDUCER_CONTRACT_BOTTOM_UP,
+    SOURCE_KIND_EXTERNAL_STATE,
+    SOURCE_KIND_RAW_INPUT,
+    STATE_CONTRACT_EXTERNAL_PASSTHROUGH,
+    STATE_CONTRACT_RAW_CONCAT,
+    default_state_contract_for_source_kind,
+    legacy_tree_bundle_kind_for_source_kind,
+    legacy_tree_text_source_for_source_kind,
+    source_kind_for_legacy_tree_text_source,
+    source_kind_for_tree_bundle_kind,
+    objective_metadata,
+    run_manifest_metadata,
+    tree_bundle_metadata,
+)
 from src.tasks.manifesto import ManifestoDataset  # noqa: E402
+from src.tasks.manifesto.script_utils import (  # noqa: E402
+    append_jsonl,
+    now_iso,
+    now_stamp,
+    parse_int_grid as _parse_int_grid,
+    write_json,
+)
+from src.tasks.manifesto.benoit_scoring_contexts import get_benoit_scoring_context  # noqa: E402
 from src.tasks.manifesto.dimensions import get_dimension, get_preservation_rubric  # noqa: E402
+from src.tasks.manifesto.expert_scale import (  # noqa: E402
+    EXPERT_SCALE_CHOICES,
+    EXPERT_SCALE_NORMALIZED_1_7,
+    EXPERT_SCALE_RAW,
+    expert_scale_bounds,
+    expert_scale_metadata,
+    raw_benoit_expert_from_row,
+    resolve_benoit_expert_target,
+    scorer_1_7_to_expert_target,
+)
 from src.tasks.manifesto.scoring_contexts import get_scoring_context  # noqa: E402
 from src.training.config_sections import config_to_dict  # noqa: E402
 from src.tree.labeled import LabeledNode, LabeledTree  # noqa: E402
@@ -60,104 +102,25 @@ from src.tree.labeled import LabeledNode, LabeledTree  # noqa: E402
 
 LOGGER = logging.getLogger(__name__)
 
+TREE_BUNDLE_KIND_RAW = "raw_manifesto_token_tree"
+TREE_BUNDLE_KIND_EXTERNAL_SUMMARY = "external_summary_token_tree"
+TREE_BUNDLE_KIND_CHOICES = (TREE_BUNDLE_KIND_RAW, TREE_BUNDLE_KIND_EXTERNAL_SUMMARY)
+SOURCE_KIND_CHOICES = (SOURCE_KIND_RAW_INPUT, SOURCE_KIND_EXTERNAL_STATE)
+STATE_CONTRACT_CHOICES = (STATE_CONTRACT_RAW_CONCAT, STATE_CONTRACT_EXTERNAL_PASSTHROUGH)
 
-def _now_stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+_now_stamp = now_stamp
+_now_iso = now_iso
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(config_to_dict(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return path
+    return write_json(path, config_to_dict(payload))
 
 
 def _append_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(config_to_dict(row), sort_keys=True) + "\n")
-    return path
+    return append_jsonl(path, (config_to_dict(row) for row in rows))
 
-
-def _stable_hash(text: str) -> str:
-    return hashlib.blake2b(str(text or "").encode("utf-8", errors="ignore"), digest_size=16).hexdigest()
-
-
-def _require_within_chars(text: str, *, max_chars: int, label: str) -> str:
-    rendered = str(text or "")
-    if int(max_chars) > 0 and len(rendered) > int(max_chars):
-        raise RuntimeError(
-            f"no-truncation guard: {label} has {len(rendered)} chars but max_chars={max_chars}. "
-            "Increase the configured context budget or reduce leaf_size_tokens."
-        )
-    return rendered
-
-
-def _parse_int_grid(value: Any) -> Tuple[int, ...]:
-    if isinstance(value, (list, tuple)):
-        grid = tuple(int(item) for item in value)
-    else:
-        parts = [part.strip() for part in str(value or "").replace(";", ",").split(",")]
-        grid = tuple(int(part) for part in parts if part)
-    if not grid:
-        raise ValueError("leaf grid must contain at least one integer")
-    if any(item <= 0 for item in grid):
-        raise ValueError(f"leaf grid entries must be positive: {grid!r}")
-    return grid
-
-
-class JsonlCallCache:
-    """Thread-safe append-only JSONL cache for successful teacher calls."""
-
-    def __init__(self, path: Path):
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-        self._rows: Dict[str, Dict[str, Any]] = {}
-        if self.path.exists():
-            with self.path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    text = line.strip()
-                    if not text:
-                        continue
-                    try:
-                        row = json.loads(text)
-                    except json.JSONDecodeError:
-                        continue
-                    key = str(row.get("cache_key") or "")
-                    if key:
-                        self._rows[key] = row
-
-    def get(self, key: str) -> Optional[Dict[str, Any]]:
-        with self._lock:
-            row = self._rows.get(str(key))
-            return dict(row) if row is not None else None
-
-    def put(self, key: str, row: Mapping[str, Any]) -> Dict[str, Any]:
-        payload = dict(row)
-        payload["cache_key"] = str(key)
-        payload.setdefault("created_at", _now_iso())
-        with self._lock:
-            existing = self._rows.get(str(key))
-            if existing is not None:
-                return dict(existing)
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(config_to_dict(payload), sort_keys=True) + "\n")
-                handle.flush()
-            self._rows[str(key)] = dict(payload)
-            return dict(payload)
-
-    def stats(self) -> Dict[str, Any]:
-        with self._lock:
-            by_kind: Dict[str, int] = {}
-            for row in self._rows.values():
-                kind = str(row.get("kind") or "unknown")
-                by_kind[kind] = by_kind.get(kind, 0) + 1
-            return {"path": str(self.path), "entries": len(self._rows), "by_kind": by_kind}
 
 
 def _load_alignment_split_ids(alignment_run_dir: Optional[Path]) -> Optional[Dict[str, Dict[str, str]]]:
@@ -175,6 +138,19 @@ def _load_alignment_split_ids(alignment_run_dir: Optional[Path]) -> Optional[Dic
             elif isinstance(values, list):
                 out[str(split)] = {str(item): "" for item in values}
     return out
+
+
+def _load_alignment_split_metadata(alignment_run_dir: Optional[Path]) -> Dict[str, Any]:
+    if alignment_run_dir is None:
+        return {}
+    summary_path = Path(alignment_run_dir) / "coverage_split_summary.json"
+    if not summary_path.exists():
+        return {}
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _load_alignment_leaf_grid(alignment_run_dir: Optional[Path]) -> Optional[Tuple[int, ...]]:
@@ -218,10 +194,15 @@ def _build_dimension_score_fn(
     max_tokens: int,
     max_chars: int,
     missing_policy: str,
+    scoring_context_source: str,
 ):
     dim = _DIM_FROM_NAME[dimension_name]
     spec = get_dimension(dim)
-    scoring_context = get_scoring_context(dim)
+    scoring_context = (
+        get_benoit_scoring_context(dim)
+        if scoring_context_source == "benoit"
+        else get_scoring_context(dim)
+    )
 
     def _score(text: str, *, role: str, node_context: Mapping[str, Any]) -> Tuple[float, Dict[str, Any]]:
         checked = _require_within_chars(
@@ -490,6 +471,7 @@ def _build_teacher_labeled_tree(
         max_tokens=int(args.score_max_tokens),
         max_chars=int(args.score_max_chars),
         missing_policy=str(args.missing_score_policy),
+        scoring_context_source=str(args.scoring_context_source),
     )
     teacher_resummary_fn = _build_dimension_resummary_fn(
         client=teacher_client,
@@ -499,7 +481,24 @@ def _build_teacher_labeled_tree(
         max_chars=int(args.resummary_max_chars),
     )
     teacher_score = _row_teacher_score(row, dimension=dimension_name)
-    expert_score = _row_expert_score(row, dimension=dimension_name)
+    expert_target_scale = str(getattr(args, "expert_target_scale", EXPERT_SCALE_NORMALIZED_1_7))
+    expert_score = _row_expert_score(
+        row,
+        dimension=dimension_name,
+        expert_scale=expert_target_scale,
+    )
+    expert_raw = raw_benoit_expert_from_row(row, dimension=dimension_name)
+    expert_1_7 = resolve_benoit_expert_target(
+        row,
+        dimension=dimension_name,
+        scale=EXPERT_SCALE_NORMALIZED_1_7,
+    )
+    expert_native = expert_raw
+    teacher_native = scorer_1_7_to_expert_target(
+        teacher_score,
+        dimension=dimension_name,
+        scale=expert_target_scale,
+    )
     label_source = str(args.label_source)
 
     # Cache-key discriminator: count_{N} for legacy, tok_{T} for size-based.
@@ -646,15 +645,59 @@ def _build_teacher_labeled_tree(
         extra_metadata={
             "dimension": str(dimension_name),
             "teacher_score_1_7_existing_root": teacher_score,
-            "expert_score_1_7": expert_score,
+            "teacher_score_native": teacher_native,
+            "expert_score_1_7": expert_1_7,
+            "expert_score_native": expert_native,
+            "expert_score_for_objective": expert_score,
+            "expert_score_raw_benoit": expert_raw,
+            **expert_scale_metadata(
+                dimension=dimension_name,
+                scale=expert_target_scale,
+            ),
             "source_results_path": str(source_results),
             "source_report_path": str(source_report) if source_report else None,
+            **tree_bundle_metadata(
+                domain="manifesto_rile",
+                leaf_unit=str(args.leaf_unit),
+                source_kind=str(args.source_kind),
+                dimension=str(dimension_name),
+                target_scale=str(expert_target_scale),
+                leaf_policy={
+                    "topology_axis": "size_tokens"
+                    if leaf_size_tokens is not None
+                    else "leaf_count",
+                    "leaf_count": None
+                    if leaf_size_tokens is not None
+                    else int(leaf_count),
+                    "leaf_size_tokens": int(leaf_size_tokens)
+                    if leaf_size_tokens is not None
+                    else None,
+                },
+                state_contract=str(args.state_contract),
+                reducer_contract=str(args.reducer_contract),
+                external_state_producer=(
+                    str(args.external_state_producer)
+                    if args.external_state_producer
+                    else None
+                ),
+                metadata={
+                    "split_manifest_digest": str(getattr(args, "split_manifest_digest", "") or ""),
+                    "split_alignment_run_dir": (
+                        str(args.alignment_run_dir)
+                        if getattr(args, "alignment_run_dir", None)
+                        else None
+                    ),
+                    "split_schema_version": str(getattr(args, "split_schema_version", "") or ""),
+                },
+            ),
+            "tree_state_source": str(args.tree_state_source),
             "teacher_fg_model": {
                 "g_base_url": str(args.teacher_base_url),
                 "g_model": str(args.teacher_model),
                 "f_base_url": str(args.scorer_base_url or args.teacher_base_url),
                 "f_model": str(args.scorer_model or args.teacher_model),
                 "score_input": str(args.score_input),
+                "scoring_context_source": str(args.scoring_context_source),
                 "summary_mode": str(args.summary_mode),
                 "idempotence_mode": str(args.idempotence_mode),
             },
@@ -695,11 +738,14 @@ def _build_teacher_labeled_tree(
                     "score_input_kind": str(args.score_input),
                     "dimension": dimension_name,
                     "scorer_model": args.scorer_model or args.teacher_model,
+                    "score_max_tokens": int(args.score_max_tokens),
+                    "score_max_chars": int(args.score_max_chars),
+                    "scoring_context_source": str(args.scoring_context_source),
                 },
                 sort_keys=True,
             )
         )
-        score_key = f"score:v2:{dimension_name}:{axis_tag}:{doc_id}:{node.node_id}:{score_hash}"
+        score_key = f"score:v3:{dimension_name}:{axis_tag}:{doc_id}:{node.node_id}:{score_hash}"
         cached_score = score_cache.get(score_key)
         if cached_score is not None:
             return score_key, cached_score
@@ -731,6 +777,7 @@ def _build_teacher_labeled_tree(
                 "is_leaf": int(node.level) == 0,
                 "scorer_model": str(args.scorer_model or args.teacher_model),
                 "score_input_kind": str(args.score_input),
+                "scoring_context_source": str(args.scoring_context_source),
                 "input_hash": score_hash,
                 "score_1_7": float(score_value),
                 **score_payload,
@@ -757,6 +804,7 @@ def _build_teacher_labeled_tree(
         node.metadata["teacher_score_1_7"] = float(node.score)
         node.metadata["teacher_score_source"] = "teacher_f_dimension_score_1_7"
         node.metadata["teacher_score_input_kind"] = str(args.score_input)
+        node.metadata["teacher_scoring_context_source"] = str(args.scoring_context_source)
         node.metadata["teacher_summary_mode"] = str(args.summary_mode)
         node.metadata["teacher_score_model"] = str(args.scorer_model or args.teacher_model)
         node.metadata["teacher_score_cache_key"] = score_key
@@ -898,6 +946,31 @@ def _resolve_split_ids(args: argparse.Namespace, rows_by_id: Mapping[str, Mappin
     )
 
 
+def _limit_split_ids_to_requested_sizes(
+    split_ids: Mapping[str, Mapping[str, str]],
+    *,
+    train_n: int,
+    val_n: int,
+    test_n: int,
+) -> Dict[str, Dict[str, str]]:
+    limits = {
+        "train": int(train_n),
+        "val": int(val_n),
+        "test": int(test_n),
+    }
+    limited: Dict[str, Dict[str, str]] = {}
+    for split, values in split_ids.items():
+        split_name = str(split)
+        items = list(values.items())
+        limit = limits.get(split_name)
+        if limit is not None and limit >= 0:
+            items = items[:limit]
+        limited[split_name] = dict(items)
+    for split in ("train", "val", "test"):
+        limited.setdefault(split, {})
+    return limited
+
+
 def _build_leaf_grid(args: argparse.Namespace) -> Tuple[int, ...]:
     if args.leaf_grid:
         return _parse_int_grid(args.leaf_grid)
@@ -987,12 +1060,76 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--split-source", choices=["phase3", "results-order"], default="phase3")
     parser.add_argument("--train-pool", choices=["expert-split", "openweight", "expert"], default="expert-split")
+    parser.add_argument(
+        "--expert-target-scale",
+        choices=EXPERT_SCALE_CHOICES,
+        default=None,
+        help=(
+            "Scale used for root expert targets in labeled trees. Omit for "
+            "normalized_1_7; pass raw_benoit only to reproduce older raw-scale metrics."
+        ),
+    )
     parser.add_argument("--split-strategy", choices=["random", "label-stratified"], default="label-stratified")
     parser.add_argument(
         "--tree-text-source",
         choices=["aligned_text", "existing_summary"],
-        default="aligned_text",
-        help="Text used to build exact leaf topology; existing_summary reproduces the stored baseline summary surface.",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--tree-bundle-kind",
+        choices=TREE_BUNDLE_KIND_CHOICES,
+        default=None,
+        help=(
+            "Deprecated compatibility alias for --source-kind. "
+            "raw_manifesto_token_tree maps to source_kind=raw_input; "
+            "external_summary_token_tree maps to source_kind=external_state."
+        ),
+    )
+    parser.add_argument(
+        "--source-kind",
+        choices=SOURCE_KIND_CHOICES,
+        default=None,
+        help=(
+            "Generic TreeBundle v1 source provenance. raw_input is the default; "
+            "external_state is explicit compatibility mode for precomputed summaries."
+        ),
+    )
+    parser.add_argument(
+        "--leaf-unit",
+        default=LEAF_UNIT_TEXT_TOKEN,
+        help="Generic TreeBundle v1 leaf unit for this topology.",
+    )
+    parser.add_argument(
+        "--state-contract",
+        choices=STATE_CONTRACT_CHOICES,
+        default=None,
+        help=(
+            "Initial state contract. Defaults to raw_concat for raw_input and "
+            "external_passthrough for external_state."
+        ),
+    )
+    parser.add_argument(
+        "--reducer-contract",
+        choices=[REDUCER_CONTRACT_BOTTOM_UP],
+        default=REDUCER_CONTRACT_BOTTOM_UP,
+        help="Tree reducer contract recorded in TreeBundle v1 metadata.",
+    )
+    parser.add_argument(
+        "--tree-state-source",
+        default=None,
+        help=(
+            "Human-readable state source stored in bundle metadata. Defaults to "
+            "raw_input for raw bundles and external_state for external bundles."
+        ),
+    )
+    parser.add_argument(
+        "--external-state-producer",
+        default=None,
+        help=(
+            "External g/state producer for source_kind=external_state bundles, "
+            "for example g_benoit."
+        ),
     )
     parser.add_argument("--train-n", type=int, default=80)
     parser.add_argument("--val-n", type=int, default=20)
@@ -1033,6 +1170,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--score-temperature", type=float, default=0.0)
     parser.add_argument("--score-max-tokens", type=int, default=180)
     parser.add_argument("--score-max-chars", type=int, default=6000)
+    parser.add_argument(
+        "--scoring-context-source",
+        choices=["compact", "benoit"],
+        default="compact",
+        help=(
+            "Scoring rubric used by teacher f. compact is the short local context; "
+            "benoit uses the exact released Benoit rubric text before the JSON wrapper."
+        ),
+    )
     parser.add_argument("--score-input", choices=["teacher_summary", "node_span"], default="teacher_summary")
     parser.add_argument(
         "--summary-mode",
@@ -1054,6 +1200,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--resummary-max-chars", type=int, default=5000)
     parser.add_argument("--label-source", type=str, default="manifesto_dimension_teacher_fg_node_v1")
+    add_manifesto_finetune_args(
+        parser,
+        kind="generic",
+        help_text="Write treepo PreferenceDataset/fine-tune adapter bundles per leaf row.",
+    )
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument(
         "--lm-concurrency",
@@ -1066,6 +1217,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--max-docs-per-split", type=int, default=None)
+    parser.add_argument(
+        "--min-test-docs",
+        type=int,
+        default=0,
+        help="Fail before teacher calls if the selected split has fewer test docs.",
+    )
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args(argv)
@@ -1076,6 +1233,56 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    legacy_tree_text_source = str(args.tree_text_source or "").strip().lower()
+    if args.source_kind is None:
+        if args.tree_bundle_kind is not None:
+            args.source_kind = source_kind_for_tree_bundle_kind(str(args.tree_bundle_kind))
+        else:
+            args.source_kind = source_kind_for_legacy_tree_text_source(legacy_tree_text_source)
+    if args.tree_bundle_kind is not None:
+        alias_source_kind = source_kind_for_tree_bundle_kind(str(args.tree_bundle_kind))
+        if alias_source_kind != str(args.source_kind):
+            raise SystemExit(
+                "Deprecated --tree-bundle-kind conflicts with --source-kind: "
+                f"tree_bundle_kind={args.tree_bundle_kind!r} source_kind={args.source_kind!r}"
+            )
+    args.tree_bundle_kind = legacy_tree_bundle_kind_for_source_kind(str(args.source_kind))
+    expected_tree_text_source = legacy_tree_text_source_for_source_kind(str(args.source_kind))
+    if legacy_tree_text_source and legacy_tree_text_source != expected_tree_text_source:
+        raise SystemExit(
+            "Legacy --tree-text-source is incompatible with TreeBundle source_kind: "
+            f"tree_text_source={legacy_tree_text_source!r} "
+            f"source_kind={args.source_kind!r}"
+        )
+    args.tree_text_source = expected_tree_text_source
+    args.state_contract = args.state_contract or default_state_contract_for_source_kind(
+        str(args.source_kind)
+    )
+    if args.tree_state_source is None:
+        args.tree_state_source = (
+            "raw_input"
+            if str(args.source_kind) == SOURCE_KIND_RAW_INPUT
+            else "external_state"
+        )
+    if str(args.source_kind) == SOURCE_KIND_EXTERNAL_STATE:
+        args.external_state_producer = args.external_state_producer or "g_benoit"
+    elif args.external_state_producer:
+        raise SystemExit(
+            "--external-state-producer is only valid for "
+            "source_kind=external_state bundles"
+        )
+    if args.expert_target_scale is None:
+        args.expert_target_scale = EXPERT_SCALE_NORMALIZED_1_7
+    target_min, target_max = expert_scale_bounds(
+        dimension=str(args.dimension),
+        scale=str(args.expert_target_scale),
+    )
+    LOGGER.info(
+        "Using expert target scale=%s bounds=[%.3f, %.3f] with scorer output bounds=[1.000, 7.000]",
+        args.expert_target_scale,
+        target_min,
+        target_max,
     )
 
     aligned_source_results = _load_alignment_source_results(args.alignment_run_dir)
@@ -1094,12 +1301,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     rows = _read_jsonl(source_results)
     rows_by_id = {_row_manifesto_id(row): row for row in rows if _row_manifesto_id(row)}
     split_ids = _resolve_split_ids(args, rows_by_id)
+    split_ids = _limit_split_ids_to_requested_sizes(
+        split_ids,
+        train_n=int(args.train_n),
+        val_n=int(args.val_n),
+        test_n=int(args.test_n),
+    )
+    split_alignment_metadata = _load_alignment_split_metadata(args.alignment_run_dir)
+    args.split_manifest_digest = str(
+        split_alignment_metadata.get("split_manifest_digest") or ""
+    )
+    args.split_schema_version = str(
+        split_alignment_metadata.get("schema_version") or ""
+    )
     if args.max_docs_per_split is not None:
         limited: Dict[str, Dict[str, str]] = {}
         for split, values in split_ids.items():
             items = list(values.items())[: int(args.max_docs_per_split)]
             limited[split] = dict(items)
         split_ids = limited
+    actual_split_sizes = {split: len(values) for split, values in split_ids.items()}
+    LOGGER.info(
+        "Selected split sizes train=%d val=%d test=%d",
+        int(actual_split_sizes.get("train", 0)),
+        int(actual_split_sizes.get("val", 0)),
+        int(actual_split_sizes.get("test", 0)),
+    )
+    if int(args.min_test_docs) > 0 and actual_split_sizes.get("test", 0) < int(args.min_test_docs):
+        raise SystemExit(
+            "Split guard failed: "
+            f"dimension={args.dimension} test_docs={actual_split_sizes.get('test', 0)} "
+            f"min_test_docs={int(args.min_test_docs)} source_results={source_results}"
+        )
     # Resolve the leaf axis. Either count-based (legacy --leaf-grid) or
     # size-based (new --leaf-size-tokens). Mutually exclusive.
     if args.leaf_grid and args.leaf_size_tokens:
@@ -1264,6 +1497,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         trees.sort(key=lambda tree: (str((tree.metadata or {}).get("split") or ""), str(tree.doc_id)))
         labeled_tree_path = write_labeled_trees_jsonl(leaf_dir / "labeled_trees.jsonl", trees)
+        finetune_bundle = export_manifesto_finetune_bundle_from_args(
+            args=args,
+            trees=trees,
+            output_dir=leaf_dir / "treepo_finetune",
+            kind="generic",
+            leaf_unit_type=str(args.leaf_unit or "leaf"),
+            logger=LOGGER,
+            log_label="Manifesto",
+        )
         node_rows: List[Dict[str, Any]] = []
         for tree in trees:
             node_rows.extend(
@@ -1278,8 +1520,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if node_rows_path.exists():
             node_rows_path.unlink()
         _append_jsonl(node_rows_path, node_rows)
+        failures_path = leaf_dir / "failures.json"
         if failures:
-            _write_json(leaf_dir / "failures.json", {"failures": failures})
+            _write_json(failures_path, {"failures": failures})
+        elif failures_path.exists():
+            failures_path.unlink()
 
         node_scores = [float(row["score_1_7"]) for row in node_rows if row.get("score_1_7") is not None]
         root_scores = [float(row["score_1_7"]) for row in node_rows if row.get("is_root") and row.get("score_1_7") is not None]
@@ -1297,6 +1542,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 ),
             },
             "dimension": str(args.dimension),
+            **tree_bundle_metadata(
+                domain="manifesto_rile",
+                leaf_unit=str(args.leaf_unit),
+                source_kind=str(args.source_kind),
+                dimension=str(args.dimension),
+                target_scale=str(args.expert_target_scale),
+                leaf_policy={
+                    "topology_axis": "size_tokens"
+                    if leaf_size_tokens is not None
+                    else "leaf_count",
+                    "leaf_count": None
+                    if leaf_size_tokens is not None
+                    else int(leaf_count),
+                    "leaf_size_tokens": int(leaf_size_tokens)
+                    if leaf_size_tokens is not None
+                    else None,
+                },
+                state_contract=str(args.state_contract),
+                reducer_contract=str(args.reducer_contract),
+                external_state_producer=(
+                    str(args.external_state_producer)
+                    if args.external_state_producer
+                    else None
+                ),
+                metadata={
+                    "split_manifest_digest": str(args.split_manifest_digest or ""),
+                    "split_alignment_run_dir": (
+                        str(args.alignment_run_dir) if args.alignment_run_dir else None
+                    ),
+                    "split_schema_version": str(args.split_schema_version or ""),
+                },
+            ),
+            "tree_bundle_kind": str(args.tree_bundle_kind),
+            "tree_state_source": str(args.tree_state_source),
+            "external_state_producer": (
+                str(args.external_state_producer)
+                if args.external_state_producer
+                else None
+            ),
+            "tree_text_source": str(args.tree_text_source),
             "tree_counts": {
                 "total": len(trees),
                 "train": sum(1 for tree in trees if (tree.metadata or {}).get("split") == "train"),
@@ -1324,13 +1609,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "score_cache": str(score_cache.path),
                 "resummary_cache": str(resummary_cache.path),
                 "failures": str(leaf_dir / "failures.json") if failures else None,
+                "finetune_bundle": (
+                    str(leaf_dir / "treepo_finetune") if finetune_bundle else None
+                ),
             },
+            "finetune": finetune_bundle,
             "teacher_fg_model": {
                 "g_base_url": str(args.teacher_base_url),
                 "g_model": str(args.teacher_model),
                 "f_base_url": str(args.scorer_base_url or args.teacher_base_url),
                 "f_model": str(args.scorer_model or args.teacher_model),
                 "score_input": str(args.score_input),
+                "scoring_context_source": str(args.scoring_context_source),
                 "summary_mode": str(args.summary_mode),
                 "idempotence_mode": str(args.idempotence_mode),
             },
@@ -1343,6 +1633,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "leaf_count": None if leaf_size_tokens is not None else int(leaf_count),
                 "leaf_size_tokens": int(leaf_size_tokens) if leaf_size_tokens is not None else None,
                 "dimension": str(args.dimension),
+                **tree_bundle_metadata(
+                    domain="manifesto_rile",
+                    leaf_unit=str(args.leaf_unit),
+                    source_kind=str(args.source_kind),
+                    dimension=str(args.dimension),
+                    target_scale=str(args.expert_target_scale),
+                    leaf_policy={
+                        "topology_axis": "size_tokens"
+                        if leaf_size_tokens is not None
+                        else "leaf_count",
+                        "leaf_count": None
+                        if leaf_size_tokens is not None
+                        else int(leaf_count),
+                        "leaf_size_tokens": int(leaf_size_tokens)
+                        if leaf_size_tokens is not None
+                        else None,
+                    },
+                    state_contract=str(args.state_contract),
+                    reducer_contract=str(args.reducer_contract),
+                    external_state_producer=(
+                        str(args.external_state_producer)
+                        if args.external_state_producer
+                        else None
+                    ),
+                    metadata={
+                        "split_manifest_digest": str(args.split_manifest_digest or ""),
+                        "split_alignment_run_dir": (
+                            str(args.alignment_run_dir) if args.alignment_run_dir else None
+                        ),
+                        "split_schema_version": str(args.split_schema_version or ""),
+                    },
+                ),
+                "tree_bundle_kind": str(args.tree_bundle_kind),
+                "tree_state_source": str(args.tree_state_source),
+                "external_state_producer": (
+                    str(args.external_state_producer)
+                    if args.external_state_producer
+                    else None
+                ),
+                "tree_text_source": str(args.tree_text_source),
                 "tree_count": len(trees),
                 "node_count": len(node_rows),
                 "failures": len(failures),
@@ -1376,11 +1706,54 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "train_n": int(args.train_n),
             "val_n": int(args.val_n),
             "test_n": int(args.test_n),
+            "actual_split_sizes": actual_split_sizes,
+            "min_test_docs": int(args.min_test_docs),
+            "expert_target_scale": str(args.expert_target_scale),
+            **tree_bundle_metadata(
+                domain="manifesto_rile",
+                leaf_unit=str(args.leaf_unit),
+                source_kind=str(args.source_kind),
+                dimension=str(args.dimension),
+                target_scale=str(args.expert_target_scale),
+                leaf_policy={
+                    "topology_axis": "size_tokens"
+                    if leaf_size_axis is not None
+                    else "leaf_count",
+                    "leaf_grid": (
+                        list(leaf_count_axis) if leaf_count_axis is not None else None
+                    ),
+                    "leaf_size_tokens": (
+                        list(leaf_size_axis) if leaf_size_axis is not None else None
+                    ),
+                },
+                state_contract=str(args.state_contract),
+                reducer_contract=str(args.reducer_contract),
+                external_state_producer=(
+                    str(args.external_state_producer)
+                    if args.external_state_producer
+                    else None
+                ),
+                metadata={
+                    "split_manifest_digest": str(args.split_manifest_digest or ""),
+                    "split_alignment_run_dir": (
+                        str(args.alignment_run_dir) if args.alignment_run_dir else None
+                    ),
+                    "split_schema_version": str(args.split_schema_version or ""),
+                },
+            ),
+            "tree_bundle_kind": str(args.tree_bundle_kind),
+            "tree_state_source": str(args.tree_state_source),
+            "external_state_producer": (
+                str(args.external_state_producer)
+                if args.external_state_producer
+                else None
+            ),
             "tree_text_source": str(args.tree_text_source),
             "score_input": str(args.score_input),
             "summary_mode": str(args.summary_mode),
             "idempotence_mode": str(args.idempotence_mode),
             "label_source": str(args.label_source),
+            "finetune_export": finetune_export_config(args),
         },
         "teacher_fg_model": {
             "g_base_url": str(args.teacher_base_url),
@@ -1394,6 +1767,74 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "aggregate_teacher_metrics": str(aggregate_path),
         },
     }
+    manifest["run_manifest"] = run_manifest_metadata(
+        run_id=f"manifesto.teacher_leaf_grid.{args.dimension}",
+        domain="manifesto_rile",
+        role="teacher_tree_bundle",
+        backend="dspy",
+        status="completed",
+        tree_bundle=manifest["config"]["tree_bundle_manifest"],
+        f_init="teacher_f",
+        g_init="teacher_g",
+        f_lineage={
+            "init": "teacher_f",
+            "base_url": str(args.scorer_base_url or args.teacher_base_url),
+            "model": str(args.scorer_model or args.teacher_model),
+            "score_input": str(args.score_input),
+            "scoring_context_source": str(args.scoring_context_source),
+        },
+        g_lineage={
+            "init": "teacher_g",
+            "base_url": str(args.teacher_base_url),
+            "model": str(args.teacher_model),
+            "summary_mode": str(args.summary_mode),
+            "idempotence_mode": str(args.idempotence_mode),
+            "tree_text_source": str(args.tree_text_source),
+        },
+        reducer_contract=str(args.reducer_contract),
+        schedule="teacher_trace",
+        objective=objective_metadata(
+            objective_family="manifesto_teacher_first_trace",
+            local_law_estimator=LOCAL_LAW_ESTIMATOR_NONE,
+            root_share=0.0,
+            local_law_component_weights={},
+            metadata={
+                "dimension": str(args.dimension),
+                "score_input": str(args.score_input),
+                "label_source": str(args.label_source),
+                "teacher_trace_component": "teacher_node_trace",
+            },
+        ),
+        optimizer_config={
+            "split_source": str(args.split_source),
+            "label_source": str(args.label_source),
+            "leaf_grid": list(leaf_count_axis) if leaf_count_axis is not None else None,
+            "leaf_size_tokens": list(leaf_size_axis) if leaf_size_axis is not None else None,
+        },
+        output_artifacts=[
+            {"kind": "manifest", "uri": str(output_dir / "manifest.json")},
+            {"kind": "aggregate_teacher_metrics", "uri": str(aggregate_path)},
+            {"kind": "tree_bundle_directory", "uri": str(output_dir)},
+        ],
+        audit_results={
+            "ok": True,
+            "source_kind": str(args.source_kind),
+            "tree_text_source": str(args.tree_text_source),
+        },
+        quarantine={"classification": "valid_treebundle_v1"},
+        command=sys.argv,
+        allow_legacy=False,
+        publication_ready=str(args.source_kind) == SOURCE_KIND_RAW_INPUT,
+        metadata={
+            "runner": "scripts/run_manifesto_teacher_fg_leaf_grid.py",
+            "actual_split_sizes": actual_split_sizes,
+            "split_manifest_digest": str(args.split_manifest_digest or ""),
+            "split_alignment_run_dir": (
+                str(args.alignment_run_dir) if args.alignment_run_dir else None
+            ),
+            "split_schema_version": str(args.split_schema_version or ""),
+        },
+    )
     _write_json(output_dir / "manifest.json", manifest)
     LOGGER.info("Wrote teacher f/g grid manifest to %s", output_dir / "manifest.json")
     return 0

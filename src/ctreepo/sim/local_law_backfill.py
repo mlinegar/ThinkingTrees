@@ -5,6 +5,11 @@ import math
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
+from src.ctreepo.contracts import (
+    LAW_ID_LEAF_PRESERVATION,
+    LAW_ID_MERGE_PRESERVATION,
+    LAW_ID_ON_RANGE_IDEMPOTENCE,
+)
 from src.ctreepo.sim.util import safe_float
 from src.ctreepo.sim.composite_objective import (
     CompositeObjectiveSpec,
@@ -144,15 +149,22 @@ def _legacy_lda_objective_payload(
             "eb_hi": _safe_float(branch.get("eb_hi")),
         }
 
+    # Backfill is a legacy reconstruction path for runs that pre-date the
+    # normalized root/local objective. Forward-going runs resolve a single
+    # lambda or explicit normalized root/law weights before scalarization.
     estimator_payload = scalarize_objective_estimates(
         spec,
         task_estimates=task_estimates,
         local_law_estimates={
-            "c1": _metric_estimates("c1", _safe_float(metrics.get("mean_c1"), 0.0)),
-            "c2_proxy": _metric_estimates(
+            LAW_ID_LEAF_PRESERVATION: _metric_estimates(
+                "c1", _safe_float(metrics.get("mean_c1"), 0.0)
+            ),
+            LAW_ID_ON_RANGE_IDEMPOTENCE: _metric_estimates(
                 "c2_proxy", _safe_float(metrics.get("mean_c2_proxy"), 0.0)
             ),
-            "c3": _metric_estimates("c3", _safe_float(metrics.get("mean_c3"), 0.0)),
+            LAW_ID_MERGE_PRESERVATION: _metric_estimates(
+                "c3", _safe_float(metrics.get("mean_c3"), 0.0)
+            ),
         },
         proxy_estimates={},
         selection_preference="hajek",
@@ -422,7 +434,7 @@ def _legacy_markov_policy_payload(
             block.get("objective_optimization_weight_mass_no_proxy"),
             float("nan"),
         ),
-        "lambda_local_law": _safe_float(block.get("objective_local_law_weight"), float("nan")),
+        "local_law_weight": _safe_float(block.get("objective_local_law_weight"), float("nan")),
         "normalized_task_share": (
             _safe_float(
                 block.get("objective_task_objective_weight"),

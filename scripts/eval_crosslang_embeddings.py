@@ -59,7 +59,7 @@ TEST_DOCS = [
 # ---------------------------------------------------------------------------
 
 def _load_manifesto_text(manifesto_id: str) -> str:
-    path = PROJECT_ROOT / "data" / "raw" / "manifesto_project_full" / "texts" / f"{manifesto_id}.txt"
+    path = PROJECT_ROOT / "data" / "raw" / "manifesto_corpus_benoit" / "texts" / f"{manifesto_id}.txt"
     if not path.exists():
         raise FileNotFoundError(f"Missing manifesto text: {path}")
     return path.read_text(encoding="utf-8", errors="replace")
@@ -239,7 +239,7 @@ def main() -> int:
     rile_scores: Dict[str, float] = {}
     try:
         import pandas as pd
-        csv_path = PROJECT_ROOT / "data" / "raw" / "manifesto_project_full" / "manifesto_maindataset.csv"
+        csv_path = PROJECT_ROOT / "data" / "raw" / "manifesto_corpus_benoit" / "manifesto_maindataset.csv"
         if csv_path.exists():
             df = pd.read_csv(csv_path, low_memory=False)
             df["manifesto_id"] = df["party"].astype(str) + "_" + df["date"].astype(str)

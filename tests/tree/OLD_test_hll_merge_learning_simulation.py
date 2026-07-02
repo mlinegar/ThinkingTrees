@@ -1,3 +1,4 @@
+# OLD_: archived 2026-07-02; tests OLD_hll_merge_learning_simulation.py (treepo.bench.hll_merge_learning removed upstream). Kept for reference; do not run.
 import math
 
 import pytest

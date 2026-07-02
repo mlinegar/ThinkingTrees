@@ -47,14 +47,14 @@ def _read_text_file(path: Path) -> str:
 
 
 def _load_manifesto_text(manifesto_id: str) -> str:
-    path = PROJECT_ROOT / "data" / "raw" / "manifesto_project_full" / "texts" / f"{manifesto_id}.txt"
+    path = PROJECT_ROOT / "data" / "raw" / "manifesto_corpus_benoit" / "texts" / f"{manifesto_id}.txt"
     if not path.exists():
         raise FileNotFoundError(f"Missing manifesto text file: {path}")
     return _read_text_file(path)
 
 
 def _load_manifesto_metadata(ids: List[str]) -> Dict[str, Dict[str, Any]]:
-    csv_path = PROJECT_ROOT / "data" / "raw" / "manifesto_project_full" / "manifesto_maindataset.csv"
+    csv_path = PROJECT_ROOT / "data" / "raw" / "manifesto_corpus_benoit" / "manifesto_maindataset.csv"
     if not csv_path.exists():
         return {}
     try:

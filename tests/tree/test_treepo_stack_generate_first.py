@@ -88,15 +88,16 @@ def test_surface_selection_prefers_generate_and_falls_back_to_chat() -> None:
         TreePOModelSpec(engine="sglang", surface="generate", prefer_generate=True),
         contract,
     )
-    assert stack_generate.surface is EngineSurface.DIFFUSION_GENERATE
-    assert stack_generate.surface_fallback_reason is None
+    assert stack_generate.surface is EngineSurface.CHAT_OPENAI
+    assert stack_generate.surface_fallback_reason == "generate_surface_demoted_to_chat_openai"
+    assert getattr(stack_generate.operator_g, "use_generate_prompt_templates") is True
 
     stack_fallback = build_treepo_stack(
         TreePOModelSpec(engine="vllm", surface="generate", prefer_generate=True),
         contract,
     )
     assert stack_fallback.surface is EngineSurface.CHAT_OPENAI
-    assert stack_fallback.surface_fallback_reason == "engine_missing_generate_surface"
+    assert stack_fallback.surface_fallback_reason == "generate_surface_demoted_to_chat_openai"
 
 
 def test_model_spec_engine_auto_infers_engine_from_base_url() -> None:
@@ -108,47 +109,47 @@ def test_model_spec_engine_auto_infers_engine_from_base_url() -> None:
     )
     assert stack_vllm.engine is EngineType.VLLM
     assert stack_vllm.surface is EngineSurface.CHAT_OPENAI
-    assert stack_vllm.surface_fallback_reason == "engine_missing_generate_surface"
+    assert stack_vllm.surface_fallback_reason == "generate_surface_demoted_to_chat_openai"
 
     stack_sglang = build_treepo_stack(
         TreePOModelSpec(engine="auto", base_url="http://localhost:30000/v1", surface="generate", prefer_generate=True),
         contract,
     )
     assert stack_sglang.engine is EngineType.SGLANG
-    assert stack_sglang.surface is EngineSurface.DIFFUSION_GENERATE
-    # generate-first: strip /v1 for generate base_url construction
-    assert stack_sglang.base_url == "http://localhost:30000"
+    assert stack_sglang.surface is EngineSurface.CHAT_OPENAI
+    assert stack_sglang.base_url == "http://localhost:30000/v1"
 
 
 def test_generate_base_url_normalization_avoids_double_generate_suffix() -> None:
     contract = _simple_contract()
 
-    spec = EngineRegistry.resolve(EngineType.SGLANG)
+    spec = EngineRegistry.resolve(EngineType.VLLM_OMNI)
     generate_path = str(spec.diffusion_generate_path or "/generate")
     default_full = spec.default_base_url(surface=EngineSurface.DIFFUSION_GENERATE)
     assert default_full is not None
     expected_root = normalize_generate_base_url(default_full, generate_path=generate_path)
 
-    stack_default = build_treepo_stack(TreePOModelSpec(engine="sglang", surface="generate"), contract)
-    backend = stack_default.inference_engine.backend
+    stack_default = build_treepo_stack(TreePOModelSpec(engine="vllm_omni", surface="generate"), contract)
+    backend = stack_default.inference_engine._client.backend
+    assert stack_default.surface is EngineSurface.CHAT_OPENAI
     assert stack_default.base_url == expected_root
     assert backend.base_url == expected_root
     assert backend.generate_path == generate_path
     assert f"{backend.base_url}{backend.generate_path}" == default_full
 
     stack_with_suffix = build_treepo_stack(
-        TreePOModelSpec(engine="sglang", surface="generate", base_url=default_full),
+        TreePOModelSpec(engine="vllm_omni", surface="generate", base_url=default_full),
         contract,
     )
-    backend2 = stack_with_suffix.inference_engine.backend
+    backend2 = stack_with_suffix.inference_engine._client.backend
     assert backend2.base_url == expected_root
     assert f"{backend2.base_url}{backend2.generate_path}" == default_full
 
     stack_with_root = build_treepo_stack(
-        TreePOModelSpec(engine="sglang", surface="generate", base_url=expected_root),
+        TreePOModelSpec(engine="vllm_omni", surface="generate", base_url=expected_root),
         contract,
     )
-    backend3 = stack_with_root.inference_engine.backend
+    backend3 = stack_with_root.inference_engine._client.backend
     assert backend3.base_url == expected_root
     assert f"{backend3.base_url}{backend3.generate_path}" == default_full
 

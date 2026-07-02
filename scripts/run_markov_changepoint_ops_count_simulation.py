@@ -26,6 +26,7 @@ from src.tree.markov_changepoint_ops_count_simulation import (  # noqa: E402
     VALID_EXACT_FAMILIES,
     VALID_GENERATOR_PROFILES,
     VALID_LAW_PACKAGES,
+    VALID_LOCAL_LAW_OBJECTIVE_MODES,
     VALID_MODEL_FAMILIES,
     build_markov_changepoint_ops_count_data_bundle,
     run_markov_changepoint_ops_count_experiment,
@@ -116,11 +117,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--task-objective-weight",
+        "--root-share",
+        dest="root_share",
         type=float,
         default=None,
         help=(
-            "Optional explicit weight on the task/root loss. When set, this overrides the "
+            "Optional explicit share for the task/root loss. When set, this overrides the "
             "default theorem-facing `(1 - lambda)` task mass and yields a free weighted "
             "composite objective."
         ),
@@ -235,15 +237,6 @@ def parse_args() -> argparse.Namespace:
         help="Disable one oracle label per doc at the root during learned training.",
     )
     parser.add_argument(
-        "--use-unified-ipw",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help=(
-            "For FNO/tree models, train one shared readout g over the full realized tree "
-            "using sampled node labels plus the always-available document-level top label."
-        ),
-    )
-    parser.add_argument(
         "--ipw-leaf-sample-rate",
         type=float,
         default=1.0,
@@ -254,6 +247,17 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="Internal-node sampling rate used by the unified IPW path; the root is not special-cased.",
+    )
+    parser.add_argument(
+        "--local-law-objective-mode",
+        type=str,
+        choices=list(VALID_LOCAL_LAW_OBJECTIVE_MODES),
+        default="corrected_local_law",
+        help=(
+            "Local-law objective for FNO/tree models. 'corrected_local_law' uses "
+            "the retained proxy population plus sampled oracle residuals; "
+            "'sampled_ipw' keeps the sampled-only Hajek/IPW objective."
+        ),
     )
     parser.add_argument(
         "--use-residual-decomposition",
@@ -503,12 +507,10 @@ def _rows_from_summary(summary: OPSCountSummary) -> List[dict]:
         "objective_parameterization": objective.get("parameterization"),
         "objective_training_scheme": objective.get("training_scheme"),
         "objective_weighting_scheme": objective.get("weighting_scheme"),
-        "objective_root_weight": objective.get("root_weight"),
-        "objective_task_objective_weight": objective.get("task_objective_weight"),
-        "objective_task_objective_weight_source": objective.get("task_objective_weight_source"),
+        "objective_root_share": objective.get("root_share"),
+        "objective_root_share_source": objective.get("root_share_source"),
         "objective_root_supervision_active": objective.get("root_supervision_active"),
         "objective_local_law_weight": objective.get("local_law_weight"),
-        "objective_local_law_lambda": objective.get("local_law_lambda"),
         "objective_local_law_c1_weight": objective.get("local_law_c1_weight"),
         "objective_local_law_c2_weight": objective.get("local_law_c2_weight"),
         "objective_local_law_c3_weight": objective.get("local_law_c3_weight"),
@@ -597,7 +599,7 @@ def main() -> int:
             float(args.local_law_weight) if args.local_law_weight is not None else None
         ),
         task_objective_weight=(
-            float(args.task_objective_weight) if args.task_objective_weight is not None else None
+            float(args.root_share) if args.root_share is not None else None
         ),
         c1_relative_weight=float(args.c1_relative_weight),
         c2_relative_weight=float(args.c2_relative_weight),
@@ -628,9 +630,9 @@ def main() -> int:
         c3_include_root=bool(args.c3_include_root),
         leaf_query_rate=float(args.leaf_query_rate),
         include_root_query=not bool(args.no_root_query),
-        use_unified_ipw=bool(args.use_unified_ipw),
         ipw_leaf_sample_rate=float(args.ipw_leaf_sample_rate),
         ipw_internal_sample_rate=float(args.ipw_internal_sample_rate),
+        local_law_objective_mode=str(args.local_law_objective_mode),
         use_residual_decomposition=bool(args.use_residual_decomposition),
         root_only_train_fraction=float(args.root_only_train_fraction),
         doc_sequence_train_fraction=float(args.doc_sequence_train_fraction),

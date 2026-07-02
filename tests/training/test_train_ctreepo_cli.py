@@ -261,7 +261,7 @@ def test_train_ctreepo_root_only_empirical_training_reports_empirical_source(
     assert summary["labeled_internal"] == 0
 
 
-def test_train_ctreepo_online_human_only_creates_feedback_store(
+def test_train_ctreepo_online_human_only_creates_preference_store(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -308,7 +308,7 @@ def test_train_ctreepo_online_human_only_creates_feedback_store(
     rc = int(mod.main())
 
     assert rc == 0
-    assert (output_dir / "online_feedback_store.json").exists()
+    assert (output_dir / "online_preference_store.json").exists()
     assert (output_dir / "training_result.json").exists()
 
 
@@ -363,5 +363,5 @@ def test_train_ctreepo_online_teacher_worker_smoke(
     rc = int(mod.main())
 
     assert rc == 0
-    store_payload = (output_dir / "online_feedback_store.json").read_text()
+    store_payload = (output_dir / "online_preference_store.json").read_text()
     assert "completed" in store_payload

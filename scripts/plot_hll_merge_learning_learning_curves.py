@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Plot approach-to-floor and schedule invariance vs query budget.
 
-Reads JSON summaries from scripts/run_hll_merge_learning_sweep.py.
+Reads JSON summaries from scripts/OLD_run_hll_merge_learning_sweep.py (archived).
 """
 
 from __future__ import annotations

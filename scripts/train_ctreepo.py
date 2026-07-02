@@ -233,13 +233,13 @@ def main() -> int:
     law_group.add_argument(
         "--online-local-law-supervision",
         action="store_true",
-        help="Queue sampled node-label requests through FeedbackStore instead of blocking tree preparation.",
+        help="Queue sampled node-label requests through PreferenceStore instead of blocking tree preparation.",
     )
     law_group.add_argument(
-        "--feedback-store",
+        "--preference-store",
         type=Path,
         default=None,
-        help="Durable JSON FeedbackStore path for online local-law supervision.",
+        help="Durable JSON PreferenceStore path for online local-law supervision.",
     )
     law_group.add_argument(
         "--online-teacher-worker",
@@ -250,7 +250,7 @@ def main() -> int:
     law_group.add_argument(
         "--online-human-only",
         action="store_true",
-        help="Alias for online local-law supervision with no teacher worker; humans answer the shared feedback queue.",
+        help="Alias for online local-law supervision with no teacher worker; humans answer the shared preference queue.",
     )
     law_group.add_argument("--online-leaf-query-budget-per-epoch", type=int, default=16)
     law_group.add_argument("--online-merge-query-budget-per-epoch", type=int, default=16)
@@ -388,7 +388,7 @@ def main() -> int:
             return 2
         if node_oracle_predictor is None:
             node_oracle_source_kind = "human"
-            node_oracle_source_spec = "feedback_store"
+            node_oracle_source_spec = "preference_store"
         logger.info(
             "Online local-law supervision enabled: teacher_worker=%s human_only=%s",
             args.online_teacher_worker,
@@ -415,21 +415,21 @@ def main() -> int:
     applied_repro = configure_reproducibility(int(args.seed))
 
     online_node_oracle_queue = None
-    feedback_store_path = args.feedback_store or (args.output_dir / "online_feedback_store.json")
+    preference_store_path = args.preference_store or (args.output_dir / "online_preference_store.json")
     if bool(args.online_local_law_supervision):
-        from src.feedback.store import FeedbackStore
+        from src.preference_collection.store import PreferenceStore
         from src.training.online_node_oracle import (
             OnlineNodeOracleQueue,
             OnlineNodeOracleQueueConfig,
         )
 
-        feedback_store = FeedbackStore(
-            storage_path=feedback_store_path,
+        preference_store = PreferenceStore(
+            storage_path=preference_store_path,
             autosave=True,
             load_existing=True,
         )
         online_node_oracle_queue = OnlineNodeOracleQueue(
-            store=feedback_store,
+            store=preference_store,
             config=OnlineNodeOracleQueueConfig(
                 leaf_budget_per_epoch=int(args.online_leaf_query_budget_per_epoch),
                 merge_budget_per_epoch=int(args.online_merge_query_budget_per_epoch),
@@ -668,7 +668,7 @@ def main() -> int:
             },
             "online_local_law_supervision": {
                 "enabled": bool(args.online_local_law_supervision),
-                "feedback_store": str(feedback_store_path)
+                "preference_store": str(preference_store_path)
                 if bool(args.online_local_law_supervision)
                 else None,
                 "teacher_worker": str(args.online_teacher_worker),
@@ -782,6 +782,100 @@ def main() -> int:
     print("")
     print(f"  Output: {args.output_dir}")
     print("=" * 60)
+
+    from src.experiments import (
+        ARTIFACT_BEST_CHECKPOINT_PATH,
+        ARTIFACT_CHECKPOINT_PATH,
+        ARTIFACT_REPRODUCIBILITY_MANIFEST_JSON,
+        ARTIFACT_TRAINING_RESULT_JSON,
+        ExperimentContext,
+        SamplingPlan,
+        benchmark_ref_from_parts,
+        embedder_role_ref,
+        experiment_method_ref,
+        oracle_ref,
+        prefixed_artifact_key,
+        role_ref,
+        state_model_role_ref,
+    )
+
+    benchmark_ref = benchmark_ref_from_parts(
+        family="treepo_task",
+        scope=str(args.task),
+        name=str(args.task),
+        dataset_id="manifesto",
+    )
+    method_ref = experiment_method_ref(
+        family="ctreepo",
+        variant="local_law_training",
+        adapter="treepo_training",
+        roles={
+            "scorer": role_ref(
+                role="scorer",
+                surface="native",
+                engine="pytorch",
+                model="ctreepo",
+            ),
+            "embedder": embedder_role_ref(
+                engine="openai_compatible",
+                model=str(resolved),
+                base_url=str(api_base),
+            ),
+            "state_model": state_model_role_ref(
+                engine="pytorch",
+                model="ctreepo",
+                checkpoint_path=str(best_path) if best_path.exists() else "",
+                execution_mode="training",
+            ),
+        },
+        oracle=oracle_ref(kind="training_labels", source=str(node_oracle_source_kind)),
+        metadata={"task": str(args.task)},
+    )
+    artifacts = {
+        ARTIFACT_CHECKPOINT_PATH: str(best_path),
+        ARTIFACT_BEST_CHECKPOINT_PATH: str(best_path),
+        ARTIFACT_REPRODUCIBILITY_MANIFEST_JSON: str(repro_manifest_path),
+    }
+    training_result = args.output_dir / "training_result.json"
+    if training_result.exists():
+        artifacts[ARTIFACT_TRAINING_RESULT_JSON] = str(training_result)
+        artifacts[prefixed_artifact_key("ctreepo", ARTIFACT_TRAINING_RESULT_JSON)] = str(training_result)
+    context = ExperimentContext(
+        output_root=args.output_dir,
+        benchmark_ref=benchmark_ref,
+        method_ref=method_ref,
+        title="train_ctreepo",
+        adapter_id="treepo_training",
+        phases=("train", "eval"),
+        sampling=SamplingPlan(seed=int(args.seed), split="all", strategy="task_split"),
+        metadata={"task": str(args.task)},
+        launch_command=tuple(sys.argv),
+        report_profiles=("runtime_eval_summary",),
+    )
+    context.record(
+        {
+            "metrics": {
+                "best_root_mae": float(result.best_root_mae),
+                "best_epoch": int(result.best_epoch),
+                "training_time_seconds": float(result.training_time_seconds),
+                "interval_coverage_95": float(final_metrics.interval_coverage_95),
+                "interval_mean_width_95": float(final_metrics.interval_mean_width_95),
+                "leaf_oracle_mae": float(final_metrics.leaf_oracle_mae),
+                "merge_oracle_mae": float(final_metrics.merge_oracle_mae),
+                "leaf_violation_rate": float(final_metrics.leaf_violation_rate),
+                "merge_violation_rate": float(final_metrics.merge_violation_rate),
+            },
+            "artifacts": artifacts,
+            "metadata": {
+                "best_epoch": int(result.best_epoch),
+                "task": str(args.task),
+                "node_oracle_source_kind": str(node_oracle_source_kind),
+                "node_oracle_source_spec": node_oracle_source_spec,
+            },
+        },
+        phase="eval",
+        state="completed",
+    )
 
     return 0
 

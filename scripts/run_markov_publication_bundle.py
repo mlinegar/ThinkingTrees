@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -17,7 +18,24 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.structured_config import load_structured_config, write_structured_config
+from src.experiments.structured_config import load_structured_config, write_structured_config
+from src.experiments.script_parse import (
+    parse_float_list as _shared_parse_float_list,
+    parse_int_list as _shared_parse_int_list,
+    parse_str_list as _shared_parse_str_list,
+)
+from src.ctreepo.contracts import (
+    LAW_SET_ALL,
+    LAW_SET_MERGE_AND_ON_RANGE_IDEMPOTENCE,
+    LAW_SET_ON_RANGE_IDEMPOTENCE_ONLY,
+    LOCAL_LAW_ESTIMATOR_ORACLE_STATE,
+    RunAxisSpec,
+    assert_public_contract_clean,
+    canonical_law_set_id,
+    markov_tree_bundle_metadata,
+    objective_metadata,
+    run_manifest_metadata,
+)
 from src.ctreepo.sim.core.tree_reference_presets import (
     COMPARISON_GRID_V3_PRESET,
 )
@@ -30,11 +48,13 @@ from src.experiments import (
     canonical_artifact_refs_from_paths,
     default_phase_specs,
     merge_artifacts,
-    method_ref_from_markov_full_doc_run,
     write_experiment_manifest,
     write_experiment_status,
 )
+from src.experiments.markov_full_doc import method_ref_from_markov_full_doc_run
 from src.experiments.scheduler import SchedulerConfig, SchedulerItem, run_scheduler
+from src.ctreepo.sim.core.tree_neural_facade import job_output_dir_name
+from src.ctreepo.sim.core.tree_neural_execution import worker_command_for_job
 
 TRADEOFF_PIPELINE_SCRIPT = REPO_ROOT / "scripts" / "run_markov_optimization_tradeoff_pipeline.py"
 TREE_FULL_DOC_SCRIPT = REPO_ROOT / "scripts" / "run_tree_neural_full_doc_mig.py"
@@ -42,7 +62,12 @@ TREE_FNO_TUNING_PDF_SCRIPT = REPO_ROOT / "scripts" / "report_tree_fno_tuning_pdf
 FULL_DOC_DIAGNOSTIC_PDF_SCRIPT = REPO_ROOT / "scripts" / "report_full_doc_anchor_diagnostics_pdf.py"
 LONG_JOB_SCRIPT = REPO_ROOT / "scripts" / "long_job.py"
 CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES = ("official_fno", "official_fno_sumlen")
-DEFAULT_PARITY_TREE_FAMILIES = ("tree_neural_c2", "tree_neural_c2c3", "tree_neural")
+DEFAULT_PARITY_METHOD_RUNS = (
+    "tree_neural:on_range_idempotence_only",
+    "tree_neural:merge_and_on_range_idempotence",
+    "tree_neural:all",
+)
+DEFAULT_REFERENCE_METHOD_RUNS = tuple(CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES)
 
 DEFAULT_TRADEOFF_PHASES = "supervision_recovery,report"
 DEFAULT_CAPACITY_WIDTHS = (64, 128, 256)
@@ -53,6 +78,119 @@ DEFAULT_CAPACITY_LOCKED_SEEDS = (0, 1, 2, 3, 4)
 DEFAULT_PARITY_SEEDS = (0, 1, 2, 3, 4)
 DEFAULT_PARITY_SCALE_TRAIN_DOCS = (1024, 2048, 3072, 4096, 5120, 8192, 10240)
 DEFAULT_PARITY_UPPER_BOUND_AUX_FRACTIONS = (0.25, 1.0)
+
+
+def _markov_publication_tree_bundle_contract(
+    *,
+    args: argparse.Namespace,
+    phases: Sequence[str] | set[str] | None = None,
+    runner: str = "run_markov_publication_bundle",
+) -> Dict[str, Any]:
+    return markov_tree_bundle_metadata(
+        leaf_policy={
+            "partition_axis": "synthetic_markov_document",
+            "phases": sorted(str(phase) for phase in (phases or ())),
+            "preset": str(getattr(args, "preset", "")),
+        },
+        state_dim=(
+            int(getattr(args, "state_dim"))
+            if getattr(args, "state_dim", None) is not None
+            else None
+        ),
+        f_init="official_oracle",
+        g_init="raw_concat",
+        schedule="balanced",
+        metadata={"runner": runner},
+    )
+
+
+def _manifest_local_law_weight(
+    args: argparse.Namespace,
+    *,
+    attr: str,
+) -> float | None:
+    raw = getattr(args, attr, None)
+    return float(raw) if raw is not None else None
+
+
+def _markov_publication_run_manifest(
+    *,
+    args: argparse.Namespace,
+    output_root: Path,
+    phases: Sequence[str] | set[str] | None,
+    tree_bundle_contract: Mapping[str, Any],
+    artifacts: Mapping[str, Any] | None = None,
+    status: str = "completed",
+    publication_ready: bool = True,
+    metadata: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    artifact_rows = [
+        {"kind": str(kind), "uri": str(uri)}
+        for kind, uri in sorted(dict(artifacts or {}).items())
+        if str(uri or "")
+    ]
+    artifact_rows.append({"kind": "run_directory", "uri": str(output_root)})
+    local_law_weight = _manifest_local_law_weight(
+        args,
+        attr="local_law_weight",
+    )
+    if local_law_weight is None and getattr(args, "tree_local_law_weight", None) is not None:
+        local_law_weight = _manifest_local_law_weight(args, attr="tree_local_law_weight")
+    root_weight = (
+        max(0.0, 1.0 - float(local_law_weight))
+        if local_law_weight is not None
+        else (
+            float(getattr(args, "root_share"))
+            if getattr(args, "root_share", None) is not None
+            else float(getattr(args, "tree_task_objective_weight"))
+            if getattr(args, "tree_task_objective_weight", None) is not None
+            else 1.0
+        )
+    )
+    return run_manifest_metadata(
+        run_id="markov.publication_bundle",
+        domain="markov",
+        role="publication_bundle",
+        backend="fno",
+        status=str(status),
+        tree_bundle=tree_bundle_contract,
+        f_init="official_oracle",
+        g_init="raw_concat",
+        f_lineage={"init": "official_oracle", "artifact": "synthetic_oracle"},
+        g_lineage={"init": "raw_concat", "artifact": "raw_concat"},
+        schedule=str(getattr(args, "tree_training_schedule", "balanced") or "balanced"),
+        objective=objective_metadata(
+            objective_family="markov_publication_bundle",
+            local_law_estimator=LOCAL_LAW_ESTIMATOR_ORACLE_STATE,
+            local_law_weight=local_law_weight,
+            root_share=root_weight,
+            local_law_component_weights={
+                "markov_local_law": float(local_law_weight or 0.0)
+            },
+            metadata={
+                "preset": str(getattr(args, "preset", "")),
+                "phases": sorted(str(phase) for phase in (phases or ())),
+            },
+        ),
+        optimizer_config={
+            "phases": sorted(str(phase) for phase in (phases or ())),
+            "preset": str(getattr(args, "preset", "")),
+            "with_preflight": bool(getattr(args, "with_preflight", False)),
+            "preflight_only": bool(getattr(args, "preflight_only", False)),
+        },
+        output_artifacts=artifact_rows,
+        audit_results={"ok": True, "policy": "manifest_contract_required"},
+        quarantine={"classification": "valid_treebundle_v1"},
+        command=sys.argv,
+        allow_legacy=False,
+        publication_ready=bool(publication_ready),
+        metadata={
+            "runner": "scripts/run_markov_publication_bundle.py",
+            **dict(metadata or {}),
+        },
+    )
+
+
 PREFLIGHT_CAPACITY_TRAIN_DOC_COUNT = 1024
 PREFLIGHT_CAPACITY_SCREEN_SEEDS = (0,)
 PREFLIGHT_CAPACITY_LOCKED_SEEDS = (0,)
@@ -75,6 +213,25 @@ DEFAULT_PHASES = (
 )
 ARCHIVED_REPORT_PHASES = frozenset({"tree_fno_pdf", "full_doc_parity_pdf"})
 
+
+def _template_run_axis(token: str, *, role: str) -> Dict[str, Any]:
+    text = str(token or "").strip()
+    if ":" in text:
+        method_id, law_set_id = text.split(":", 1)
+    else:
+        method_id, law_set_id = text, LAW_SET_ALL
+    return {
+        "problem_id": "markov_ops_count",
+        "method_id": str(method_id).strip(),
+        "law_set_id": canonical_law_set_id(str(law_set_id).strip() or LAW_SET_ALL),
+        "role": str(role),
+    }
+
+
+def _template_run_axes(tokens: Sequence[str], *, role: str) -> List[Dict[str, Any]]:
+    return [_template_run_axis(token, role=role) for token in tokens]
+
+
 PUBLICATION_SELECTION_TEMPLATE: Dict[str, Any] = {
     "publication_bundle": {
         "phases": list(DEFAULT_PHASES),
@@ -87,7 +244,7 @@ PUBLICATION_SELECTION_TEMPLATE: Dict[str, Any] = {
             "train_docs": 10240,
             "supervision_recovery_train_docs": [1024, 4096, 10240],
             "supervision_recovery_seeds": [0, 1],
-            "supervision_recovery_tree_family": "tree_neural",
+            "supervision_recovery_method_id": "tree_neural",
             "supervision_recovery_structural_cell": "r12_p079",
             "tree_reference": {
                 "mode": "preset",
@@ -124,8 +281,8 @@ PUBLICATION_SELECTION_TEMPLATE: Dict[str, Any] = {
             "gate_train_doc_count": 10240,
             "scale_train_doc_counts": list(DEFAULT_PARITY_SCALE_TRAIN_DOCS),
             "seeds": list(DEFAULT_PARITY_SEEDS),
-            "tree_families": list(DEFAULT_PARITY_TREE_FAMILIES),
-            "fno_families": list(CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES),
+            "method_runs": _template_run_axes(DEFAULT_PARITY_METHOD_RUNS, role="primary"),
+            "reference_method_runs": _template_run_axes(DEFAULT_REFERENCE_METHOD_RUNS, role="reference"),
             "run_aux_upper_bound": True,
             "upper_bound_aux_fractions": list(DEFAULT_PARITY_UPPER_BOUND_AUX_FRACTIONS),
             "backfill_on_success": True,
@@ -160,13 +317,13 @@ PUBLICATION_SELECTION_TEMPLATE: Dict[str, Any] = {
         "test_docs": 1024,
         "supervision_recovery_train_docs": [1024, 4096, 10240],
         "supervision_recovery_seeds": [0, 1],
-        "supervision_recovery_tree_family": "tree_neural",
+        "supervision_recovery_method_id": "tree_neural",
             "supervision_recovery_structural_cell": "r12_p079",
         "medium_batch_sizes": [128, 256, 512],
         "medium_seeds": [0, 1, 2, 3],
-        "law_package_names": ["tree_root_only", "tree_c2_only", "tree_all_laws"],
+        "law_set_ids": ["root_only", "on_range_idempotence_only", "all"],
         "support_modes": ["supported", "unsupported"],
-        "full_doc_anchor_families": list(CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES),
+        "full_doc_anchor_reference_method_runs": _template_run_axes(DEFAULT_REFERENCE_METHOD_RUNS, role="reference"),
         "efficiency_anchor_mode": "both",
         "efficiency_train_docs": [2048, 4096],
         "efficiency_anchor_train_docs_dense": [256, 512, 768, 1024, 1536, 2048, 3072, 4096],
@@ -199,25 +356,11 @@ class StepResult:
 
 
 def _parse_int_list(text: str | None, default: Sequence[int]) -> List[int]:
-    if text is None:
-        return list(default)
-    values: List[int] = []
-    for raw in str(text).replace(",", " ").split():
-        item = raw.strip()
-        if item:
-            values.append(int(item))
-    return values or list(default)
+    return _shared_parse_int_list(text, default=default, separators=",")
 
 
 def _parse_float_list(text: str | None, default: Sequence[float]) -> List[float]:
-    if text is None:
-        return list(default)
-    values: List[float] = []
-    for raw in str(text).replace(",", " ").split():
-        item = raw.strip()
-        if item:
-            values.append(float(item))
-    return values or list(default)
+    return _shared_parse_float_list(text, default=default, separators=",")
 
 
 def _parse_phase_set(text: str | None) -> List[str]:
@@ -232,19 +375,130 @@ def _parse_phase_set(text: str | None) -> List[str]:
 
 
 def _parse_str_list(text: str | None, default: Sequence[str]) -> List[str]:
+    return _shared_parse_str_list(text, default=default, separators=",")
+
+
+def _run_axis_from_token(
+    token: str,
+    *,
+    problem_id: str = "markov_ops_count",
+    role: str = "primary",
+) -> Dict[str, Any]:
+    text = str(token or "").strip()
+    if not text:
+        raise ValueError("method run token must be non-empty")
+    if ":" in text:
+        method_id, law_set_id = text.split(":", 1)
+    else:
+        method_id, law_set_id = text, LAW_SET_ALL
+    return RunAxisSpec(
+        problem_id=problem_id,
+        method_id=str(method_id).strip(),
+        law_set_id=canonical_law_set_id(str(law_set_id).strip() or LAW_SET_ALL),
+        role=role,
+    ).to_dict()
+
+
+def _parse_run_axis_list(
+    text: Any,
+    default: Sequence[Any],
+    *,
+    role: str,
+) -> List[Dict[str, Any]]:
     if text is None:
-        return list(default)
-    out: List[str] = []
-    for raw in str(text).replace(",", " ").split():
-        item = raw.strip()
-        if item:
-            out.append(item)
-    return out or list(default)
+        raw_items: Sequence[Any] = list(default)
+    elif isinstance(text, (list, tuple)):
+        raw_items = list(text)
+    else:
+        raw_items = _parse_str_list(str(text), ())
+    if not raw_items:
+        raw_items = list(default)
+    runs: List[Dict[str, Any]] = []
+    for item in raw_items:
+        if isinstance(item, Mapping):
+            payload = dict(item)
+            payload.setdefault("role", role)
+            runs.append(RunAxisSpec.from_mapping(payload).to_dict())
+        else:
+            runs.append(_run_axis_from_token(str(item), role=role))
+    return runs
+
+
+RUN_AXIS_CONFIG_ROLES = {
+    "method_runs": "primary",
+    "parity_method_runs": "primary",
+    "oracle_budget_method_runs": "primary",
+    "reference_method_runs": "reference",
+    "parity_reference_method_runs": "reference",
+    "oracle_budget_reference_method_runs": "reference",
+    "full_doc_anchor_reference_method_runs": "reference",
+}
+
+
+def _normalize_run_axis_config_aliases(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    def _clean(value: Any, key: str = "") -> Any:
+        role = RUN_AXIS_CONFIG_ROLES.get(str(key))
+        if role is not None:
+            return _parse_run_axis_list(value, (), role=role)
+        if isinstance(value, Mapping):
+            return {str(child_key): _clean(child_value, str(child_key)) for child_key, child_value in value.items()}
+        if isinstance(value, list):
+            return [_clean(item) for item in value]
+        if isinstance(value, tuple):
+            return [_clean(item) for item in value]
+        return value
+
+    return dict(_clean(payload))
+
+
+def _method_ids_from_run_axes(runs: Sequence[Mapping[str, Any]]) -> List[str]:
+    return [str(run.get("method_id") or "").strip() for run in runs if str(run.get("method_id") or "").strip()]
+
+
+def _legacy_family_from_run_axis(run: Mapping[str, Any]) -> str:
+    method_id = str(run.get("method_id") or "").strip()
+    law_set_id = canonical_law_set_id(str(run.get("law_set_id") or LAW_SET_ALL))
+    if method_id == "tree_neural":
+        if law_set_id == LAW_SET_ON_RANGE_IDEMPOTENCE_ONLY:
+            return "tree_neural_c2"
+        if law_set_id == LAW_SET_MERGE_AND_ON_RANGE_IDEMPOTENCE:
+            return "tree_neural_c2c3"
+    return method_id
+
+
+def _legacy_families_from_run_axes(runs: Sequence[Mapping[str, Any]]) -> List[str]:
+    return [_legacy_family_from_run_axis(run) for run in runs]
+
+
+def _parity_backend_tree_families(args: argparse.Namespace) -> List[str]:
+    method_runs = _parse_run_axis_list(
+        getattr(args, "parity_method_runs", None),
+        DEFAULT_PARITY_METHOD_RUNS,
+        role="primary",
+    )
+    return _parse_str_list(
+        getattr(args, "parity_tree_families", None),
+        _legacy_families_from_run_axes(method_runs),
+    )
+
+
+def _parity_backend_reference_families(args: argparse.Namespace) -> List[str]:
+    reference_runs = _parse_run_axis_list(
+        getattr(args, "parity_reference_method_runs", None),
+        DEFAULT_REFERENCE_METHOD_RUNS,
+        role="reference",
+    )
+    return _parse_str_list(
+        getattr(args, "parity_fno_families", None),
+        _method_ids_from_run_axes(reference_runs),
+    )
 
 
 def _stringify_cli_default(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
+    if isinstance(value, (list, tuple)) and all(isinstance(item, Mapping) for item in value):
+        return list(value)
     if isinstance(value, (list, tuple)):
         return " ".join(str(item) for item in value)
     return value
@@ -296,6 +550,10 @@ def _load_selection_config(
     if path is None:
         return {}
     payload = load_structured_config(path)
+    assert_public_contract_clean(
+        _normalize_run_axis_config_aliases(payload),
+        surface=str(path),
+    )
     selected: Mapping[str, Any] = payload
     for section_name in section_names:
         section = payload.get(section_name)
@@ -505,21 +763,23 @@ def estimate_publication_runtime(args: argparse.Namespace, *, mig_count: int) ->
         scale_docs = _parse_int_list(
             args.parity_scale_train_doc_counts, DEFAULT_PARITY_SCALE_TRAIN_DOCS
         )
-        tree_families = _parse_str_list(
-            getattr(args, "parity_tree_families", None),
-            DEFAULT_PARITY_TREE_FAMILIES,
+        method_runs = _parse_run_axis_list(
+            getattr(args, "parity_method_runs", None),
+            DEFAULT_PARITY_METHOD_RUNS,
+            role="primary",
         )
-        fno_families = _parse_str_list(
-            getattr(args, "parity_fno_families", None),
-            CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES,
+        reference_method_runs = _parse_run_axis_list(
+            getattr(args, "parity_reference_method_runs", None),
+            DEFAULT_REFERENCE_METHOD_RUNS,
+            role="reference",
         )
         aux_fracs = _parse_float_list(
             args.parity_upper_bound_aux_fractions,
             DEFAULT_PARITY_UPPER_BOUND_AUX_FRACTIONS,
         )
-        gate_jobs = len(seeds) * (len(tree_families) + len(fno_families))
-        upper_jobs = len(seeds) * len(tree_families) * len(aux_fracs) if bool(args.parity_run_aux_upper_bound) else 0
-        backfill_jobs = len(seeds) * (len(tree_families) + len(fno_families)) * len(scale_docs) if bool(args.parity_backfill_on_success) else 0
+        gate_jobs = len(seeds) * (len(method_runs) + len(reference_method_runs))
+        upper_jobs = len(seeds) * len(method_runs) * len(aux_fracs) if bool(args.parity_run_aux_upper_bound) else 0
+        backfill_jobs = len(seeds) * (len(method_runs) + len(reference_method_runs)) * len(scale_docs) if bool(args.parity_backfill_on_success) else 0
         breakdown["parity"] = _wave_eta_range(
             total_jobs=gate_jobs + upper_jobs + backfill_jobs,
             device_count=mig_count,
@@ -561,6 +821,22 @@ def _load_json(path: Path) -> Mapping[str, Any]:
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _public_payload_for_contract(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    def _clean(value: Any, path: tuple[str, ...]) -> Any:
+        if isinstance(value, Mapping):
+            if path and path[-1] == "config" and any("tree_reference" in part for part in path[:-1]):
+                encoded = json.dumps(dict(value), sort_keys=True, default=str).encode("utf-8")
+                return {"backend_config_digest": hashlib.sha256(encoded).hexdigest()}
+            return {str(key): _clean(item, (*path, str(key))) for key, item in value.items()}
+        if isinstance(value, list):
+            return [_clean(item, (*path, str(index))) for index, item in enumerate(value)]
+        if isinstance(value, tuple):
+            return [_clean(item, (*path, str(index))) for index, item in enumerate(value)]
+        return value
+
+    return dict(_clean(payload, ()))
 
 
 def _publication_experiment_spec(
@@ -824,7 +1100,7 @@ def _tradeoff_command(
     if str(supervision_recovery_tree_family).strip():
         cmd.extend(
             [
-                "--supervision-recovery-tree-family",
+                "--supervision-recovery-method-id",
                 str(supervision_recovery_tree_family),
             ]
         )
@@ -952,8 +1228,8 @@ def _parity_command(
     gate_train_doc_count: int,
     scale_train_doc_counts: Sequence[int],
     seeds: Sequence[int],
-    tree_families: Sequence[str],
-    fno_families: Sequence[str],
+    method_runs: Sequence[Mapping[str, Any]],
+    reference_method_runs: Sequence[Mapping[str, Any]],
     capacity_root: Path | None,
     run_aux_upper_bound: bool,
     upper_bound_aux_fractions: Sequence[float],
@@ -981,10 +1257,22 @@ def _parity_command(
         *[str(v) for v in scale_train_doc_counts],
         "--seeds",
         *[str(v) for v in seeds],
-        "--tree-families",
-        *[str(v) for v in tree_families],
-        "--fno-families",
-        *[str(v) for v in fno_families],
+        "--method-runs",
+        *[
+            (
+                f"{str(run.get('method_id') or '').strip()}:"
+                f"{str(run.get('law_set_id') or LAW_SET_ALL).strip()}"
+            )
+            for run in method_runs
+        ],
+        "--reference-method-runs",
+        *[
+            (
+                f"{str(run.get('method_id') or '').strip()}:"
+                f"{str(run.get('law_set_id') or LAW_SET_ALL).strip()}"
+            )
+            for run in reference_method_runs
+        ],
         ("--run-aux-upper-bound" if bool(run_aux_upper_bound) else "--no-run-aux-upper-bound"),
         "--upper-bound-aux-fractions",
         *[str(v) for v in upper_bound_aux_fractions],
@@ -1292,6 +1580,10 @@ def _build_artifact_map(
 
 
 def _write_selection_template(path: Path) -> None:
+    assert_public_contract_clean(
+        PUBLICATION_SELECTION_TEMPLATE,
+        surface="markov publication config template",
+    )
     write_structured_config(path, PUBLICATION_SELECTION_TEMPLATE)
 
 
@@ -1345,7 +1637,7 @@ def _build_tradeoff_plan_for_bundle(
     if str(supervision_recovery_tree_family).strip():
         argv.extend(
             [
-                "--supervision-recovery-tree-family",
+                "--supervision-recovery-method-id",
                 str(supervision_recovery_tree_family),
             ]
         )
@@ -1460,7 +1752,7 @@ def _tradeoff_args_for_bundle(
     if str(supervision_recovery_tree_family).strip():
         argv.extend(
             [
-                "--supervision-recovery-tree-family",
+                "--supervision-recovery-method-id",
                 str(supervision_recovery_tree_family),
             ]
         )
@@ -1549,12 +1841,7 @@ def _full_doc_job_item(
     job: Any,
     use_cuda: bool,
 ) -> SchedulerItem:
-    from scripts.run_tree_neural_full_doc_mig import (  # type: ignore
-        _job_output_dir_name,
-        _worker_command_for_job,
-    )
-
-    job_output_dir = output_root / "jobs" / _job_output_dir_name(str(job.job_name))
+    job_output_dir = output_root / "jobs" / job_output_dir_name(str(job.job_name))
     return SchedulerItem(
         item_id=item_id,
         phase=str(phase),
@@ -1562,7 +1849,7 @@ def _full_doc_job_item(
         expected_outputs=(str(job_output_dir / "summary.json"),),
         command=tuple(
             str(arg)
-            for arg in _worker_command_for_job(
+            for arg in worker_command_for_job(
                 job,
                 output_dir=job_output_dir,
                 torch_threads=1,
@@ -1603,6 +1890,8 @@ def _publication_capacity_namespace(
         batch_size=64,
         lr=5e-4,
         weight_decay=0.0,
+        local_law_weight=0.3,
+        root_share=None,
         tree_local_law_weight=0.3,
         tree_task_objective_weight=None,
         doc_sequence_train_fraction=0.0,
@@ -1623,14 +1912,24 @@ def _publication_parity_namespace(
     capacity_root: Path | None,
     mig_uuids: Sequence[str],
 ) -> argparse.Namespace:
+    method_runs = _parse_run_axis_list(
+        args.parity_method_runs,
+        DEFAULT_PARITY_METHOD_RUNS,
+        role="primary",
+    )
+    reference_method_runs = _parse_run_axis_list(
+        args.parity_reference_method_runs,
+        DEFAULT_REFERENCE_METHOD_RUNS,
+        role="reference",
+    )
     return argparse.Namespace(
         output_root=str(output_root),
         benchmark=str(args.parity_benchmark),
         gate_train_doc_count=int(args.parity_gate_train_doc_count),
         scale_train_doc_counts=_parse_int_list(args.parity_scale_train_doc_counts, DEFAULT_PARITY_SCALE_TRAIN_DOCS),
         seeds=_parse_int_list(args.parity_seeds, DEFAULT_PARITY_SEEDS),
-        tree_families=_parse_str_list(args.parity_tree_families, DEFAULT_PARITY_TREE_FAMILIES),
-        fno_families=_parse_str_list(args.parity_fno_families, CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES),
+        tree_families=_legacy_families_from_run_axes(method_runs),
+        fno_families=_method_ids_from_run_axes(reference_method_runs),
         job_granularity=str(getattr(args, "default_job_granularity", "family_train_seed")),
         resume=True,
         backfill_on_success=bool(args.parity_backfill_on_success),
@@ -1649,6 +1948,8 @@ def _publication_parity_namespace(
         batch_size=64,
         lr=5e-4,
         weight_decay=0.0,
+        local_law_weight=None,
+        root_share=None,
         tree_local_law_weight=None,
         tree_task_objective_weight=None,
         doc_sequence_train_fraction=0.0,
@@ -1691,6 +1992,10 @@ def _run_publication_global_scheduler(
         args,
         capacity_root=(capacity_root if ("capacity" in phase_set or args.capacity_root is not None) else None),
     )
+    tree_bundle_contract = _markov_publication_tree_bundle_contract(
+        args=args,
+        phases=phase_set,
+    )
     manifest: Dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "output_root": str(output_root),
@@ -1701,7 +2006,17 @@ def _run_publication_global_scheduler(
         "with_preflight": bool(args.with_preflight),
         "preflight_only": bool(args.preflight_only),
         "eta_estimate": dict(eta_estimate),
+        "tree_bundle_contract": tree_bundle_contract,
     }
+    manifest["run_manifest"] = _markov_publication_run_manifest(
+        args=args,
+        output_root=output_root,
+        phases=phase_set,
+        tree_bundle_contract=tree_bundle_contract,
+        status="running",
+        publication_ready=False,
+        metadata={"scheduler_mode": "global_per_run"},
+    )
     items: List[SchedulerItem] = []
 
     if "tradeoff" in phase_set:
@@ -1950,6 +2265,10 @@ def _run_publication_global_scheduler(
                 bundle_root=bundle_root,
                 include_full_doc_parity_pdf=bool(args.render_full_doc_parity_pdf),
             )
+            bundle_tree_bundle_contract = _markov_publication_tree_bundle_contract(
+                args=args,
+                phases=phase_set,
+            )
             bundle_manifest = {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "output_root": str(output_root),
@@ -1962,6 +2281,7 @@ def _run_publication_global_scheduler(
                 "with_preflight": bool(args.with_preflight),
                 "preflight_only": bool(args.preflight_only),
                 "steps": [],
+                "tree_bundle_contract": bundle_tree_bundle_contract,
                 "reference_contract": {
                     "identifiable_zero_reference_kind": "full_doc_fno_upper_bound",
                     "full_doc_fno_families": list(CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES),
@@ -1969,6 +2289,15 @@ def _run_publication_global_scheduler(
                     "note": "The publication bundle treats the full-doc FNO upper bound as the canonical identifiable-zero reference.",
                 },
             }
+            bundle_manifest["run_manifest"] = _markov_publication_run_manifest(
+                args=args,
+                output_root=output_root,
+                phases=phase_set,
+                tree_bundle_contract=bundle_tree_bundle_contract,
+                artifacts=artifacts,
+                publication_ready=not bool(args.preflight_only),
+                metadata={"bundle_root": str(bundle_root), "scheduler_mode": "global_per_run"},
+            )
             manifest_path, index_path = _write_bundle_outputs(
                 manifest=bundle_manifest,
                 bundle_root=bundle_root,
@@ -2032,6 +2361,16 @@ def _run_publication_global_scheduler(
         ),
     )
     manifest["scheduler"] = scheduler_summary
+    scheduler_state = str(scheduler_summary.get("state", "completed") or "completed")
+    manifest["run_manifest"] = _markov_publication_run_manifest(
+        args=args,
+        output_root=output_root,
+        phases=phase_set,
+        tree_bundle_contract=tree_bundle_contract,
+        status="completed" if scheduler_state == "completed" else "partial",
+        publication_ready=scheduler_state == "completed",
+        metadata={"scheduler_mode": "global_per_run", "scheduler_state": scheduler_state},
+    )
     merge_artifacts(output_root, _publication_artifacts(output_root))
     append_result_rows(
         output_root,
@@ -2189,10 +2528,10 @@ def build_publication_run_plan(
                 ).get("supervision_recovery_seeds", [])
                 or []
             ),
-            "supervision_recovery_tree_family": str(
+            "supervision_recovery_method_id": str(
                 (
                     tradeoff_plan.get("resolved_selection", {}) or {}
-                ).get("supervision_recovery_tree_family", "")
+                ).get("supervision_recovery_method_id", "")
                 or ""
             ),
             "supervision_recovery_structural_cell": str(
@@ -2230,8 +2569,16 @@ def build_publication_run_plan(
             "gate_train_doc_count": int(args.parity_gate_train_doc_count),
             "scale_train_doc_counts": _parse_int_list(args.parity_scale_train_doc_counts, DEFAULT_PARITY_SCALE_TRAIN_DOCS),
             "seeds": _parse_int_list(args.parity_seeds, DEFAULT_PARITY_SEEDS),
-            "tree_families": _parse_str_list(args.parity_tree_families, DEFAULT_PARITY_TREE_FAMILIES),
-            "fno_families": _parse_str_list(args.parity_fno_families, CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES),
+            "method_runs": _parse_run_axis_list(
+                args.parity_method_runs,
+                DEFAULT_PARITY_METHOD_RUNS,
+                role="primary",
+            ),
+            "reference_method_runs": _parse_run_axis_list(
+                args.parity_reference_method_runs,
+                DEFAULT_REFERENCE_METHOD_RUNS,
+                role="reference",
+            ),
             "run_aux_upper_bound": bool(args.parity_run_aux_upper_bound),
             "upper_bound_aux_fractions": _parse_float_list(args.parity_upper_bound_aux_fractions, DEFAULT_PARITY_UPPER_BOUND_AUX_FRACTIONS),
             "backfill_enabled": bool(args.parity_backfill_on_success),
@@ -2341,8 +2688,16 @@ def build_publication_run_plan(
                     gate_train_doc_count=int(args.parity_gate_train_doc_count),
                     scale_train_doc_counts=_parse_int_list(args.parity_scale_train_doc_counts, DEFAULT_PARITY_SCALE_TRAIN_DOCS),
                     seeds=_parse_int_list(args.parity_seeds, DEFAULT_PARITY_SEEDS),
-                    tree_families=_parse_str_list(args.parity_tree_families, DEFAULT_PARITY_TREE_FAMILIES),
-                    fno_families=_parse_str_list(args.parity_fno_families, CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES),
+                    method_runs=_parse_run_axis_list(
+                        getattr(args, "parity_method_runs", None),
+                        DEFAULT_PARITY_METHOD_RUNS,
+                        role="primary",
+                    ),
+                    reference_method_runs=_parse_run_axis_list(
+                        getattr(args, "parity_reference_method_runs", None),
+                        DEFAULT_REFERENCE_METHOD_RUNS,
+                        role="reference",
+                    ),
                     capacity_root=(capacity_root if ("capacity" in phases or args.capacity_root is not None) else None),
                     run_aux_upper_bound=bool(args.parity_run_aux_upper_bound),
                     upper_bound_aux_fractions=_parse_float_list(args.parity_upper_bound_aux_fractions, DEFAULT_PARITY_UPPER_BOUND_AUX_FRACTIONS),
@@ -2450,7 +2805,6 @@ def _build_parser(*, config_defaults: Mapping[str, Any] | None = None) -> argpar
     parser.add_argument("--default-job-granularity", choices=("family_train_seed", "family_train"), default="family_train_seed")
     parser.add_argument("--cleanup-stale-children", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-gpu-items-per-mig", type=int, default=1)
-
     parser.add_argument("--tradeoff-root", type=Path, default=None)
     parser.add_argument(
         "--tradeoff-preset",
@@ -2460,6 +2814,7 @@ def _build_parser(*, config_defaults: Mapping[str, Any] | None = None) -> argpar
     parser.add_argument("--tradeoff-device-mode", choices=("auto", "cpu", "cuda"), default="cuda")
     parser.add_argument("--tradeoff-phases", type=str, default=DEFAULT_TRADEOFF_PHASES)
     parser.add_argument("--tradeoff-train-docs", type=int, default=10240)
+    parser.add_argument("--tradeoff-supervision-recovery-method-id", choices=("tree_neural",), default="tree_neural")
     parser.add_argument("--tradeoff-tree-exact-eval-max-docs", type=int, default=0)
     parser.add_argument("--tradeoff-prepared-data-root", type=Path, default=None)
     parser.add_argument(
@@ -2513,8 +2868,8 @@ def _build_parser(*, config_defaults: Mapping[str, Any] | None = None) -> argpar
     parser.add_argument("--parity-gate-train-doc-count", type=int, default=10240)
     parser.add_argument("--parity-scale-train-doc-counts", type=str, default="1024,2048,3072,4096,5120,8192,10240")
     parser.add_argument("--parity-seeds", type=str, default="0,1,2,3,4")
-    parser.add_argument("--parity-tree-families", type=str, default="tree_neural_c2 tree_neural_c2c3 tree_neural")
-    parser.add_argument("--parity-fno-families", type=str, default="official_fno official_fno_sumlen")
+    parser.add_argument("--parity-method-runs", type=str, default=" ".join(DEFAULT_PARITY_METHOD_RUNS))
+    parser.add_argument("--parity-reference-method-runs", type=str, default="official_fno official_fno_sumlen")
     parser.add_argument(
         "--parity-backfill-on-success",
         action=argparse.BooleanOptionalAction,
@@ -2558,7 +2913,24 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         flatten_sections=True,
     )
     parser = _build_parser(config_defaults=config_defaults)
-    return parser.parse_args(raw_argv)
+    args = parser.parse_args(raw_argv)
+    method_runs = _parse_run_axis_list(
+        getattr(args, "parity_method_runs", None),
+        DEFAULT_PARITY_METHOD_RUNS,
+        role="primary",
+    )
+    reference_method_runs = _parse_run_axis_list(
+        getattr(args, "parity_reference_method_runs", None),
+        DEFAULT_REFERENCE_METHOD_RUNS,
+        role="reference",
+    )
+    # Private adapter aliases for legacy child commands.
+    args.parity_tree_families = " ".join(_legacy_families_from_run_axes(method_runs))
+    args.parity_fno_families = " ".join(_method_ids_from_run_axes(reference_method_runs))
+    args.tradeoff_supervision_recovery_tree_family = str(
+        getattr(args, "tradeoff_supervision_recovery_method_id", "tree_neural")
+    )
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -2587,10 +2959,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         mig_uuids=mig_uuids,
         output_root=output_root,
     )
+    public_run_plan = _public_payload_for_contract(run_plan)
+    assert_public_contract_clean(public_run_plan, surface="markov publication run plan")
     if args.write_run_plan is not None:
-        _write_json(Path(args.write_run_plan).expanduser(), run_plan)
+        _write_json(Path(args.write_run_plan).expanduser(), public_run_plan)
     if bool(args.plan_only):
-        print(json.dumps(run_plan, indent=2, sort_keys=True))
+        print(json.dumps(public_run_plan, indent=2, sort_keys=True))
         return 0
     eta_estimate = estimate_publication_runtime(args, mig_count=mig_count)
     if bool(args.estimate_only):
@@ -2747,8 +3121,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                         gate_train_doc_count=PREFLIGHT_PARITY_GATE_TRAIN_DOC_COUNT,
                         scale_train_doc_counts=PREFLIGHT_PARITY_SCALE_TRAIN_DOCS,
                         seeds=PREFLIGHT_PARITY_SEEDS,
-                        tree_families=_parse_str_list(args.parity_tree_families, DEFAULT_PARITY_TREE_FAMILIES),
-                        fno_families=_parse_str_list(args.parity_fno_families, CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES),
+                        method_runs=_parse_run_axis_list(
+                            getattr(args, "parity_method_runs", None),
+                            DEFAULT_PARITY_METHOD_RUNS,
+                            role="primary",
+                        ),
+                        reference_method_runs=_parse_run_axis_list(
+                            getattr(args, "parity_reference_method_runs", None),
+                            DEFAULT_REFERENCE_METHOD_RUNS,
+                            role="reference",
+                        ),
                         capacity_root=preflight_capacity_root_arg,
                         run_aux_upper_bound=False,
                         upper_bound_aux_fractions=PREFLIGHT_PARITY_UPPER_BOUND_AUX_FRACTIONS,
@@ -2838,6 +3220,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             bundle_root=preflight_bundle_root,
             include_full_doc_parity_pdf=bool(args.render_full_doc_parity_pdf),
         )
+        preflight_tree_bundle_contract = _markov_publication_tree_bundle_contract(
+            args=args,
+            phases=phases,
+        )
         preflight_bundle_manifest = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "output_root": str(preflight_root),
@@ -2848,8 +3234,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             "eta_estimate": eta_estimate,
             "steps": [asdict(step) for step in preflight_steps],
             "artifacts": preflight_artifacts,
+            "tree_bundle_contract": preflight_tree_bundle_contract,
             "reference_contract": dict(reference_contract),
         }
+        preflight_bundle_manifest["run_manifest"] = _markov_publication_run_manifest(
+            args=args,
+            output_root=preflight_root,
+            phases=phases,
+            tree_bundle_contract=preflight_tree_bundle_contract,
+            artifacts=preflight_artifacts,
+            status="completed",
+            publication_ready=False,
+            metadata={"preflight_only": True},
+        )
         if "bundle" in phases:
             manifest_path, index_path = _write_bundle_outputs(
                 manifest=preflight_bundle_manifest,
@@ -3039,8 +3436,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                         DEFAULT_PARITY_SCALE_TRAIN_DOCS,
                     ),
                     seeds=_parse_int_list(args.parity_seeds, DEFAULT_PARITY_SEEDS),
-                    tree_families=_parse_str_list(args.parity_tree_families, DEFAULT_PARITY_TREE_FAMILIES),
-                    fno_families=_parse_str_list(args.parity_fno_families, CANONICAL_FULL_DOC_FNO_BASELINE_FAMILIES),
+                    method_runs=_parse_run_axis_list(
+                        getattr(args, "parity_method_runs", None),
+                        DEFAULT_PARITY_METHOD_RUNS,
+                        role="primary",
+                    ),
+                    reference_method_runs=_parse_run_axis_list(
+                        getattr(args, "parity_reference_method_runs", None),
+                        DEFAULT_REFERENCE_METHOD_RUNS,
+                        role="reference",
+                    ),
                     capacity_root=parity_capacity_root,
                     run_aux_upper_bound=bool(args.parity_run_aux_upper_bound),
                     upper_bound_aux_fractions=_parse_float_list(
@@ -3119,6 +3524,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         bundle_root=bundle_root,
         include_full_doc_parity_pdf=bool(args.render_full_doc_parity_pdf),
     )
+    tree_bundle_contract = _markov_publication_tree_bundle_contract(
+        args=args,
+        phases=phases,
+    )
     manifest: Dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "output_root": str(output_root),
@@ -3133,8 +3542,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         "eta_estimate": eta_estimate,
         "steps": [asdict(step) for step in steps],
         "artifacts": artifacts,
+        "tree_bundle_contract": tree_bundle_contract,
         "reference_contract": dict(reference_contract),
     }
+    manifest["run_manifest"] = _markov_publication_run_manifest(
+        args=args,
+        output_root=output_root,
+        phases=phases,
+        tree_bundle_contract=tree_bundle_contract,
+        artifacts=artifacts,
+        status="completed",
+        publication_ready=not bool(args.preflight_only),
+        metadata={"scheduler_mode": str(getattr(args, "scheduler_mode", ""))},
+    )
 
     if with_preflight:
         preflight_artifacts = _build_artifact_map(
@@ -3143,6 +3563,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             parity_root=preflight_parity_root,
             bundle_root=preflight_bundle_root,
             include_full_doc_parity_pdf=bool(args.render_full_doc_parity_pdf),
+        )
+        preflight_tree_bundle_contract = _markov_publication_tree_bundle_contract(
+            args=args,
+            phases=phases,
         )
         preflight_manifest: Dict[str, Any] = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -3157,8 +3581,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             "eta_estimate": eta_estimate,
             "steps": [asdict(step) for step in preflight_steps],
             "artifacts": preflight_artifacts,
+            "tree_bundle_contract": preflight_tree_bundle_contract,
             "reference_contract": dict(manifest["reference_contract"]),
         }
+        preflight_manifest["run_manifest"] = _markov_publication_run_manifest(
+            args=args,
+            output_root=preflight_root,
+            phases=phases,
+            tree_bundle_contract=preflight_tree_bundle_contract,
+            artifacts=preflight_artifacts,
+            status="completed",
+            publication_ready=False,
+            metadata={"preflight": True},
+        )
         if "bundle" in phases:
             preflight_manifest_path, preflight_index_path = _write_bundle_outputs(
                 manifest=preflight_manifest,

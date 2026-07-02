@@ -23,7 +23,22 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts import run_tree_neural_full_doc_mig as mig  # noqa: E402
+from src.ctreepo.sim.core.tree_neural_config_recipes import slot_exact_sanity_config  # noqa: E402
+from src.ctreepo.sim.core.tree_neural_execution import (  # noqa: E402
+    run_job_batch,
+    write_summary_outputs,
+)
+from src.ctreepo.sim.core.tree_neural_exact_sanity import (  # noqa: E402
+    EXACT_SANITY_FAMILY,
+    render_exact_sanity_summary_markdown,
+    tree_neural_exact_sanity_summary,
+)
+from src.ctreepo.sim.core.tree_neural_facade import (  # noqa: E402
+    build_jobs_for_configs,
+    JobSpec,
+    RunConfigSpec,
+    discover_mig_uuids,
+)
 
 
 def _timestamp() -> str:
@@ -92,8 +107,8 @@ def _make_slot_config(
     tree_c1_relative_weight: float = 1.0,
     tree_c2_relative_weight: float = 1.0,
     tree_c3_relative_weight: float = 1.0,
-) -> mig._RunConfigSpec:
-    base = mig._slot_exact_sanity_config(
+) -> RunConfigSpec:
+    base = slot_exact_sanity_config(
         _base_args(args),
         train_doc_count=int(train_doc_count),
         config_label=str(label),
@@ -127,6 +142,20 @@ def _make_slot_config(
             else int(base.n_epochs)
         )
     )
+    resolved_task_objective_weight = (
+        None
+        if tree_task_objective_weight is None
+        else float(tree_task_objective_weight)
+    )
+    resolved_local_law_weight = (
+        None
+        if resolved_task_objective_weight is not None
+        else (
+            float(tree_local_law_weight)
+            if tree_local_law_weight is not None
+            else base.tree_local_law_weight
+        )
+    )
     return replace(
         base,
         label=str(label),
@@ -136,16 +165,8 @@ def _make_slot_config(
         tree_training_schedule=str(final_schedule),
         tree_stage1_epochs=int(final_stage1),
         tree_stage2_epochs=int(final_stage2),
-        tree_local_law_weight=(
-            float(tree_local_law_weight)
-            if tree_local_law_weight is not None
-            else base.tree_local_law_weight
-        ),
-        tree_task_objective_weight=(
-            None
-            if tree_task_objective_weight is None
-            else float(tree_task_objective_weight)
-        ),
+        tree_local_law_weight=resolved_local_law_weight,
+        tree_task_objective_weight=resolved_task_objective_weight,
         tree_c1_relative_weight=float(tree_c1_relative_weight),
         tree_c2_relative_weight=float(tree_c2_relative_weight),
         tree_c3_relative_weight=float(tree_c3_relative_weight),
@@ -154,8 +175,8 @@ def _make_slot_config(
     )
 
 
-def _phase1_configs(args: argparse.Namespace) -> List[tuple[int, mig._RunConfigSpec]]:
-    configs: List[tuple[int, mig._RunConfigSpec]] = []
+def _phase1_configs(args: argparse.Namespace) -> List[tuple[int, RunConfigSpec]]:
+    configs: List[tuple[int, RunConfigSpec]] = []
     small = int(args.phase1_train_small)
     large = int(args.phase1_train_large)
 
@@ -358,16 +379,16 @@ def _phase1_configs(args: argparse.Namespace) -> List[tuple[int, mig._RunConfigS
 
 def _build_phase_jobs(
     args: argparse.Namespace,
-    configs_by_train: Sequence[tuple[int, mig._RunConfigSpec]],
+    configs_by_train: Sequence[tuple[int, RunConfigSpec]],
     *,
     seeds: Sequence[int],
     tuning_stage: str,
-) -> List[mig._JobSpec]:
-    jobs: List[mig._JobSpec] = []
+) -> List[JobSpec]:
+    jobs: List[JobSpec] = []
     for train_doc_count, config in configs_by_train:
         jobs.extend(
-            mig._build_jobs_for_configs(
-                families=(mig.EXACT_SANITY_FAMILY,),
+            build_jobs_for_configs(
+                families=(EXACT_SANITY_FAMILY,),
                 train_doc_counts=(int(train_doc_count),),
                 benchmark=str(args.benchmark),
                 hardness_grid="",
@@ -387,13 +408,13 @@ def _build_phase_jobs(
 
 
 def _write_exact_summary(output_root: Path, payload: Mapping[str, Any]) -> None:
-    exact_summary = mig._tree_neural_exact_sanity_summary(dict(payload or {}))
+    exact_summary = tree_neural_exact_sanity_summary(dict(payload or {}))
     (output_root / "tree_neural_exact_sanity_summary.json").write_text(
         json.dumps(exact_summary, indent=2, sort_keys=True),
         encoding="utf-8",
     )
     (output_root / "tree_neural_exact_sanity_summary.md").write_text(
-        mig._render_exact_sanity_summary_markdown(exact_summary)
+        render_exact_sanity_summary_markdown(exact_summary)
         if exact_summary
         else "# Tree-Neural Exact-Sketch Sanity Summary\n\nNo exact-sanity runs found.\n",
         encoding="utf-8",
@@ -445,7 +466,7 @@ def _select_promotions(
         run
         for run in runs
         if int(run.get("train_doc_count", 0)) == int(train_doc_count)
-        and str(run.get("baseline_family", "")) == mig.EXACT_SANITY_FAMILY
+        and str(run.get("baseline_family", "")) == EXACT_SANITY_FAMILY
     ]
     best_by_label: Dict[str, Dict[str, Any]] = {}
     for run in candidates:
@@ -467,8 +488,8 @@ def _select_promotions(
 def _promotion_configs(
     args: argparse.Namespace,
     phase1_runs: Sequence[Mapping[str, Any]],
-) -> List[tuple[int, mig._RunConfigSpec]]:
-    label_to_config: Dict[str, mig._RunConfigSpec] = {
+) -> List[tuple[int, RunConfigSpec]]:
+    label_to_config: Dict[str, RunConfigSpec] = {
         config.label: config for _, config in _phase1_configs(args)
     }
     promoted_small = _select_promotions(
@@ -486,7 +507,7 @@ def _promotion_configs(
         if label not in unique_labels:
             unique_labels.append(label)
 
-    promotions: List[tuple[int, mig._RunConfigSpec]] = []
+    promotions: List[tuple[int, RunConfigSpec]] = []
     for label in unique_labels:
         base = label_to_config.get(label)
         if base is None:
@@ -518,15 +539,15 @@ def _promotion_configs(
 def _run_phase(
     *,
     output_root: Path,
-    jobs: Sequence[mig._JobSpec],
+    jobs: Sequence[JobSpec],
     args: argparse.Namespace,
     manifest_payload: Mapping[str, Any],
 ) -> Dict[str, Any]:
     output_root.mkdir(parents=True, exist_ok=True)
-    mig_uuids = mig._discover_mig_uuids()
+    mig_uuids = discover_mig_uuids()
     if not mig_uuids:
         raise RuntimeError("No MIG UUIDs discovered")
-    result = mig._run_job_batch(
+    result = run_job_batch(
         output_root=output_root,
         jobs=jobs,
         mig_uuids=mig_uuids,
@@ -535,7 +556,7 @@ def _run_phase(
         torch_threads=int(args.torch_threads),
         manifest_payload=dict(manifest_payload),
     )
-    payload = mig._write_summary_outputs(output_root)
+    payload = write_summary_outputs(output_root)
     _write_exact_summary(output_root, payload)
     return {
         "result": result,
@@ -563,7 +584,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
-    parser.add_argument("--tree-local-law-weight", type=float, default=0.8)
+    parser.add_argument("--local-law-weight", dest="tree_local_law_weight", type=float, default=0.8)
     parser.add_argument("--tree-join-bit-weight", type=float, default=1.0)
     parser.add_argument("--tree-stage1-epochs", type=int, default=12)
     parser.add_argument("--tree-stage2-epochs", type=int, default=20)

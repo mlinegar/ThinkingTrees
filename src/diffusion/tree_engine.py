@@ -319,7 +319,7 @@ class FixedBinaryDiffusionTreeEngine:
         warnings.warn(
             "FixedBinaryDiffusionTreeEngine.run_fixed_tree is deprecated; "
             "prefer src.tree.state_tree_runner.run_fixed_binary_state_tree with "
-            "src.tree.async_operator.AsyncFromDiffusionBackend.",
+            "src.tree.async_operator.AsyncFromInferenceEngine.",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -327,13 +327,27 @@ class FixedBinaryDiffusionTreeEngine:
             raise ValueError("FixedBinaryDiffusionTreeEngine.run_fixed_tree requires at least one leaf.")
         resolved_engine_options = dict(engine_options or {})
 
-        from src.tree.async_operator import AsyncFromDiffusionBackend
+        from src.core.engines import EngineType
+        from src.core.inference_engine import ChatInferenceEngine, GenerateChatClient
+        from src.core.llm_client import LLMConfig
+        from src.tree.async_operator import AsyncFromInferenceEngine
         from src.tree.state_tree import state_tree_to_text_tree
         from src.tree.state_tree_runner import arun_fixed_binary_state_tree, run_fixed_binary_state_tree
 
-        operator = AsyncFromDiffusionBackend(
-            self.backend,
-            prompt_templates=self.prompt_templates,
+        config = LLMConfig(
+            base_url="",
+            model=str(getattr(self.backend, "model", None) or getattr(self.backend, "backend_name", "generate")),
+            api_key="EMPTY",
+        )
+        engine = ChatInferenceEngine(
+            engine_type=EngineType.CUSTOM_HTTP,
+            config=config,
+            llm_client=GenerateChatClient(config=config, backend=self.backend),
+        )
+        operator = AsyncFromInferenceEngine(
+            engine,
+            diffusion_prompt_templates=self.prompt_templates,
+            use_generate_prompt_templates=True,
         )
         try:
             asyncio.get_running_loop()

@@ -214,7 +214,7 @@ def test_local_law_validation_selection_and_artifacts_are_serialized(tmp_path: P
     selection = dict(learnability["selection"])
     assert selection["selection_split"] == "val"
     assert selection["test_metrics_used_for_selection"] is False
-    assert selection["selection_metric"] == "configured_objective_hajek"
+    assert selection["selection_metric"] == "configured_objective"
     assert str(selection["selected_candidate"]) in {
         "law_calibrated_naive",
         "law_calibrated_ipw",
@@ -257,25 +257,31 @@ def test_local_law_payload_emits_shared_configured_objective_wrapper() -> None:
     learnability = dict(payload["local_law_learnability"])
     metadata = dict(learnability["metadata"])
 
-    assert objective["selection_metric_name"] == "configured_objective_hajek"
-    assert "hajek" in list(objective["available_estimators"])
-    assert float(objective["task_weight"]) == pytest.approx(1.5)
-    assert float(objective["local_law_weights"]["c1"]) == pytest.approx(0.5)
-    assert float(objective["local_law_weights"]["c2_proxy"]) == pytest.approx(0.1)
-    assert float(objective["local_law_weights"]["c3"]) == pytest.approx(1.25)
-    assert float(objective["normalized_task_share"]) == pytest.approx(1.5 / 3.35)
-    assert float(objective["normalized_local_law_share"]) == pytest.approx(1.85 / 3.35)
-    assert metadata["law_package"] == "all_laws"
-    assert float(metadata["resolved_local_law_weights"]["c1"]) == pytest.approx(0.5)
-    assert float(metadata["resolved_local_law_weights"]["c2_proxy"]) == pytest.approx(0.1)
-    assert float(metadata["resolved_local_law_weights"]["c3"]) == pytest.approx(1.25)
+    assert objective["selection_metric_name"] == "configured_objective"
+    assert "exact" in list(objective["available_estimators"])
+    assert float(objective["root_share"]) == pytest.approx(1.5 / 3.35)
+    assert float(objective["local_law_weight"]) == pytest.approx(1.85 / 3.35)
+    assert float(objective["local_law_component_weights"]["leaf_preservation"]) == pytest.approx(0.5 / 3.35)
+    assert float(objective["local_law_component_weights"]["on_range_idempotence"]) == pytest.approx(0.1 / 3.35)
+    assert float(objective["local_law_component_weights"]["merge_preservation"]) == pytest.approx(1.25 / 3.35)
+    assert "task_weight" not in objective
+    assert "local_law_weights" not in objective
+    assert "proxy_weights" not in objective
+    assert metadata["law_set_id"] == "all"
+    assert float(metadata["resolved_local_law_weights"]["leaf_preservation"]) == pytest.approx(0.5 / 3.35)
+    assert float(metadata["resolved_local_law_weights"]["on_range_idempotence"]) == pytest.approx(0.1 / 3.35)
+    assert float(metadata["resolved_local_law_weights"]["merge_preservation"]) == pytest.approx(1.25 / 3.35)
 
     infer_identity = dict(local_law["policy_metrics"]["infer_identity"])
+    root_share = 1.5 / 3.35
+    c1_share = 0.5 / 3.35
+    c2_share = 0.1 / 3.35
+    c3_share = 1.25 / 3.35
     expected_total = (
-        1.5 * float(infer_identity["mean_aux_oracle_target_abs_error"])
-        + 0.5 * float(infer_identity["mean_c1"])
-        + 0.1 * float(infer_identity["mean_c2_proxy"])
-        + 1.25 * float(infer_identity["mean_c3"])
+        root_share * float(infer_identity["mean_aux_oracle_target_abs_error"])
+        + c1_share * float(infer_identity["mean_c1"])
+        + c2_share * float(infer_identity["mean_c2_proxy"])
+        + c3_share * float(infer_identity["mean_c3"])
     )
     expected_combined = (
         0.5 * float(infer_identity["mean_c1"])
@@ -285,18 +291,56 @@ def test_local_law_payload_emits_shared_configured_objective_wrapper() -> None:
     assert float(infer_identity["combined_law_score"]) == pytest.approx(expected_combined)
     assert float(infer_identity["configured_objective"]) == pytest.approx(expected_total)
     assert float(infer_identity["configured_objective_task_term"]) == pytest.approx(
-        1.5 * float(infer_identity["mean_aux_oracle_target_abs_error"])
+        root_share * float(infer_identity["mean_aux_oracle_target_abs_error"])
     )
-    assert float(infer_identity["configured_objective_c1_term"]) == pytest.approx(
-        0.5 * float(infer_identity["mean_c1"])
+    assert float(infer_identity["configured_objective_leaf_preservation_term"]) == pytest.approx(
+        c1_share * float(infer_identity["mean_c1"])
     )
-    assert float(infer_identity["configured_objective_c2_proxy_term"]) == pytest.approx(
-        0.1 * float(infer_identity["mean_c2_proxy"])
+    assert float(infer_identity["configured_objective_on_range_idempotence_term"]) == pytest.approx(
+        c2_share * float(infer_identity["mean_c2_proxy"])
     )
-    assert float(infer_identity["configured_objective_c3_term"]) == pytest.approx(
-        1.25 * float(infer_identity["mean_c3"])
+    assert float(infer_identity["configured_objective_merge_preservation_term"]) == pytest.approx(
+        c3_share * float(infer_identity["mean_c3"])
     )
-    assert math.isfinite(float(infer_identity["configured_objective_hajek"]))
+    assert math.isfinite(float(infer_identity["configured_objective"]))
+
+
+def test_lambda_objective_survives_lda_estimator_augmentation() -> None:
+    cfg = _law_cfg(
+        train_docs=32,
+        val_docs=16,
+        test_docs=24,
+        local_law_weight=0.5,
+        law_package="c1c3",
+        seed=33,
+    )
+    summary = run_leaf_local_mixture_utility_experiment(cfg)
+    metrics = dict(summary.local_law["policy_metrics"]["infer_identity"])
+    estimator_payload = dict(metrics["objective_estimator_payload"])
+
+    assert estimator_payload["root_share"] == pytest.approx(0.5)
+    assert estimator_payload["local_law_weight"] == pytest.approx(0.5)
+    assert metrics["configured_objective"] == pytest.approx(estimator_payload["configured_objective"])
+    assert estimator_payload["selection_metric_value"] == pytest.approx(
+        metrics[str(estimator_payload["selection_metric_name"])]
+    )
+    assert float(metrics["configured_objective"]) == pytest.approx(
+        float(metrics["configured_objective_task_term"])
+        + float(metrics["configured_objective_local_law_term_total"])
+    )
+
+
+def test_explicit_lda_weights_report_implied_lambda_without_calibration() -> None:
+    cfg = _law_cfg(
+        law_task_objective_weight=0.5,
+        law_c1_weight=0.25,
+        law_c3_weight=0.25,
+        law_c2_proxy_weight=0.0,
+    )
+    objective_spec = _local_law_objective_spec(cfg)
+
+    assert objective_spec.normalized_task_share() == pytest.approx(0.5)
+    assert objective_spec.to_dict()["local_law_weight"] == pytest.approx(0.5)
 
 
 def test_local_law_candidate_selection_recomputes_configured_objective_from_raw_metrics() -> None:
@@ -353,18 +397,18 @@ def test_local_law_objective_wrapper_respects_law_package_mask() -> None:
     learnability = dict(payload["local_law_learnability"])
     metadata = dict(learnability["metadata"])
 
-    assert local_law_config["law_package"] == "root_only"
-    assert float(objective["local_law_weights"]["c1"]) == pytest.approx(0.0)
-    assert float(objective["local_law_weights"]["c2_proxy"]) == pytest.approx(0.0)
-    assert float(objective["local_law_weights"]["c3"]) == pytest.approx(0.0)
+    assert local_law_config["law_set_id"] == "root_only"
+    assert float(objective["local_law_component_weights"]["leaf_preservation"]) == pytest.approx(0.0)
+    assert float(objective["local_law_component_weights"]["on_range_idempotence"]) == pytest.approx(0.0)
+    assert float(objective["local_law_component_weights"]["merge_preservation"]) == pytest.approx(0.0)
     assert float(objective["local_law_weight_total"]) == pytest.approx(0.0)
-    assert metadata["law_package"] == "root_only"
-    assert float(metadata["resolved_local_law_weights"]["c1"]) == pytest.approx(0.0)
-    assert float(metadata["resolved_local_law_weights"]["c2_proxy"]) == pytest.approx(0.0)
-    assert float(metadata["resolved_local_law_weights"]["c3"]) == pytest.approx(0.0)
+    assert metadata["law_set_id"] == "root_only"
+    assert float(metadata["resolved_local_law_weights"]["leaf_preservation"]) == pytest.approx(0.0)
+    assert float(metadata["resolved_local_law_weights"]["on_range_idempotence"]) == pytest.approx(0.0)
+    assert float(metadata["resolved_local_law_weights"]["merge_preservation"]) == pytest.approx(0.0)
     assert float(infer_identity["combined_law_score"]) == pytest.approx(0.0)
     assert float(infer_identity["configured_objective"]) == pytest.approx(
-        2.0 * float(infer_identity["mean_aux_oracle_target_abs_error"])
+        float(infer_identity["mean_aux_oracle_target_abs_error"])
     )
 
 
@@ -454,15 +498,16 @@ def test_local_law_report_smoke_with_minimal_fixture(tmp_path: Path):
     assert "unified_core" in report_summary
     assert (
         report_summary["law_score_label"]
-        == "Configured local-law score (0.5*C1 + 0.1*C2-proxy + 1.25*C3)"
+        == "Configured local-law score (0.175*C1 + 0.0351*C2-proxy + 0.439*C3)"
     )
     assert report_summary["law_score_is_uniform"] is True
     profiles = list(report_summary["objective_weight_profiles"])
     assert len(profiles) == 1
-    assert profiles[0]["law_package"] == "all_laws"
+    assert profiles[0]["law_set_id"] == "all"
     assert int(profiles[0]["n_runs"]) == 5
-    assert float(profiles[0]["c1"]) == pytest.approx(0.5)
-    assert float(profiles[0]["c2_proxy"]) == pytest.approx(0.1)
-    assert float(profiles[0]["c3"]) == pytest.approx(1.25)
-    assert "Configured local-law score (0.5*C1 + 0.1*C2-proxy + 1.25*C3)" in report_markdown
+    component_weights = dict(profiles[0]["local_law_component_weights"])
+    assert float(component_weights["leaf_preservation"]) == pytest.approx(0.5 / 2.85)
+    assert float(component_weights["on_range_idempotence"]) == pytest.approx(0.1 / 2.85)
+    assert float(component_weights["merge_preservation"]) == pytest.approx(1.25 / 2.85)
+    assert "Configured local-law score (0.175*C1 + 0.0351*C2-proxy + 0.439*C3)" in report_markdown
     assert "0.25*C2-proxy" not in report_markdown

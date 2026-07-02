@@ -7,6 +7,7 @@ the literal ``fg -> fgf -> fgfg`` ladder rows:
 - ``f^1 g^{benoit}``: GEPA-v2 optimized scorer on Benoit GPT-4o summaries.
 - ``f^1 g^0``: GEPA-v2 optimized scorer on the stored baseline root summaries
   from ``outputs/overnight_benoit/full_pipeline/<dim>/per_manifesto.jsonl``.
+- ``f^0 g^{benoit}``: exact Benoit raw prompt on Benoit's GPT-4o summaries.
 - ``f^0 g^0``: exact Benoit raw prompt on the same stored baseline root
   summaries, with party names masked to ``<PARTY>`` before scoring.
 
@@ -19,12 +20,10 @@ metric directly.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import re
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
@@ -34,16 +33,37 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config.dspy_config import configure_dspy, create_vllm_lm
+from src.experiments.script_io import (
+    now_iso as _utc_now,
+    read_json as _read_json,
+    read_jsonl as _read_jsonl,
+    write_json as _write_json,
+    write_jsonl as _write_jsonl,
+)
+from src.experiments.script_parse import safe_float as _safe_float
+from src.config.dspy_config import configure_dspy, create_local_engine_lm
+from src.config.local_inference import resolve_local_inference_config
 from src.tasks.manifesto.benoit_scoring_contexts import get_benoit_scoring_context
 from src.tasks.manifesto.corpus_metrics import compute_corpus_pearson_r
 from src.tasks.manifesto.data_loader import ManifestoDataset
 from src.tasks.manifesto.dimension_scorer import DimensionScorer
 from src.tasks.manifesto.dimensions import PolicyDimension, get_dimension
 from src.tasks.manifesto.expert_benchmarks import (
+    benoit_ensemble_mean,
     load_benoit_expert_means,
+    load_benoit_llm_scores,
     load_benoit_masked_summaries,
     load_benoit_mp_crosswalk,
+)
+from src.tasks.manifesto.expert_scale import (
+    EXPERT_SCALE_CHOICES,
+    EXPERT_SCALE_NORMALIZED_1_7,
+    EXPERT_SCALE_RAW,
+    expert_scale_bounds,
+    expert_scale_metadata,
+    raw_benoit_expert_from_row,
+    resolve_benoit_expert_target,
+    scorer_1_7_to_expert_target,
 )
 from src.tasks.manifesto.resume_utils import load_resume_rows
 
@@ -51,6 +71,7 @@ LOGGER = logging.getLogger(__name__)
 
 _DIM_FROM_NAME = {dim.value: dim for dim in PolicyDimension}
 _INT_RE = re.compile(r"([1-7])")
+PARTY_MASK_MODES = ("safe_boundary", "legacy", "none")
 
 DEFAULT_SPLIT_IDS = (
     PROJECT_ROOT
@@ -72,6 +93,15 @@ DEFAULT_G0_RESULTS = (
     / "per_manifesto.jsonl"
 )
 
+BENOIT_FIGURE1_PUBLISHED = {
+    PolicyDimension.ECONOMIC: 0.87,
+    PolicyDimension.SOCIAL: 0.92,
+    PolicyDimension.IMMIGRATION: 0.89,
+    PolicyDimension.EU: 0.91,
+    PolicyDimension.ENVIRONMENT: 0.82,
+    PolicyDimension.DECENTRALIZATION: 0.49,
+}
+
 COMBO_SPECS: dict[str, dict[str, Any]] = {
     "f1g_benoit": {
         "display_label": r"f^1 g^{benoit}",
@@ -83,6 +113,11 @@ COMBO_SPECS: dict[str, dict[str, Any]] = {
         "f_kind": "optimized_dimension_scorer",
         "g_kind": "stored_baseline_summary",
     },
+    "f0g_benoit": {
+        "display_label": r"f^0 g^{benoit}",
+        "f_kind": "raw_benoit_prompt",
+        "g_kind": "benoit_masked_summary",
+    },
     "f0g0": {
         "display_label": r"f^0 g^0",
         "f_kind": "raw_benoit_prompt",
@@ -91,39 +126,26 @@ COMBO_SPECS: dict[str, dict[str, Any]] = {
 }
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _resolve_expert_target_scale(args: argparse.Namespace, dimension: PolicyDimension) -> str:
+    raw = getattr(args, "expert_target_scale", None)
+    if raw:
+        return str(raw)
+    return EXPERT_SCALE_NORMALIZED_1_7
 
 
-def _safe_float(value: Any) -> Optional[float]:
-    try:
-        if value is None:
-            return None
-        out = float(value)
-    except (TypeError, ValueError):
-        return None
-    return out
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            text = line.strip()
-            if not text:
-                continue
-            try:
-                row = json.loads(text)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(row, dict):
-                rows.append(row)
-    return rows
-
-
-def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(dict(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+def _prediction_on_target_scale(
+    score_1_7: Any,
+    *,
+    dimension: PolicyDimension,
+    expert_target_scale: str,
+) -> Optional[float]:
+    if expert_target_scale == EXPERT_SCALE_NORMALIZED_1_7:
+        return _safe_float(score_1_7)
+    return scorer_1_7_to_expert_target(
+        score_1_7,
+        dimension=dimension,
+        scale=expert_target_scale,
+    )
 
 
 def _discover_model(client: OpenAI) -> str:
@@ -147,7 +169,7 @@ def _parse_raw_prompt_score(text: str) -> tuple[Optional[float], str]:
 
 
 def _load_split_map(path: Path) -> tuple[dict[str, str], dict[str, list[str]]]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = _read_json(path)
     split_map: dict[str, str] = {}
     split_ids: dict[str, list[str]] = {}
     for split in ("train", "val", "test"):
@@ -158,14 +180,23 @@ def _load_split_map(path: Path) -> tuple[dict[str, str], dict[str, list[str]]]:
     return split_map, split_ids
 
 
-def _party_aliases(sample: Any) -> list[str]:
+def _is_invalid_party_alias(text: str) -> bool:
+    normalized = str(text or "").strip().casefold()
+    return normalized in {"", "nan", "none", "null", "na", "n/a", "<na>"}
+
+
+def _alias_word_chars(text: str) -> str:
+    return re.sub(r"[^\w]+", "", str(text or ""), flags=re.UNICODE)
+
+
+def _party_aliases(sample: Any, *, include_invalid: bool = True) -> list[str]:
     aliases = []
     for value in (
         getattr(sample, "party_name", None),
         getattr(sample, "party_abbrev", None),
     ):
         text = str(value or "").strip()
-        if not text:
+        if not text or (not include_invalid and _is_invalid_party_alias(text)):
             continue
         aliases.append(text)
         aliases.append(text.replace("’", "'"))
@@ -181,30 +212,54 @@ def _party_aliases(sample: Any) -> list[str]:
     return out
 
 
-def _mask_party_names(summary: str, sample: Any) -> str:
+def _mask_party_names(summary: str, sample: Any, *, mode: str = "safe_boundary") -> str:
+    if mode not in PARTY_MASK_MODES:
+        raise ValueError(f"unknown party mask mode {mode!r}; expected one of {PARTY_MASK_MODES}")
     masked = str(summary or "")
-    for alias in sorted(_party_aliases(sample), key=len, reverse=True):
-        masked = re.sub(re.escape(alias), "<PARTY>", masked, flags=re.IGNORECASE)
+    if mode == "none":
+        return masked
+    if mode == "legacy":
+        for alias in sorted(_party_aliases(sample, include_invalid=True), key=len, reverse=True):
+            masked = re.sub(re.escape(alias), "<PARTY>", masked, flags=re.IGNORECASE)
+        return masked
+
+    aliases = []
+    for alias in _party_aliases(sample, include_invalid=False):
+        if len(_alias_word_chars(alias)) <= 1:
+            continue
+        aliases.append(alias)
+    for alias in sorted(aliases, key=len, reverse=True):
+        pattern = rf"(?<!\w){re.escape(alias)}(?!\w)"
+        masked = re.sub(pattern, "<PARTY>", masked, flags=re.IGNORECASE)
     return masked
 
 
 def _load_g0_rows(
     *,
     path: Path,
+    dimension: PolicyDimension,
     dataset: ManifestoDataset,
     split_map: Mapping[str, str],
+    party_mask_mode: str,
+    expert_target_scale: str = EXPERT_SCALE_RAW,
 ) -> list[dict[str, Any]]:
     sample_by_id = {
         str(manifesto_id): dataset.get_sample(str(manifesto_id))
         for manifesto_id in split_map
     }
     rows: list[dict[str, Any]] = []
-    for row in _read_jsonl(path):
+    for row in _read_jsonl(path, skip_bad=True):
         manifesto_id = str(row.get("manifesto_id") or "").strip()
         if not manifesto_id or manifesto_id not in split_map:
             continue
         summary = str(row.get("summary") or "").strip()
-        expert = _safe_float(row.get("benoit_expert_mean"))
+        expert = resolve_benoit_expert_target(row, dimension=dimension, scale=expert_target_scale)
+        expert_1_7 = resolve_benoit_expert_target(
+            row,
+            dimension=dimension,
+            scale=EXPERT_SCALE_NORMALIZED_1_7,
+        )
+        expert_raw = raw_benoit_expert_from_row(row, dimension=dimension)
         sample = sample_by_id.get(manifesto_id)
         if not summary or expert is None or sample is None:
             continue
@@ -213,9 +268,18 @@ def _load_g0_rows(
                 "manifesto_id": manifesto_id,
                 "split": str(split_map[manifesto_id]),
                 "summary": summary,
-                "masked_summary": _mask_party_names(summary, sample),
-                "expert_score_1_7": float(expert),
+                "masked_summary": _mask_party_names(summary, sample, mode=party_mask_mode),
+                "party_mask_mode": party_mask_mode,
+                "expert_score": float(expert),
+                "expert_score_native": float(expert_raw) if expert_raw is not None else None,
+                "expert_score_1_7": float(expert_1_7) if expert_1_7 is not None else None,
+                "expert_score_raw_benoit": expert_raw,
                 "source_score_1_7": _safe_float(row.get("llm_score_1_7")),
+                "source_score": _prediction_on_target_scale(
+                    row.get("llm_score_1_7"),
+                    dimension=dimension,
+                    expert_target_scale=expert_target_scale,
+                ),
                 "summary_source": "stored_baseline_summary",
                 "source_path": str(path),
                 "party_name": getattr(sample, "party_name", ""),
@@ -231,6 +295,7 @@ def _load_benoit_rows(
     dimension: PolicyDimension,
     dataset: ManifestoDataset,
     split_map: Mapping[str, str],
+    expert_target_scale: str = EXPERT_SCALE_RAW,
 ) -> list[dict[str, Any]]:
     crosswalk = load_benoit_mp_crosswalk()
     benoit_to_py = {
@@ -242,7 +307,10 @@ def _load_benoit_rows(
         for sample in dataset
     }
     expert_lookup = {
-        str(row.manifesto).removesuffix(".txt"): float(row.expert_mean)
+        str(row.manifesto).removesuffix(".txt"): (
+            float(row.expert_mean),
+            float(row.expert_mean_1_7),
+        )
         for row in load_benoit_expert_means(dimension).itertuples()
     }
     summaries = load_benoit_masked_summaries(dimension=dimension)
@@ -258,19 +326,29 @@ def _load_benoit_rows(
         if manifesto_id is None or manifesto_id not in split_map:
             skipped += 1
             continue
-        expert = expert_lookup.get(benoit_key)
+        expert_pair = expert_lookup.get(benoit_key)
         summary = str(row.summary or "").strip()
-        if expert is None or not summary:
+        if expert_pair is None or not summary:
             skipped += 1
             continue
+        expert_raw, expert_1_7 = expert_pair
+        expert = expert_raw if expert_target_scale == EXPERT_SCALE_RAW else expert_1_7
         rows.append(
             {
                 "manifesto_id": manifesto_id,
                 "split": str(split_map[manifesto_id]),
                 "summary": summary,
                 "masked_summary": summary,
-                "expert_score_1_7": float(expert),
+                "expert_score": float(expert),
+                "expert_score_native": float(expert_raw),
+                "expert_score_1_7": float(expert_1_7),
+                "expert_score_raw_benoit": float(expert_raw),
                 "source_score_1_7": _safe_float(getattr(row, "benoit_score", None)),
+                "source_score": _prediction_on_target_scale(
+                    getattr(row, "benoit_score", None),
+                    dimension=dimension,
+                    expert_target_scale=expert_target_scale,
+                ),
                 "summary_source": "benoit_masked_summary",
                 "source_key": benoit_key,
             }
@@ -284,25 +362,38 @@ def _load_benoit_rows(
     return rows
 
 
-def _score_metrics(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+def _pair_metrics(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    pred_key: str,
+    truth_key: str,
+    pred_mean_key: str,
+    truth_mean_key: str,
+    values_are_1_7: bool = False,
+) -> dict[str, Any]:
+    row_list = list(rows)
     preds: list[float] = []
     truths: list[float] = []
-    for row in rows:
-        pred = _safe_float(row.get("pred_score_1_7"))
-        truth = _safe_float(row.get("expert_score_1_7"))
+    for row in row_list:
+        pred = _safe_float(row.get(pred_key))
+        truth = _safe_float(row.get(truth_key))
         if pred is None or truth is None:
             continue
         preds.append(float(pred))
         truths.append(float(truth))
     if not preds:
         return {
+            "n": 0,
+            "n_na": len(row_list),
             "n_scored": 0,
             "pearson_r": None,
             "pearson_ci_low": None,
             "pearson_ci_high": None,
+            "spearman_r": None,
+            "mae": None,
             "mae_1_7": None,
-            "mean_prediction_1_7": None,
-            "mean_expert_1_7": None,
+            pred_mean_key: None,
+            truth_mean_key: None,
         }
     if len(preds) >= 3:
         report = compute_corpus_pearson_r(preds, truths).as_dict()
@@ -311,33 +402,138 @@ def _score_metrics(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             "pearson_r": None,
             "pearson_ci_low": None,
             "pearson_ci_high": None,
+            "spearman_r": None,
             "n": int(len(preds)),
+            "n_na": int(len(row_list) - len(preds)),
         }
-    report["mae_1_7"] = float(sum(abs(p - t) for p, t in zip(preds, truths)) / len(preds))
-    report["mean_prediction_1_7"] = float(sum(preds) / len(preds))
-    report["mean_expert_1_7"] = float(sum(truths) / len(truths))
+    report["mae"] = float(sum(abs(p - t) for p, t in zip(preds, truths)) / len(preds))
+    report["mae_1_7"] = report["mae"] if values_are_1_7 else None
+    report[pred_mean_key] = float(sum(preds) / len(preds))
+    report[truth_mean_key] = float(sum(truths) / len(truths))
     report["n_scored"] = int(len(preds))
     return report
 
 
-def _split_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    by_split: dict[str, Any] = {"all": _score_metrics(rows)}
+def _score_metrics(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    return _pair_metrics(
+        rows,
+        pred_key="pred_score",
+        truth_key="expert_score",
+        pred_mean_key="mean_prediction",
+        truth_mean_key="mean_expert",
+    )
+
+
+def _split_report(
+    rows: list[dict[str, Any]],
+    *,
+    pred_key: str = "pred_score",
+    truth_key: str = "expert_score",
+    pred_mean_key: str = "mean_prediction",
+    truth_mean_key: str = "mean_expert",
+    values_are_1_7: bool = False,
+) -> dict[str, Any]:
+    by_split: dict[str, Any] = {
+        "all": _pair_metrics(
+            rows,
+            pred_key=pred_key,
+            truth_key=truth_key,
+            pred_mean_key=pred_mean_key,
+            truth_mean_key=truth_mean_key,
+            values_are_1_7=values_are_1_7,
+        )
+    }
     for split in ("train", "val", "test"):
         subset = [row for row in rows if str(row.get("split")) == split]
-        by_split[split] = _score_metrics(subset)
+        by_split[split] = _pair_metrics(
+            subset,
+            pred_key=pred_key,
+            truth_key=truth_key,
+            pred_mean_key=pred_mean_key,
+            truth_mean_key=truth_mean_key,
+            values_are_1_7=values_are_1_7,
+        )
     by_split["n_total_rows"] = int(len(rows))
-    by_split["n_na_rows"] = int(sum(row.get("pred_score_1_7") is None for row in rows))
+    by_split["n_na_rows"] = int(
+        sum(_safe_float(row.get(pred_key)) is None or _safe_float(row.get(truth_key)) is None for row in rows)
+    )
     return by_split
 
 
+def _comparison_reports(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "model_vs_expert": _split_report(
+            rows,
+            pred_key="pred_score",
+            truth_key="expert_score",
+            pred_mean_key="mean_prediction",
+            truth_mean_key="mean_expert",
+        ),
+        "source_vs_expert": _split_report(
+            rows,
+            pred_key="source_score",
+            truth_key="expert_score",
+            pred_mean_key="mean_source_score",
+            truth_mean_key="mean_expert",
+        ),
+        "model_vs_source": _split_report(
+            rows,
+            pred_key="pred_score_1_7",
+            truth_key="source_score_1_7",
+            pred_mean_key="mean_prediction_1_7",
+            truth_mean_key="mean_source_score_1_7",
+            values_are_1_7=True,
+        ),
+    }
+
+
+def _benoit_ensemble_reference_metrics(dimension: PolicyDimension) -> dict[str, Any]:
+    refs: dict[str, Any] = {
+        "reported_ensemble_published_pearson_r": BENOIT_FIGURE1_PUBLISHED[dimension],
+    }
+    experts = load_benoit_expert_means(dimension)
+    expert_lookup = {
+        str(row.manifesto): float(row.expert_mean)
+        for row in experts.itertuples()
+    }
+    for kind in ("reported", "openweight"):
+        try:
+            scores = load_benoit_llm_scores(kind=kind, dimension=dimension)
+            ensemble = benoit_ensemble_mean(scores)
+            rows = [
+                {
+                    "pred": _prediction_on_target_scale(
+                        row.score_llm_mean,
+                        dimension=dimension,
+                        expert_target_scale=EXPERT_SCALE_RAW,
+                    ),
+                    "expert": expert_lookup.get(str(row.manifesto)),
+                }
+                for row in ensemble.itertuples()
+            ]
+            refs[f"{kind}_ensemble_reproduced"] = _pair_metrics(
+                rows,
+                pred_key="pred",
+                truth_key="expert",
+                pred_mean_key="mean_ensemble_score",
+                truth_mean_key="mean_expert",
+                values_are_1_7=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            refs[f"{kind}_ensemble_reproduced_error"] = str(exc)
+    return refs
+
+
 def _configure_dspy_lm(*, port: int, model: Optional[str], temperature: float, max_tokens: int) -> str:
-    lm = create_vllm_lm(
-        port=int(port),
-        model=model,
-        temperature=float(temperature),
-        max_tokens=int(max_tokens),
-        cache=True,
+    local_inference = resolve_local_inference_config(
+        {
+            "port": int(port),
+            "model": model,
+            "temperature": float(temperature),
+            "max_tokens": int(max_tokens),
+        }
     )
+    lm = create_local_engine_lm(**local_inference.dspy_kwargs(cache=True))
     configure_dspy(lm=lm)
     resolved = getattr(lm, "model", None) or model
     return str(resolved or "")
@@ -349,6 +545,7 @@ def _score_with_f1(
     dimension: PolicyDimension,
     scorer_json: Path,
     max_output_tokens: int,
+    expert_target_scale: str,
 ) -> list[dict[str, Any]]:
     spec = get_dimension(dimension)
     scorer = DimensionScorer(spec, use_cot=False, max_output_tokens=int(max_output_tokens))
@@ -362,6 +559,11 @@ def _score_with_f1(
             {
                 **row,
                 "pred_score_1_7": _safe_float(pred),
+                "pred_score": _prediction_on_target_scale(
+                    pred,
+                    dimension=dimension,
+                    expert_target_scale=expert_target_scale,
+                ),
                 "pred_is_na": pred is None,
                 "pred_reasoning": str((result or {}).get("reasoning") or "")[:800],
             }
@@ -379,6 +581,7 @@ def _score_with_f0_raw_prompt(
     model: str,
     temperature: float,
     max_tokens: int,
+    expert_target_scale: str,
 ) -> list[dict[str, Any]]:
     system_prompt = get_benoit_scoring_context(dimension)
     out: list[dict[str, Any]] = []
@@ -406,6 +609,11 @@ def _score_with_f0_raw_prompt(
             {
                 **row,
                 "pred_score_1_7": pred,
+                "pred_score": _prediction_on_target_scale(
+                    pred,
+                    dimension=dimension,
+                    expert_target_scale=expert_target_scale,
+                ),
                 "pred_is_na": pred is None,
                 "pred_reasoning": normalized[:200],
             }
@@ -422,13 +630,13 @@ def _write_combo_outputs(
     rows: list[dict[str, Any]],
     output_dir: Path,
     run_meta: Mapping[str, Any],
+    references: Mapping[str, Any],
 ) -> None:
     combo_dir = output_dir / combo
     combo_dir.mkdir(parents=True, exist_ok=True)
     per_path = combo_dir / "per_manifesto.jsonl"
-    with per_path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    _write_jsonl(per_path, rows, ensure_ascii=False)
+    comparisons = _comparison_reports(rows)
     report = {
         "generated_at": _utc_now(),
         "combo": combo,
@@ -436,7 +644,9 @@ def _write_combo_outputs(
         "f_kind": combo_spec.get("f_kind"),
         "g_kind": combo_spec.get("g_kind"),
         "run": dict(run_meta),
-        "metrics": _split_report(rows),
+        "metrics": comparisons["model_vs_expert"],
+        "comparisons": comparisons,
+        "references": dict(references),
         "artifacts": {
             "per_manifesto": str(per_path),
         },
@@ -466,6 +676,22 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--f1-max-tokens", type=int, default=256)
     parser.add_argument("--f0-max-tokens", type=int, default=8)
+    parser.add_argument(
+        "--expert-target-scale",
+        choices=EXPERT_SCALE_CHOICES,
+        default=None,
+        help="Omit for normalized_1_7; pass raw_benoit only to reproduce older raw-scale metrics.",
+    )
+    parser.add_argument(
+        "--party-mask-mode",
+        choices=PARTY_MASK_MODES,
+        default="safe_boundary",
+        help=(
+            "How to anonymize party names in stored baseline summaries before raw-prompt scoring. "
+            "safe_boundary skips invalid/one-letter aliases and masks only boundary-delimited aliases; "
+            "legacy preserves the old unrestricted substitution behavior."
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--log-level", default="INFO")
     return parser.parse_args(argv)
@@ -480,10 +706,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     combos = args.combo or list(COMBO_SPECS)
     split_map, split_ids = _load_split_map(args.split_ids)
     dimension = _DIM_FROM_NAME[str(args.dimension)]
+    expert_target_scale = _resolve_expert_target_scale(args, dimension)
+    target_min, target_max = expert_scale_bounds(
+        dimension=dimension,
+        scale=expert_target_scale,
+    )
     dataset = ManifestoDataset(data_dir=args.mp_data_dir, require_text=True)
 
-    g0_rows = _load_g0_rows(path=args.g0_results, dataset=dataset, split_map=split_map)
-    benoit_rows = _load_benoit_rows(dimension=dimension, dataset=dataset, split_map=split_map)
+    g0_rows = _load_g0_rows(
+        path=args.g0_results,
+        dimension=dimension,
+        dataset=dataset,
+        split_map=split_map,
+        party_mask_mode=str(args.party_mask_mode),
+        expert_target_scale=expert_target_scale,
+    )
+    benoit_rows = _load_benoit_rows(
+        dimension=dimension,
+        dataset=dataset,
+        split_map=split_map,
+        expert_target_scale=expert_target_scale,
+    )
+    references = _benoit_ensemble_reference_metrics(dimension)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -494,8 +738,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "split_sizes": {key: len(value) for key, value in split_ids.items()},
         "g0_results_path": str(args.g0_results),
         "f1_scorer_json": str(args.f1_scorer_json),
+        "party_mask_mode": str(args.party_mask_mode),
+        "metrics_scale": expert_target_scale,
+        **expert_scale_metadata(dimension=dimension, scale=expert_target_scale),
+        "target_min": float(target_min),
+        "target_max": float(target_max),
         "model": args.model,
         "port": int(args.port),
+        "references": references,
         "sources": {
             "g0_split_rows": len(g0_rows),
             "benoit_split_rows": len(benoit_rows),
@@ -526,12 +776,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 dimension=dimension,
                 scorer_json=args.f1_scorer_json,
                 max_output_tokens=int(args.f1_max_tokens),
+                expert_target_scale=expert_target_scale,
             )
             run_meta = {
                 "scorer_kind": "optimized_dimension_scorer",
                 "scorer_json": str(args.f1_scorer_json),
                 "model": resolved_f1_model,
                 "temperature": float(args.temperature),
+                "party_mask_mode": str(args.party_mask_mode),
+                "metrics_scale": expert_target_scale,
+                **expert_scale_metadata(dimension=dimension, scale=expert_target_scale),
             }
         elif combo_spec["f_kind"] == "raw_benoit_prompt":
             if raw_prompt_client is None:
@@ -546,12 +800,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 model=str(raw_prompt_model),
                 temperature=float(args.temperature),
                 max_tokens=int(args.f0_max_tokens),
+                expert_target_scale=expert_target_scale,
             )
             run_meta = {
                 "scorer_kind": "raw_benoit_prompt",
                 "model": raw_prompt_model,
                 "temperature": float(args.temperature),
                 "max_tokens": int(args.f0_max_tokens),
+                "party_mask_mode": str(args.party_mask_mode),
+                "metrics_scale": expert_target_scale,
+                **expert_scale_metadata(dimension=dimension, scale=expert_target_scale),
             }
         else:
             raise ValueError(f"Unsupported combo scorer kind: {combo_spec['f_kind']!r}")
@@ -561,6 +819,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             rows=scored_rows,
             output_dir=args.output_dir,
             run_meta=run_meta,
+            references=references,
         )
 
     _write_json(args.output_dir / "manifest.json", manifest)

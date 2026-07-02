@@ -463,6 +463,24 @@ class TestBatchedPipelineConfig:
         assert config.adaptive_windows is True
         assert config.oracle_feedback_to_chunks is True
 
+    def test_task_model_endpoints_populate_urls(self):
+        from src.core.engines import EngineType, LocalChatEndpoints
+        from src.pipelines.batched import BatchedPipelineConfig
+
+        endpoints = LocalChatEndpoints(
+            engine=EngineType.VLLM,
+            ports=(8123, 8124),
+            base_urls=("http://localhost:8123/v1", "http://localhost:8124/v1"),
+        )
+
+        config = BatchedPipelineConfig(task_model_endpoints=endpoints)
+
+        assert config.task_model_url == "http://localhost:8123/v1"
+        assert config.task_model_urls == [
+            "http://localhost:8123/v1",
+            "http://localhost:8124/v1",
+        ]
+
 
 class TestProcessUnified:
     """Test the unified pipeline path (process_unified)."""

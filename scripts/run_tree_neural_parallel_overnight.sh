@@ -11,8 +11,8 @@ LOG_ROOT="${OUT_ROOT}/logs"
 mkdir -p "${OUT_ROOT}" "${LOG_ROOT}"
 
 mapfile -t MIG_UUIDS < <(python - <<'PY'
-from scripts import run_tree_neural_full_doc_mig as mig
-for uuid in mig._discover_mig_uuids():
+from src.ctreepo.sim.core.tree_neural_facade import discover_mig_uuids
+for uuid in discover_mig_uuids():
     print(uuid)
 PY
 )

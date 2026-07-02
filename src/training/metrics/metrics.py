@@ -256,13 +256,13 @@ def calibration_error(
     return {'ece': ece, 'mce': mce}
 
 
-def reliability_diagram_data(
+def calibration_diagram_data(
     predictions: List[Prediction],
     ground_truth: List[str],
     n_bins: int = 10,
 ) -> List[Dict]:
     """
-    Compute data for a reliability diagram.
+    Compute data for a calibration diagram.
 
     Args:
         predictions: List of Prediction objects

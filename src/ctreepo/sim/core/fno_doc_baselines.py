@@ -163,6 +163,41 @@ VALID_MARKOV_MERGE_WEIGHTING_MODES = (
 # ---------------------------------------------------------------------------
 
 
+def apply_fno_token_encoder(
+    tokens: torch.Tensor,
+    *,
+    token_mask: torch.Tensor,
+    token_embedding: nn.Embedding,
+    fno: nn.Module,
+    pooling_mode: str = "mean",
+    input_proj: nn.Module | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Encode tokens through embedding -> optional projection -> FNO -> masked pool.
+
+    Single source of truth for the embed/FNO/pool pipeline. Both
+    ``FNOTokenEncoder.forward`` and ``FNOCountSketch._encode_token_batch``
+    call this with their own (token_embedding, fno) modules so the encode
+    sequence stays a thin wrapper around the official neuralop FNO.
+
+    Returns ``(fno_output, pooled)`` where ``fno_output`` is (B, width, L)
+    channel-first FNO output and ``pooled`` is (B, width).
+    """
+    emb = token_embedding(tokens)  # (B, L, embed_dim)
+    if input_proj is not None:
+        emb = input_proj(emb)  # (B, L, width)
+    x = emb.permute(0, 2, 1)  # (B, width, L)
+    x = fno(x)  # (B, width, L)
+    mask = token_mask.unsqueeze(1)  # (B, 1, L)
+    pooled = (x * mask).sum(dim=-1)
+    if pooling_mode == "mean":
+        pooled = pooled / mask.sum(dim=-1).clamp(min=1)
+    elif pooling_mode != "sum":
+        raise ValueError(
+            f"unsupported FNO pooling_mode={pooling_mode!r}; expected 'mean' or 'sum'"
+        )
+    return x, pooled
+
+
 class FNOTokenEncoder(nn.Module):
     """Shared: embed tokens -> optional projection -> 1D FNO -> masked pool.
 
@@ -218,22 +253,14 @@ class FNOTokenEncoder(nn.Module):
     def forward(
         self, tokens: torch.Tensor, *, token_mask: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode tokens through FNO.
-
-        Returns (fno_output, pooled) where fno_output is (B, width, L)
-        and pooled is (B, width).
-        """
-        emb = self.token_embedding(tokens)  # (B, L, embed_dim)
-        if self.input_proj is not None:
-            emb = self.input_proj(emb)  # (B, L, width)
-        x = emb.permute(0, 2, 1)  # (B, width, L)
-        x = self.fno(x)  # (B, width, L)
-        mask = token_mask.unsqueeze(1)  # (B, 1, L)
-        pooled = (x * mask).sum(dim=-1)
-        valid_lengths = mask.sum(dim=-1).clamp(min=1)
-        if self.pooling_mode == "mean":
-            pooled = pooled / valid_lengths
-        return x, pooled
+        return apply_fno_token_encoder(
+            tokens,
+            token_mask=token_mask,
+            token_embedding=self.token_embedding,
+            fno=self.fno,
+            pooling_mode=self.pooling_mode,
+            input_proj=self.input_proj,
+        )
 
 
 # ---------------------------------------------------------------------------

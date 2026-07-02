@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 
 
 class EngineSurface(Enum):
@@ -14,6 +14,7 @@ class EngineSurface(Enum):
     CHAT_OPENAI = "chat_openai"
     DIFFUSION_GENERATE = "diffusion_generate"
     EMBEDDING = "embedding"
+    OPERATOR = "operator"
     SYMBOLIC_EXACT = "symbolic_exact"
 
 
@@ -25,6 +26,7 @@ class EngineType(Enum):
     VLLM_OMNI = "vllm_omni"
     OPENAI = "openai"
     CUSTOM_HTTP = "custom_http"
+    NATIVE_OPERATOR = "native_operator"
     SYMBOLIC_LOCAL = "symbolic_local"
 
     @classmethod
@@ -45,6 +47,11 @@ class EngineType(Enum):
             "custom_http": cls.CUSTOM_HTTP,
             "http": cls.CUSTOM_HTTP,
             "http_generate": cls.CUSTOM_HTTP,
+            "native": cls.NATIVE_OPERATOR,
+            "native_operator": cls.NATIVE_OPERATOR,
+            "local_operator": cls.NATIVE_OPERATOR,
+            "pytorch": cls.NATIVE_OPERATOR,
+            "torch": cls.NATIVE_OPERATOR,
             "symbolic": cls.SYMBOLIC_LOCAL,
             "symbolic_local": cls.SYMBOLIC_LOCAL,
             "local_symbolic": cls.SYMBOLIC_LOCAL,
@@ -120,7 +127,7 @@ class EngineSpec:
         resolved_port = port if port is not None else self.default_port
         if self.engine is EngineType.OPENAI:
             return "https://api.openai.com/v1"
-        if self.engine is EngineType.SYMBOLIC_LOCAL:
+        if self.engine in {EngineType.NATIVE_OPERATOR, EngineType.SYMBOLIC_LOCAL}:
             return None
         if not resolved_host or resolved_port is None:
             return None
@@ -152,6 +159,49 @@ class EngineSpec:
         }
 
 
+@dataclass(frozen=True)
+class LocalChatEndpoints:
+    """Resolved local OpenAI-compatible chat endpoints for one engine."""
+
+    engine: EngineType
+    ports: Tuple[int, ...]
+    base_urls: Tuple[str, ...]
+
+    @property
+    def primary_port(self) -> int:
+        return int(self.ports[0])
+
+    @property
+    def primary_base_url(self) -> str:
+        return self.base_urls[0]
+
+    @property
+    def primary_url(self) -> str:
+        return self.primary_base_url
+
+    @property
+    def urls(self) -> Tuple[str, ...]:
+        return self.base_urls
+
+    @property
+    def pipeline_base_urls(self) -> Optional[list[str]]:
+        urls = list(self.base_urls)
+        return urls if len(urls) > 1 else None
+
+    @property
+    def pipeline_urls(self) -> Optional[list[str]]:
+        return self.pipeline_base_urls
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "engine": self.engine.value,
+            "ports": list(self.ports),
+            "base_urls": list(self.base_urls),
+            "primary_port": self.primary_port,
+            "primary_base_url": self.primary_base_url,
+        }
+
+
 class EngineRegistry:
     """Single source of truth for engine metadata and factories."""
 
@@ -178,20 +228,21 @@ class EngineRegistry:
             ),
             EngineType.SGLANG: EngineSpec(
                 engine=EngineType.SGLANG,
-                surfaces=(EngineSurface.CHAT_OPENAI, EngineSurface.DIFFUSION_GENERATE),
+                surfaces=(EngineSurface.CHAT_OPENAI, EngineSurface.EMBEDDING),
                 default_port=30000,
                 default_host="localhost",
                 launchable=True,
                 openai_compatible=True,
                 supports_profiles=True,
                 supports_diffusion=True,
+                supports_embeddings=True,
                 config_section="sglang",
                 manager_kind="sglang",
                 launch_script=str(scripts_dir / "start_sglang.sh"),
             ),
             EngineType.VLLM_OMNI: EngineSpec(
                 engine=EngineType.VLLM_OMNI,
-                surfaces=(EngineSurface.DIFFUSION_GENERATE,),
+                surfaces=(EngineSurface.CHAT_OPENAI,),
                 default_port=8004,
                 default_host="localhost",
                 launchable=False,
@@ -200,7 +251,7 @@ class EngineRegistry:
                 supports_diffusion=True,
                 config_section="vllm_omni",
                 notes=(
-                    "vLLM-Omni is treated as a diffusion-oriented engine surface in the first pass.",
+                    "vLLM-Omni is a generate-only transport exposed through the canonical text surface.",
                 ),
             ),
             EngineType.OPENAI: EngineSpec(
@@ -216,8 +267,8 @@ class EngineRegistry:
                 engine=EngineType.CUSTOM_HTTP,
                 surfaces=(
                     EngineSurface.CHAT_OPENAI,
-                    EngineSurface.DIFFUSION_GENERATE,
                     EngineSurface.EMBEDDING,
+                    EngineSurface.OPERATOR,
                 ),
                 default_port=None,
                 default_host=None,
@@ -225,6 +276,16 @@ class EngineRegistry:
                 openai_compatible=True,
                 supports_diffusion=True,
                 supports_embeddings=True,
+            ),
+            EngineType.NATIVE_OPERATOR: EngineSpec(
+                engine=EngineType.NATIVE_OPERATOR,
+                surfaces=(EngineSurface.OPERATOR,),
+                default_port=None,
+                default_host=None,
+                launchable=False,
+                openai_compatible=False,
+                config_section="native_operator",
+                notes=("In-process Python/PyTorch operator execution.",),
             ),
             EngineType.SYMBOLIC_LOCAL: EngineSpec(
                 engine=EngineType.SYMBOLIC_LOCAL,
@@ -392,6 +453,111 @@ def resolve_engine_base_url(
     }:
         resolved_port = default_engine_port(spec.engine, role=role, settings=settings)
     return spec.default_base_url(surface=surface, host=host, port=resolved_port)
+
+
+def _normalize_endpoint_ports(
+    *,
+    port: Optional[int],
+    ports: Optional[Sequence[int]],
+    default_port: Optional[int],
+) -> Tuple[int, ...]:
+    selected_ports: list[int] = []
+    if ports is not None:
+        seen_ports = set()
+        for raw_port in ports:
+            try:
+                selected_port = int(raw_port)
+            except (TypeError, ValueError):
+                continue
+            if selected_port in seen_ports:
+                continue
+            seen_ports.add(selected_port)
+            selected_ports.append(selected_port)
+    elif port is not None:
+        selected_ports.append(int(port))
+    elif default_port is not None:
+        selected_ports.append(int(default_port))
+
+    if not selected_ports and ports is not None:
+        raise ValueError("At least one valid port is required when ports are provided.")
+    if not selected_ports:
+        raise ValueError("Could not resolve a local chat endpoint port.")
+    return tuple(selected_ports)
+
+
+def _local_chat_endpoint_ready(base_url: str, *, timeout: float = 2.0) -> bool:
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(
+            f"{str(base_url).rstrip('/')}/models",
+            timeout=float(timeout),
+        ) as resp:
+            return int(getattr(resp, "status", 0) or 0) == 200
+    except Exception:
+        return False
+
+
+def resolve_local_chat_endpoints(
+    engine: str | EngineType,
+    *,
+    port: Optional[int] = None,
+    ports: Optional[Sequence[int]] = None,
+    settings: Optional[Mapping[str, Any]] = None,
+    host: Optional[str] = None,
+    role: str = "task",
+    usage: str = "local chat endpoints",
+    allowed_engines: Optional[Sequence[str | EngineType]] = LOCAL_CHAT_MANAGED_ENGINES,
+    filter_unreachable: bool = False,
+    readiness_timeout: float = 2.0,
+    endpoint_ready: Optional[Callable[[str], bool]] = None,
+) -> LocalChatEndpoints:
+    """Resolve one local chat endpoint contract for vLLM/SGLang-style engines."""
+
+    spec = resolve_engine_for_usage(
+        engine,
+        surface=EngineSurface.CHAT_OPENAI,
+        usage=usage,
+        settings=settings,
+        allowed_engines=allowed_engines,
+    )
+    selected_ports = _normalize_endpoint_ports(
+        port=port,
+        ports=ports,
+        default_port=default_engine_port(spec.engine, role=role, settings=settings),
+    )
+
+    pairs: list[tuple[int, str]] = []
+    for selected_port in selected_ports:
+        base_url = spec.default_base_url(
+            surface=EngineSurface.CHAT_OPENAI,
+            host=host,
+            port=selected_port,
+        )
+        if base_url is None:
+            raise ValueError(
+                f"Could not resolve OpenAI-compatible base URL for engine '{spec.engine.value}'"
+            )
+        pairs.append((int(selected_port), base_url.rstrip("/")))
+
+    if filter_unreachable and len(pairs) > 1:
+        ready_fn = endpoint_ready or (
+            lambda url: _local_chat_endpoint_ready(url, timeout=readiness_timeout)
+        )
+        ready_pairs = [(port_value, url) for port_value, url in pairs if ready_fn(url)]
+        if ready_pairs:
+            pairs = ready_pairs
+        else:
+            raise RuntimeError(
+                "None of the provided local chat endpoints are reachable: "
+                + ", ".join(url for _port, url in pairs)
+            )
+
+    return LocalChatEndpoints(
+        engine=spec.engine,
+        ports=tuple(port_value for port_value, _url in pairs),
+        base_urls=tuple(url for _port, url in pairs),
+    )
 
 
 def resolve_engine_for_usage(

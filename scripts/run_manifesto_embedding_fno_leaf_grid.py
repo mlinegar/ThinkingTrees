@@ -13,7 +13,6 @@ import json
 import logging
 import sys
 from dataclasses import replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -21,22 +20,35 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.run_manifesto_dimension_fit_existing_results import (
-    _DIM_FROM_NAME,
-    _get_text_for_row,
-    _load_run_metadata,
-    _make_embedding_client,
-    _order_split_rows,
-    _phase3_split_examples,
-    _preload_transformers_for_local_embedding,
-    _read_jsonl,
-    _row_expert_score,
-    _row_manifesto_id,
-    _row_summary,
-    _row_target_score,
-    _row_teacher_score,
+from src.experiments.embedding_clients import (
+    make_embedding_client_from_args as _make_embedding_client,
+    preload_transformers_for_local_embedding as _preload_transformers_for_local_embedding,
+)
+from src.experiments.script_io import read_jsonl as _read_jsonl
+from src.tasks.manifesto.result_rows import (
+    DIMENSION_BY_NAME as _DIM_FROM_NAME,
+    get_text_for_row as _get_text_for_row,
+    load_run_metadata as _load_run_metadata,
+    order_split_rows as _order_split_rows,
+    phase3_split_examples as _phase3_split_examples,
+    row_expert_score as _row_expert_score,
+    row_manifesto_id as _row_manifesto_id,
+    row_summary as _row_summary,
+    row_target_score as _row_target_score,
+    row_teacher_score as _row_teacher_score,
 )
 from src.ctreepo.distillation import build_labeled_tree_from_text, write_labeled_trees_jsonl
+from src.ctreepo.treepo_bridge.manifesto_finetune import (
+    add_manifesto_finetune_args,
+    export_manifesto_finetune_bundle_from_args,
+    finetune_export_config,
+)
+from src.tasks.manifesto.script_utils import (
+    now_iso as _now_iso,
+    now_stamp as _now_stamp,
+    parse_int_grid,
+    write_json,
+)
 from src.ctreepo.embedding_fno import (
     EmbeddingFNOModelConfig,
     EmbeddingFNOObjectiveConfig,
@@ -60,25 +72,6 @@ from src.tree.treepo_stack import TreePOContractSpec, TreePOModelSpec
 
 LOGGER = logging.getLogger(__name__)
 
-
-def _now_stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-
-
-def _write_json(path: Path, payload: Mapping[str, Any]) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(config_to_dict(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return path
-
-
-def _parse_int_grid(value: str) -> Tuple[int, ...]:
-    parts = [part.strip() for part in str(value or "").replace(";", ",").split(",")]
-    grid = tuple(int(part) for part in parts if part)
-    if not grid:
-        raise ValueError("grid must contain at least one integer")
-    if any(item <= 0 for item in grid):
-        raise ValueError(f"grid entries must be positive: {grid!r}")
-    return grid
 
 
 def _build_trees_for_leaf_count(
@@ -205,6 +198,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--root-weight", type=float, default=1.0)
     parser.add_argument("--leaf-weight", type=float, default=0.5)
     parser.add_argument("--merge-weight", type=float, default=0.5)
+    add_manifesto_finetune_args(
+        parser,
+        kind="generic",
+        help_text="Write treepo PreferenceDataset/fine-tune adapter bundles per leaf row.",
+    )
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args(argv)
@@ -243,9 +241,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             test_n=int(args.test_n),
             seed=int(args.seed),
         )
-    _write_json(output_dir / "split_ids.json", {split: sorted(ids) for split, ids in split_ids.items()})
+    write_json(output_dir / "split_ids.json", config_to_dict({split: sorted(ids) for split, ids in split_ids.items()}))
     embedding_client = _make_embedding_client(args)
-    leaf_grid = _parse_int_grid(args.leaf_grid)
+    leaf_grid = parse_int_grid(args.leaf_grid)
     train_cfg = TrainConfig(train_splits=("train",), epochs=int(args.epochs), batch_size=int(args.batch_size))
     val_cfg = ValidationConfig(val_splits=("val",), enabled=True, eval_every=1)
     test_cfg = TestConfig(test_splits=("test",), enabled=True)
@@ -273,6 +271,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not trees:
             raise SystemExit(f"No labeled trees built for leaf_count={leaf_count}")
         labeled_tree_path = write_labeled_trees_jsonl(leaf_dir / "labeled_trees.jsonl", trees)
+        finetune_bundle = export_manifesto_finetune_bundle_from_args(
+            args=args,
+            trees=trees,
+            output_dir=leaf_dir / "treepo_finetune",
+            kind="generic",
+        )
         contract = TreePOContractSpec(
             contract_id=f"manifesto_{dim.value}_embedding_fno_leaf_{int(leaf_count)}",
             objective_kind="embedding_fno_node_distillation",
@@ -331,9 +335,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "leaf_count": int(leaf_count),
             "tree_counts": tree_counts,
             "labeled_trees": str(labeled_tree_path),
+            "finetune": finetune_bundle,
+            "artifacts": {
+                "labeled_trees": str(labeled_tree_path),
+                "finetune_bundle": str(leaf_dir / "treepo_finetune") if finetune_bundle else None,
+            },
             "contract_result": result.to_dict(),
         }
-        _write_json(summary_path, entry)
+        write_json(summary_path, config_to_dict(entry))
         run_entries[str(leaf_count)] = entry
 
         fit_metrics = result.metrics.get("fit_metrics", {})
@@ -361,7 +370,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for row in aggregate_rows:
             handle.write(json.dumps(config_to_dict(row), sort_keys=True) + "\n")
     manifest = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": _now_iso(),
         "status": "completed",
         "dimension": dim.value,
         "source_results": str(args.source_results),
@@ -382,6 +391,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "hidden_channels": int(args.hidden_channels),
             "n_modes": int(args.n_modes),
             "n_layers": int(args.n_layers),
+            "finetune_export": finetune_export_config(args),
         },
         "artifacts": {
             "split_ids": str(output_dir / "split_ids.json"),
@@ -389,7 +399,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         },
         "runs": run_entries,
     }
-    _write_json(output_dir / "manifest.json", manifest)
+    write_json(output_dir / "manifest.json", config_to_dict(manifest))
     LOGGER.info("Wrote embedding-FNO leaf grid to %s", output_dir)
     return 0
 

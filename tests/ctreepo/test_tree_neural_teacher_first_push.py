@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 import subprocess
 
-from scripts import run_tree_neural_full_doc_mig as mig
 from scripts import run_tree_neural_teacher_first_push as tfpush
 
 
@@ -381,8 +380,8 @@ def test_run_grouped_stage2_phase_terminates_lingering_worker_after_summary(
     monkeypatch.setattr(tfpush.subprocess, "Popen", _FakePopen)
     monkeypatch.setattr(tfpush, "GROUPED_STAGE2_COMPLETION_GRACE_S", 0.0)
     monkeypatch.setattr(
-        tfpush.mig,
-        "_write_summary_outputs",
+        tfpush,
+        "write_summary_outputs",
         lambda _output_root: {
             "runs": [
                 {

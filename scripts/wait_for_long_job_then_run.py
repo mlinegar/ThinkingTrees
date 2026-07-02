@@ -1,112 +1,82 @@
 #!/usr/bin/env python3
-"""Wait for one long_job launcher to finish, then run a follow-on command."""
+"""Wait for detached long_job launchers, then run a command.
+
+This is intentionally small glue for queued experiment follow-ups. It avoids
+starting a GPU-heavy job on a device that is already occupied by an earlier
+``scripts/long_job.py launch`` process.
+"""
 
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import json
-from pathlib import Path
-import shlex
 import subprocess
 import sys
 import time
-from typing import Any, Sequence
+from datetime import UTC, datetime
+from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-LONG_JOB_SCRIPT = REPO_ROOT / "scripts" / "long_job.py"
+def _log(message: str) -> None:
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"[{stamp}] {message}", flush=True)
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    return Path(f"/proc/{pid}").exists()
 
 
-def _strip_separator(command: Sequence[str]) -> list[str]:
-    items = list(command)
-    if items and items[0] == "--":
-        return items[1:]
-    return items
-
-
-def _status(job_root: str, python_bin: str) -> dict[str, Any]:
-    result = subprocess.run(
-        [
-            python_bin,
-            str(LONG_JOB_SCRIPT),
-            "status",
-            "--job-root",
-            job_root,
-        ],
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        message = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(f"long_job status failed with code {result.returncode}: {message}")
-    payload = json.loads(result.stdout)
-    if not isinstance(payload, dict):
-        raise RuntimeError("long_job status returned non-object JSON")
-    return payload
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Wait for a scripts/long_job.py job to finish, then run a command."
-    )
-    parser.add_argument("--job-root", required=True, help="Job root to wait on.")
-    parser.add_argument("--poll-seconds", type=float, default=60.0)
-    parser.add_argument(
-        "--status-python",
-        default=sys.executable,
-        help="Python executable used to call scripts/long_job.py status.",
-    )
-    parser.add_argument(
-        "--timeout-seconds",
-        type=float,
-        default=0.0,
-        help="Optional wait timeout. Zero means no timeout.",
-    )
-    parser.add_argument("command", nargs=argparse.REMAINDER)
-    args = parser.parse_args()
-    args.command = _strip_separator(args.command)
-    if not args.command:
-        parser.error("provide a command after --")
-    if args.poll_seconds <= 0:
-        parser.error("--poll-seconds must be positive")
-    return args
+def _job_is_running(job_root: Path) -> bool:
+    manifest_path = job_root / "manifest.json"
+    if not manifest_path.exists():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except Exception:
+        return False
+    pid_file = Path(str(manifest.get("pid_file") or job_root / "job.pid"))
+    if pid_file.exists():
+        try:
+            return _pid_is_alive(int(pid_file.read_text().strip()))
+        except Exception:
+            return False
+    try:
+        return _pid_is_alive(int(manifest.get("pid") or 0))
+    except Exception:
+        return False
 
 
 def main() -> int:
-    args = parse_args()
-    started = time.monotonic()
-    print(
-        f"{_utc_now()} waiting for {args.job_root}; "
-        f"then running: {shlex.join(args.command)}",
-        flush=True,
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--wait-job-root",
+        action="append",
+        default=[],
+        help="A long_job.py job root to wait for. May be passed multiple times.",
     )
+    parser.add_argument("--poll-seconds", type=float, default=300.0)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
 
+    command = list(args.command)
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        parser.error("missing command after --")
+
+    wait_roots = [Path(raw) for raw in args.wait_job_root]
     while True:
-        status = _status(args.job_root, args.status_python)
-        systemd_state = status.get("systemd_state") or {}
-        state = systemd_state.get("active_state") or "unknown"
-        sub_state = systemd_state.get("sub_state") or "unknown"
-        print(
-            f"{_utc_now()} upstream running={bool(status.get('running'))} "
-            f"state={state}/{sub_state} pid={status.get('pid')}",
-            flush=True,
-        )
-        if not status.get("running"):
+        running = [root for root in wait_roots if _job_is_running(root)]
+        if not running:
             break
-        if args.timeout_seconds and time.monotonic() - started > args.timeout_seconds:
-            print(f"{_utc_now()} timed out waiting for {args.job_root}", file=sys.stderr)
-            return 124
-        time.sleep(args.poll_seconds)
+        joined = ", ".join(str(root) for root in running)
+        _log(f"waiting for {len(running)} job(s): {joined}")
+        time.sleep(max(1.0, float(args.poll_seconds)))
 
-    print(f"{_utc_now()} upstream finished; launching follow-on command", flush=True)
-    return subprocess.call(args.command, cwd=str(REPO_ROOT))
+    _log("starting queued command: " + " ".join(command))
+    return int(subprocess.run(command).returncode)
 
 
 if __name__ == "__main__":

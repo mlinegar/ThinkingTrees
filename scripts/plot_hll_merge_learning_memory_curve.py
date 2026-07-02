@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Plot the theory-linked memory curve for HLL merge-learning sweeps.
 
-Inputs are JSON summaries from scripts/run_hll_merge_learning_sweep.py.
+Inputs are JSON summaries from scripts/OLD_run_hll_merge_learning_sweep.py (archived).
 """
 
 from __future__ import annotations

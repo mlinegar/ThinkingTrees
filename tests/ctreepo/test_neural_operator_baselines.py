@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import replace
+import inspect
 import json
 from typing import Mapping, Sequence
 
@@ -49,9 +50,11 @@ from src.ctreepo.sim.core.markov_neural_operator_baselines import (
     _fit_fno_baseline_with_predictions,
     _fit_mlp_bigram_baseline,
     _fno_summary_replay_tensors,
+    _fno_single_lambda_objective_loss,
     _prepare_fno_count_docs,
     _theorem_count_threshold_pos_weights_from_docs,
     train_fno_tree,
+    train_fno_tree_local_law,
 )
 from src.ctreepo.sim.core.theorem_feature_route import (
     build_theorem_feature_pair_sets,
@@ -60,6 +63,10 @@ from src.ctreepo.sim.core.theorem_feature_route import (
     resolve_theorem_feature_adapter,
     theorem_feature_pair_metrics_from_scores,
     write_theorem_feature_stage1_artifact,
+)
+from treepo.training.local_law import (
+    local_law_objective_from_losses,
+    local_law_objective_target_mse,
 )
 
 
@@ -144,6 +151,148 @@ def _make_tiny_fno_doc(tokens: Sequence[int], *, root_count: float) -> nob._FNOC
         merge_token_lengths=tuple(),
         root_count=float(root_count),
     )
+
+
+def test_local_law_objective_corrected_mode_matches_dr_formula():
+    out = {
+        "all_node_preds": torch.tensor([0.0, 1.0]),
+        "all_node_proxy_targets": torch.tensor([0.0, 0.0]),
+        "all_node_oracle_targets": torch.tensor([2.0, 1.0]),
+        "all_node_observed": torch.tensor([1.0, 0.0]),
+        "all_node_propensities": torch.tensor([0.5, 1.0]),
+        "all_node_depths": torch.tensor([0.0, 1.0]),
+    }
+    loss = local_law_objective_target_mse(
+        predictions=out["all_node_preds"],
+        proxy_targets=out["all_node_proxy_targets"],
+        oracle_targets=out["all_node_oracle_targets"],
+        observed=out["all_node_observed"],
+        propensity=out["all_node_propensities"],
+        depths=out["all_node_depths"],
+        gamma_depth=0.5,
+        objective_mode="corrected_local_law",
+    )
+    assert float(loss.detach().cpu()) == pytest.approx((8.0 + 0.5) / 1.5)
+
+
+def test_local_law_objective_exact_proxy_endpoint():
+    out = {
+        "all_node_preds": torch.tensor([0.0, 1.0, 2.0]),
+        "all_node_proxy_targets": torch.tensor([1.0, 1.0, 3.0]),
+        "all_node_oracle_targets": torch.tensor([1.0, 1.0, 3.0]),
+        "all_node_observed": torch.tensor([0.0, 1.0, 1.0]),
+        "all_node_propensities": torch.tensor([0.0, 0.25, 1.0]),
+        "all_node_depths": torch.tensor([0.0, 0.0, 0.0]),
+    }
+    loss = local_law_objective_target_mse(
+        predictions=out["all_node_preds"],
+        proxy_targets=out["all_node_proxy_targets"],
+        oracle_targets=out["all_node_oracle_targets"],
+        observed=out["all_node_observed"],
+        propensity=out["all_node_propensities"],
+        depths=out["all_node_depths"],
+        objective_mode="corrected_local_law",
+    )
+    assert float(loss.detach().cpu()) == pytest.approx((1.0 + 0.0 + 1.0) / 3.0)
+
+
+def test_local_law_objective_sampled_ipw_mode_uses_observed_subset():
+    out = {
+        "all_node_preds": torch.tensor([0.0, 100.0]),
+        "all_node_proxy_targets": torch.tensor([0.0, 100.0]),
+        "all_node_oracle_targets": torch.tensor([2.0, 100.0]),
+        "all_node_observed": torch.tensor([1.0, 0.0]),
+        "all_node_propensities": torch.tensor([0.1, 1.0]),
+        "all_node_depths": torch.tensor([0.0, 0.0]),
+    }
+    loss = local_law_objective_target_mse(
+        predictions=out["all_node_preds"],
+        proxy_targets=out["all_node_proxy_targets"],
+        oracle_targets=out["all_node_oracle_targets"],
+        observed=out["all_node_observed"],
+        propensity=out["all_node_propensities"],
+        depths=out["all_node_depths"],
+        objective_mode="sampled_ipw",
+    )
+    assert float(loss.detach().cpu()) == pytest.approx(4.0)
+
+
+def test_local_law_objective_from_losses_matches_target_adapter():
+    predictions = torch.tensor([0.0, 1.0])
+    proxy_targets = torch.tensor([0.0, 0.0])
+    oracle_targets = torch.tensor([2.0, 1.0])
+    observed = torch.tensor([1.0, 0.0])
+    propensity = torch.tensor([0.5, 1.0])
+    depths = torch.tensor([0.0, 1.0])
+
+    direct = local_law_objective_from_losses(
+        proxy_loss=(predictions - proxy_targets) ** 2,
+        oracle_loss=(predictions - oracle_targets) ** 2,
+        observed=observed,
+        propensity=propensity,
+        depths=depths,
+        gamma_depth=0.5,
+        objective_mode="corrected_local_law",
+    )
+    adapter = local_law_objective_target_mse(
+        predictions=predictions,
+        proxy_targets=proxy_targets,
+        oracle_targets=oracle_targets,
+        observed=observed,
+        propensity=propensity,
+        depths=depths,
+        gamma_depth=0.5,
+        objective_mode="corrected_local_law",
+    )
+
+    assert float(direct.detach().cpu()) == pytest.approx(float(adapter.detach().cpu()))
+
+
+def test_fno_single_lambda_objective_uses_convex_root_local_shares():
+    root_loss = torch.tensor(10.0)
+    local_law_loss = torch.tensor(2.0)
+
+    combined = _fno_single_lambda_objective_loss(
+        root_loss=root_loss,
+        local_law_loss=local_law_loss,
+        root_objective_share=0.4,
+        local_law_objective_share=0.6,
+    )
+    root_only = _fno_single_lambda_objective_loss(
+        root_loss=root_loss,
+        local_law_loss=local_law_loss,
+        root_objective_share=1.0,
+        local_law_objective_share=0.0,
+    )
+    local_only = _fno_single_lambda_objective_loss(
+        root_loss=root_loss,
+        local_law_loss=local_law_loss,
+        root_objective_share=0.0,
+        local_law_objective_share=1.0,
+    )
+
+    assert float(combined.detach().cpu()) == pytest.approx(0.4 * 10.0 + 0.6 * 2.0)
+    assert float(root_only.detach().cpu()) == pytest.approx(10.0)
+    assert float(local_only.detach().cpu()) == pytest.approx(2.0)
+
+
+def test_fno_single_lambda_objective_rejects_nonconvex_shares():
+    with pytest.raises(ValueError, match="convex root/local-law objective"):
+        _fno_single_lambda_objective_loss(
+            root_loss=torch.tensor(1.0),
+            local_law_loss=torch.tensor(1.0),
+            root_objective_share=1.0,
+            local_law_objective_share=1.0,
+        )
+
+
+def test_fno_tree_local_law_training_requires_resolved_objective_shares():
+    signature = inspect.signature(train_fno_tree_local_law)
+
+    assert "root_loss_weight" not in signature.parameters
+    assert "local_law_weight" not in signature.parameters
+    assert signature.parameters["root_objective_share"].default is inspect.Parameter.empty
+    assert signature.parameters["local_law_objective_share"].default is inspect.Parameter.empty
 
 
 def test_theorem_feature_pair_builder_respects_thresholds():
@@ -5053,7 +5202,7 @@ class TestFNOModelFamily:
         assert learned["merge_mae"] >= 0.0
         assert learned["n_docs"] == 4
 
-    def test_fno_model_family_with_c2_law(self):
+    def test_fno_model_family_rejects_law_specific_local_law_bundle(self):
         config = OPSCountConfig(
             model_family="fno",
             n_regimes=2,
@@ -5074,17 +5223,13 @@ class TestFNOModelFamily:
             fno_width=8,
             fno_n_modes=4,
             fno_n_layers=1,
+            law_package="c2_only",
             local_law_weight=0.5,
-            c1_relative_weight=0.0,
-            c2_relative_weight=1.0,
-            c3_relative_weight=0.0,
             use_cuda=False,
             seed=42,
         )
-        result = run_markov_changepoint_ops_count_experiment(config)
-        obj = result.objective
-        assert obj["local_law_c2_weight"] > 0.0
-        assert obj["local_law_c1_weight"] == 0.0
+        with pytest.raises(ValueError, match="bundled corrected_local_law loss"):
+            run_markov_changepoint_ops_count_experiment(config)
 
     def test_fno_model_family_v2_unified_runtime_smoke(self):
         config = OPSCountConfig(
@@ -5120,9 +5265,6 @@ class TestFNOModelFamily:
             tree_theorem_score_dim=1,
             tree_theorem_fiber_dim=15,
             local_law_weight=0.5,
-            c1_relative_weight=0.0,
-            c2_relative_weight=1.0,
-            c3_relative_weight=0.0,
         )
         result = run_markov_changepoint_ops_count_experiment(config)
         learned = result.metrics["learned"]
@@ -5131,8 +5273,9 @@ class TestFNOModelFamily:
         assert result.config["tree_batch_runtime_mode"] == "unified_v2"
         assert result.config["tree_theorem_surface_mode"] == "factorized_score_fiber"
         assert result.config["tree_task_head_mode"] == "theorem_feature_scalar"
-        assert result.objective["local_law_c2_weight"] > 0.0
-        assert result.objective["local_law_c1_weight"] == 0.0
+        assert result.objective["local_law_c1_weight"] == pytest.approx(1.0 / 6.0)
+        assert result.objective["local_law_c2_weight"] == pytest.approx(1.0 / 6.0)
+        assert result.objective["local_law_c3_weight"] == pytest.approx(1.0 / 6.0)
         assert learned["root_mae"] >= 0.0
         assert learned["c2_idempotence_mae"] >= 0.0
         assert learned["n_docs"] == 4
@@ -5163,6 +5306,7 @@ class TestFNOModelFamily:
             sampled_internal_indices=set(),
             leaf_propensity=0.0,
             internal_propensity=0.0,
+            collect_full_trace=True,  # this test reads node_records / state_tree
         )
         node_records = list(out["node_records"])
         root_records = [record for record in node_records if bool(record.is_root)]
@@ -5171,6 +5315,229 @@ class TestFNOModelFamily:
         assert root_records[0].propensity == pytest.approx(0.0)
         assert out["n_sampled_nodes"] == 0
         assert out["document_record"].target == pytest.approx(fno_docs[0].root_count / 32.0)
+        assert int(out["all_node_preds"].shape[0]) == len(node_records)
+        assert int(out["all_node_proxy_targets"].shape[0]) == len(node_records)
+        assert int(out["all_node_oracle_targets"].shape[0]) == len(node_records)
+        assert float(out["all_node_observed"].sum().detach().cpu()) == pytest.approx(0.0)
+        assert torch.allclose(
+            out["all_node_proxy_targets"],
+            out["all_node_oracle_targets"],
+        )
+        trace = out["state_tree"]
+        assert trace.root.metadata["doc_id"] == "doc_0"
+        assert trace.node_count == len(node_records)
+        assert trace.root.metadata["state_kind"] == "markov_fno_state"
+        assert trace.root.metadata["observed"] is False
+
+    def test_forward_doc_unified_collect_full_trace_false_skips_telemetry(self):
+        """Default collect_full_trace=False skips per-node telemetry sync.
+
+        The training/eval hot path takes this branch. GPU-tensor outputs
+        (document_pred_norm, all_node_preds, etc.) must still be correct;
+        only the per-node FullTreeNodeRecord / StateTree side-channel is
+        skipped to avoid the GPU->CPU sync per node.
+        """
+        docs = _make_tiny_docs(n=1, seq_len=32, vocab_size=8)
+        fno_docs = _prepare_fno_count_docs(docs, leaf_tokens=8)
+        model = FNOCountSketch(
+            vocab_size=8,
+            leaf_tokens=8,
+            state_dim=8,
+            hidden_dim=16,
+            target_scale=32.0,
+            n_regimes=4,
+            fno_width=8,
+            fno_n_modes=4,
+            fno_n_layers=1,
+        )
+        kwargs = dict(
+            leaf_token_ids=fno_docs[0].leaf_token_ids,
+            leaf_counts=fno_docs[0].leaf_counts,
+            merge_counts_balanced=fno_docs[0].merge_counts_balanced,
+            root_count=fno_docs[0].root_count,
+            doc_id="doc_0",
+            schedule="balanced",
+            device=torch.device("cpu"),
+            sampled_leaf_indices=None,
+            sampled_internal_indices=None,
+            leaf_propensity=1.0,
+            internal_propensity=1.0,
+        )
+        out_full = model.forward_doc_unified(**kwargs, collect_full_trace=True)
+        out_fast = model.forward_doc_unified(**kwargs)  # default = False
+        # Telemetry side-channel skipped under default.
+        assert out_fast["node_records"] == ()
+        assert out_fast["document_record"] is None
+        assert out_fast["state_tree"] is None
+        # GPU-tensor outputs match the telemetry path exactly.
+        assert torch.allclose(out_fast["document_pred_norm"], out_full["document_pred_norm"])
+        assert torch.allclose(out_fast["all_node_preds"], out_full["all_node_preds"])
+        assert torch.allclose(out_fast["all_node_proxy_targets"], out_full["all_node_proxy_targets"])
+        assert torch.allclose(out_fast["all_node_oracle_targets"], out_full["all_node_oracle_targets"])
+        assert torch.allclose(out_fast["root_pred_count"], out_full["root_pred_count"])
+
+
+@pytest.mark.skipif(not HAS_NEURAL_OPERATOR, reason="neuraloperator not installed")
+def test_unified_g_carrier_projection_reencodes_exact_summary_without_wide_padding():
+    model = FNOCountSketch(
+        vocab_size=8,
+        leaf_tokens=8,
+        state_dim=16,
+        hidden_dim=32,
+        target_scale=8.0,
+        n_regimes=4,
+        fno_width=8,
+        fno_n_modes=4,
+        fno_n_layers=1,
+        summary_spec_name="markov_count_sketch",
+        slot_count=4,
+        theorem_surface_mode="carrier_projection",
+        tree_model_version="unified_g",
+    )
+
+    assert model.unified_g_summary_dim > model.summary_dim
+    summary = torch.tensor(
+        [0.25, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        dtype=torch.float32,
+    )
+    decoded = model.decode_summary(model.encode_summary(summary))
+
+    assert torch.allclose(decoded, summary, atol=1e-6)
+
+
+@pytest.mark.skipif(not HAS_NEURAL_OPERATOR, reason="neuraloperator not installed")
+def test_carrier_projection_rejects_noncanonical_direct_slot_dims():
+    with pytest.raises(ValueError, match="direct Markov sketch slots"):
+        FNOCountSketch(
+            vocab_size=8,
+            leaf_tokens=8,
+            state_dim=16,
+            hidden_dim=32,
+            target_scale=8.0,
+            n_regimes=4,
+            fno_width=8,
+            fno_n_modes=4,
+            fno_n_layers=1,
+            summary_spec_name="markov_count_sketch",
+            slot_count=4,
+            theorem_surface_mode="carrier_projection",
+            theorem_count_dim=8,
+            theorem_first_dim=8,
+            theorem_last_dim=8,
+        )
+
+
+@pytest.mark.skipif(not HAS_NEURAL_OPERATOR, reason="neuraloperator not installed")
+def test_carrier_projection_dense_leaf_batch_matches_flat_leaf_path():
+    model = FNOCountSketch(
+        vocab_size=8,
+        leaf_tokens=4,
+        state_dim=16,
+        hidden_dim=32,
+        target_scale=8.0,
+        n_regimes=4,
+        fno_width=8,
+        fno_n_modes=4,
+        fno_n_layers=1,
+        summary_spec_name="markov_count_sketch",
+        slot_count=4,
+        theorem_surface_mode="carrier_projection",
+    )
+    model.eval()
+    tokens = torch.tensor(
+        [
+            [[1, 2, 3, 4], [2, 3, 8, 8]],
+            [[3, 4, 5, 8], [1, 1, 1, 1]],
+        ],
+        dtype=torch.long,
+    )
+    mask = tokens.ne(8).to(dtype=torch.float32)
+
+    dense_states = model.encode_leaf_tokens_batch(
+        tokens,
+        token_mask=mask,
+        device=torch.device("cpu"),
+    ).reshape(int(tokens.shape[0]), int(tokens.shape[1]), -1)
+    flat_states = model.encode_leaf_tokens_batch(
+        tokens.reshape(-1, int(tokens.shape[-1])),
+        token_mask=mask.reshape(-1, int(mask.shape[-1])),
+        device=torch.device("cpu"),
+    ).reshape(int(tokens.shape[0]), int(tokens.shape[1]), -1)
+
+    assert torch.allclose(dense_states, flat_states, atol=1e-6)
+
+
+@pytest.mark.skipif(not HAS_NEURAL_OPERATOR, reason="neuraloperator not installed")
+def test_carrier_projection_merge_canonicalizes_endpoint_logits_before_merging():
+    model = FNOCountSketch(
+        vocab_size=8,
+        leaf_tokens=8,
+        state_dim=16,
+        hidden_dim=32,
+        target_scale=8.0,
+        n_regimes=4,
+        fno_width=8,
+        fno_n_modes=4,
+        fno_n_layers=1,
+        summary_spec_name="markov_count_sketch",
+        slot_count=4,
+        theorem_surface_mode="carrier_projection",
+    )
+    left = model.encode_summary(
+        torch.tensor(
+            [0.25, 0.1, 4.0, 0.2, -1.0, -0.5, 0.2, 3.0, 0.1],
+            dtype=torch.float32,
+        )
+    )
+    right = model.encode_summary(
+        torch.tensor(
+            [0.125, -0.1, 0.3, 2.5, 0.0, 0.4, -0.2, 0.1, 1.5],
+            dtype=torch.float32,
+        )
+    )
+    merged = model._merge_summary_spec_states(left, right)
+    decoded = model.decode_summary(merged)
+
+    assert torch.argmax(decoded[1:5]).item() == 1
+    assert torch.argmax(decoded[5:9]).item() == 3
+    assert torch.allclose(decoded[1:5], torch.tensor([0.0, 1.0, 0.0, 0.0]))
+    assert torch.allclose(decoded[5:9], torch.tensor([0.0, 0.0, 0.0, 1.0]))
+
+
+@pytest.mark.skipif(not HAS_NEURAL_OPERATOR, reason="neuraloperator not installed")
+def test_carrier_projection_runtime_count_discretization_rounds_merge_slot():
+    model = FNOCountSketch(
+        vocab_size=8,
+        leaf_tokens=4,
+        state_dim=16,
+        hidden_dim=8,
+        target_scale=10.0,
+        n_regimes=2,
+        fno_width=4,
+        fno_n_modes=2,
+        fno_n_layers=1,
+        summary_spec_name="markov_count_sketch",
+        slot_count=4,
+        theorem_surface_mode="carrier_projection",
+        runtime_count_discretization="st_round",
+    )
+    assert model.count_slot_merger is not None
+    with torch.no_grad():
+        for param in model.count_slot_merger.parameters():
+            param.zero_()
+        final_linear = model.count_slot_merger[-1]
+        final_linear.bias.fill_(0.26)
+
+    left = model.encode_summary(
+        torch.tensor([[0.1, 1.0, 0.0, 1.0, 0.0]], dtype=torch.float32)
+    )
+    right = model.encode_summary(
+        torch.tensor([[0.1, 1.0, 0.0, 1.0, 0.0]], dtype=torch.float32)
+    )
+    merged = model._merge_state_pairs(left, right)
+
+    assert float(model._count_slot(merged).item()) == pytest.approx(0.3)
+    assert float(model.predict_count_from_state(merged).item()) == pytest.approx(3.0)
 
 
 @pytest.mark.skipif(not HAS_NEURAL_OPERATOR, reason="neuraloperator not installed")
@@ -5367,20 +5734,121 @@ def test_exact_sketch_selection_exact_merge_fallback_detects_serialized_modes():
         exact_projected_root_mae=1.75,
     ) == pytest.approx(1.75)
 
-    tree_prefixed_model = _DummyModel()
-    tree_prefixed_model.tree_score_merge_mode = "exact_projected_sketch"
-    tree_prefixed_model.tree_theorem_surface_mode = "opaque_carrier_exact_sketch"
+    stale_tree_prefixed_model = _DummyModel()
+    stale_tree_prefixed_model.tree_score_merge_mode = "exact_projected_sketch"
 
     assert nob._exact_sketch_selection_root_mae(
-        tree_prefixed_model,
+        stale_tree_prefixed_model,
+        root_direct_count_mae=0.25,
+        exact_projected_root_mae=1.75,
+    ) == pytest.approx(0.25)
+    assert nob._exact_sketch_selection_split_penalty(
+        stale_tree_prefixed_model,
+        root_mae_oracle_counts_predicted_endpoints=3.0,
+        root_mae_predicted_counts_oracle_endpoints=1.0,
+    ) == pytest.approx(0.0)
+
+    runtime_model = _DummyModel()
+    runtime_model.runtime_merge_kind = "exact_projected_sketch"
+    assert nob._exact_sketch_selection_root_mae(
+        runtime_model,
         root_direct_count_mae=0.25,
         exact_projected_root_mae=1.75,
     ) == pytest.approx(1.75)
-    assert nob._exact_sketch_selection_split_penalty(
-        tree_prefixed_model,
-        root_mae_oracle_counts_predicted_endpoints=3.0,
-        root_mae_predicted_counts_oracle_endpoints=1.0,
-    ) == pytest.approx(2.0)
+
+
+@pytest.mark.skipif(not HAS_NEURAL_OPERATOR, reason="neuraloperator not installed")
+def test_unified_g_exact_projected_label_still_uses_learned_runtime_merge():
+    torch.manual_seed(0)
+    model = FNOCountSketch(
+        vocab_size=8,
+        leaf_tokens=4,
+        state_dim=32,
+        hidden_dim=64,
+        target_scale=8.0,
+        n_regimes=3,
+        fno_width=8,
+        fno_n_modes=4,
+        fno_n_layers=1,
+        summary_spec_name="markov_count_sketch",
+        slot_count=4,
+        task_head_mode="theorem_feature_scalar",
+        summary_spec_root_mode="factored_theorem_readout",
+        theorem_surface_mode="factorized_score_fiber",
+        theorem_feature_dim=24,
+        theorem_feature_hidden_dim=48,
+        theorem_score_dim=1,
+        theorem_fiber_dim=23,
+        theorem_aux_dim=0,
+        score_merge_mode="exact_projected_sketch",
+        tree_model_version="unified_g",
+    )
+
+    left = torch.randn(2, model.state_dim)
+    right = torch.randn(2, model.state_dim)
+    learned = model._merge_state_pairs(left, right)
+    exact = model._exact_projected_merge_state(left, right)
+
+    assert model.uses_unified_g_learned_merge is True
+    assert model.exact_projected_merge_is_runtime_merge is False
+    assert model.runtime_merge_kind == "learned_unified_g"
+    assert nob._selection_uses_exact_projected_merge(model) is False
+    assert learned.shape == exact.shape
+    assert not torch.allclose(learned.detach(), exact.detach())
+
+    serialized = type("SerializedUnifiedG", (), {})()
+    serialized.tree_model_version = "unified_g"
+    serialized.use_exact_projected_sketch_merge = True
+    assert nob._selection_uses_exact_projected_merge(serialized) is False
+
+
+@pytest.mark.skipif(not HAS_NEURAL_OPERATOR, reason="neuraloperator not installed")
+def test_unified_g_c3_local_law_backprops_through_learned_merge_projector():
+    torch.manual_seed(1)
+    model = FNOCountSketch(
+        vocab_size=8,
+        leaf_tokens=4,
+        state_dim=32,
+        hidden_dim=64,
+        target_scale=8.0,
+        n_regimes=3,
+        fno_width=8,
+        fno_n_modes=4,
+        fno_n_layers=1,
+        summary_spec_name="markov_count_sketch",
+        slot_count=4,
+        task_head_mode="theorem_feature_scalar",
+        summary_spec_root_mode="factored_theorem_readout",
+        theorem_surface_mode="factorized_score_fiber",
+        theorem_feature_dim=24,
+        theorem_feature_hidden_dim=48,
+        theorem_score_dim=1,
+        theorem_fiber_dim=23,
+        theorem_aux_dim=0,
+        score_merge_mode="exact_projected_sketch",
+        tree_model_version="unified_g",
+    )
+
+    left = torch.randn(3, model.state_dim, requires_grad=True)
+    right = torch.randn(3, model.state_dim, requires_grad=True)
+    parent = model._merge_state_pairs(left, right)
+    terms = nob._summary_spec_merge_consistency_terms(
+        model,
+        left,
+        right,
+        parent,
+        truth_join_bit=1,
+    )
+
+    assert terms["total_loss"].requires_grad
+    model.zero_grad(set_to_none=True)
+    terms["total_loss"].backward()
+    grad_norm = 0.0
+    assert model.unified_g_merge_summary_proj is not None
+    for param in model.unified_g_merge_summary_proj.parameters():
+        if param.grad is not None:
+            grad_norm += float(param.grad.detach().abs().sum().cpu())
+    assert grad_norm > 0.0
 
 
 def test_exact_markov_root_error_decomposition_separates_count_and_endpoint_failures():

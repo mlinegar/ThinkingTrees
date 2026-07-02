@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -165,7 +166,7 @@ def test_job_output_dir_name_hashes_long_names_deterministically() -> None:
 
     assert first == second
     assert len(first) <= 80
-    assert first.endswith(mod.hashlib.sha1(long_name.encode("utf-8")).hexdigest()[:12])
+    assert first.endswith(hashlib.sha1(long_name.encode("utf-8")).hexdigest()[:12])
 
 
 def test_parse_mig_layout_from_nvidia_smi_listing_groups_slices_by_physical_gpu() -> None:
@@ -613,7 +614,7 @@ def test_fair_fno_parity_tree_config_matches_preset(monkeypatch) -> None:
             "5e-4",
             "--weight-decay",
             "0.0",
-            "--tree-local-law-weight",
+            "--local-law-weight",
             "0.3",
         ]
     )
@@ -693,7 +694,7 @@ def test_launch_exact_sanity_builds_tree_only_jobs(
             "64",
             "--lr",
             "5e-4",
-            "--tree-local-law-weight",
+            "--local-law-weight",
             "0.3",
         ]
     )
@@ -2700,7 +2701,6 @@ def test_run_config_from_mapping_accepts_preset_style_objective_keys() -> None:
             "lr": 5e-4,
             "weight_decay": 0.0,
             "local_law_weight": 0.8,
-            "task_objective_weight": 1.0,
             "c1_relative_weight": 2.0,
             "c2_relative_weight": 1.0,
             "c3_relative_weight": 0.5,
@@ -2708,10 +2708,29 @@ def test_run_config_from_mapping_accepts_preset_style_objective_keys() -> None:
     )
 
     assert config.tree_local_law_weight == pytest.approx(0.8)
-    assert config.tree_task_objective_weight == pytest.approx(1.0)
+    assert config.tree_task_objective_weight is None
     assert config.tree_c1_relative_weight == pytest.approx(2.0)
     assert config.tree_c2_relative_weight == pytest.approx(1.0)
     assert config.tree_c3_relative_weight == pytest.approx(0.5)
+
+
+def test_run_config_from_mapping_rejects_lambda_and_explicit_root_hybrid() -> None:
+    mod = _load_module()
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        mod._run_config_from_mapping(
+            {
+                "label": "cfg_preset",
+                "state_dim": 128,
+                "hidden_dim": 512,
+                "n_epochs": 10,
+                "batch_size": 64,
+                "lr": 5e-4,
+                "weight_decay": 0.0,
+                "local_law_weight": 0.8,
+                "task_objective_weight": 1.0,
+            }
+        )
 
 
 def test_worker_payload_uses_authoritative_config_spec_when_cli_flags_are_missing(
@@ -2746,7 +2765,6 @@ def test_worker_payload_uses_authoritative_config_spec_when_cli_flags_are_missin
             weight_decay=0.0,
             fixed_leaf_tokens=16,
             tree_local_law_weight=0.8,
-            tree_task_objective_weight=0.75,
             tree_c1_relative_weight=2.0,
             tree_c2_relative_weight=1.0,
             tree_c3_relative_weight=0.5,
@@ -2767,8 +2785,8 @@ def test_worker_payload_uses_authoritative_config_spec_when_cli_flags_are_missin
         torch_threads=1,
         use_cuda=False,
     )
-    assert "--tree-local-law-weight" in cmd
-    assert "--tree-task-objective-weight" in cmd
+    assert "--local-law-weight" in cmd
+    assert "--root-share" not in cmd
     assert "--tree-document-loss-normalization-mode" in cmd
     assert "--tree-supervision-source" in cmd
 
@@ -2779,8 +2797,8 @@ def test_worker_payload_uses_authoritative_config_spec_when_cli_flags_are_missin
             del trimmed[idx : idx + 2]
         return trimmed
 
-    parsed_cmd = _strip_flag(cmd[2:], "--tree-local-law-weight")
-    parsed_cmd = _strip_flag(parsed_cmd, "--tree-task-objective-weight")
+    parsed_cmd = _strip_flag(cmd[2:], "--local-law-weight")
+    parsed_cmd = _strip_flag(parsed_cmd, "--root-share")
     parsed_cmd = _strip_flag(parsed_cmd, "--tree-document-loss-normalization-mode")
     parsed_cmd = _strip_flag(parsed_cmd, "--tree-supervision-source")
     args = mod._parser().parse_args([*parsed_cmd, "--debug-stop-after-snapshot"])
@@ -2799,9 +2817,7 @@ def test_worker_payload_uses_authoritative_config_spec_when_cli_flags_are_missin
     ] == "supervised_docs"
     assert snapshot["requested_run_config"]["tree_supervision_source"] == "manifest"
     assert snapshot["config_overrides"]["local_law_weight"] == pytest.approx(0.8)
-    assert snapshot["config_overrides"]["task_objective_weight"] == pytest.approx(
-        0.75
-    )
+    assert "task_objective_weight" not in snapshot["config_overrides"]
     assert snapshot["config_overrides"]["c1_relative_weight"] == pytest.approx(2.0)
     assert snapshot["config_overrides"]["c3_relative_weight"] == pytest.approx(0.5)
     assert (

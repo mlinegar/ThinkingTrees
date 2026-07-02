@@ -18,7 +18,8 @@ sys.path.insert(0, str(project_root))
 
 import dspy
 
-from src.config.dspy_config import configure_dspy, create_vllm_lm
+from src.config.dspy_config import configure_dspy, create_local_engine_lm
+from src.config.local_inference import resolve_local_inference_config
 from src.tasks.manifesto.lawstress_bootstrap_program import UnifiedG
 from src.tasks.manifesto.lawstress_eval import RILE_RUBRIC
 
@@ -378,19 +379,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         llm_extra_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
 
     student_max_tokens = int(args.student_max_tokens)
-    lm = create_vllm_lm(
-        port=int(args.student_port),
-        model=str(args.student_model),
-        temperature=float(args.student_temperature),
-        max_tokens=(student_max_tokens if student_max_tokens > 0 else None),
-        cache=True,
-        **llm_extra_kwargs,
+    student_inference = resolve_local_inference_config(
+        {
+            "port": int(args.student_port),
+            "model": str(args.student_model),
+            "temperature": float(args.student_temperature),
+            "max_tokens": student_max_tokens if student_max_tokens > 0 else None,
+        }
     )
+    lm = create_local_engine_lm(**student_inference.dspy_kwargs(cache=True), **llm_extra_kwargs)
     configure_dspy(lm=lm)
 
     reflection_max_tokens = int(args.gepa_reflection_max_tokens)
-    reflection_lm = create_vllm_lm(
-        port=int(args.student_port),
+    reflection_lm = create_local_engine_lm(
+        engine=student_inference.engine,
+        endpoints=student_inference.endpoints,
         model=str(args.gepa_reflection_model) if args.gepa_reflection_model else str(args.student_model),
         temperature=float(args.gepa_reflection_temperature),
         max_tokens=(reflection_max_tokens if reflection_max_tokens > 0 else None),

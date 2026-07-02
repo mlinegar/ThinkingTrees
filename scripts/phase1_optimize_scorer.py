@@ -42,7 +42,8 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from src.config.dspy_config import configure_dspy, create_vllm_lm
+from src.config.dspy_config import configure_dspy, create_local_engine_lm
+from src.config.local_inference import resolve_local_inference_config
 from src.tasks.manifesto.corpus_metrics import compute_corpus_pearson_r
 from src.tasks.manifesto.dimensions import BENOIT_DIMENSIONS, PolicyDimension
 from src.tasks.manifesto.dimension_scorer import DimensionScorer
@@ -127,7 +128,7 @@ def _load_test_pairs(dim: PolicyDimension) -> pd.DataFrame:
     summaries = load_benoit_masked_summaries(dimension=dim)
     experts = load_benoit_expert_means(dim)
     experts_lookup = {
-        str(r.manifesto).removesuffix(".txt"): float(r.expert_mean)
+        str(r.manifesto).removesuffix(".txt"): float(r.expert_mean_1_7)
         for r in experts.itertuples()
     }
     summaries["label"] = summaries["manifesto_stem"].map(experts_lookup)
@@ -147,7 +148,7 @@ def _load_train_pairs(dim: PolicyDimension, pool: str, test_keys: set[str]) -> p
     elif pool == "expert":
         experts = load_benoit_expert_means(dim)
         lookup = {
-            str(r.manifesto).removesuffix(".txt"): float(r.expert_mean)
+            str(r.manifesto).removesuffix(".txt"): float(r.expert_mean_1_7)
             for r in experts.itertuples()
         }
     else:
@@ -424,11 +425,12 @@ def main() -> int:
     testset = _make_examples(test_df)
 
     logger.info("Configuring LM on port %d (T=%g)", args.port, args.temperature)
-    lm = create_vllm_lm(port=args.port, model=args.model, temperature=args.temperature,
-                       max_tokens=args.max_tokens, cache=True)
+    local_inference = resolve_local_inference_config(args)
+    lm = create_local_engine_lm(**local_inference.dspy_kwargs(cache=True))
     configure_dspy(lm=lm)
-    reflection_lm = create_vllm_lm(
-        port=args.port,
+    reflection_lm = create_local_engine_lm(
+        engine=local_inference.engine,
+        endpoints=local_inference.endpoints,
         model=args.model,
         temperature=0.7,
         max_tokens=args.reflection_max_tokens,

@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.ctreepo.sim.suite.registry import CanonicalSuiteTarget, iter_canonical_suite_targets
+from src.ctreepo.contracts import validate_run_manifest
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=sys.executable,
         help="Python interpreter to use for suite report generation.",
     )
+    parser.add_argument(
+        "--allow-unaudited",
+        action="store_true",
+        help="Compatibility mode: allow roots without publication-ready RunManifest v1.",
+    )
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -88,6 +94,47 @@ def _line_count(path: Path) -> int:
 
 def _load_suite_meta(root: Path) -> Dict[str, object]:
     return _load_json(root / "suite_meta.json") or {}
+
+
+def _run_manifest_payloads(root: Path) -> List[Dict[str, object]]:
+    payloads: List[Dict[str, object]] = []
+    if not root.exists():
+        return payloads
+    candidates = list(root.rglob("run_manifest.json")) + list(root.rglob("ctreepo_run_manifest.json"))
+    for path in sorted(set(candidates)):
+        payload = _load_json(path)
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    for path in sorted(root.rglob("*manifest*.json")):
+        if path.name in {"run_manifest.json", "ctreepo_run_manifest.json"}:
+            continue
+        payload = _load_json(path)
+        if isinstance(payload, dict) and isinstance(payload.get("run_manifest"), dict):
+            payloads.append(payload["run_manifest"])
+    return payloads
+
+
+def _contract_audit(root: Path, *, allow_unaudited: bool) -> Dict[str, object]:
+    payloads = _run_manifest_payloads(root)
+    if not payloads:
+        return {
+            "ok": bool(allow_unaudited),
+            "mode": "allow_unaudited" if allow_unaudited else "required",
+            "checked": 0,
+            "errors": [] if allow_unaudited else ["no RunManifest v1 metadata found"],
+        }
+    errors: List[str] = []
+    for payload in payloads:
+        try:
+            validate_run_manifest(payload, require_publication_ready=True)
+        except Exception as exc:
+            errors.append(str(exc))
+    return {
+        "ok": not errors,
+        "mode": "required",
+        "checked": len(payloads),
+        "errors": errors,
+    }
 
 
 def _materialize(template: str, *, root: Path, formal_root: Path, bundle_dir: Path) -> str:
@@ -240,6 +287,7 @@ def _run_target(
     formal_root: Path,
     bundle_dir: Path,
     python_bin: str,
+    allow_unaudited: bool,
 ) -> Dict[str, object]:
     root = (formal_root / target.root_rel).resolve()
     json_count = _json_count(root)
@@ -258,6 +306,22 @@ def _run_target(
             "status": "pending",
             "bundle_role": target.bundle_role,
             "cli_suite_name": target.cli_suite_name,
+            "outputs": placeholder,
+        }
+
+    contract_audit = _contract_audit(root, allow_unaudited=allow_unaudited)
+    if not bool(contract_audit.get("ok")):
+        placeholder = _placeholder_outputs(target, root=root, bundle_dir=bundle_dir)
+        return {
+            "name": target.key,
+            "title": target.title,
+            "description": target.description,
+            "root": str(root),
+            "json_count": int(json_count),
+            "status": "blocked_contract",
+            "bundle_role": target.bundle_role,
+            "cli_suite_name": target.cli_suite_name,
+            "contract_audit": contract_audit,
             "outputs": placeholder,
         }
 
@@ -299,6 +363,7 @@ def _run_target(
         "stdout_log": str(stdout_path),
         "stderr_log": str(stderr_path),
         "returncode": int(proc.returncode),
+        "contract_audit": contract_audit,
         "outputs": outputs,
     }
 
@@ -402,7 +467,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     excluded_roots = _excluded_roots()
     results = [
-        _run_target(target, formal_root=formal_root, bundle_dir=bundle_dir, python_bin=str(args.python_bin))
+        _run_target(
+            target,
+            formal_root=formal_root,
+            bundle_dir=bundle_dir,
+            python_bin=str(args.python_bin),
+            allow_unaudited=bool(args.allow_unaudited),
+        )
         for target in iter_canonical_suite_targets(bundle_roles=("paper", "appendix", "diagnostic"))
     ]
     index_path = _write_bundle_index(

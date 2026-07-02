@@ -2227,7 +2227,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "segment": {
                     "train_docs": FIXED_SEG_TRAIN_DOCS,
                     "lambda_multiplier": FIXED_SEG_LAMBDA,
-                    "local_law_lambda": FIXED_SEG_LAMBDA,
+                    "local_law_weight": FIXED_SEG_LAMBDA,
                 },
                 "ctree": {"train_docs": FIXED_CTREE_TRAIN_DOCS, "min_calibration_samples": FIXED_CTREE_MIN_CAL_SAMPLES},
                 "markov": {

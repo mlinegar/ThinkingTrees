@@ -23,7 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.ctreepo.sim.report.pdf_utils import write_image_page, write_text_page
 from src.ctreepo.sim.util import safe_float
-from scripts.run_markov_supervision_recovery_parity_grid import (
+from src.ctreepo.sim.core.markov_parity_grid_io import (
     ASSUMED_DOC_TOKENS,
     CANONICAL_TRAIN_LADDER,
     CLAIM_LEVEL_EMPIRICAL_GEOMETRY,

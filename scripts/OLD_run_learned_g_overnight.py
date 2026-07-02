@@ -1,3 +1,4 @@
+# OLD_: archived 2026-07-02; depends on treepo._research and the removed treepo.bench.runner RunSpec surface. Kept for reference; do not import or run.
 #!/usr/bin/env python3
 """Adaptive overnight optimizer for learned mergeable-g LDA benchmarks."""
 
@@ -24,8 +25,8 @@ if str(TREEPO_SRC) not in sys.path:
     sys.path.insert(0, str(TREEPO_SRC))
 
 from src.ctreepo.sim.util import safe_float
-from treepo.bench.lda.learned_segment_lda_ops_g import LearnedSegmentLDAOpsGConfig
-from treepo.bench.lda.learned_segmented_lda_theta_g import LearnedSegmentedLDATopicThetaGConfig
+from treepo._research.bench.lda.learned_segment_lda_ops_g import LearnedSegmentLDAOpsGConfig
+from treepo._research.bench.lda.learned_segmented_lda_theta_g import LearnedSegmentedLDATopicThetaGConfig
 from treepo.bench.runner import (
     EXPERIMENT_LEARNED_OPS_G,
     EXPERIMENT_LEARNED_SEGMENTED_THETA_G,

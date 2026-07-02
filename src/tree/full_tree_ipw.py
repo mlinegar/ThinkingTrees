@@ -19,6 +19,10 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 import numpy as np
 
+from treepo.training.local_law import (
+    LocalLawTrainingRow as LocalLawObservation,
+    aggregate_local_law_training_rows as aggregate_local_law_observations,
+)
 from src.core.logged_supervision import SamplingMetadata
 from src.tree.ipw import (
     NodeType,
@@ -67,6 +71,8 @@ class FullTreeNodeRecord:
     sampled: bool
     propensity: float
     objective_prediction: Optional[float] = None
+    proxy_loss: Optional[float] = None
+    oracle_loss: Optional[float] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -85,6 +91,10 @@ class FullTreeNodeRecord:
                 "objective_prediction must be finite when provided, "
                 f"got {self.objective_prediction!r}"
             )
+        if self.proxy_loss is not None and not math.isfinite(float(self.proxy_loss)):
+            raise ValueError(f"proxy_loss must be finite when provided, got {self.proxy_loss!r}")
+        if self.oracle_loss is not None and not math.isfinite(float(self.oracle_loss)):
+            raise ValueError(f"oracle_loss must be finite when provided, got {self.oracle_loss!r}")
         prop = float(self.propensity)
         if not math.isfinite(prop) or prop < 0.0 or prop > 1.0:
             raise ValueError(f"propensity must be finite and in [0, 1], got {self.propensity!r}")
@@ -214,6 +224,7 @@ class FullTreeIPWSummaryAccumulator:
     node_stats: _StreamingBreakdownAccumulator = field(
         default_factory=_StreamingBreakdownAccumulator
     )
+    corrected_local_law_observations: list[LocalLawObservation] = field(default_factory=list)
     type_groups: Dict[str, _StreamingBreakdownAccumulator] = field(default_factory=dict)
     depth_groups: Dict[str, _StreamingBreakdownAccumulator] = field(default_factory=dict)
     document_loss_total: float = 0.0
@@ -241,6 +252,9 @@ class FullTreeIPWSummaryAccumulator:
     def update_node_record(self, record: FullTreeNodeRecord) -> None:
         loss_value = _loss_value(record, self.node_loss_fn)
         self.node_stats.update(record, loss_value=float(loss_value))
+        self.corrected_local_law_observations.append(
+            _local_law_observation_from_node_record(record, loss_fn=self.node_loss_fn)
+        )
         bucket = "root" if bool(record.is_root) else str(record.node_type.value)
         self.type_groups.setdefault(bucket, _StreamingBreakdownAccumulator()).update(
             record,
@@ -333,6 +347,10 @@ class FullTreeIPWSummaryAccumulator:
                 else 0.0
             ),
             "weight_sum": float(self.node_stats.weight_sum),
+            "corrected_local_law": aggregate_local_law_observations(
+                self.corrected_local_law_observations,
+                local_law_weight=1.0,
+            ).to_dict(),
             "type_breakdown": {
                 str(name): acc.summary()
                 for name, acc in sorted(self.type_groups.items())
@@ -393,8 +411,249 @@ def _loss_value(record: FullTreeNodeRecord, loss_fn: LossFn) -> float:
     return float(loss_fn(record.loss_prediction, record.target))
 
 
+def _local_law_observation_from_node_record(
+    record: FullTreeNodeRecord,
+    *,
+    loss_fn: LossFn = squared_error,
+) -> LocalLawObservation:
+    exact_loss = _loss_value(record, loss_fn)
+    proxy_loss = float(record.proxy_loss) if record.proxy_loss is not None else float(exact_loss)
+    if bool(record.sampled) and record.oracle_loss is None:
+        raise ValueError(
+            f"sampled full-tree node record {record.doc_id}/{record.node_id} "
+            "requires explicit oracle_loss"
+        )
+    observed = bool(record.sampled)
+    oracle_loss = float(record.oracle_loss) if observed and record.oracle_loss is not None else None
+    try:
+        node_weight = float(record.metadata.get("node_weight", 1.0))
+    except (TypeError, ValueError):
+        node_weight = 1.0
+    return LocalLawObservation(
+        proxy_loss=float(proxy_loss),
+        oracle_loss=oracle_loss,
+        observed=bool(observed),
+        propensity=float(record.propensity if observed else 0.0),
+        depth=int(record.depth),
+        node_weight=float(node_weight),
+        metadata={
+            "doc_id": str(record.doc_id),
+            "node_id": str(record.node_id),
+            "node_type": str(record.node_type.value),
+            **dict(record.metadata),
+        },
+    )
+
+
+def corrected_local_law_node_summary(
+    records: Sequence[FullTreeNodeRecord],
+    *,
+    loss_fn: LossFn = squared_error,
+    gamma_depth: float = 1.0,
+    local_law_weight: float = 1.0,
+) -> Dict[str, Any]:
+    """Summarize dense-proxy plus sampled-oracle corrected node losses."""
+
+    aggregate = aggregate_local_law_observations(
+        [
+            _local_law_observation_from_node_record(record, loss_fn=loss_fn)
+            for record in records
+        ],
+        gamma_depth=float(gamma_depth),
+        local_law_weight=float(local_law_weight),
+    )
+    return aggregate.to_dict()
+
+
 def _document_loss_value(record: DocumentLevelPredictionRecord, loss_fn: LossFn) -> float:
     return float(loss_fn(record.prediction, record.target))
+
+
+def _metadata_float(
+    metadata: Mapping[str, Any],
+    keys: Sequence[str],
+    *,
+    default: Optional[float] = None,
+) -> Optional[float]:
+    for key in keys:
+        if key not in metadata:
+            continue
+        value = metadata.get(key)
+        if value is None:
+            continue
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(out):
+            return out
+    return default
+
+
+def full_tree_node_records_from_state_tree(
+    tree: Any,
+    *,
+    default_sampled: bool = False,
+    default_propensity: Optional[float] = None,
+) -> list[FullTreeNodeRecord]:
+    """Project a rich ``StateTree`` full-tree trace into estimator records."""
+
+    doc_id = str(getattr(tree, "metadata", {}).get("doc_id", "") or "")
+    records: list[FullTreeNodeRecord] = []
+    for node in tree.traverse_preorder():
+        metadata = dict(getattr(node, "metadata", {}) or {})
+        node_doc_id = str(metadata.get("doc_id", doc_id) or doc_id)
+        node_type_name = str(metadata.get("node_type", "") or "")
+        is_root = bool(metadata.get("is_root", getattr(node, "is_root", False)))
+        is_leaf = bool(metadata.get("is_leaf", getattr(node, "is_leaf", False)))
+        node_type = NodeType.LEAF if is_leaf else NodeType.MERGE
+        if node_type_name in {NodeType.RESUMMARY.value, NodeType.SUBSTITUTION.value}:
+            node_type = NodeType(node_type_name)
+        prediction = _metadata_float(
+            metadata,
+            ("prediction", "objective_prediction", "readout_prediction", "scorer_output"),
+        )
+        target = _metadata_float(
+            metadata,
+            ("target", "oracle_target", "target_score", "target_raw", "target_1_7"),
+        )
+        if prediction is None or target is None:
+            continue
+        sampled = bool(metadata.get("observed", metadata.get("sampled", default_sampled)))
+        propensity = _metadata_float(metadata, ("propensity", "logged_propensity"))
+        if propensity is None:
+            if bool(sampled):
+                if bool(is_root):
+                    propensity = 1.0
+                else:
+                    raise ValueError(
+                        f"observed non-root trace node {node_doc_id}/{getattr(node, 'id', '')} "
+                        "is missing propensity"
+                    )
+            else:
+                propensity = 0.0 if default_propensity is None else float(default_propensity)
+        depth = int(
+            metadata.get(
+                "depth",
+                max(0, int(getattr(tree, "height", 0)) - int(getattr(node, "level", 0))),
+            )
+        )
+        records.append(
+            FullTreeNodeRecord(
+                doc_id=node_doc_id,
+                node_id=str(getattr(node, "id", "")),
+                depth=depth,
+                node_type=node_type,
+                is_root=bool(is_root),
+                prediction=float(prediction),
+                target=float(target),
+                sampled=bool(sampled),
+                propensity=float(propensity),
+                objective_prediction=_metadata_float(metadata, ("objective_prediction",)),
+                proxy_loss=_metadata_float(metadata, ("proxy_loss",)),
+                oracle_loss=_metadata_float(metadata, ("oracle_loss",)),
+                metadata=metadata,
+            )
+        )
+    return records
+
+
+def document_record_from_state_tree(tree: Any) -> Optional[DocumentLevelPredictionRecord]:
+    """Project the root of a full-tree trace into a document-level record."""
+
+    metadata = dict(getattr(tree.root, "metadata", {}) or {})
+    prediction = _metadata_float(
+        metadata,
+        ("document_prediction", "root_prediction", "prediction", "readout_prediction", "scorer_output"),
+    )
+    target = _metadata_float(
+        metadata,
+        ("document_target", "root_target", "target", "target_score", "target_raw"),
+    )
+    if prediction is None or target is None:
+        return None
+    tree_meta = dict(getattr(tree, "metadata", {}) or {})
+    return DocumentLevelPredictionRecord(
+        doc_id=str(metadata.get("doc_id", tree_meta.get("doc_id", "")) or ""),
+        prediction=float(prediction),
+        target=float(target),
+        metadata={**tree_meta, **metadata},
+    )
+
+
+def local_law_observations_from_state_tree(tree: Any) -> list[LocalLawObservation]:
+    """Project a rich full-tree trace directly into local-law loss rows."""
+
+    observations: list[LocalLawObservation] = []
+    for node in tree.traverse_preorder():
+        metadata = dict(getattr(node, "metadata", {}) or {})
+        proxy_loss = _metadata_float(metadata, ("proxy_loss", "loss_proxy"))
+        if proxy_loss is None:
+            prediction = _metadata_float(
+                metadata,
+                ("prediction", "objective_prediction", "readout_prediction", "scorer_output"),
+            )
+            proxy_target = _metadata_float(
+                metadata,
+                ("proxy_target", "target", "target_score", "target_raw", "target_1_7"),
+            )
+            if prediction is not None and proxy_target is not None:
+                proxy_loss = float((float(prediction) - float(proxy_target)) ** 2)
+        if proxy_loss is None:
+            continue
+        oracle_loss = _metadata_float(metadata, ("oracle_loss", "loss_oracle"))
+        if oracle_loss is None:
+            prediction = _metadata_float(
+                metadata,
+                ("prediction", "objective_prediction", "readout_prediction", "scorer_output"),
+            )
+            oracle_target = _metadata_float(
+                metadata,
+                ("oracle_target", "oracle_score", "oracle_target_score"),
+            )
+            if prediction is not None and oracle_target is not None:
+                oracle_loss = float((float(prediction) - float(oracle_target)) ** 2)
+        observed = bool(metadata.get("observed", metadata.get("sampled", False)))
+        if oracle_loss is None:
+            observed = False
+        propensity = _metadata_float(metadata, ("propensity", "logged_propensity"))
+        if propensity is None:
+            is_root = bool(metadata.get("is_root", getattr(node, "is_root", False)))
+            if observed:
+                if is_root:
+                    propensity = 1.0
+                else:
+                    raise ValueError(
+                        f"observed non-root trace node {metadata.get('doc_id', '')}/{getattr(node, 'id', '')} "
+                        "is missing propensity"
+                    )
+            else:
+                propensity = 0.0
+        depth_raw = metadata.get(
+            "depth",
+            max(0, int(getattr(tree, "height", 0)) - int(getattr(node, "level", 0))),
+        )
+        try:
+            depth = int(depth_raw)
+        except (TypeError, ValueError):
+            depth = 0
+        node_weight = _metadata_float(metadata, ("node_weight", "weight"), default=1.0)
+        observations.append(
+            LocalLawObservation(
+                proxy_loss=float(proxy_loss),
+                oracle_loss=None if oracle_loss is None else float(oracle_loss),
+                observed=bool(observed),
+                propensity=float(propensity),
+                depth=max(0, int(depth)),
+                node_weight=float(1.0 if node_weight is None else node_weight),
+                metadata={
+                    "doc_id": str(metadata.get("doc_id", getattr(tree, "metadata", {}).get("doc_id", "")) or ""),
+                    "node_id": str(getattr(node, "id", "")),
+                    **metadata,
+                },
+            )
+        )
+    return observations
 
 
 def project_node_records_to_tree_samples(
@@ -629,6 +888,12 @@ def summarize_full_tree_ipw(
         "effective_sample_size": float(effective_sample_size(samples)) if samples else 0.0,
         "max_weight": float(max_weight(samples)) if samples else 0.0,
         "weight_sum": float(sum(sample.weight for sample in samples)),
+        "corrected_local_law": corrected_local_law_node_summary(
+            node_records,
+            loss_fn=node_loss_fn,
+            gamma_depth=1.0,
+            local_law_weight=1.0,
+        ),
         "type_breakdown": {
             str(name): _breakdown_summary(group, loss_fn=node_loss_fn)
             for name, group in sorted(type_groups.items())
@@ -746,9 +1011,13 @@ __all__ = [
     "FullTreeNodeRecord",
     "absolute_error",
     "classify_layered_sampling_regime",
+    "corrected_local_law_node_summary",
+    "document_record_from_state_tree",
     "exact_full_node_mean_loss",
     "full_document_mean_loss",
+    "full_tree_node_records_from_state_tree",
     "layered_propensity_policy",
+    "local_law_observations_from_state_tree",
     "project_node_records_to_tree_samples",
     "resample_full_tree_records",
     "run_full_tree_estimator_monte_carlo",

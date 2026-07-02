@@ -13,8 +13,8 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Optional, Sequence
 
-import requests
 
+from src.tasks.manifesto.openai_chat import OpenAIChatClient
 from src.tasks.manifesto.teacher_trace_generator import (
     TeacherTraceRecord,
     load_teacher_trace_records_jsonl,
@@ -71,54 +71,6 @@ class CandidateResult:
             "objective": self.objective,
             "details": self.details,
         }
-
-
-class OpenAIChatClient:
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        model: str,
-        api_key: str = "EMPTY",
-        timeout_seconds: float = 420.0,
-        enable_thinking: bool = False,
-    ):
-        self.base_url = str(base_url).rstrip("/")
-        self.model = str(model)
-        self.api_key = str(api_key)
-        self.timeout_seconds = float(timeout_seconds)
-        self.enable_thinking = bool(enable_thinking)
-
-    def chat(self, *, system: str, user: str, temperature: float, max_tokens: int) -> str:
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": float(temperature),
-            "max_tokens": int(max_tokens),
-            "chat_template_kwargs": {
-                "enable_thinking": bool(self.enable_thinking),
-            },
-        }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        resp = requests.post(
-            f"{self.base_url}/chat/completions",
-            json=payload,
-            headers=headers,
-            timeout=self.timeout_seconds,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        choices = data.get("choices") or []
-        if not choices:
-            return ""
-        message = choices[0].get("message") or {}
-        return str(message.get("content") or "").strip()
 
 
 def _parse_score(text: str) -> Optional[float]:

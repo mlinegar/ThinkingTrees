@@ -36,7 +36,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts import run_tree_neural_full_doc_mig as mig  # noqa: E402
+from src.ctreepo.sim.core.tree_neural_config_recipes import slot_exact_sanity_config  # noqa: E402
+from src.ctreepo.sim.core.tree_neural_facade import RunConfigSpec  # noqa: E402
 from scripts import run_tree_neural_teacher_first_push as tfpush  # noqa: E402
 from src.ctreepo.sim.core.full_doc_anchor_diagnostics import (  # noqa: E402
     _base_config_for_benchmark,
@@ -180,7 +181,7 @@ def _parser() -> argparse.ArgumentParser:
         subparser.add_argument("--batch-size", type=int, default=64)
         subparser.add_argument("--lr", type=float, default=5e-4)
         subparser.add_argument("--weight-decay", type=float, default=0.0)
-        subparser.add_argument("--tree-local-law-weight", type=float, default=0.8)
+        subparser.add_argument("--local-law-weight", dest="tree_local_law_weight", type=float, default=0.8)
         subparser.add_argument("--tree-join-bit-weight", type=float, default=1.0)
         subparser.add_argument("--stage1-epochs", type=int, default=2)
         subparser.add_argument("--tree-theorem-count-dim", type=int, default=8)
@@ -234,10 +235,10 @@ def _common_runner_args(args: argparse.Namespace) -> argparse.Namespace:
     )
 
 
-def _build_case_config(args: argparse.Namespace, case: _HarnessCase) -> mig._RunConfigSpec:
+def _build_case_config(args: argparse.Namespace, case: _HarnessCase) -> RunConfigSpec:
     common_args = _common_runner_args(args)
     if case.kind == "control":
-        base = mig._slot_exact_sanity_config(
+        base = slot_exact_sanity_config(
             common_args,
             train_doc_count=int(args.train_docs),
             config_label=str(case.name),
@@ -304,7 +305,7 @@ def _resolve_benchmark_bundle(
 def _merged_training_config(
     *,
     args: argparse.Namespace,
-    case_config: mig._RunConfigSpec,
+    case_config: RunConfigSpec,
 ) -> OPSCountConfig:
     base_config, _bundle, _bundle_source = _resolve_benchmark_bundle(args=args)
     merged = {**asdict(base_config), **asdict(case_config)}
@@ -588,7 +589,7 @@ def _worker_command(args: argparse.Namespace, case: _HarnessCase) -> List[str]:
         str(float(args.lr)),
         "--weight-decay",
         str(float(args.weight_decay)),
-        "--tree-local-law-weight",
+        "--local-law-weight",
         str(float(args.tree_local_law_weight)),
         "--tree-join-bit-weight",
         str(float(args.tree_join_bit_weight)),

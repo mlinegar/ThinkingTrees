@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import yaml
 
 from src.runtime.adapters.base import BenchmarkAdapter
-from src.runtime.contracts import NodeContract, ProblemSpec
+from src.runtime.contracts import AnswerSpec, NodeContract, ProblemSpec, RuntimeTaskView
 
 
 def _string_match_part(preds: List[str], refs: List[List[str]]) -> float:
@@ -241,6 +241,31 @@ class RulerSyntheticAdapter(BenchmarkAdapter):
                 return input_text.split(marker, 1)[-1].strip()
         return ""
 
+    def _extract_context_and_question(self, input_text: str) -> Tuple[str, str]:
+        task_type = str(self._task_type or "")
+        if task_type == "niah":
+            marker = "\nWhat "
+            if marker in input_text:
+                before, after = input_text.split(marker, 1)
+                return before, "What " + after.strip()
+            return input_text, ""
+        if task_type in {"variable_tracking", "common_words_extraction", "freq_words_extraction"}:
+            marker = "\nQuestion:"
+            if marker in input_text:
+                before, after = input_text.split(marker, 1)
+                return before, after.strip()
+            return input_text, ""
+        if task_type == "qa":
+            marker = "\n\nQuestion:"
+            if marker in input_text:
+                before, after = input_text.split(marker, 1)
+                return before, after.strip()
+            marker2 = "\nQuestion:"
+            if marker2 in input_text:
+                before, after = input_text.split(marker2, 1)
+                return before, after.strip()
+        return input_text, ""
+
     def build_contract(self, problem: ProblemSpec) -> NodeContract:
         return NodeContract(
             objective="Answer the benchmark question correctly using bounded-context steps.",
@@ -251,8 +276,35 @@ class RulerSyntheticAdapter(BenchmarkAdapter):
             max_output_tokens=256,
         )
 
+    def task_view(self, problem: ProblemSpec) -> RuntimeTaskView:
+        context, question = self._extract_context_and_question(str(problem.input_text or ""))
+        answer_prefix = str(problem.metadata.get("answer_prefix", "") or "")
+        return RuntimeTaskView(
+            context=context,
+            question=question or str(problem.query or ""),
+            choices={},
+            answer_instruction="Answer the benchmark question using the provided context.",
+            official_prompt=str(problem.input_text or "") + answer_prefix,
+            answer_prefix=answer_prefix,
+            metadata={
+                "benchmark": "ruler_synthetic",
+                "task_type": self._task_type,
+            },
+        )
+
+    def parse_prediction(self, problem: ProblemSpec, text: str) -> str:
+        return str(text or "").strip()
+
+    def build_answer_spec(self, problem: ProblemSpec) -> AnswerSpec:
+        return AnswerSpec(
+            kind="free_text",
+            answer_prefix=str(problem.metadata.get("answer_prefix", "") or ""),
+            instruction="Answer the benchmark question using the provided context.",
+            metadata={"benchmark": "ruler_synthetic", "task_type": self._task_type},
+        )
+
     def score(self, problem: ProblemSpec, runtime_output: dict) -> dict[str, float]:
-        pred = str(runtime_output.get("prediction", "") or "")
+        pred = self.parse_prediction(problem, str(runtime_output.get("prediction", "") or ""))
         refs = [list(problem.references)]
         score = self._metric_fn([pred], refs)
         return {self.primary_metric(): float(score)}

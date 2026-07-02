@@ -20,7 +20,30 @@ from src.ctreepo.sim.expectations import (
     StructuredLocalLawAdapter,
     build_local_law_expectation_report,
 )
+from src.ctreepo.contracts import assert_public_contract_clean
 from src.ctreepo.sim.manifest import read_manifest_jsonl
+
+
+_PUBLIC_KEY_RENAMES = {
+    "baseline_family": "method_id",
+    "dgp": "problem_id",
+    "families_scanned": "problem_ids_scanned",
+    "families_with_failures": "problem_ids_with_failures",
+    "family": "problem_id",
+    "law_package": "law_set_id",
+}
+
+
+def _canonical_public_payload(value):
+    if isinstance(value, dict):
+        out = {}
+        for raw_key, child in value.items():
+            key = _PUBLIC_KEY_RENAMES.get(str(raw_key), str(raw_key))
+            out[key] = _canonical_public_payload(child)
+        return out
+    if isinstance(value, list):
+        return [_canonical_public_payload(item) for item in value]
+    return value
 
 
 def _run_pandoc(md_path: Path, pdf_path: Path) -> bool:
@@ -63,12 +86,12 @@ def _anchor_rows(
 ) -> List[Dict[str, object]]:
     buckets: Dict[tuple[str, str, str], Dict[str, object]] = {}
     for _path, summary, _payload in loaded:
-        key = (str(summary.family), str(summary.dgp), str(summary.suite_role))
+        key = (str(summary.dgp), str(summary.family), str(summary.suite_role))
         bucket = buckets.setdefault(
             key,
             {
-                "family": str(summary.family),
-                "dgp": str(summary.dgp),
+                "problem_id": str(summary.dgp),
+                "method_id": str(summary.family),
                 "suite_role": str(summary.suite_role),
                 "runs": 0,
                 "train_docs": set(),
@@ -87,8 +110,8 @@ def _anchor_rows(
     for bucket in buckets.values():
         rows.append(
             {
-                "family": bucket["family"],
-                "dgp": bucket["dgp"],
+                "problem_id": bucket["problem_id"],
+                "method_id": bucket["method_id"],
                 "suite_role": bucket["suite_role"],
                 "runs": int(bucket["runs"]),
                 "train_docs": sorted(int(x) for x in bucket["train_docs"]),
@@ -101,7 +124,7 @@ def _anchor_rows(
                 ),
             }
         )
-    rows.sort(key=lambda row: (str(row["family"]), str(row["suite_role"]), str(row["dgp"])))
+    rows.sort(key=lambda row: (str(row["problem_id"]), str(row["suite_role"]), str(row["method_id"])))
     return rows
 
 
@@ -138,14 +161,14 @@ def _markdown_report(
             "",
             "## Cross-DGP Anchor Table",
             "",
-            "| Family | DGP | Suite role | Runs | Train docs | Val docs | Test docs | Mean queries |",
+            "| Problem | Method | Suite role | Runs | Train docs | Val docs | Test docs | Mean queries |",
             "| --- | --- | --- | ---: | --- | --- | --- | ---: |",
         ]
     )
     for row in anchor_rows:
         lines.append(
             "| "
-            f"`{row['family']}` | `{row['dgp']}` | `{row['suite_role']}` | {int(row['runs'])} | "
+            f"`{row['problem_id']}` | `{row['method_id']}` | `{row['suite_role']}` | {int(row['runs'])} | "
             f"{_format_int_list(row['train_docs'])} | {_format_int_list(row['val_docs'])} | {_format_int_list(row['test_docs'])} | "
             f"{float(row['mean_queries']):.1f} |"
         )
@@ -234,13 +257,15 @@ def main() -> int:
     md_path = args.output_dir / "local_law_meta_report.md"
     json_path = args.output_dir / "local_law_meta_report_summary.json"
     pdf_path = args.output_dir / "local_law_meta_report.pdf"
+    summary_payload = {
+        "expectations": _canonical_public_payload(report.to_dict()),
+        "anchor_rows": anchor_rows,
+    }
+    assert_public_contract_clean(summary_payload, surface=str(json_path))
     md_path.write_text(md_text, encoding="utf-8")
     json_path.write_text(
         json.dumps(
-            {
-                "expectations": report.to_dict(),
-                "anchor_rows": anchor_rows,
-            },
+            summary_payload,
             indent=2,
             sort_keys=True,
         )

@@ -1067,7 +1067,12 @@ def run_markov_full_tree_ipw_grid(
                         continue
                     cfg = replace(
                         base_config,
-                        use_unified_ipw=True,
+                        local_law_objective_mode="sampled_ipw",
+                        local_law_weight=(
+                            float(base_config.local_law_weight)
+                            if base_config.local_law_weight is not None
+                            else 0.5
+                        ),
                         ipw_internal_sample_rate=float(internal_rate),
                         ipw_leaf_sample_rate=float(leaf_rate),
                         root_only_train_fraction=float(root_only_train_fraction),
@@ -1119,7 +1124,12 @@ def run_markov_full_tree_ipw_grid(
         "base_config": asdict(
             replace(
                 base_config,
-                use_unified_ipw=True,
+                local_law_objective_mode="sampled_ipw",
+                local_law_weight=(
+                    float(base_config.local_law_weight)
+                    if base_config.local_law_weight is not None
+                    else 0.5
+                ),
                 ipw_internal_sample_rate=float(base_config.ipw_internal_sample_rate),
                 ipw_leaf_sample_rate=float(base_config.ipw_leaf_sample_rate),
                 root_only_train_fraction=float(base_config.root_only_train_fraction),
@@ -1240,7 +1250,12 @@ def load_markov_full_tree_ipw_grid_from_output_dir(
         "base_config": asdict(
             replace(
                 base_config,
-                use_unified_ipw=True,
+                local_law_objective_mode="sampled_ipw",
+                local_law_weight=(
+                    float(base_config.local_law_weight)
+                    if base_config.local_law_weight is not None
+                    else 0.5
+                ),
                 ipw_internal_sample_rate=float(base_config.ipw_internal_sample_rate),
                 ipw_leaf_sample_rate=float(base_config.ipw_leaf_sample_rate),
                 root_only_train_fraction=float(base_config.root_only_train_fraction),

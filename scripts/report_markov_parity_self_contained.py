@@ -24,7 +24,7 @@ if str(REPO_ROOT) not in sys.path:
 from src.ctreepo.sim.report.pdf_utils import write_image_page, write_text_page
 from src.ctreepo.sim.core.markov_v3_row_contract import is_headline_contract_status
 from src.ctreepo.sim.util import safe_float
-from scripts.run_markov_supervision_recovery_parity_grid import (
+from src.ctreepo.sim.core.markov_parity_grid_io import (
     FULL_LOCAL_LAWS_TOPOLOGY_STUDY_AXIS,
     PARITY_MANIFEST_NAME,
     PARITY_SUMMARY_NAME,

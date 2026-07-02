@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pytest
 
@@ -240,6 +242,9 @@ def test_topic_permutation_does_not_break_weight_recovery_metrics_when_aligned()
         seed=7,
     )
     summary = run_segment_lda_ops_weight_recovery_experiment(cfg)
+    payload = json.loads(summary.to_json())
+    assert payload["config"]["quadratic_utility_weight"] == pytest.approx(1.0)
+    assert "lambda_multiplier" not in json.dumps(payload)
 
     # Topic estimation error should be ~0 after best alignment.
     assert float(summary.topic_meta.get("topic_phi_l2_error_max", 1.0)) < 1e-8

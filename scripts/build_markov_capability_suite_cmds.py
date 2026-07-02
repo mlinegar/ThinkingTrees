@@ -7,7 +7,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Iterable, List, Sequence
+from typing import Iterable, List, Mapping, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -66,6 +66,7 @@ def _base_runs(
         leaf_query_rates=[1.0],
         include_root_queries=[True],
         local_law_weights=list(local_law_weights),
+        task_objective_weights=[],
         c1_relative_weights=[1.0],
         c3_relative_weights=[4.0],
         root_weights=list(root_weights),
@@ -76,9 +77,22 @@ def _base_runs(
         eval_guidance_seed_offset=100_000,
         eval_guidance_include_root=True,
         include_rf_root_baseline=False,
+        include_doc_level_baseline=False,
+        include_doc_level_ridge_baseline=False,
+        include_leaf_ridge_tree_baseline=False,
+        include_leaf_endpoint_table_tree_baseline=False,
+        include_leaf_dt_tree_baseline=False,
+        include_leaf_knn_tree_baseline=False,
+        include_leaf_rf_tree_baseline=False,
         rf_n_estimators=200,
         rf_max_depth=16,
         rf_min_samples_leaf=5,
+        doc_level_ridge_alpha=1.0,
+        leaf_knn_neighbors=5,
+        include_sampled_leaf_pool_ridge_baseline=False,
+        include_sampled_leaf_pool_rf_baseline=False,
+        sampled_leaf_pool_leaf_counts=[],
+        sampled_leaf_pool_seed_offset=250_000,
         data_seeds=list(data_seeds),
         seeds=list(model_seeds),
         output_root=output_root,
@@ -206,14 +220,22 @@ def _positive_fallback(
     state_dim: int,
     hidden_dim: int,
 ) -> float:
+    def _row_value(row: Mapping[str, object]) -> float:
+        if key not in row:
+            raise ValueError(
+                f"transition summary missing canonical field {key!r}; "
+                "regenerate the report instead of using legacy aliases"
+            )
+        return float(row.get(key, 0.0))
+
     candidates = [
-        float(row.get(key, 0.0))
+        _row_value(row)
         for row in rows
         if int(row.get("n_regimes", -1)) == int(n_regimes)
         and int(row.get("fixed_leaf_tokens", -1)) == int(fixed_leaf_tokens)
         and int(row.get("state_dim", -1)) == int(state_dim)
         and int(row.get("hidden_dim", -1)) == int(hidden_dim)
-        and float(row.get(key, 0.0)) > 0.0
+        and _row_value(row) > 0.0
     ]
     return max(candidates) if candidates else (0.2 if key.endswith("sched") else 0.5)
 
@@ -235,12 +257,21 @@ def _build_mechanism_suite(
     runs: List[object] = []
     selected_cells: List[dict] = []
     for idx, row in enumerate(chosen):
-        boundary_llw = float(row.get("selected_lambda_local", 0.0))
+        if "selected_lambda_local" in row:
+            raise ValueError(
+                "transition summary uses legacy field 'selected_lambda_local'; "
+                "regenerate with selected_local_law_weight"
+            )
+        if "selected_local_law_weight" not in row:
+            raise ValueError(
+                "transition summary missing canonical selected_local_law_weight"
+            )
+        boundary_llw = float(row.get("selected_local_law_weight", 0.0))
         boundary_scw = float(row.get("selected_lambda_sched", 0.0))
         if boundary_llw <= 0.0:
             boundary_llw = _positive_fallback(
                 rows,
-                key="selected_lambda_local",
+                key="selected_local_law_weight",
                 n_regimes=int(row["n_regimes"]),
                 fixed_leaf_tokens=int(row["fixed_leaf_tokens"]),
                 state_dim=int(row["state_dim"]),
@@ -265,7 +296,7 @@ def _build_mechanism_suite(
                 "state_dim": int(row["state_dim"]),
                 "hidden_dim": int(row["hidden_dim"]),
                 "n_epochs": int(row["n_epochs"]),
-                "boundary_lambda_local": float(boundary_llw),
+                "boundary_local_law_weight": float(boundary_llw),
                 "boundary_lambda_sched": float(boundary_scw),
             }
         )

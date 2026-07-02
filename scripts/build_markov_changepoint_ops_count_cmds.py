@@ -442,7 +442,7 @@ def _iter_commands(
                                                                                     is not None
                                                                                 ):
                                                                                     parts.append(
-                                                                                        f"--task-objective-weight {float(task_weight)}"
+                                                                                        f"--root-share {float(task_weight)}"
                                                                                     )
                                                                                 if (
                                                                                     data_seed
@@ -643,10 +643,10 @@ def parse_args() -> argparse.Namespace:
         help="Space/comma list of theorem-facing local-law tradeoff weights λ.",
     )
     p.add_argument(
-        "--task-objective-weights",
+        "--root-shares",
         type=str,
         default="",
-        help="Optional space/comma list of explicit task-objective weights. Empty keeps theorem-facing `(1-lambda)` defaults.",
+        help="Optional space/comma list of explicit root-share values. Empty keeps theorem-facing `(1-lambda)` defaults.",
     )
     p.add_argument(
         "--c1-relative-weights",
@@ -842,8 +842,8 @@ def main() -> int:
         include_root_queries=_parse_bools(args.include_root_query),
         local_law_weights=_parse_floats(args.local_law_weights),
         task_objective_weights=(
-            _parse_floats(args.task_objective_weights)
-            if str(args.task_objective_weights).strip()
+            _parse_floats(args.root_shares)
+            if str(args.root_shares).strip()
             else []
         ),
         c1_relative_weights=_parse_floats(args.c1_relative_weights),

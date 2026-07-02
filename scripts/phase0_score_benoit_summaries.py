@@ -30,7 +30,8 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from src.config.dspy_config import configure_dspy, create_vllm_lm
+from src.config.dspy_config import configure_dspy, create_local_engine_lm
+from src.config.local_inference import resolve_local_inference_config
 from src.tasks.manifesto.corpus_metrics import compute_corpus_pearson_r
 from src.tasks.manifesto.dimensions import BENOIT_DIMENSIONS, PolicyDimension
 from src.tasks.manifesto.dimension_scorer import DimensionScorer
@@ -102,10 +103,8 @@ def main() -> int:
         logger.info("Subsampled to %d (seed=0)", len(scorable))
 
     logger.info("Configuring LM on port %d (T=%g, max_tokens=%d)", args.port, args.temperature, args.max_tokens)
-    lm = create_vllm_lm(
-        port=args.port, model=args.model, temperature=args.temperature,
-        max_tokens=args.max_tokens, cache=True,
-    )
+    local_inference = resolve_local_inference_config(args)
+    lm = create_local_engine_lm(**local_inference.dspy_kwargs(cache=True))
     configure_dspy(lm=lm)
     logger.info("Using LM: %s", getattr(lm, "model", "unknown"))
 

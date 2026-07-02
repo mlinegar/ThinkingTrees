@@ -35,7 +35,17 @@ def test_paper_report_bundle_generator_uses_suite_registry(tmp_path: Path, monke
         root.mkdir(parents=True, exist_ok=True)
         (root / "dummy.json").write_text("{}", encoding="utf-8")
 
-    rc = int(module.main(["--formal-root", str(tmp_path), "--python-bin", sys.executable]))
+    rc = int(
+        module.main(
+            [
+                "--formal-root",
+                str(tmp_path),
+                "--python-bin",
+                sys.executable,
+                "--allow-unaudited",
+            ]
+        )
+    )
     assert rc == 0
 
     manifest = json.loads((tmp_path / "paper_reports" / "paper_report_bundle_manifest.json").read_text(encoding="utf-8"))
@@ -52,3 +62,25 @@ def test_paper_report_bundle_generator_uses_suite_registry(tmp_path: Path, monke
         call[:7] == [sys.executable, "-m", "src.ctreepo.cli", "sim", "suite", "identifiable-zero-publication", "report"]
         for call in calls
     )
+
+
+def test_paper_report_bundle_blocks_unaudited_roots_by_default(tmp_path: Path, monkeypatch) -> None:
+    module = _load_bundle_module()
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd, cwd, capture_output, text):  # noqa: ANN001
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", _fake_run)
+    root = tmp_path / "cpu_megasweep"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "dummy.json").write_text("{}", encoding="utf-8")
+
+    rc = int(module.main(["--formal-root", str(tmp_path), "--python-bin", sys.executable]))
+    assert rc == 0
+    manifest = json.loads((tmp_path / "paper_reports" / "paper_report_bundle_manifest.json").read_text(encoding="utf-8"))
+    cpu = next(row for row in manifest["results"] if row["name"] == "cpu_megasweep")
+    assert cpu["status"] == "blocked_contract"
+    assert cpu["contract_audit"]["ok"] is False
+    assert not calls

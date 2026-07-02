@@ -12,6 +12,7 @@ from src.core.supervision_metadata import judgment_supervision_metadata
 from src.training.preference.types import PreferenceDataset, PreferencePair
 from src.training.supervision import ResponseJudgment, SupervisionDataset
 from src.training.supervision.optimizer_metadata import (
+    build_treepo_optimizer_export_metadata,
     resolve_treepo_objective_weight,
 )
 from src.training.trl_training import (
@@ -158,6 +159,29 @@ def test_discounted_dpo_export_includes_treepo_rl_metadata():
     assert treepo["sample_weight"] == pytest.approx(1.0)
     assert treepo["rl_role"] == "dpo_pair"
     assert row["sample_weight"] == pytest.approx(1.0)
+
+
+def test_optimizer_metadata_preserves_local_law_adjustment_payload():
+    metadata = build_treepo_optimizer_export_metadata(
+        fallback_node_id="node_1",
+        source_example_id="doc_1",
+        source_doc_id="doc_1",
+        source_observation_ids=(),
+        sampling=SamplingMetadata(joint_propensity=0.5),
+        law_type="sufficiency",
+        supervision_channel_name=None,
+        supervision_signal_name=None,
+        local_law_adjustment={
+            "corrected_mean": 0.2,
+            "proxy_oracle_gap_bound": 0.1,
+            "local_law_weight": 0.3,
+        },
+    )
+
+    payload = metadata.to_dict()
+    assert payload["sample_weight"] == pytest.approx(payload["effective_weight"])
+    assert payload["local_law_adjustment"]["corrected_mean"] == pytest.approx(0.2)
+    assert payload["local_law_adjustment"]["proxy_oracle_gap_bound"] == pytest.approx(0.1)
 
 
 def test_extract_sample_weight_uses_zero_effective_weight():

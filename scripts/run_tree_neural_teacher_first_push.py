@@ -31,21 +31,35 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.ctreepo.sim.core.tree_neural_config_recipes import (  # noqa: E402
+    resolved_tree_batch_pack_mode,
+    slot_exact_sanity_config,
+)
 from scripts import run_tree_neural_full_doc_mig as mig  # noqa: E402
+from src.ctreepo.sim.core.tree_neural_execution import (  # noqa: E402
+    run_job_batch,
+    job_completion_keys,
+    load_completed_run_keys,
+    write_summary_outputs,
+)
+from src.ctreepo.sim.core.tree_neural_exact_sanity import (  # noqa: E402
+    EXACT_SANITY_FAMILY,
+    render_exact_sanity_summary_markdown,
+    tree_neural_exact_sanity_summary,
+)
+from src.ctreepo.sim.core.tree_neural_facade import (  # noqa: E402
+    build_jobs_for_configs,
+    JobSpec,
+    RunConfigSpec,
+    discover_mig_uuids,
+    job_output_dir_name,
+    parse_mig_uuids,
+    run_config_from_mapping,
+)
 
 GROUPED_STAGE2_SUMMARY_FILENAME = "grouped_stage2_summary.json"
 GROUPED_STAGE2_COMPLETION_GRACE_S = 5.0
 
-
-def _default_tree_batch_pack_mode(benchmark: str) -> str:
-    return "fixed_fused" if str(benchmark).strip().lower() == "recoverable_v4" else "structure_bucket"
-
-
-def _resolved_tree_batch_pack_mode(args: argparse.Namespace) -> str:
-    raw = str(getattr(args, "tree_batch_pack_mode", "")).strip()
-    if raw:
-        return raw
-    return _default_tree_batch_pack_mode(str(getattr(args, "benchmark", "")))
 
 
 SURROGATE_VARIANTS: tuple[dict[str, Any], ...] = (
@@ -213,7 +227,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--weight-decay", type=float, default=0.0)
-    parser.add_argument("--tree-local-law-weight", type=float, default=0.8)
+    parser.add_argument("--local-law-weight", dest="tree_local_law_weight", type=float, default=0.8)
     parser.add_argument("--tree-join-bit-weight", type=float, default=1.0)
     parser.add_argument("--stage1-epochs", type=int, default=12)
     parser.add_argument("--stage2-epochs", type=int, default=20)
@@ -386,7 +400,10 @@ def _base_args(args: argparse.Namespace) -> argparse.Namespace:
         tree_stage1_final_exact_doc_limit=int(
             getattr(args, "tree_stage1_final_exact_doc_limit", 0)
         ),
-        tree_batch_pack_mode=str(_resolved_tree_batch_pack_mode(args)),
+        tree_batch_pack_mode=resolved_tree_batch_pack_mode(
+            benchmark=str(getattr(args, "benchmark", "")),
+            raw_value=getattr(args, "tree_batch_pack_mode", ""),
+        ),
         tree_batch_token_budget=int(getattr(args, "batch_token_budget", 0)),
         tree_batch_node_budget=int(getattr(args, "batch_node_budget", 0)),
         tree_batch_autotune=bool(getattr(args, "batch_autotune", True)),
@@ -429,8 +446,8 @@ def _make_stage1_config(
     *,
     train_doc_count: int,
     variant: Mapping[str, Any],
-) -> mig._RunConfigSpec:
-    base = mig._slot_exact_sanity_config(
+) -> RunConfigSpec:
+    base = slot_exact_sanity_config(
         _base_args(args),
         train_doc_count=int(train_doc_count),
         config_label=str(variant["label"]),
@@ -475,16 +492,16 @@ def _make_stage1_config(
 def _build_phase_jobs(
     *,
     args: argparse.Namespace,
-    configs_by_train: Sequence[tuple[int, mig._RunConfigSpec]],
+    configs_by_train: Sequence[tuple[int, RunConfigSpec]],
     seeds: Sequence[int],
     tuning_stage: str,
     study_axis: str,
-) -> List[mig._JobSpec]:
-    jobs: List[mig._JobSpec] = []
+) -> List[JobSpec]:
+    jobs: List[JobSpec] = []
     for train_doc_count, config in configs_by_train:
         jobs.extend(
-            mig._build_jobs_for_configs(
-                families=(mig.EXACT_SANITY_FAMILY,),
+            build_jobs_for_configs(
+                families=(EXACT_SANITY_FAMILY,),
                 train_doc_counts=(int(train_doc_count),),
                 benchmark=str(args.benchmark),
                 hardness_grid="",
@@ -506,22 +523,22 @@ def _build_phase_jobs(
 def _run_phase(
     *,
     output_root: Path,
-    jobs: Sequence[mig._JobSpec],
+    jobs: Sequence[JobSpec],
     args: argparse.Namespace,
     manifest_payload: Mapping[str, Any],
 ) -> Dict[str, Any]:
     output_root.mkdir(parents=True, exist_ok=True)
     if bool(args.use_cuda):
         mig_uuids = (
-            mig._parse_mig_uuids(args.mig_uuids)
+            parse_mig_uuids(args.mig_uuids)
             if str(args.mig_uuids).strip()
-            else mig._discover_mig_uuids()
+            else discover_mig_uuids()
         )
         if not mig_uuids:
             raise RuntimeError("No MIG UUIDs discovered")
     else:
         mig_uuids = ["cpu0"]
-    result = mig._run_job_batch(
+    result = run_job_batch(
         output_root=output_root,
         jobs=jobs,
         mig_uuids=mig_uuids,
@@ -531,7 +548,7 @@ def _run_phase(
         manifest_payload=dict(manifest_payload),
     )
     try:
-        payload = mig._write_summary_outputs(output_root)
+        payload = write_summary_outputs(output_root)
     except FileNotFoundError as exc:
         raise RuntimeError(
             f"no completed diagnostic runs were written under {output_root}; "
@@ -630,12 +647,12 @@ def _stage1_run_index(
 
 def _make_stage2_config(
     *,
-    base_config: mig._RunConfigSpec,
+    base_config: RunConfigSpec,
     condition: Mapping[str, Any],
     artifact_dir: str,
     stage2_epochs: int,
     train_doc_count: int,
-) -> mig._RunConfigSpec:
+) -> RunConfigSpec:
     condition_label = str(condition["label"])
     return replace(
         base_config,
@@ -656,11 +673,11 @@ def _build_stage2_jobs(
     *,
     args: argparse.Namespace,
     stage1_runs: Sequence[Mapping[str, Any]],
-    base_configs: Mapping[str, mig._RunConfigSpec],
+    base_configs: Mapping[str, RunConfigSpec],
     stage2_epochs: int | None = None,
-) -> List[mig._JobSpec]:
+) -> List[JobSpec]:
     stage1_by_label_seed = _stage1_run_index(stage1_runs)
-    configs_by_train: List[tuple[int, mig._RunConfigSpec]] = []
+    configs_by_train: List[tuple[int, RunConfigSpec]] = []
     target_train_docs = int(args.phase2_train_docs)
     resolved_stage2_epochs = int(
         args.stage2_epochs if stage2_epochs is None else stage2_epochs
@@ -694,39 +711,43 @@ def _build_stage2_jobs(
     )
 
 
-def _job_from_mapping(mapping: Mapping[str, Any]) -> mig._JobSpec:
+def _job_from_mapping(mapping: Mapping[str, Any]) -> JobSpec:
     config_mapping = dict(mapping.get("config") or {})
-    return mig._JobSpec(
-        family=str(mapping.get("family", "")),
-        train_doc_count=int(mapping.get("train_doc_count", 0)),
-        benchmark=str(mapping.get("benchmark", "")),
-        hardness_grid=str(mapping.get("hardness_grid", "")),
-        grid_cell_ids=tuple(str(cell) for cell in mapping.get("grid_cell_ids", ()) or ()),
-        seeds=tuple(int(seed) for seed in mapping.get("seeds", ()) or ()),
-        config=mig._run_config_from_mapping(config_mapping),
-        tuning_stage=str(mapping.get("tuning_stage", "")),
-        test_metrics_hidden_during_selection=bool(
+    job_kwargs = {
+        "family": str(mapping.get("family", "")),
+        "train_doc_count": int(mapping.get("train_doc_count", 0)),
+        "benchmark": str(mapping.get("benchmark", "")),
+        "hardness_grid": str(mapping.get("hardness_grid", "")),
+        "grid_cell_ids": tuple(str(cell) for cell in mapping.get("grid_cell_ids", ()) or ()),
+        "seeds": tuple(int(seed) for seed in mapping.get("seeds", ()) or ()),
+        "config": run_config_from_mapping(config_mapping),
+        "tuning_stage": str(mapping.get("tuning_stage", "")),
+        "test_metrics_hidden_during_selection": bool(
             mapping.get("test_metrics_hidden_during_selection", False)
         ),
-        study_name=str(mapping.get("study_name", "")),
-        study_axis=str(mapping.get("study_axis", "")),
-        axis_value=str(mapping.get("axis_value", "")),
-        locked_tree_neural_config_label=str(
+        "study_name": str(mapping.get("study_name", "")),
+        "study_axis": str(mapping.get("study_axis", "")),
+        "axis_value": str(mapping.get("axis_value", "")),
+        "locked_tree_neural_config_label": str(
             mapping.get("locked_tree_neural_config_label", "")
         ),
-        selection_metric=str(mapping.get("selection_metric", "")),
-        budget_total_calls=int(mapping.get("budget_total_calls", 0)),
-        budget_total_calls_per_doc=float(mapping.get("budget_total_calls_per_doc", 0.0)),
-        full_doc_budget_share=float(mapping.get("full_doc_budget_share", 1.0)),
-        doc_consumption_mode=str(mapping.get("doc_consumption_mode", "")),
-        local_split_mode=str(mapping.get("local_split_mode", "")),
-        local_allocation_policy=str(mapping.get("local_allocation_policy", "")),
+        "selection_metric": str(mapping.get("selection_metric", "")),
+        "budget_total_calls": int(mapping.get("budget_total_calls", 0)),
+        "budget_total_calls_per_doc": float(mapping.get("budget_total_calls_per_doc", 0.0)),
+        "full_doc_budget_share": float(mapping.get("full_doc_budget_share", 1.0)),
+        "doc_consumption_mode": str(mapping.get("doc_consumption_mode", "")),
+        "local_split_mode": str(mapping.get("local_split_mode", "")),
+        "local_allocation_policy": str(mapping.get("local_allocation_policy", "")),
+    }
+    known_fields = set(JobSpec.__dataclass_fields__)
+    return JobSpec(
+        **{key: value for key, value in job_kwargs.items() if key in known_fields}
     )
 
 
 def _worker_namespace_for_job(
     *,
-    job: mig._JobSpec,
+    job: JobSpec,
     output_dir: Path,
     use_cuda: bool,
     torch_threads: int,
@@ -760,9 +781,9 @@ def _grouped_stage2_job_name(
 
 
 def _build_grouped_stage2_jobs(
-    jobs: Sequence[mig._JobSpec],
+    jobs: Sequence[JobSpec],
 ) -> List[Dict[str, Any]]:
-    grouped: Dict[tuple[str, int, int, str, str], List[mig._JobSpec]] = {}
+    grouped: Dict[tuple[str, int, int, str, str], List[JobSpec]] = {}
     for job in jobs:
         config_label = str(job.config.label).strip()
         candidate_label = config_label.split("__", 1)[0]
@@ -838,7 +859,7 @@ def _run_grouped_stage2_worker(
     worker_start_s = time.perf_counter()
     for job_mapping in manifest.get("jobs", []):
         job = _job_from_mapping(job_mapping)
-        condition_output_dir = output_dir / "conditions" / mig._job_output_dir_name(
+        condition_output_dir = output_dir / "conditions" / job_output_dir_name(
             job.job_name
         )
         condition_output_dir.mkdir(parents=True, exist_ok=True)
@@ -888,7 +909,7 @@ def _run_grouped_stage2_phase(
         json.dumps(dict(manifest_payload), indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    completed_run_keys = mig._load_completed_run_keys(output_root)
+    completed_run_keys = load_completed_run_keys(output_root)
     pending: List[Dict[str, Any]] = []
     skipped_jobs: List[Dict[str, Any]] = []
     for grouped_job in grouped_jobs:
@@ -898,7 +919,7 @@ def _run_grouped_stage2_phase(
         ]
         required_keys = set()
         for job in condition_jobs:
-            required_keys.update(mig._job_completion_keys(job))
+            required_keys.update(job_completion_keys(job))
         if required_keys and required_keys.issubset(completed_run_keys):
             skipped_jobs.append(
                 {
@@ -910,9 +931,9 @@ def _run_grouped_stage2_phase(
         pending.append(dict(grouped_job))
 
     available_tokens = (
-        mig._parse_mig_uuids(str(args.mig_uuids))
+        parse_mig_uuids(str(args.mig_uuids))
         if bool(args.use_cuda) and str(args.mig_uuids).strip()
-        else (mig._discover_mig_uuids() if bool(args.use_cuda) else ["cpu0"])
+        else (discover_mig_uuids() if bool(args.use_cuda) else ["cpu0"])
     )
     if bool(args.use_cuda) and not available_tokens:
         raise RuntimeError("No MIG UUIDs discovered")
@@ -950,7 +971,7 @@ def _run_grouped_stage2_phase(
         while pending and available_tokens and not stop_requested:
             token = available_tokens.pop(0)
             grouped_job = pending.pop(0)
-            job_output_dir = job_root / mig._job_output_dir_name(
+            job_output_dir = job_root / job_output_dir_name(
                 str(grouped_job["job_name"])
             )
             job_output_dir.mkdir(parents=True, exist_ok=True)
@@ -1072,7 +1093,7 @@ def _run_grouped_stage2_phase(
             + ", ".join(str(item["job_name"]) for item in failed)
         )
     try:
-        payload = mig._write_summary_outputs(output_root)
+        payload = write_summary_outputs(output_root)
     except FileNotFoundError as exc:
         raise RuntimeError(
             f"no completed diagnostic runs were written under {output_root}; "
@@ -1089,7 +1110,7 @@ def _run_stage2_phase(
     *,
     output_root: Path,
     args: argparse.Namespace,
-    jobs: Sequence[mig._JobSpec],
+    jobs: Sequence[JobSpec],
     grouped_conditions: bool,
     manifest_payload: Mapping[str, Any],
 ) -> Dict[str, Any]:

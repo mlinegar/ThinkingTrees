@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional, Tuple
 ACQUISITION_OFFLINE_ARTIFACT = "offline_artifact"
 ACQUISITION_NONE = "none"
 ACQUISITION_SYNCHRONOUS_ORACLE = "synchronous_oracle"
-ACQUISITION_ASYNC_FEEDBACK_QUEUE = "async_feedback_queue"
+ACQUISITION_ASYNC_PREFERENCE_QUEUE = "async_preference_queue"
 ACQUISITION_HUMAN_REVIEW = "human_review"
 ACQUISITION_TEACHER_WORKER = "teacher_worker"
 ACQUISITION_SYNCHRONOUS_OPTIMIZER_METRIC = "synchronous_optimizer_metric"
@@ -116,7 +116,7 @@ def supervision_timing_contract(
 
 
 __all__ = [
-    "ACQUISITION_ASYNC_FEEDBACK_QUEUE",
+    "ACQUISITION_ASYNC_PREFERENCE_QUEUE",
     "ACQUISITION_HUMAN_REVIEW",
     "ACQUISITION_NONE",
     "ACQUISITION_OFFLINE_ARTIFACT",

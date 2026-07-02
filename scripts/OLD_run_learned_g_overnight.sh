@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# OLD_: archived 2026-07-02; launches OLD_run_learned_g_overnight.py. Kept for reference; do not run.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -14,6 +14,13 @@ from __future__ import annotations
 import json
 import time
 
+from src.ctreepo.contracts import (
+    LAW_ID_LEAF_PRESERVATION,
+    LAW_ID_MERGE_PRESERVATION,
+    LAW_ID_ON_RANGE_IDEMPOTENCE,
+    LAW_SET_ALL,
+    assert_public_contract_clean,
+)
 from src.ctreepo.sim.core.markov_changepoint_ops_count import (
     OPSCountConfig,
     run_markov_changepoint_ops_count_experiment,
@@ -61,7 +68,8 @@ def _ipw_config(
 ) -> OPSCountConfig:
     return OPSCountConfig(
         **_SHARED,
-        use_unified_ipw=True,
+        local_law_objective_mode="sampled_ipw",
+        local_law_weight=0.5,
         ipw_leaf_sample_rate=leaf_sample_rate,
         ipw_internal_sample_rate=internal_sample_rate,
         include_fno_baseline=include_fno_baseline,
@@ -75,7 +83,7 @@ def _law_config(
 ) -> OPSCountConfig:
     return OPSCountConfig(
         **_SHARED,
-        use_unified_ipw=False,
+        local_law_objective_mode="corrected_local_law",
         law_package=law_package,
         local_law_weight=local_law_weight,
         leaf_query_rate=1.0,
@@ -100,6 +108,25 @@ CONFIGS = {
 }
 
 
+def _canonical_axis(cfg: OPSCountConfig) -> dict[str, object]:
+    local_law_weight = (
+        0.0 if cfg.local_law_weight is None else float(cfg.local_law_weight)
+    )
+    share = local_law_weight / 3.0 if local_law_weight > 0.0 else 0.0
+    return {
+        "problem_id": "markov_ops_count",
+        "method_id": "tree_neural",
+        "law_set_id": LAW_SET_ALL,
+        "root_share": float(1.0 - local_law_weight),
+        "local_law_weight": float(local_law_weight),
+        "local_law_component_weights": {
+            LAW_ID_LEAF_PRESERVATION: float(share),
+            LAW_ID_ON_RANGE_IDEMPOTENCE: float(share),
+            LAW_ID_MERGE_PRESERVATION: float(share),
+        },
+    }
+
+
 def _run_one(name: str, cfg: OPSCountConfig) -> dict:
     print(f"\n{'='*60}")
     print(f"Running: {name}")
@@ -110,6 +137,7 @@ def _run_one(name: str, cfg: OPSCountConfig) -> dict:
 
     learned = out.metrics["learned"]
     r = {
+        **_canonical_axis(cfg),
         "test_root_mae": float(learned["root_mae"]),
         "test_leaf_mae": float(learned["leaf_mae"]),
         "test_merge_mae": float(learned["merge_mae"]),
@@ -151,6 +179,7 @@ def main():
             break
 
     with open("outputs/fno_tree_ipw_labeling_study.json", "w") as f:
+        assert_public_contract_clean(results, surface="quick FNO/tree IPW labeling study")
         json.dump(results, f, indent=2)
     print("\nResults saved to outputs/fno_tree_ipw_labeling_study.json")
 

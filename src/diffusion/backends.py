@@ -11,10 +11,9 @@ from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence
 import requests
 
 from src.core.engines import (
+    EngineRegistry,
     EngineSurface,
     EngineType,
-    resolve_engine_base_url,
-    resolve_engine_for_usage,
 )
 from src.core.url_utils import normalize_generate_base_url
 
@@ -263,6 +262,26 @@ class SGLangDiffusionBackend(HTTPGenerateDiffusionBackend):
             default_payload=default_payload,
         )
 
+    def generate(
+        self,
+        texts: Sequence[str] | str,
+        sampling_params: Optional[Mapping[str, Any]] = None,
+        engine_options: Optional[Mapping[str, Any]] = None,
+        dllm_algorithm: Optional[str] = None,
+        dllm_algorithm_config: Optional[Mapping[str, Any] | str] = None,
+    ) -> DiffusionBatchResponse:
+        resolved_engine_options = dict(engine_options or {})
+        if dllm_algorithm and "dllm_algorithm" not in resolved_engine_options:
+            resolved_engine_options["dllm_algorithm"] = dllm_algorithm
+        parsed_config = self._normalize_algorithm_config(dllm_algorithm_config)
+        if parsed_config is not None and "dllm_algorithm_config" not in resolved_engine_options:
+            resolved_engine_options["dllm_algorithm_config"] = parsed_config
+        return super().generate(
+            texts,
+            sampling_params=sampling_params,
+            engine_options=resolved_engine_options,
+        )
+
 
 class VLLMOmniDiffusionBackend(HTTPGenerateDiffusionBackend):
     """Concrete diffusion adapter for a vLLM-Omni-style `/generate` surface."""
@@ -301,39 +320,58 @@ class InferenceDiffusionBackendAdapter:
         sampling_params: Optional[Mapping[str, Any]] = None,
         engine_options: Optional[Mapping[str, Any]] = None,
     ) -> DiffusionBatchResponse:
-        from src.runtime.contracts import DiffusionInput, InferenceRequest, TextListOutput
+        from src.runtime.contracts import ChatInput, InferenceRequest, TextListOutput, TextOutput
 
         prompts = [texts] if isinstance(texts, str) else [str(text) for text in texts]
-        request = InferenceRequest(
-            surface=EngineSurface.DIFFUSION_GENERATE,
-            input=DiffusionInput(
-                texts=prompts,
-                sampling_params=dict(sampling_params or {}),
-            ),
-            engine_options=dict(engine_options or {}),
-        )
-        response = self.inference_engine.execute(request)
-        if not isinstance(response.output, TextListOutput):
-            raise TypeError(
-                "Unified diffusion inference must return TextListOutput. "
-                f"Received {type(response.output).__name__}."
+        params = dict(sampling_params or {})
+        extra = dict(params)
+        extra.update(dict(engine_options or {}))
+        max_tokens = int(params.get("max_tokens", params.get("max_new_tokens", 256)) or 256)
+        temperature = float(params.get("temperature", 0.0) or 0.0)
+        responses = [
+            self.inference_engine.execute(
+                InferenceRequest(
+                    surface=EngineSurface.CHAT_OPENAI,
+                    input=ChatInput(
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        extra=dict(extra),
+                    ),
+                    engine_options=dict(engine_options or {}),
+                )
             )
-        finish_reasons = list(response.output.finish_reasons or [])
+            for prompt in prompts
+        ]
+        output_texts: List[str] = []
+        finish_reasons: List[Optional[str]] = []
+        for response in responses:
+            if isinstance(response.output, TextOutput):
+                output_texts.append(str(response.output.text))
+                finish_reasons.append(response.output.finish_reason)
+            elif isinstance(response.output, TextListOutput):
+                output_texts.extend(str(text) for text in response.output.texts)
+                finish_reasons.extend(list(response.output.finish_reasons or []))
+            else:
+                raise TypeError(
+                    "Unified generate transport must return text output. "
+                    f"Received {type(response.output).__name__}."
+                )
         generations = [
             DiffusionGeneration(
                 input_text=prompt,
                 output_text=text,
                 finish_reason=finish_reasons[index] if index < len(finish_reasons) else None,
             )
-            for index, (prompt, text) in enumerate(zip(prompts, response.output.texts))
+            for index, (prompt, text) in enumerate(zip(prompts, output_texts))
         ]
         return DiffusionBatchResponse(
             generations=generations,
-            latency_seconds=float(response.latency_ms or 0.0) / 1000.0,
-            request_payload=dict(response.artifacts.get("request_payload", {})),
-            raw_response=response.raw,
-            model=response.model_id or None,
-            telemetry=dict(response.telemetry),
+            latency_seconds=sum(float(response.latency_ms or 0.0) for response in responses) / 1000.0,
+            request_payload={"text": prompts, **dict(extra)},
+            raw_response=[response.raw for response in responses],
+            model=responses[0].model_id if responses else None,
+            telemetry={"surface": EngineSurface.CHAT_OPENAI.value, "transport": "generate"},
         )
 
 
@@ -349,16 +387,11 @@ def build_raw_diffusion_backend(
     default_payload: Optional[Mapping[str, Any]] = None,
 ) -> DiffusionBackend:
     """Construct a direct HTTP diffusion backend from a simple engine name."""
-    spec = resolve_engine_for_usage(
-        engine,
-        surface=surface,
-        usage="diffusion backend construction",
-    )
-    engine_type = spec.engine
-    resolved_base_url = base_url or resolve_engine_base_url(
-        engine_type,
-        surface=surface,
-    )
+    engine_type = EngineType.normalize(engine)
+    spec = EngineRegistry.resolve(engine_type)
+    if engine_type not in {EngineType.SGLANG, EngineType.VLLM_OMNI, EngineType.CUSTOM_HTTP}:
+        raise ValueError(f"Engine '{engine_type.value}' does not expose a /generate transport.")
+    resolved_base_url = base_url or spec.default_base_url(surface=EngineSurface.DIFFUSION_GENERATE)
     resolved_generate_path = generate_path or spec.diffusion_generate_path
     if not resolved_base_url:
         raise ValueError(
@@ -442,18 +475,19 @@ def build_inference_diffusion_backend(
     generate_path: Optional[str] = None,
     default_payload: Optional[Mapping[str, Any]] = None,
 ) -> DiffusionBackend:
-    """Construct a diffusion backend via the universal inference engine."""
+    """Construct a legacy diffusion backend via the canonical text engine."""
     from src.core.inference_engine import build_inference_engine
 
     inference_engine = build_inference_engine(
         engine,
-        surface=surface,
+        surface=EngineSurface.CHAT_OPENAI,
         base_url=base_url,
         model=model or "default",
         timeout=timeout,
         session=session,
         generate_path=generate_path,
         default_payload=default_payload,
+        transport="generate",
     )
     return InferenceDiffusionBackendAdapter(
         inference_engine,

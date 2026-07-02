@@ -95,7 +95,7 @@ Options:
   --skip-oracle-opt           Skip scorer/oracle optimization (optimize summarizers only)
   --skip-summarizer-opt       Skip summarizer optimization (optimize scorer only)
   --init-modules-dir PATH     Initialize Phase A optimization from prior modules
-                              (expects scorer_final.json / leaf_summarizer_final.json / merge_summarizer_final.json)
+                              (expects scorer_final.json / unified_g_final.json)
   --rerun-optimization        When used with --resume, rerun Phase A optimization even if artifacts exist
   --enable-genrm              Deprecated and blocked (large-model-only path)
   --optimize-judge            Deprecated and blocked (large-model-only path)
@@ -365,7 +365,7 @@ if [[ "${RESUME}" == "true" ]]; then
   MODULE_DIR="${OUTPUT_DIR}/trained_modules"
   LATEST_MODULE_DIR="${LATEST_ROOT_DIR}/trained_modules"
   mkdir -p "${MODULE_DIR}"
-  for module_name in leaf_summarizer_final.json merge_summarizer_final.json scorer_final.json; do
+  for module_name in unified_g_final.json scorer_final.json; do
     if [[ ! -f "${MODULE_DIR}/${module_name}" && -f "${LATEST_MODULE_DIR}/${module_name}" ]]; then
       echo "Restoring missing ${module_name} from ${LATEST_MODULE_DIR}"
       cp -f "${LATEST_MODULE_DIR}/${module_name}" "${MODULE_DIR}/${module_name}"
@@ -646,13 +646,13 @@ if [[ -n "${CHUNK_TOKENS}" ]]; then
 fi
 "${RUN_PIPELINE_CMD[@]}"
 
-LEAF_PATH="${OUTPUT_DIR}/trained_modules/leaf_summarizer_final.json"
-MERGE_PATH="${OUTPUT_DIR}/trained_modules/merge_summarizer_final.json"
+G_PATH="${OUTPUT_DIR}/trained_modules/unified_g_final.json"
 SCORER_PATH="${OUTPUT_DIR}/trained_modules/scorer_final.json"
 FINAL_STATS_PATH="${OUTPUT_DIR}/final_stats.json"
 
-if [[ ! -f "${LEAF_PATH}" ]] || [[ ! -f "${MERGE_PATH}" ]] || [[ ! -f "${SCORER_PATH}" ]]; then
+if [[ ! -f "${G_PATH}" ]] || [[ ! -f "${SCORER_PATH}" ]]; then
   echo "Missing optimized module artifacts in ${OUTPUT_DIR}/trained_modules" >&2
+  echo "Expected unified_g_final.json and scorer_final.json for the active batched path." >&2
   if [[ -f "${FINAL_STATS_PATH}" ]]; then
     PIPELINE_ERROR="$("${PYTHON_BIN}" - "${FINAL_STATS_PATH}" <<'PY'
 import json
@@ -684,8 +684,7 @@ if [[ "${PUBLISH_LATEST}" == "true" ]]; then
   echo "PHASE A.5: Publish Optimized Modules (latest)"
   echo "============================================================"
   mkdir -p "${LATEST_ROOT_DIR}/trained_modules"
-  cp -f "${LEAF_PATH}" "${LATEST_ROOT_DIR}/trained_modules/leaf_summarizer_final.json"
-  cp -f "${MERGE_PATH}" "${LATEST_ROOT_DIR}/trained_modules/merge_summarizer_final.json"
+  cp -f "${G_PATH}" "${LATEST_ROOT_DIR}/trained_modules/unified_g_final.json"
   cp -f "${SCORER_PATH}" "${LATEST_ROOT_DIR}/trained_modules/scorer_final.json"
   {
     echo "task=manifesto_rile"
@@ -719,8 +718,7 @@ PHASE_B_CMD=(
   --chunk-size "${CHUNK_SIZE}"
   --concurrent-docs "${CONCURRENT_DOCS}"
   --concurrent-requests "${CONCURRENT_REQUESTS}"
-  --leaf-module-path "${LEAF_PATH}"
-  --merge-module-path "${MERGE_PATH}"
+  --g-module-path "${G_PATH}"
   --scorer-module-path "${SCORER_PATH}"
   --output "${OUTPUT_DIR}/rile_optimized_example.json"
 )

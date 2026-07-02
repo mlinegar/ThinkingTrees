@@ -50,7 +50,8 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from src.config.dspy_config import configure_dspy, create_vllm_lm, create_vllm_lm_multi
+from src.config.dspy_config import configure_dspy, create_local_engine_lm
+from src.config.local_inference import resolve_local_inference_config
 from src.core.protocols import format_merge_input
 from src.preprocessing.chunker import chunk_for_ops
 from src.tasks.manifesto import ManifestoDataset
@@ -223,15 +224,11 @@ def main() -> int:
                         format="%(asctime)s %(levelname)s %(name)s | %(message)s")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    lm_kwargs = {"model": args.model, "temperature": 0.0, "cache": True}
-    if args.max_tokens is not None:
-        lm_kwargs["max_tokens"] = args.max_tokens
+    local_inference = resolve_local_inference_config({**vars(args), "temperature": 0.0})
+    if local_inference.max_tokens is not None:
         logger.info("Using max_tokens=%d for LM outputs", args.max_tokens)
-    if args.ports:
-        logger.info("Load-balancing across vLLM ports %s", args.ports)
-        lm = create_vllm_lm_multi(ports=args.ports, **lm_kwargs)
-    else:
-        lm = create_vllm_lm(port=args.port, **lm_kwargs)
+    logger.info("Configuring LM on %s port(s) %s", local_inference.engine, list(local_inference.ports))
+    lm = create_local_engine_lm(**local_inference.dspy_kwargs(cache=True))
     configure_dspy(lm=lm)
     logger.info("LM: %s", getattr(lm, "model", "unknown"))
 
@@ -248,11 +245,16 @@ def main() -> int:
     # Expert lookups per dim, joined via Benoit manifesto crosswalk
     crosswalk = load_benoit_mp_crosswalk()
     expert_by_dim: dict[PolicyDimension, dict[tuple[int, int], float]] = {}
+    expert_by_dim_1_7: dict[PolicyDimension, dict[tuple[int, int], float]] = {}
     for dim in _ORDER:
         experts = load_benoit_expert_means(dim)
         joined = experts.merge(crosswalk[["manifesto", "party", "year"]], on="manifesto", how="inner")
         expert_by_dim[dim] = {
             (int(r.party), int(r.year)): float(r.expert_mean)
+            for r in joined.itertuples()
+        }
+        expert_by_dim_1_7[dim] = {
+            (int(r.party), int(r.year)): float(r.expert_mean_1_7)
             for r in joined.itertuples()
         }
     # Any manifesto with at least one dim label is scorable; we'll fill per-dim
@@ -391,6 +393,9 @@ def main() -> int:
             "expert_means": {
                 dim.value: expert_by_dim[dim].get(key) for dim in _ORDER
             },
+            "expert_means_1_7": {
+                dim.value: expert_by_dim_1_7[dim].get(key) for dim in _ORDER
+            },
         }
 
     # Cap on total produced summaries (matches old --max-manifestos).
@@ -496,6 +501,7 @@ def main() -> int:
             "predictions": preds,
             "reasoning": reasons,
             "expert_means": row.get("expert_means", {}),
+            "expert_means_1_7": row.get("expert_means_1_7", {}),
         })
     with per_path.open("w") as fp:
         for row in rows:

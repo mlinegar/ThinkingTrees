@@ -37,13 +37,18 @@ import re as _re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Dict, Optional, Any, Callable, Awaitable, Tuple, Union, Set, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Set, Union
+
 import aiohttp
 
-from src.preprocessing.chunker import chunk_for_ops
-from src.core.data_models import Node
 from src.config.constants import LOG_TRUNCATE_LENGTH
 from src.core.async_utils import cancel_tasks, to_thread
+from src.core.batch_transport import (
+    DEFAULT_BATCH_MAX_CONCURRENT,
+    DEFAULT_BATCH_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_BATCH_TIMEOUT_SECONDS,
+)
 
 if TYPE_CHECKING:
     from src.core.vllm_metrics import VLLMMetricsCollector
@@ -92,12 +97,14 @@ class BatchRequest:
     max_tokens: int = 8192
     temperature: float = 0.7
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+    extra_request_params: Optional[Dict[str, Any]] = None
 
     # Tracking
     document_id: Optional[str] = None
     routing_key: Optional[str] = None
     request_type: str = "summarize"  # summarize, audit, score
     priority: int = 0  # Higher = more urgent
+    call_metadata: Optional[Dict[str, Any]] = None
 
     # Response handling
     future: Optional[asyncio.Future] = None
@@ -113,6 +120,7 @@ class BatchResponse:
     usage: Dict[str, int] = field(default_factory=dict)
     error: Optional[str] = None
     latency_ms: float = 0.0
+    call_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -198,14 +206,15 @@ class AsyncBatchLLMClient:
     def __init__(
         self,
         base_url: str = "http://localhost:8000/v1",
-        max_concurrent: int = 200,  # Max concurrent requests to vLLM
-        batch_size: int = 50,       # Requests per batch
-        batch_timeout: float = 0.1,  # Max wait to fill batch (seconds)
+        max_concurrent: int = DEFAULT_BATCH_MAX_CONCURRENT,  # Max concurrent requests to vLLM
+        batch_size: int = DEFAULT_BATCH_SIZE,       # Requests per batch
+        batch_timeout: float = DEFAULT_BATCH_TIMEOUT_SECONDS,  # Max wait to fill batch (seconds)
         model: str = None,  # Auto-detect from server if None
-        request_timeout: float = 300.0,  # Per-request timeout (5 minutes)
+        request_timeout: float = DEFAULT_BATCH_REQUEST_TIMEOUT_SECONDS,  # Per-request timeout
         api_key: str = "EMPTY",  # vLLM/SGLang use "EMPTY"; set real key for OpenAI
         recover_base_url_callback: Optional[Callable[[str], bool]] = None,
         recovery_cooldown_seconds: float = 120.0,
+        call_sink: Optional[Callable[[Mapping[str, Any]], None]] = None,
     ):
         """
         Initialize async batch client.
@@ -231,6 +240,7 @@ class AsyncBatchLLMClient:
         self.api_key = api_key
         self.recover_base_url_callback = recover_base_url_callback
         self.recovery_cooldown_seconds = max(0.0, float(recovery_cooldown_seconds))
+        self.call_sink = call_sink
         self._last_recovery_attempt: float = 0.0
         self._recovery_lock: Optional[asyncio.Lock] = None
 
@@ -331,11 +341,31 @@ class AsyncBatchLLMClient:
         logger.error(f"Request {request.request_id} failed: {error_msg}")
         self.stats.failed_requests += 1
         if request.future and not request.future.done():
-            request.future.set_result(BatchResponse(
+            response = BatchResponse(
                 request_id=request.request_id,
                 content="",
                 error=error_msg,
-            ))
+                call_metadata=dict(request.call_metadata or {}),
+            )
+            self._emit_call_trace(request, response)
+            request.future.set_result(response)
+
+    def _emit_call_trace(self, request: BatchRequest, response: BatchResponse) -> None:
+        if self.call_sink is None:
+            return
+        try:
+            from src.experiments.call_tracing import batch_request_call_row
+
+            self.call_sink(
+                batch_request_call_row(
+                    request,
+                    response,
+                    base_url=str(self.base_url),
+                    model=str(self.model),
+                )
+            )
+        except Exception:
+            logger.debug("Failed to emit batch call trace for %s", request.request_id, exc_info=True)
 
     async def start(self):
         """Start the batch processor."""
@@ -465,7 +495,11 @@ class AsyncBatchLLMClient:
                     messages=request.messages,
                     max_tokens=request.max_tokens,
                     temperature=request.temperature,
-                    extra={"request_type": request.request_type},
+                    extra={
+                        "request_type": request.request_type,
+                        "chat_template_kwargs": request.chat_template_kwargs,
+                        "extra_request_params": request.extra_request_params,
+                    },
                 )
             except Exception:
                 request.cache_key = None
@@ -480,11 +514,13 @@ class AsyncBatchLLMClient:
                         usage=cached.usage,
                         error=None,
                         latency_ms=0.0,
+                        call_metadata=dict(request.call_metadata or {}),
                     )
                     self.stats.completed_requests += 1
                     self.stats.total_tokens += int(cached.usage.get("total_tokens", 0) or 0)
                     self.stats.prompt_tokens += int(cached.usage.get("prompt_tokens", 0) or 0)
                     self.stats.completion_tokens += int(cached.usage.get("completion_tokens", 0) or 0)
+                    self._emit_call_trace(request, response)
                     if request.future and not request.future.done():
                         request.future.set_result(response)
                     return request.request_id
@@ -609,6 +645,11 @@ class AsyncBatchLLMClient:
                     "max_tokens": request.max_tokens,
                     "temperature": request.temperature,
                 }
+                if request.extra_request_params:
+                    for key, value in dict(request.extra_request_params).items():
+                        if value is None or key in {"model", "messages"}:
+                            continue
+                        payload[str(key)] = value
                 if request.chat_template_kwargs:
                     payload["chat_template_kwargs"] = dict(request.chat_template_kwargs)
 
@@ -631,6 +672,7 @@ class AsyncBatchLLMClient:
                                     content=content,
                                     usage=usage,
                                     latency_ms=latency,
+                                    call_metadata=dict(request.call_metadata or {}),
                                 )
                                 self.stats.completed_requests += 1
                                 self.stats.total_latency_ms += latency
@@ -643,7 +685,10 @@ class AsyncBatchLLMClient:
                                     and self._response_cache_allows(request)
                                 ):
                                     try:
-                                        from src.core.response_cache import CachedChatResponse, FileResponseCache
+                                        from src.core.response_cache import (
+                                            CachedChatResponse,
+                                            FileResponseCache,
+                                        )
 
                                         cache_key = request.cache_key
                                         if not cache_key:
@@ -654,7 +699,11 @@ class AsyncBatchLLMClient:
                                                 messages=request.messages,
                                                 max_tokens=request.max_tokens,
                                                 temperature=request.temperature,
-                                                extra={"request_type": request.request_type},
+                                                extra={
+                                                    "request_type": request.request_type,
+                                                    "chat_template_kwargs": request.chat_template_kwargs,
+                                                    "extra_request_params": request.extra_request_params,
+                                                },
                                             )
                                         if cache_key:
                                             self._response_cache.set(
@@ -669,6 +718,7 @@ class AsyncBatchLLMClient:
                                             self.stats.cache_writes += 1
                                     except Exception:
                                         pass
+                                self._emit_call_trace(request, response)
                                 if request.future and not request.future.done():
                                     request.future.set_result(response)
                                 return
@@ -715,8 +765,10 @@ class AsyncBatchLLMClient:
                                 content="",
                                 error=error_msg,
                                 latency_ms=latency,
+                                call_metadata=dict(request.call_metadata or {}),
                             )
                             self.stats.failed_requests += 1
+                            self._emit_call_trace(request, response)
                             if request.future and not request.future.done():
                                 request.future.set_result(response)
                             return
@@ -829,10 +881,11 @@ class MultiServerBatchClient:
     def __init__(
         self,
         servers: List[str],  # List of base URLs, e.g., ["http://localhost:8000/v1", "http://localhost:8002/v1"]
-        max_concurrent_per_server: int = 200,
-        batch_size: int = 50,
-        batch_timeout: float = 0.1,
-        request_timeout: float = 300.0,
+        max_concurrent_per_server: int = DEFAULT_BATCH_MAX_CONCURRENT,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        batch_timeout: float = DEFAULT_BATCH_TIMEOUT_SECONDS,
+        request_timeout: float = DEFAULT_BATCH_REQUEST_TIMEOUT_SECONDS,
+        model: Optional[str] = None,
         api_key: str = "EMPTY",
         recover_base_url_callback: Optional[Callable[[str], bool]] = None,
         recovery_cooldown_seconds: float = 120.0,
@@ -840,6 +893,7 @@ class MultiServerBatchClient:
         routing_policy: Union[RoutingPolicy, str] = RoutingPolicy.AFFINITY_LOAD_AWARE,
         load_imbalance_threshold: float = 2.0,
         min_pending_before_spillover: int = 50,
+        call_sink: Optional[Callable[[Mapping[str, Any]], None]] = None,
     ):
         """
         Initialize multi-server client.
@@ -850,6 +904,7 @@ class MultiServerBatchClient:
             batch_size: Requests per batch
             batch_timeout: Max wait to fill batch
             request_timeout: Per-request HTTP timeout in seconds
+            model: Model name for each server (auto-detected if None)
             api_key: API key for Authorization header
             metrics_collector: Optional VLLMMetricsCollector for load-aware routing
         """
@@ -883,10 +938,12 @@ class MultiServerBatchClient:
                 max_concurrent=max_concurrent_per_server,
                 batch_size=batch_size,
                 batch_timeout=batch_timeout,
+                model=model,
                 request_timeout=request_timeout,
                 api_key=api_key,
                 recover_base_url_callback=recover_base_url_callback,
                 recovery_cooldown_seconds=recovery_cooldown_seconds,
+                call_sink=call_sink,
             )
             self.clients.append(client)
             self._routing_counts[str(server_url)] = 0
