@@ -1,0 +1,20 @@
+operator_kinds = ["fno", "conv1d"]
+n_train = 128
+n_eval = 64
+doc_tokens = 96
+leaf_token_count = 16
+vocabulary_size = 96
+seed = 17
+max_iterations = 3
+
+embedding_dim = 16
+hidden_channels = 16
+n_modes = 4
+n_layers = 2
+conv_kernel_size = 5
+head_hidden_dim = 32
+epochs_per_iteration = 20
+batch_size = 16
+learning_rate = 0.003
+device = "cuda"
+

@@ -1,0 +1,21 @@
+local_law_leaf_discount_gamma: 1.0
+universe_size: 16384
+min_tokens: 512
+max_tokens: 1536
+leaf_size: 64
+zipf_alphas: [0.8, 1.0, 1.2]
+precisions: [8, 10]
+train_docs_grid: [1024, 2048]
+audit_policies: [all]
+n_test: 256
+hidden_dim: 32
+n_epochs: 4
+batch_docs: 128
+lr: 0.001
+weight_decay: 0.0
+grad_clip_norm: 1.0
+use_cuda: true
+cuda_device: 0
+torch_threads: 8
+seed: 117
+data_seed: 117

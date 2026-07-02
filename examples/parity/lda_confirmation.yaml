@@ -1,0 +1,37 @@
+method: lda
+scorer: lda
+seed: 29
+split: test
+n_trees: 0
+task_config:
+  n_topics: 6
+  vocab_size: 128
+  min_tokens: 128
+  max_tokens: 128
+  doc_topic_concentration: 0.6
+  topic_concentration: 0.2
+  emission_mode: anchored
+  anchor_words_per_topic: 8
+  anchor_multiplier: 20.0
+  relevant_topics: 3
+  theta_scale: 1.0
+  zero_diagonal: false
+  quadratic_utility_weight: 1.0
+  leaf_tokens: 16
+  train_docs: 128
+  test_docs: 64
+  inference_prior_mass: 0.25
+  inference_max_iter: 80
+  inference_tol: 0.000001
+  full_hidden_dim: 64
+  full_n_layers: 2
+  state_dim: 32
+  supervise_all_balanced_nodes: true
+  n_epochs: 12
+  batch_size: 32
+  lr: 0.003
+  weight_decay: 0.00001
+  device: cuda
+  cuda_device: 3
+  torch_threads: 1
+

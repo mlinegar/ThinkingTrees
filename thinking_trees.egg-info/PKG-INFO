@@ -1,3 +1,68 @@
+Metadata-Version: 2.4
+Name: thinking-trees
+Version: 0.1.0
+Summary: OPS-based document summarization with oracle-aligned training
+Author: ThinkingTrees Contributors
+License: MIT
+Project-URL: Homepage, https://github.com/thinking-trees/thinking-trees
+Project-URL: Documentation, https://github.com/thinking-trees/thinking-trees#readme
+Project-URL: Repository, https://github.com/thinking-trees/thinking-trees
+Keywords: summarization,dspy,llm,oracle,nlp
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy>=1.23
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: more-itertools>=10.0
+Requires-Dist: matplotlib>=3.8.0
+Requires-Dist: dspy>=3.0.0
+Requires-Dist: openai>=1.0.0
+Requires-Dist: tiktoken>=0.12.0
+Requires-Dist: tqdm>=4.65
+Requires-Dist: langextract>=1.5.0
+Requires-Dist: treepo
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.0.0; extra == "dev"
+Requires-Dist: hypothesis>=6.0.0; extra == "dev"
+Requires-Dist: black>=23.0.0; extra == "dev"
+Requires-Dist: isort>=5.0.0; extra == "dev"
+Requires-Dist: mypy>=1.0.0; extra == "dev"
+Requires-Dist: ruff>=0.1.0; extra == "dev"
+Provides-Extra: sim
+Requires-Dist: scikit-learn>=1.4.2; extra == "sim"
+Requires-Dist: torch>=2.0.0; extra == "sim"
+Requires-Dist: neuraloperator>=2.0.0; extra == "sim"
+Provides-Extra: vllm
+Requires-Dist: vllm>=0.12.0; extra == "vllm"
+Provides-Extra: ui
+Requires-Dist: streamlit>=1.30.0; extra == "ui"
+Requires-Dist: click>=8.0.0; extra == "ui"
+Provides-Extra: manifesto
+Requires-Dist: pandas>=2.0.0; extra == "manifesto"
+Requires-Dist: openpyxl>=3.0.0; extra == "manifesto"
+Provides-Extra: ruler
+Requires-Dist: nltk>=3.9.0; extra == "ruler"
+Requires-Dist: wonderwords>=2.2.0; extra == "ruler"
+Provides-Extra: trl
+Requires-Dist: trl>=0.8.0; extra == "trl"
+Requires-Dist: transformers>=4.40.0; extra == "trl"
+Requires-Dist: datasets>=2.14.0; extra == "trl"
+Requires-Dist: peft>=0.8.0; extra == "trl"
+Requires-Dist: bitsandbytes>=0.43.0; extra == "trl"
+Provides-Extra: all
+Requires-Dist: thinking-trees[dev,manifesto,ruler,trl,ui,vllm]; extra == "all"
+Dynamic: license-file
+
 # ThinkingTrees: Oracle-Preserving Summarization (OPS)
 
 Hierarchical summarization with verifiable information preservation guarantees. Build recursive summarization trees that maintain task-critical information through probabilistic auditing and DSPy-based optimization.
