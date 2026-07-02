@@ -716,6 +716,17 @@ def _load_scorer_component(pipeline: DimensionFullPipeline, path: Path) -> None:
     if "scorer" in data:
         target.load_state(data["scorer"])
         return
+    if "predictor" in data:
+        # Current DimensionScorer.save() layout: one named predictor.
+        from src.tasks.manifesto.dimension_scorer import DimensionScorer
+
+        temp = DimensionScorer(pipeline.spec)
+        temp.predictor.load_state(data["predictor"])
+        if hasattr(pipeline.scorer, "_module"):
+            pipeline.scorer._module = temp.predictor
+        else:
+            pipeline.scorer = temp.predictor
+        return
     if "score" in data:
         from src.tasks.manifesto.dimension_scorer import DimensionScorer
         temp = DimensionScorer(pipeline.spec)

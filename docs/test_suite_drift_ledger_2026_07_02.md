@@ -44,6 +44,31 @@ Full failing-test list captured at the time of the pass:
 in `tests/conftest.py` still excludes anything importing
 `treepo._research`.
 
+## Manifesto pass (same day, second round)
+
+The manifesto suites (`tests/tasks/test_manifesto_*`, `test_phase3_*`) are
+now 60 passed / 1 skipped / 1 failed:
+
+- `pyreadr` added to the `manifesto` extra (Benoit .rda readers);
+  `transformers` pinned `<5` in the `trl` extra (v5 changes model-loading
+  pickle defaults). Both installed in the venv.
+- `dspy.load` calls in `run_manifesto_full_doc_dspy_global_f.py` pass
+  `allow_pickle=True` (local, self-produced program artifacts).
+- `phase3_full_pipeline_optimize._load_scorer_component` handles the
+  current `DimensionScorer.save()` layout (top-level `predictor` key)
+  alongside the older `scorer`/`score`/`scorer.score` layouts; the
+  warm-start test builds its fixture with `save()` so it tracks the format.
+- `test_fg_ladder_exports_contract_fit_artifacts` is skipped: its subject
+  is the archived `scripts/OLD_build_manifesto_fg_ladder_legacy.py`;
+  current fg-ladder runs go through `run_manifesto_fg_real_training_grid.py`.
+- Remaining: `test_teacher_fg_leaf_grid_writes_external_summary_bundle_metadata`
+  — the external-summary bundle path writes 0 of 4 labeled trees; behavior
+  drift in the bundle writer, needs the owning thread.
+
+treepo's own manifesto guard: the full Manifesto Project corpus integration
+test passes against v0.1.1
+(`TREEPO_RUN_MANIFESTO_PROJECT_FULL=1 TREEPO_MANIFESTO_PROJECT_ROOT=data/raw/manifesto_project_full`).
+
 ## Conventions
 
 - Port, don't delete: update expectations to the current schemes when the

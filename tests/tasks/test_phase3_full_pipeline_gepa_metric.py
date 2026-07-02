@@ -83,10 +83,13 @@ def test_component_warm_start_accepts_scorer_only_artifact(tmp_path):
 
     spec = BENOIT_DIMENSIONS[PolicyDimension.DECENTRALIZATION]
     scorer = DimensionScorer(spec)
-    state = scorer.dump_state()
-    state["score"]["signature"]["instructions"] = "warm scorer instruction"
+    import json
+
     path = tmp_path / "optimized_scorer.json"
-    path.write_text(__import__("json").dumps(state))
+    scorer.save(path)
+    state = json.loads(path.read_text())
+    state["predictor"]["signature"]["instructions"] = "warm scorer instruction"
+    path.write_text(json.dumps(state))
 
     pipeline = module.DimensionFullPipeline(PolicyDimension.DECENTRALIZATION)
     loaded = module._warm_start_pipeline(

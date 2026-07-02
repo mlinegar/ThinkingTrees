@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib
 import json
+
+import pytest
 from pathlib import Path
 
 from src.ctreepo.distillation import load_labeled_trees, write_labeled_trees_jsonl
@@ -107,6 +109,13 @@ def _make_f_tree(idx: int, split: str) -> LabeledTree:
     return tree
 
 
+@pytest.mark.skip(
+    reason=(
+        "subject archived: the ladder builder lives at "
+        "scripts/OLD_build_manifesto_fg_ladder_legacy.py; current fg-ladder runs "
+        "go through run_manifesto_fg_real_training_grid.py"
+    )
+)
 def test_fg_ladder_exports_contract_fit_artifacts(tmp_path: Path) -> None:
     cli = importlib.import_module("scripts.build_manifesto_fg_ladder")
     splits = ["train", "train", "val", "test"]

@@ -916,7 +916,8 @@ def run_global_f(args: argparse.Namespace) -> Dict[str, Any]:
     if args.initial_program_dir:
         import dspy
 
-        program = dspy.load(str(args.initial_program_dir))
+        # Local, self-produced program artifacts (cloudpickle) are trusted.
+        program = dspy.load(str(args.initial_program_dir), allow_pickle=True)
         if hasattr(program, "max_output_tokens"):
             program.max_output_tokens = int(args.max_tokens)
         f_init = "loaded_dspy_global_f_raw_document"
