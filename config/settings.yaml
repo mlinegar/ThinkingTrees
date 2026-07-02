@@ -65,6 +65,79 @@ vllm:
       tensor_parallel: 1
       max_model_len: 32768
 
+    # Google Gemma 4 E2B: small instruction-tuned Gemma 4 model for chat smoke tests.
+    # The upstream model card advertises 128K context; we keep the default serving
+    # profile at 32K for cheaper KV-cache allocation during local iteration.
+    gemma-4-e2b-it:
+      path: "/mnt/data/models/google/gemma-4-E2B-it"
+      served_model_name: "google/gemma-4-E2B-it"
+      tensor_parallel: 1
+      max_model_len: 32768
+
+    # Google Gemma 4 E4B: larger small-model Gemma 4 variant.
+    gemma-4-e4b-it:
+      path: "/mnt/data/models/google/gemma-4-E4B-it"
+      served_model_name: "google/gemma-4-E4B-it"
+      tensor_parallel: 1
+      max_model_len: 32768
+
+    # Google Gemma 4 31B: dense base model for larger local testing.
+    gemma-4-31b:
+      path: "/mnt/data/models/google/gemma-4-31B"
+      served_model_name: "google/gemma-4-31B"
+      tensor_parallel: 1
+      max_model_len: 32768
+
+    # Google Gemma 4 31B instruction-tuned model.
+    gemma-4-31b-it:
+      path: "/mnt/data/models/google/gemma-4-31B-it"
+      served_model_name: "google/gemma-4-31B-it"
+      tensor_parallel: 1
+      max_model_len: 32768
+
+    # NVIDIA-quantized NVFP4 version of gemma-4-31B-IT.
+    gemma-4-31b-it-nvfp4:
+      path: "/mnt/data/models/nvidia/Gemma-4-31B-IT-NVFP4"
+      served_model_name: "nvidia/Gemma-4-31B-IT-NVFP4"
+      tensor_parallel: 1
+      max_model_len: 32768
+
+    # NVIDIA Gemma-4-26B-A4B NVFP4 — official MoE variant with 4B active /
+    # 26B total params. Native 262K context; cap lower for cheaper KV cache
+    # during local iteration.
+    gemma-4-26b-a4b-it-nvfp4:
+      path: "/mnt/data/models/nvidia/Gemma-4-26B-A4B-NVFP4"
+      served_model_name: "nvidia/Gemma-4-26B-A4B-NVFP4"
+      tensor_parallel: 1
+      max_model_len: 32768
+
+    # DiffusionGemma 26B-A4B IT NVFP4. Requires a vLLM build with the
+    # DiffusionGemma branch support (`--diffusion-config`).
+    diffusiongemma-26b-a4b-it-nvfp4:
+      path: "/mnt/data/models/RedHatAI/diffusiongemma-26B-A4B-it-NVFP4"
+      served_model_name: "RedHatAI/diffusiongemma-26B-A4B-it-NVFP4"
+      tensor_parallel: 1
+      max_model_len: 262144
+
+    # Gemma-3-27B-IT NVFP4A16 — this is THE model Benoit et al. (2026 AJPS) used
+    # for their open-weight replication. Pulled via BCCard's NVFP4A16 quantization
+    # of google/gemma-3-27b-it.
+    gemma-3-27b-it-nvfp4a16:
+      path: "/mnt/data/models/BCCard/gemma-3-27b-it-NVFP4A16"
+      served_model_name: "BCCard/gemma-3-27b-it-NVFP4A16"
+      tensor_parallel: 1
+      max_model_len: 32768
+
+    # Gemma-3-27B-IT BF16 (Google's full-precision checkpoint — exact model
+    # Benoit used for their Table 6 Gemma row). NVFP4A16 variant fails to load
+    # because the multimodal vision weights weren't quantized; BF16 works as
+    # a single pass on one A100-96GB with 20–25 GB KV cache at 32K context.
+    gemma-3-27b-it:
+      path: "/mnt/data/models/google/gemma-3-27b-it"
+      served_model_name: "google/gemma-3-27b-it"
+      tensor_parallel: 1
+      max_model_len: 32768
+
     # Qwen3.5-4B-Base: base checkpoint for higher-capacity finetuning.
     # NOTE: AxionML NVFP4 variant not currently published; retaining existing path.
     qwen3.5-4b-base:
@@ -147,6 +220,23 @@ vllm:
       served_model_name: "Qwen/Qwen3-Embedding-8B"
       tensor_parallel: 1
       max_model_len: 32768
+    qwen3-embedding-4b:
+      path: "/mnt/data/models/Qwen/Qwen3-Embedding-4B"
+      served_model_name: "Qwen/Qwen3-Embedding-4B"
+      tensor_parallel: 1
+      max_model_len: 32768
+    qwen3-embedding-0.6b:
+      path: "/mnt/data/models/Qwen/Qwen3-Embedding-0.6B"
+      served_model_name: "Qwen/Qwen3-Embedding-0.6B"
+      tensor_parallel: 1
+      max_model_len: 32768
+
+    # Google EmbeddingGemma 300M: lightweight sentence-transformer-style embedding model.
+    embeddinggemma-300m:
+      path: "/mnt/data/models/google/embeddinggemma-300m"
+      served_model_name: "google/embeddinggemma-300m"
+      tensor_parallel: 1
+      max_model_len: 2048
 
   # Server settings
   host: "0.0.0.0"
@@ -193,11 +283,34 @@ vllm:
 
     # Per-profile runtime overrides for multimodal models.
     profile_overrides:
+      embeddinggemma-300m:
+        extra_flags: [
+          "--runner", "pooling",
+          "--convert", "embed",
+          "--no-enable-prefix-caching",
+          "--no-enable-chunked-prefill",
+          "--disable-hybrid-kv-cache-manager"
+        ]
       # Avoid large warmup allocations that can OOM TP=2 startup.
       nemotron-30b-nvfp4:
         extra_flags: [
           "--max-num-seqs", "128",
           "--max-num-batched-tokens", "16384",
+        ]
+      gemma-4-31b-it-nvfp4:
+        extra_flags: [
+          "--max-num-seqs", "128",
+          "--max-num-batched-tokens", "65536",
+        ]
+      diffusiongemma-26b-a4b-it-nvfp4:
+        extra_flags: [
+          "--max-num-seqs", "4",
+          "--gpu-memory-utilization", "0.85",
+          "--attention-backend", "TRITON_ATTN",
+          "--generation-config", "vllm",
+          "--hf-overrides", "{\"diffusion_sampler\":\"entropy_bound\",\"diffusion_entropy_bound\":0.1}",
+          "--diffusion-config", "{\"canvas_length\":256}",
+          "--default-chat-template-kwargs", "{\"enable_thinking\":true}",
         ]
       # GenRM 235B is more memory-sensitive; keep warmup smaller.
       genrm-nvfp4:
@@ -248,6 +361,14 @@ sglang:
         # Avoid CUDA-graph startup fragility during pipeline debugging.
         disable_cuda_graph: true
 
+# Optional diffusion-oriented engine settings. The model/profile catalog still
+# comes from vllm.models above in the first pass; this block only captures
+# engine-specific serving defaults.
+vllm_omni:
+  port: 8004
+  host: "0.0.0.0"
+  generate_path: "/generate"
+
 # Conditional Memory (Engram-inspired unified cache)
 # Provides persistent, context-gated memory across pipeline runs.
 memory:
@@ -271,7 +392,7 @@ servers:
 # Inference backend selection and routing policy.
 inference:
   backend:
-    # Backend names: vllm | sglang
+    # Backend names: vllm | sglang | vllm_omni | openai | custom_http | symbolic_local
     task_backend: "vllm"
     genrm_backend: "vllm"
     # Fallback backend used when the selected backend is unavailable.
@@ -742,6 +863,7 @@ orchestration:
 ctreepo:
   enabled: false
   model_path: null                # Path to trained .pt checkpoint
+  tree_model_version: "v2"        # Centralized trainer/default runtime surface
   sketch_dim: 32
   hidden_dim: 256
   merge_type: "gated"             # gated | mlp | avg
@@ -784,6 +906,8 @@ training:
     fail_fast: false
     fail_on_error: false
     rerun_on_resume: false
+    ctreepo_search_spec: null      # Optional JSON search spec for scripts/train_neural_operators.py --ctreepo-search-spec
+    mergeable_search_spec: null    # Optional JSON search spec for scripts/train_neural_operators.py --mergeable-search-spec
     ctreepo_local_law:
       root_weight: 1.0
       leaf_audit_weight: 0.0

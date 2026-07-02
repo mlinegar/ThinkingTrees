@@ -1,0 +1,148 @@
+version: 1
+
+supported:
+  - path: scripts/run_runtime_eval.py
+    status: canonical
+    notes: Runtime-eval v2 roles, calls, metrics, predictions, steps.
+  - path: scripts/audit_runtime_umbrella_coverage.py
+    status: canonical_tool
+    notes: Release gate for supported, adapter-covered, and legacy script inventory.
+  - path: scripts/check_repo_release_hygiene.py
+    status: canonical_tool
+    notes: Release gate for generated artifacts, local paths, and stale public runtime flags.
+  - path: scripts/run_v1_launch_checks.py
+    status: canonical_sidecar
+    notes: Local v1 readiness gate over audit, LongBench fixture runtime eval, and focused tests.
+  - path: scripts/report_runtime_v1_results.py
+    status: canonical_sidecar
+    notes: Paper-facing method and slice matrix over runtime predictions/results.
+  - path: scripts/run_longbench_batched_example.py
+    status: canonical_sidecar
+    notes: File output preserved; sidecars live in <output_stem>_experiment.
+  - path: scripts/run_manifesto_batched_example.py
+    status: canonical_sidecar
+    notes: File output preserved; sidecars live in <output_stem>_experiment.
+  - path: scripts/build_manifesto_coverage_split.py
+    status: canonical
+    notes: RunManifest v1 all-six Manifesto coverage split builder.
+  - path: scripts/run_manifesto_full_doc_gemma4_benchmark.py
+    status: canonical
+    notes: ExperimentContext full-document Gemma-4 Manifesto benchmark.
+  - path: scripts/run_manifesto_full_doc_dspy_global_f.py
+    status: canonical
+    notes: ExperimentContext raw one-leaf/document DSPy global f benchmark.
+  - path: scripts/run_method_compare.py
+    status: canonical_sidecar
+  - path: scripts/report_method_compare.py
+    status: canonical_sidecar
+  - path: scripts/run_method_compare_lbv2.py
+    status: canonical_sidecar
+  - path: src/training/run_pipeline.py
+    status: canonical
+  - path: scripts/train_neural_operators.py
+    status: canonical
+  - path: scripts/train_ctreepo.py
+    status: canonical_sidecar
+  - path: scripts/generate_manifesto_teacher_traces.py
+    status: canonical_sidecar
+  - path: scripts/generate_manifesto_lawstress.py
+    status: canonical_sidecar
+  - path: scripts/eval_manifesto_lawstress.py
+    status: canonical_sidecar
+  - path: scripts/run_markov_publication_bundle.py
+    status: canonical
+  - path: scripts/run_markov_optimization_tradeoff_pipeline.py
+    status: canonical
+  - path: scripts/probe_contextual_sbijax.py
+    status: canonical_sidecar
+    notes: Package-facing contextual sufficiency / sbijax control probe; also exposed as `ctreepo sim run contextual-sbijax`.
+  - path: scripts/prepare_markov_hazard_panel_data.py
+    status: canonical_sidecar
+    notes: Paper hazard-panel bundle and prepared-cache builder for Markov anti-mean simulations.
+  - path: scripts/run_markov_supervision_recovery_parity_grid.py
+    status: canonical
+  - path: scripts/run_tree_batching_benchmark.py
+    status: canonical_sidecar
+  - path: scripts/run_classical_parity_benchmark.py
+    status: canonical_sidecar
+    notes: Fit-routed HLL parity cells with aggregate canonical sidecars.
+  - path: scripts/run_treepo_stack_generate_demo.py
+    status: canonical_sidecar
+  - path: scripts/run_treepo_stack_markov_demo.py
+    status: canonical_sidecar
+
+adapter_covered:
+  - path: scripts/run_experiment.py
+    adapter: experiment_control_plane
+  - glob: scripts/report_*.py
+    adapter: report_only
+    notes: Report scripts remain legacy unless listed as supported.
+  - glob: scripts/plot_*.py
+    adapter: legacy_plot_artifact
+  - glob: scripts/build_*.py
+    adapter: legacy_command_builder
+  - glob: scripts/launch_*.py
+    adapter: legacy_launcher
+
+legacy_globs:
+  - scripts/_*.py
+  - scripts/aggregate_*.py
+  - scripts/analyze_*.py
+  - scripts/audit_*.py
+  - scripts/backfill_*.py
+  - scripts/bench_*.py
+  - scripts/benchmark_*.py
+  - scripts/bootstrap_*.py
+  - scripts/combine_*.py
+  - scripts/compare_*.py
+  - scripts/comparison_*.py
+  - scripts/check_*.py
+  - scripts/debug_*.py
+  - scripts/diagnose_*.py
+  - scripts/distill_*.py
+  - scripts/download_*.py
+  - scripts/emit_*.py
+  - scripts/eval_*.py
+  - scripts/evaluate_*.py
+  - scripts/fetch_*.py
+  - scripts/generate_*.py
+  - scripts/gepa_*.py
+  - scripts/grid_*.py
+  - scripts/inspect_*.py
+  - scripts/kfold_*.py
+  - scripts/label_*.py
+  - scripts/log_*.py
+  - scripts/long_job.py
+  - scripts/markov_*.py
+  - scripts/monitor_*.py
+  - scripts/organize_*.py
+  - scripts/phase*.py
+  - scripts/prepare_*.py
+  - scripts/probe_*.py
+  - scripts/profile_*.py
+  - scripts/quick_*.py
+  - scripts/recommend_*.py
+  - scripts/refresh_*.py
+  - scripts/replay_*.py
+  - scripts/reproduce_*.py
+  - scripts/render_*.py
+  - scripts/roundup_*.py
+  - scripts/run_*.py
+  - scripts/sanity_*.py
+  - scripts/score_*.py
+  - scripts/setup_*.py
+  - scripts/spawn_*.py
+  - scripts/start_*.py
+  - scripts/structured_config.py
+  - scripts/summarize_*.py
+  - scripts/sweep_*.py
+  - scripts/test_*.py
+  - scripts/train_*.py
+  - scripts/triage_*.py
+  - scripts/tutorial_*.py
+  - scripts/rescore_*.py
+  - scripts/tune_*.py
+  - scripts/validate_*.py
+  - scripts/wait_*.py
+  - scripts/watch_*.py
+  - scripts/write_*.py

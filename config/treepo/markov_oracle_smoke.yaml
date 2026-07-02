@@ -1,0 +1,17 @@
+method: oracle
+scorer: markov_changepoint_count
+seed: 0
+split: test
+n_trees: 8
+task_config:
+  n_regimes: 4
+  vocab_size: 96
+  min_tokens: 96
+  max_tokens: 96
+  min_segments: 2
+  max_segments: 5
+  min_seg_len: 8
+  max_seg_len: 32
+  leaf_token_count: 16
+  sinkhorn_iters: 30
+  transition_log_std: 1.25

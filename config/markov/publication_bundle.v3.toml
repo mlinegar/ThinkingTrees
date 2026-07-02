@@ -58,8 +58,6 @@ benchmark = "recoverable_v5_t128"
 gate_train_doc_count = 10240
 scale_train_doc_counts = [1024, 2048, 4096, 10240]
 seeds = [0, 1, 2, 3, 4]
-tree_families = ["tree_neural"]
-fno_families = ["official_fno", "official_fno_sumlen"]
 run_aux_upper_bound = true
 upper_bound_aux_fractions = [0.25, 1.0]
 backfill_on_success = true
@@ -73,8 +71,32 @@ workers_per_mig = 1
 allow_multi_worker_screen = false
 capacity_workers_per_mig = 2
 
+[[publication_bundle.parity.method_runs]]
+problem_id = "markov_ops_count"
+method_id = "tree_neural"
+law_set_id = "all"
+role = "primary"
+
+[[publication_bundle.parity.reference_method_runs]]
+problem_id = "markov_ops_count"
+method_id = "official_fno"
+law_set_id = "all"
+role = "reference"
+
+[[publication_bundle.parity.reference_method_runs]]
+problem_id = "markov_ops_count"
+method_id = "official_fno_sumlen"
+law_set_id = "all"
+role = "reference"
+
 [publication_bundle.render]
 render_full_doc_parity_pdf = true
+
+[publication_bundle.scheduler]
+mode = "global_per_run"
+default_job_granularity = "family_train_seed"
+cleanup_stale_children = true
+max_gpu_items_per_mig = 1
 
 [tradeoff_pipeline]
 preset = "v3"
@@ -107,12 +129,6 @@ preload_targets = true
 workers_per_mig = 1
 allow_multi_worker_screen = true
 capacity_workers_per_mig = 2
-
-[publication_bundle.scheduler]
-mode = "global_per_run"
-default_job_granularity = "family_train_seed"
-cleanup_stale_children = true
-max_gpu_items_per_mig = 1
 
 [tradeoff_pipeline.scheduler]
 mode = "global_per_run"

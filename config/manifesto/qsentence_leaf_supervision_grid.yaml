@@ -1,0 +1,52 @@
+version: 1
+
+# HEADLINE: the NEW leaf x supervision axis, centralized in ONE run.
+#
+# The canonical runner enumerates the full leaf_qsentences x supervision grid in
+# a SINGLE invocation (outer leaf axis, inner supervision axis, through the same
+# run_alternating_family driver). Supervision levels map to FNO f-loss weight
+# knobs, so this is FNO-only; --family dspy + non-default supervision fails fast
+# by design in the runner.
+#
+# This bundle expresses that as data: one run sweeps every (leaf, supervision)
+# cell; a second run isolates the strong root+node "mix" recipe at leaf=8 for a
+# focused read. No bespoke per-cell shell needed.
+#
+# Dry-run:
+#   ./venv/bin/python scripts/run_manifesto_qsentence_bundle.py \
+#     config/manifesto/qsentence_leaf_supervision_grid.yaml --dry-run
+
+defaults:
+  family: fno
+  grid_dir: outputs/manifesto_qsentence_dspy_labeled_grid
+  max_iterations: 2
+  embedding:
+    backend: local-hf
+    model: /mnt/data/models/google/embeddinggemma-300m
+    device: cuda
+    batch_size: 128
+  fno:
+    epochs: 8
+    batch_size: 16
+    learning_rate: 3e-3
+  extra_args: ["--verbose"]
+
+runs:
+  # Full leaf x supervision grid: 5 leaf sizes x 4 supervision levels = 20 cells
+  # in one runner invocation. Output nests <family>/leafqNNN/sup_<level>/.
+  - name: leaf_supervision_full_grid
+    leaf_qsentences: "1,2,4,8,16"
+    supervision: "root,leaf,node,mix"
+    target_dimension: rile
+    output_dir: outputs/manifesto_qsentence_fno_leaf_supervision_grid
+    env:
+      CUDA_VISIBLE_DEVICES: "0"
+
+  # Focused read: the working econ-style root-dominant "mix" recipe at leaf=8.
+  - name: mix_leaf8_rile
+    leaf_qsentences: "8"
+    supervision: "mix"
+    target_dimension: rile
+    output_dir: outputs/manifesto_qsentence_fno_mix_leaf8
+    env:
+      CUDA_VISIBLE_DEVICES: "1"

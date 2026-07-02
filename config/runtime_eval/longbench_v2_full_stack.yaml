@@ -1,0 +1,85 @@
+experiment:
+  name: longbench_v2_full_stack_v0
+
+benchmark:
+  name: longbench_v2
+  # For offline/smoke runs, set dataset_path to a JSON/JSONL file or directory.
+  # If omitted, the adapter loads this HF dataset with `datasets.load_dataset`.
+  hf_dataset: THUDM/LongBench-v2
+  streaming: false
+
+methods: [full_context, retrieval, summary_tree, state_tree, neural_operator]
+
+# Paper-facing runtime roles. Internally these normalize to stable engine
+# surfaces, but configs should stay in scorer/summarizer/oracle/state terms.
+scorer:
+  engine: vllm
+  endpoint: http://localhost:8000/v1
+  model: default
+  api_key: EMPTY
+  batch_size: 32
+  temperature: 0.0
+  timeout: 180.0
+  enable_cache: true
+
+# Optional: defaults to scorer when omitted.
+# summarizer:
+#   engine: vllm
+#   endpoint: http://localhost:8000/v1
+#   model: default
+#   api_key: EMPTY
+
+embedder:
+  engine: vllm
+  endpoint: http://localhost:8003/v1
+  model: Qwen/Qwen3-Embedding-8B
+  api_key: EMPTY
+  batch_size: 32
+  timeout: 60.0
+  mock_dim: 32
+
+state_model:
+  kind: neural_operator
+  model: neural_tree_selector
+  checkpoint: ""
+  device: auto
+  execution_mode: auto
+
+oracle:
+  kind: benchmark_labels
+
+runtime_defaults:
+  cap_tokens: 8192
+  safety_tokens: 256
+  max_output_tokens: 16
+
+  chunk_tokens: 6144
+  overlap_tokens: 256
+  leaf_memory_tokens: 256
+  merge_memory_tokens: 256
+  tree_shape: balanced
+
+  verifier_enabled: true
+  repair_enabled: true
+  max_retries_per_step: 2
+
+  retrieval_top_k: 4
+  retrieval_chunk_tokens: 1024
+  retrieval_overlap_tokens: 128
+  treepo_refine_rounds: 0
+  neural_checkpoint_path: ""
+
+phases:
+  - phase_id: S0_smoke
+    tasks: [all]
+    lengths: [8192]
+    seeds: [0]
+    num_samples: 10
+    split: test
+
+  - phase_id: S1_full_stack
+    tasks: [all]
+    lengths: [8192, 32768, 131072]
+    seeds: [0]
+    num_samples: 200
+    split: test

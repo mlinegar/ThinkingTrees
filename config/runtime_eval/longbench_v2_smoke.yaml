@@ -1,0 +1,63 @@
+experiment:
+  name: longbench_v2_smoke
+
+benchmark:
+  name: longbench_v2
+  dataset_path: tests/fixtures/runtime/longbench_v2_tiny.jsonl
+
+methods: [full_context, retrieval, summary_tree, state_tree, neural_operator]
+
+scorer:
+  engine: vllm
+  endpoint: http://localhost:8000/v1
+  model: mock-model
+  api_key: EMPTY
+  batch_size: 8
+  temperature: 0.0
+  timeout: 60.0
+
+# Defaults to scorer in runtime normalization, but is explicit here so the
+# smoke config documents the paper role split.
+summarizer:
+  engine: vllm
+  endpoint: http://localhost:8000/v1
+  model: mock-model
+  api_key: EMPTY
+  batch_size: 8
+  temperature: 0.0
+  timeout: 60.0
+
+embedder:
+  mock: true
+  mock_dim: 16
+
+state_model:
+  kind: neural_operator
+  model: neural_tree_selector
+  checkpoint: ""
+  execution_mode: auto
+
+oracle:
+  kind: benchmark_labels
+
+runtime_defaults:
+  cap_tokens: 512
+  safety_tokens: 16
+  max_output_tokens: 16
+  chunk_tokens: 12
+  overlap_tokens: 0
+  leaf_memory_tokens: 16
+  merge_memory_tokens: 16
+  retrieval_top_k: 1
+  retrieval_chunk_tokens: 12
+  retrieval_overlap_tokens: 0
+  verifier_enabled: false
+  repair_enabled: false
+
+phases:
+  - phase_id: S0_smoke
+    tasks: [all]
+    lengths: [4096]
+    seeds: [0]
+    num_samples: 2
+    split: test

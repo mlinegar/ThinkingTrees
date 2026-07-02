@@ -32,7 +32,7 @@ supervision_recovery_packages = [
   "full90_leaf_full100_internal_count100",
   "full100_leaf_full100_internal_count100",
 ]
-supervision_recovery_tree_family = "tree_neural"
+supervision_recovery_method_id = "tree_neural"
 supervision_recovery_structural_cell = "r12_p079"
 supervision_epochs = 52
 exact_metric_final_doc_limit = 128

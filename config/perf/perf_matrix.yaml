@@ -19,16 +19,16 @@ scenarios:
       python3 scripts/run_runtime_eval.py init
       --config config/runtime_eval/ruler_8k_freeform.yaml
       --output-dir outputs/perf_harness/generated
-      --run-id perf_micro_ruler_mock &&
+      --experiment-id perf_micro_ruler_mock &&
       python3 scripts/run_runtime_eval.py run
-      --run-dir outputs/perf_harness/generated/perf_micro_ruler_mock
+      --experiment-dir outputs/perf_harness/generated/perf_micro_ruler_mock
       --phase-id S0_smoke
-      --mode runtime_full
+      --method runtime_full
       --max-units 1
       --max-problems 5
       --mock-llm &&
       python3 scripts/run_runtime_eval.py aggregate
-      --run-dir outputs/perf_harness/generated/perf_micro_ruler_mock
+      --experiment-dir outputs/perf_harness/generated/perf_micro_ruler_mock
     metrics_file: outputs/perf_harness/generated/perf_micro_ruler_mock/metrics.json
     metrics:
       primary_mean: primary_mean

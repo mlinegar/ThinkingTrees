@@ -15,7 +15,7 @@ supervision_recovery_packages = [
   "root100_extra_local10",
   "root100_extra_leaf05_internal10",
 ]
-supervision_recovery_tree_family = "tree_neural"
+supervision_recovery_method_id = "tree_neural"
 supervision_recovery_recoverable_benchmark = "recoverable_v5_t128"
 supervision_recovery_structural_grid = "structural_core_v2_t128"
 supervision_recovery_structural_cell = "r12_p079"

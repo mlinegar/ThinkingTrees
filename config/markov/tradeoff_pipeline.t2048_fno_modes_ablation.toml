@@ -1,0 +1,72 @@
+# FNO modes ablation at zero-merge on recoverable_v5_t2048.
+#
+# Hypothesis: the ~2.14 root_mae floor at zero merges (1 leaf, 0 merges,
+# trivial single-leaf count regression) is FNO mode-bottlenecked. With
+# 20 boundaries per 2048-token doc (mean segment length ~128 tokens), the
+# boundary signal has fundamental period ~128 tokens => mode index 16
+# at Nyquist. Current default n_modes=8 is sub-Nyquist.
+#
+# Test bumping n_modes ∈ {8, 16, 32, 64, 128} at zero-merge AND at moderate
+# composition (leaf=256, 7 merges) to see:
+# (a) does higher n_modes crack the zero-merge floor?
+# (b) does higher n_modes also help at moderate composition or just zero-merge?
+# (c) is there a knee where more modes stop helping?
+#
+# Two leaf rungs * 5 n_modes * 1 package * 1 seed = 10 cells.
+# Plus FNO baselines = ~12 items.
+#
+# Note: n_modes is a preset-level parameter, so we launch this as 5 separate
+# TOMLs OR use a single sweep with overrides. For simplicity we run 5 separate
+# launch points by varying the preset.
+#
+# This single TOML uses n_modes=8 (the baseline). Launch 4 more with
+# n_modes={16, 32, 64, 128} via CLI override or per-preset TOMLs.
+
+[tradeoff_pipeline]
+preset = "standard"
+phases = ["supervision_recovery", "report"]
+device_mode = "cuda"
+train_docs = 10240
+val_docs = 1024
+test_docs = 1024
+supervision_recovery_train_docs = [10240]
+supervision_recovery_seeds = [0]
+supervision_recovery_packages = ["full100"]
+supervision_recovery_method_id = "tree_neural"
+supervision_recovery_recoverable_benchmark = "recoverable_v5_t2048"
+supervision_recovery_structural_cell = "r12_p079"
+supervision_recovery_scope_keys = ["recoverable_v5_t2048"]
+supervision_fixed_leaf_tokens = 16
+supervision_recovery_leaf_token_ladder = [2048, 256]
+supervision_recovery_leaf_token_batch_sizes = "2048=512;256=256"
+supervision_min_tokens = 2048
+supervision_max_tokens = 2048
+supervision_epochs = 40
+supervision_batch_size = 128
+exact_metric_final_doc_limit = 256
+tree_posttrain_train_doc_limit = 256
+tree_stage1_artifact_root = "outputs/_stage1_artifacts/markov_t2048_fno_modes"
+
+[tradeoff_pipeline.tree_reference]
+mode = "preset"
+preset = "unified_g_full_local_laws_v1"
+
+[tradeoff_pipeline.structural_tree_reference]
+mode = "preset"
+preset = "unified_g_full_local_laws_v1"
+
+[tradeoff_pipeline.runtime]
+data_mode = "resident"
+bucket_mode = "leaf_count_auto_queue"
+tree_batch_structural_pad_limit = 0.5
+tree_batch_auto_queue_min_docs = 8
+tree_batch_auto_queue_min_fill_ratio = 0.5
+preload_splits = ["train", "val", "test"]
+preload_targets = true
+workers_per_mig = 1
+
+[tradeoff_pipeline.scheduler]
+mode = "global_per_run"
+default_job_granularity = "family_train_seed"
+cleanup_stale_children = true
+max_gpu_items_per_mig = 1

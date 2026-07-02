@@ -1,0 +1,50 @@
+# Sum-pool ablation: n_modes=1024, leaf encoder uses sum pooling.
+# Zero-merge only (leaf=2048). 120 epochs to give ample budget.
+[tradeoff_pipeline]
+preset = "standard"
+phases = ["supervision_recovery", "report"]
+device_mode = "cuda"
+train_docs = 10240
+val_docs = 1024
+test_docs = 1024
+supervision_recovery_train_docs = [10240]
+supervision_recovery_seeds = [0]
+supervision_recovery_packages = ["full100"]
+supervision_recovery_method_id = "tree_neural"
+supervision_recovery_recoverable_benchmark = "recoverable_v5_t2048"
+supervision_recovery_structural_cell = "r12_p079"
+supervision_recovery_scope_keys = ["recoverable_v5_t2048"]
+supervision_fixed_leaf_tokens = 16
+supervision_recovery_leaf_token_ladder = [2048]
+supervision_recovery_leaf_token_batch_sizes = "2048=512"
+supervision_min_tokens = 2048
+supervision_max_tokens = 2048
+supervision_epochs = 120
+supervision_batch_size = 128
+exact_metric_final_doc_limit = 256
+tree_posttrain_train_doc_limit = 256
+tree_stage1_artifact_root = "outputs/_stage1_artifacts/markov_t2048_modes1024_sumpool"
+
+[tradeoff_pipeline.tree_reference]
+mode = "preset"
+preset = "unified_g_full_local_laws_modes1024_sumpool_v1"
+
+[tradeoff_pipeline.structural_tree_reference]
+mode = "preset"
+preset = "unified_g_full_local_laws_modes1024_sumpool_v1"
+
+[tradeoff_pipeline.runtime]
+data_mode = "resident"
+bucket_mode = "leaf_count_auto_queue"
+tree_batch_structural_pad_limit = 0.5
+tree_batch_auto_queue_min_docs = 8
+tree_batch_auto_queue_min_fill_ratio = 0.5
+preload_splits = ["train", "val", "test"]
+preload_targets = true
+workers_per_mig = 1
+
+[tradeoff_pipeline.scheduler]
+mode = "global_per_run"
+default_job_granularity = "family_train_seed"
+cleanup_stale_children = true
+max_gpu_items_per_mig = 1

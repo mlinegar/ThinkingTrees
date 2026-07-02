@@ -1,0 +1,62 @@
+[tradeoff_pipeline]
+preset = "standard"
+phases = ["supervision_recovery", "report"]
+device_mode = "cuda"
+train_docs = 10240
+val_docs = 1024
+test_docs = 1024
+
+# Paper-facing mixed-regime panels. Generate these once with:
+# python scripts/prepare_markov_hazard_panel_data.py
+supervision_recovery_hazard_panel_ids = [
+  "paper_hazard_panel_v1_t128",
+  "paper_hazard_panel_v1_t2048",
+]
+supervision_recovery_scope_keys = [
+  "paper_hazard_panel_v1_t128",
+  "paper_hazard_panel_v1_t2048",
+]
+supervision_recovery_hazard_panel_bundle_map = "paper_hazard_panel_v1_t128=outputs/_bundles/markov_hazard_panels/paper_hazard_panel_v1_t128/seed_0/base_bundle.json;paper_hazard_panel_v1_t2048=outputs/_bundles/markov_hazard_panels/paper_hazard_panel_v1_t2048/seed_0/base_bundle.json"
+
+supervision_recovery_train_docs = [1024, 4096, 10240]
+supervision_recovery_seeds = [0]
+supervision_recovery_method_id = "tree_neural"
+supervision_recovery_packages = ["full100"]
+supervision_recovery_leaf_token_ladder = [16]
+
+# Required by the existing recovery builder; mixed hazard panels are the
+# selected scopes above, while these remain compatibility defaults.
+supervision_recovery_recoverable_benchmark = "recoverable_v5_t128"
+supervision_recovery_structural_grid = "structural_core_v2_t128"
+supervision_recovery_structural_cell = "r12_p079"
+
+supervision_min_tokens = 128
+supervision_max_tokens = 128
+supervision_fixed_leaf_tokens = 16
+prepared_data_root = "outputs/_prepared_data/markov_hazard_panels"
+prepared_data_allow_create = false
+
+[tradeoff_pipeline.tree_reference]
+mode = "preset"
+capacity_root = ""
+preset = "common_factorized_sketch_v1"
+
+[tradeoff_pipeline.structural_tree_reference]
+mode = "preset"
+capacity_root = ""
+preset = "common_factorized_sketch_v1"
+
+[tradeoff_pipeline.runtime]
+data_mode = "resident"
+bucket_mode = "leaf_count_auto_queue"
+preload_splits = ["train", "val", "test"]
+preload_targets = true
+workers_per_mig = 1
+allow_multi_worker_screen = true
+capacity_workers_per_mig = 2
+
+[tradeoff_pipeline.scheduler]
+mode = "global_per_run"
+default_job_granularity = "family_train_seed"
+cleanup_stale_children = true
+max_gpu_items_per_mig = 1

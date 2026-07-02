@@ -1,0 +1,119 @@
+version: 1
+
+# Benoit chunk-FNO multi-dimension reconstruction (q-sentence FNO substrate).
+#
+# Replaces the ladder-invocation cells of:
+#   scripts/run_benoit_chunkfno_economic.sh   (economic, na + forced variants)
+#   scripts/run_benoit_chunkfno_phase2.sh     (6 dims x 2 variants chunk-FNO leg)
+#
+# NOT expressed here (leave to the orchestration side of phase2): killing the
+# vLLM servers to free the GPUs and the per-(variant,dim) grid RELABEL step
+# (scripts/relabel_benoit_grid_with_chunks.py). This bundle assumes the relabeled
+# chunk grids already exist under outputs/benoit_chunkgrid_<variant>_<dim>/ and
+# declares the chunk-FNO training runs (the recipe: root-dominant supervision
+# root_w=20, leaf_w=1.0, merge_w=0.2, leaf=16, EmbeddingGemma on GPU).
+#
+# Each run pins CUDA_VISIBLE_DEVICES so a launcher pass can fan across GPUs
+# (phase2 ran these 12 in parallel round-robin; here they are explicit cells and
+# can be launched selectively with --only or sequentially).
+#
+# Dry-run:
+#   ./venv/bin/python scripts/run_manifesto_qsentence_bundle.py \
+#     config/manifesto/qsentence_benoit.yaml --dry-run
+
+defaults:
+  family: fno
+  leaf_qsentences: "16"
+  max_iterations: 2
+  embedding:
+    backend: local-hf
+    model: /mnt/data/models/google/embeddinggemma-300m
+    device: cuda
+    batch_size: 64
+  fno:
+    epochs: 8
+    batch_size: 16
+    learning_rate: 3e-3
+    leaf_weight: 1.0
+    merge_weight: 0.2
+    root_weight: 20.0
+  extra_args: ["--verbose"]
+
+runs:
+  # --- economic (both chunk-grid variants) ---
+  - name: economic_na
+    grid_dir: outputs/benoit_chunkgrid_na_economic
+    output_dir: outputs/benoit_chunkfno_na_economic
+    target_dimension: economic
+    env:
+      CUDA_VISIBLE_DEVICES: "0"
+  - name: economic_forced
+    grid_dir: outputs/benoit_chunkgrid_forced_economic
+    output_dir: outputs/benoit_chunkfno_forced_economic
+    target_dimension: economic
+    env:
+      CUDA_VISIBLE_DEVICES: "1"
+
+  # --- phase2 remaining dimensions (na variant) ---
+  - name: social_na
+    grid_dir: outputs/benoit_chunkgrid_na_social
+    output_dir: outputs/benoit_chunkfno_na_social
+    target_dimension: social
+    env:
+      CUDA_VISIBLE_DEVICES: "2"
+  - name: immigration_na
+    grid_dir: outputs/benoit_chunkgrid_na_immigration
+    output_dir: outputs/benoit_chunkfno_na_immigration
+    target_dimension: immigration
+    env:
+      CUDA_VISIBLE_DEVICES: "3"
+  - name: eu_na
+    grid_dir: outputs/benoit_chunkgrid_na_eu
+    output_dir: outputs/benoit_chunkfno_na_eu
+    target_dimension: eu
+    env:
+      CUDA_VISIBLE_DEVICES: "0"
+  - name: environment_na
+    grid_dir: outputs/benoit_chunkgrid_na_environment
+    output_dir: outputs/benoit_chunkfno_na_environment
+    target_dimension: environment
+    env:
+      CUDA_VISIBLE_DEVICES: "1"
+  - name: decentralization_na
+    grid_dir: outputs/benoit_chunkgrid_na_decentralization
+    output_dir: outputs/benoit_chunkfno_na_decentralization
+    target_dimension: decentralization
+    env:
+      CUDA_VISIBLE_DEVICES: "2"
+
+  # --- phase2 remaining dimensions (forced variant) ---
+  - name: social_forced
+    grid_dir: outputs/benoit_chunkgrid_forced_social
+    output_dir: outputs/benoit_chunkfno_forced_social
+    target_dimension: social
+    env:
+      CUDA_VISIBLE_DEVICES: "3"
+  - name: immigration_forced
+    grid_dir: outputs/benoit_chunkgrid_forced_immigration
+    output_dir: outputs/benoit_chunkfno_forced_immigration
+    target_dimension: immigration
+    env:
+      CUDA_VISIBLE_DEVICES: "0"
+  - name: eu_forced
+    grid_dir: outputs/benoit_chunkgrid_forced_eu
+    output_dir: outputs/benoit_chunkfno_forced_eu
+    target_dimension: eu
+    env:
+      CUDA_VISIBLE_DEVICES: "1"
+  - name: environment_forced
+    grid_dir: outputs/benoit_chunkgrid_forced_environment
+    output_dir: outputs/benoit_chunkfno_forced_environment
+    target_dimension: environment
+    env:
+      CUDA_VISIBLE_DEVICES: "2"
+  - name: decentralization_forced
+    grid_dir: outputs/benoit_chunkgrid_forced_decentralization
+    output_dir: outputs/benoit_chunkfno_forced_decentralization
+    target_dimension: decentralization
+    env:
+      CUDA_VISIBLE_DEVICES: "3"

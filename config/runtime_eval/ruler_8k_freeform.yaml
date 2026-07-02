@@ -1,4 +1,4 @@
-run:
+experiment:
   name: ruler_8k_freeform_v0
 
 benchmark:
@@ -10,9 +10,9 @@ benchmark:
   model_template_type: base
   ensure_prepared: true
 
-model:
+scorer:
   # OpenAI-compatible endpoint (vLLM/SGLang/OpenAI).
-  base_url: http://localhost:8000/v1
+  endpoint: http://localhost:8000/v1
   model: default
   api_key: EMPTY
   temperature: 0.0
@@ -32,7 +32,7 @@ runtime_defaults:
   merge_memory_tokens: 256
   tree_shape: balanced
 
-  # Ablation toggles (overridden by modes like runtime_no_verifier).
+  # Ablation toggles (overridden by methods like runtime_no_verifier).
   verifier_enabled: true
   repair_enabled: true
   max_retries_per_step: 2
@@ -44,7 +44,7 @@ phases:
     seeds: [0]
     num_samples: 50
     split: validation
-    modes: [ground_truth, empty, runtime_full]
+    methods: [ground_truth, empty, runtime_full]
 
   - phase_id: S1_length_scaling
     tasks:
@@ -67,7 +67,7 @@ phases:
     seeds: [0, 1, 2]
     num_samples: 500
     split: validation
-    modes: [flat_prompt_baseline, chunk_concat_baseline, runtime_no_verifier, runtime_full]
+    methods: [flat_prompt_baseline, chunk_concat_baseline, runtime_no_verifier, runtime_full]
 
   - phase_id: S2_budget_phase
     tasks: [niah_multikey_3, vt, cwe, qa_2]
@@ -75,8 +75,7 @@ phases:
     seeds: [0, 1]
     num_samples: 200
     split: validation
-    modes: [runtime_full]
+    methods: [runtime_full]
     runtime_grid:
       leaf_memory_tokens: [64, 128, 256, 512, 1024]
       merge_memory_tokens: [64, 128, 256, 512, 1024]
-
