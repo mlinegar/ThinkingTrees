@@ -8,6 +8,11 @@ Bridge from neural-operator approximation to approximate theorem-backedness.
 
 The central point of this file is intentionally modest and explicit:
 
+- the core C-TreePO theorem interface is stochastic (`Summarizer = α → PMF α`);
+- this file certifies deterministic neural-operator realizers and embeds them
+  through `deterministicSummarizer`;
+- randomized summarizers are covered by the broader PMF-valued local-law stack
+  unless one supplies a separate randomized-operator approximation theorem;
 - an ideal deterministic summarizer `sStar` may already be known to be
   `ExactTheoremBacked`;
 - a realized summarizer `sApprox` may approximate `sStar` uniformly on compact

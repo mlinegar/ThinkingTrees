@@ -1,0 +1,171 @@
+\section{What the Guarantees Say}\label{sec:min-guarantees}
+
+The formal results can be read as one stack for the economic example.
+If every realized leaf and merge preserves the economic oracle, the
+root summary preserves the full-manifesto economic score. If the run
+also preserves re-summarization, extra passes do not drift. If the
+downstream preference objective depends on the document only through
+its preserved economic value, training on root summaries and training
+on full manifestos share a population target. And if preservation is
+only approximate, sampled node-level audits turn the residual into an
+explicit, finite-sample objective-gap certificate.
+Figure~\ref{fig:min-theorem-deps} shows how the statements compose.
+
+\begin{figure}[t]
+    \centering
+    \begin{tikzpicture}[
+        every matrix/.style={
+            matrix of nodes,
+            ampersand replacement=\&,
+            column sep=7mm, row sep=3.5mm,
+            nodes={draw, rounded corners=1pt, inner sep=5pt,
+                   minimum height=7.5mm, font=\small, align=center},
+        },
+        arr/.style={-{Latex[length=1.8mm]}, shorten >=2pt, shorten <=2pt},
+    ]
+        \matrix (m) {
+            C1 $+$ C3 $+$ Assumption~\ref{ass:context} \&
+                Preservation \& Thm.~\ref{thm:one-pass} \\
+            $+\,$C2 \&
+                Recompression \& Thm.~\ref{thm:multi-round} \\
+            $+\,$oracle factorization \&
+                Optimization \& Thm.~\ref{thm:pref-equiv} \\
+            $+\,$transport, calibration, sampling \&
+                Certificate \& Thms.~\ref{thm:unified-gap}, \ref{thm:e2e} \\
+        };
+        \foreach \r in {1,2,3,4} {
+            \draw[arr] (m-\r-1.east) -- (m-\r-2.west);
+            \draw[arr] (m-\r-2.east) -- (m-\r-3.west);
+        }
+    \end{tikzpicture}
+    \caption{\textbf{Each theorem adds one ingredient to the bundle
+    above it.} The four theorem statements of this section read as a
+    stack: preservation uses only the realized local laws; repeated-round
+    stability adds C2; preference alignment adds ``oracle factorization''
+    (a measurability premise on the downstream preference objective);
+    the finite-sample certificate adds transport, calibration, and
+    sampling envelopes that turn a population distortion into a
+    reportable bound.}
+    \label{fig:min-theorem-deps}
+\end{figure}
+
+\paragraph{Root preservation.}
+Fix a document partition and a full binary merge tree with leaves in
+contiguous order. The root stored summary is written $Z^{(1)}(x)$;
+re-summarization rounds $Z^{(R+1)}(x) = g(Z^{(R)}(x))$ iterate from
+there.
+
+\begin{theorem}[Inductive preservation]\label{thm:one-pass}
+If the realized run satisfies \eqref{eq:leaf_sufficiency},
+\eqref{eq:leaf_compatibility}, and Assumption~\ref{ass:context} for the
+target oracle, then
+\[
+    \E\!\left[\metric\big(\fstar(Z^{(1)}(x)),\fstar(x)\big)\right] = 0.
+\]
+\end{theorem}
+
+\begin{theorem}[Preservation under re-summarization]\label{thm:multi-round}
+If the run additionally satisfies \eqref{eq:leaf_idempotence}, the
+same equality holds for every round $R\ge 1$:
+\[
+    \E\!\left[\metric\big(\fstar(Z^{(R)}(x)),\fstar(x)\big)\right] = 0.
+\]
+\end{theorem}
+
+Structurally this is induction on the tree.
+Assumption~\ref{ass:context} lets an oracle-equivalent child substitute
+for the raw child span inside its parent's context;
+\eqref{eq:leaf_compatibility} propagates the substitution across each
+merge; and \eqref{eq:leaf_idempotence} carries it through any number
+of recompression passes.
+
+\begin{corollary}[Schedule invariance]\label{cor:schedule}
+For a fixed contiguous partition, any two reduction schedules that
+satisfy the same realized local laws have the same expected oracle
+value at the root.
+\end{corollary}
+
+In practice, left-to-right merges, balanced binary merges, and every
+other schedule that respects the partition land on the same economic
+reading, provided every realized call stays within the preservation
+stack.
+
+\paragraph{Preference alignment.}
+\begin{theorem}[Preference-objective equivalence;
+\textsc{PaperPreferenceStack}]\label{thm:pref-equiv}
+Under the recompression stack, together with an \emph{oracle-factorization}
+premise on the downstream objective---a measurability statement saying
+the preference objective depends on the document only through its
+oracle value $\fstar(x)$---and the generator-indexing premise of the
+chosen application bundle, the full-document and summary preference
+objectives share a population target: zero residual gives identical
+argmin sets, and residual $\varepsilon$ makes every minimizer of the
+summary objective $2\varepsilon$-optimal for the full objective.
+\end{theorem}
+
+The two cases correspond to the Lean statements
+\texttt{paper\_preference\_stack\_same\_argmin} (exact) and
+\texttt{paper\_preference\_stack\_summary\_argmin\_full\_epsilon}
+(approximate); Appendix~\ref{app:min-proofs} gives the crosswalk.
+
+The DPO and GRPO applications are premise packages that instantiate
+this equivalence. Under their bundle assumptions, the preference
+objective sees the document only through its preserved economic value,
+so training on summaries aims at the same population target as
+training on full manifestos.
+
+\paragraph{Finite-sample certificate.}
+Approximate preservation is handled by a method transport constant
+$C_{\mathrm{meth}}$. Write
+$\Delta_R = \E[\metric(\fstar(X),\fstar(Z^{(R)}(X)))]$
+for the expected oracle distortion after $R$ recompression rounds of
+Theorem~\ref{thm:multi-round}.
+
+\begin{theorem}[Unified preference gap]\label{thm:unified-gap}
+If the method-specific expected inner loss has transport constant
+$C_{\mathrm{meth}}$ in oracle distance, then
+\[
+    |G_{\mathrm{meth}}| \le C_{\mathrm{meth}}\,\Delta_R.
+\]
+\end{theorem}
+
+\begin{theorem}[Audited preference-gap certificate;
+\textsc{PaperErrorStack}]\label{thm:e2e}
+Let $\hat\Delta_R$ be the design-based estimate of $\Delta_R$ from a
+tree-unit audit with logged positive propensities. On the event where
+judge calibration, sampling error, and clipping are bounded by
+$B_{\mathrm{cal}}$, $B_{\mathrm{est}}$, and $B_{\mathrm{clip}}$ in
+objective units,
+\[
+    |G_{\mathrm{meth}}|
+    \le
+    C_{\mathrm{meth}}\hat{\Delta}_R + B_{\mathrm{cal}}
+    + B_{\mathrm{est}} + B_{\mathrm{clip}}.
+\]
+The high-probability version of this inequality is the Lean statement
+\texttt{paper\_error\_stack\_high\_prob}; the methodologist-facing
+certificate is \texttt{PaperErrorCertificate}, with method-specific
+end-to-end variants \texttt{dpo\_treepo\_end\_to\_end},
+\texttt{grpo\_pl\_treepo\_end\_to\_end}, and
+\texttt{grpo\_rl\_treepo\_end\_to\_end} (all in
+Appendix~\ref{app:min-proofs}).
+\end{theorem}
+
+The four envelope terms carry the four real sources of slack.
+$C_{\mathrm{meth}}\hat\Delta_R$ is the observed local distortion
+converted into objective units. $B_{\mathrm{cal}}$ covers the gap
+between the accessible judge and the trusted expert oracle.
+$B_{\mathrm{est}}$ is sampling error from the audit design.
+$B_{\mathrm{clip}}$ records any stabilisation bias from clipped
+inverse-propensity weights. More local labels shrink
+$B_{\mathrm{est}}$ directly but not $B_{\mathrm{cal}}$: calibration is
+a judge-oracle question, not a sample-size question.
+
+\paragraph{Conditional, not unconditional.}
+These theorems are conditional on economic-state preservation at every
+realized call. They do not assert that an arbitrary summarizer
+preserves that state on political text; that claim is what the audit
+in Section~\ref{sec:min-audit} estimates, and what
+Section~\ref{sec:min-validation} cross-checks on two tasks whose
+states are known in advance. Appendix~\ref{app:min-proofs} gives the
+proof sketches.

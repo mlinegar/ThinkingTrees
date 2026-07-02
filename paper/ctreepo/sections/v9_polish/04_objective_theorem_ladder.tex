@@ -1,0 +1,196 @@
+\section{Objective and Theorem Ladder}
+\label{sec:v8-objective}
+\label{sec:v8-theorem-ladder}
+
+\subsection{The C-TreePO Objective}
+
+Section~\ref{sec:v8-ctree-math} gives the structural goal: learn one
+state map \(g\) whose node states can replace the manifesto spans they
+represent for oracle-compatible readouts. We now write the loss that
+pushes \(g\) toward that goal. The shape is two-channel. The root
+channel asks the predicted document score to match the expert mean.
+The local channel asks every realized state to behave like a valid
+manifesto state in its own right.
+
+Let \(L_{\mathrm{root}}(g)\) be the root-level loss, measured against
+the available expert target. In the manifesto experiments,
+\(L_{\mathrm{root}}\) measures the discrepancy between the predicted
+root score and the expert-survey mean; the precise per-node agreement
+metric used by the prompt-and-demonstration optimizer is given in
+Section~\ref{sec:v8-benoit-tree-setup}.
+
+For the local channel, attach one node loss to each \(v\in V(T)\).
+The form of the loss depends on which law applies at \(v\). At a
+leaf, the loss measures C1: does the leaf summary preserve the policy
+evidence in the raw text? At a state passed back through \(g\), the
+loss measures C2: does summarizing again give the same expert-facing
+answer? At an internal merge, the loss measures C3: does merging the
+two children preserve the joint policy evidence of the parent span?
+If every check could be measured by the target oracle, the local-law
+loss at node \(v\) would be
+\[
+  \ell_v^\ast
+  =
+  \ell_{\mathrm{law}}(v;f^\ast,g).
+\]
+The star marks the target quantity: the local-law loss as it would be
+measured by the expert oracle, not by the cheaper proxy used during
+dense training.
+
+Let \(d(v)\) be the depth of node \(v\), with the root at depth \(0\),
+and let \(\gamma\in[0,1]\) be a depth-discount weight. Each node enters
+the local-law sum with weight \(\gamma^{d(v)}\), so the root counts
+fully and deeper nodes count progressively less. \(\gamma=1\) treats
+every node equally; smaller \(\gamma\) emphasizes nodes near the root
+and damps deeper nodes. This is the same discount pattern used in
+discounted-reward objectives, and the matching Lean formalization
+carries \(\gamma\) through the local-law sum, so we report \(\gamma\)
+as a declared knob even when \(\gamma=1\) is the operational default.
+The oracle local-law channel is
+\begin{equation}
+\label{eq:v8-local-law-estimand}
+  L_{\mathrm{law}}^\ast(g,T)
+  =
+  \sum_{v\in V(T)}\gamma^{d(v)}\ell_v^\ast .
+\end{equation}
+The theorem-facing objective is
+\begin{equation}
+\label{eq:v8-main-objective}
+  J_\lambda^\ast(g)
+  =
+  (1-\lambda)L_{\mathrm{root}}(g)
+  +
+  \lambda L_{\mathrm{law}}^\ast(g,T),
+  \qquad 0\le\lambda\le 1 .
+\end{equation}
+Here \(\lambda\) is the analyst-chosen local-law share. \(\lambda=0\)
+trains on the document-level expert target alone, with no local-law
+pressure on \(g\). \(\lambda=1\) trains on local laws alone and lets
+the root drift. Intermediate values balance the two. The root term
+names the manifesto score we ultimately report; the local term names
+the state-validity pressure that makes the theorem relevant to the
+fitted tree.
+
+\subsection{Three Claim Stacks}
+
+The objective sits inside three nested claim stacks. Each stack adds premises
+and supports a different conclusion.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}p{0.24\linewidth}p{0.33\linewidth}p{0.34\linewidth}@{}}
+\toprule
+Stack & Added premise & Manifesto-facing conclusion \\
+\midrule
+Preservation & C1/C2/C3 hold on the realized C-Tree for \(f^\ast\) &
+Node and root states can replace their raw manifesto spans for
+oracle-compatible readouts. \\
+Optimization & Preferences or losses depend on the input only through the
+preserved oracle interface &
+Training on valid root summaries has the same population target as training
+on full manifestos. \\
+Certificate & Approximate local-law distortion is bounded or estimated from
+sampled nodes with logged propensities &
+Approximate preservation becomes a finite-sample bound on downstream
+objective drift. \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{The theorem ladder.} Each tier keeps the Manifesto target
+explicit: the oracle is the policy measurement the analyst wants to preserve.}
+\label{tab:v8-theorem-ladder}
+\end{table}
+
+The three stacks build on each other. Preservation is the cleanest
+claim and assumes exact local laws. Optimization keeps the exact-laws
+premise and adds a compatibility condition on the downstream training
+object. Certificate relaxes exact laws to a sampled bound estimated
+from the realized tree. We take them in order.
+
+The preservation stack is Theorem~\ref{thm:v8-root-preservation} and
+Corollary~\ref{cor:v8-preferences-pass-to-root}. It is the
+local-to-global claim: if every realized state remains in the same
+\(f^\ast\)-fiber as the span it represents, then the root state
+remains in the same fiber as the whole manifesto.
+
+The optimization stack adds an oracle-compatibility premise for the
+downstream training object. The manifesto experiments below use a
+regression target, where this premise holds automatically:
+\(L_{\mathrm{root}}\) sees the manifesto only through its predicted
+score. The premise becomes load-bearing when the framework is applied
+to preference-learning or RL-style downstream tasks. For pairwise
+preference learning, a comparison rule is compatible when replacing a
+manifesto by an equivalent root state does not change the preferred
+answer. This covers DPO-style pairwise objectives
+\citep{BradleyTerry1952,RafailovEtAl2023DPO} and GRPO-style group
+objectives only when the prompt, response generator, policy, ranker,
+or reward channel depends on the manifesto through the preserved
+policy oracle. A preference for formatting, rhetoric, or style
+outside the policy target needs a wider oracle interface.
+
+\begin{proposition}[Manifesto Preference Objective Equivalence]
+\label{prop:v8-manifesto-preference-equivalence}
+Fix a population of manifestos and a realized C-Tree construction for each
+manifesto. If C1/C2/C3 hold exactly for \(f^\ast\), and if the downstream
+preference loss is oracle-compatible in the input argument, then replacing each
+manifesto by its C-Tree root state leaves the population preference objective
+unchanged.
+\end{proposition}
+
+The proposition says that root summaries can be used as training inputs only
+for preference tasks whose input dependence is already captured by the
+manifesto policy target. Exact local laws handle the compression step; the
+oracle-compatibility premise handles the downstream objective.
+
+\subsection{Approximate Preservation}
+
+Exact local laws are the clean theorem endpoint. The deployed LLM
+setting is approximate. The realized state at each node differs from
+the raw span by some amount, and the realized score at the root
+differs from the expert mean by some amount. Three quantities organize
+that approximation.
+
+\(G_{\mathrm{meth}}\) is the drift in whatever downstream quantity the
+analyst is reporting (a population correlation, a population MSE, or a
+preference-task population gap). This is the error the analyst cares
+about.
+
+\(\Delta_R\) is the average distortion between a produced state and
+the raw span it represents, measured by the oracle. The subscript
+\(R\) marks the represented-span comparison.
+
+\(C_{\mathrm{meth}}\) is a method-specific transport constant. It
+captures how much the downstream quantity can move when the
+representation moves: a small \(C_{\mathrm{meth}}\) means a smooth
+downstream method that tolerates small representation distortion well,
+and a large \(C_{\mathrm{meth}}\) means a sharper method where small
+representation errors translate into bigger reported drift.
+
+The bound is
+\begin{equation}
+\label{eq:v8-population-gap}
+  |G_{\mathrm{meth}}|
+  \le
+  C_{\mathrm{meth}}\,\Delta_R .
+\end{equation}
+For the manifesto regression case, \(C_{\mathrm{meth}}\) is the
+Lipschitz constant of the score readout: how far the predicted score
+can move when the input state moves a little. For DPO,
+\(C_{\mathrm{meth}}\) packages a policy-Lipschitz condition on the
+log-probability ratios. For group-ranking or RL-style objectives,
+\(C_{\mathrm{meth}}\) packages the ranker, reward, clipping, and KL
+terms. The constant belongs to the downstream training method; the
+C-Tree audit supplies \(\Delta_R\).
+
+Section~\ref{sec:v8-audit-certificate} develops the operational route
+for \(\Delta_R\): sample realized manifesto tree nodes and use a
+Horvitz--Thompson estimator with logged inclusion
+probabilities.\footnote{A separate representation route bounds
+\(\Delta_R\) from function-class approximation properties of \(g\); we
+do not develop that route in the main text because the operational
+route is what carries the deployed manifesto measurement. The
+function-class formulation is in
+Appendix~\ref{app:v8-neural-operator-route}.}
+Appendix~\ref{app:v8-full-proofs} gives the proof details for the
+preservation, preference-transport, and certificate statements used
+in this ladder.

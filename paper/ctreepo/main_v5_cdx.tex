@@ -1,0 +1,90 @@
+\documentclass[11pt]{article}
+
+\input{preamble_minimal}
+\usepackage{array}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\title{C-TreePO: Learned Mergeable Sketches for Design-Based Long-Document Measurement}
+\author{Mitchell Linegar}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Long-document measurement with language models usually hides a compression
+problem. A model is asked to score a document, but in practice the scored
+object may be a chunked, retrieved, recursively summarized, or otherwise
+compressed representation. Classical mergeable sketches give the clean
+version of the problem. In Count-Min, a hand-designed map $g$ turns a stream
+segment into counters, counter states merge exactly by addition, and a readout
+$f_q$ estimates an item frequency from the merged state. The state is useful
+because it is sufficient for the fixed query family up to the sketch's
+collision error. C-TreePO asks for the same state--merge--readout discipline
+when the query is a social-science oracle and the state is not known in
+advance. A summarizer $g$ maps spans into task-relative states, a readout $f$
+scores the root, and local laws check whether leaf summaries, re-summary
+steps, and merges preserve the oracle along the realized tree. The classical
+case hand-crafts $g$ for a fixed $f$; C-TreePO learns $g$ and, when needed,
+the readout $f$ in a general function class. For LLM applications this means
+prompt search, instruction tuning, or weight optimization against the oracle,
+with the important benefit that $g(x)$ is readable text rather than an opaque
+register array. For continuous or non-language domains, the same interface is
+a learned operator between function spaces, such as a neural operator.
+Design-Based Supervised Learning supplies the audit design: root labels anchor
+the full-document target, sampled node labels estimate local-law residuals,
+and logged propensities support IPW/Horvitz--Thompson certificates for
+compression-induced distortion. The main application is Manifesto/Benoit
+political-text measurement. On six policy dimensions, a single open-weight
+C-Tree pipeline reaches macro Pearson $r=0.829$ against expert-survey means,
+above Benoit's proprietary 18-score ensemble ($0.817$) and matched open-weight
+replication ($0.793$). The first two sections of this draft develop the
+learned mergeable-sketch framing; later sections retain the current empirical
+and audit scaffolding.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+
+\etocdepthtag.toc{minimalmain}
+\input{sections/v5_cdx/01_introduction}
+\input{sections/v5_cdx/02_state_laws}
+
+\clearpage
+\section*{Version Note on Remaining Sections}
+\addcontentsline{toc}{section}{Version Note on Remaining Sections}
+Sections~3--7 below are inherited from the current v4 C-TreePO draft so this
+v5 shell remains compileable and keeps the existing empirical, audit, and
+appendix references intact. The active v5 rewrite in this pass is the
+abstract, Section~\ref{sec:min-introduction}, and
+Section~\ref{sec:min-framework}; later sections should be harmonized with the
+learned mergeable-sketch framing in the next revision pass.
+
+\input{sections/v4_cdx/03_audit}
+\input{sections/v4_cdx/04_guarantees}
+\input{sections/v4_cdx/05_manifesto_results}
+\input{sections/v4_cdx/06_simulation_bridge}
+\input{sections/v4_cdx/07_preference_scope}
+
+\appendix
+\etocdepthtag.toc{minimalappendixfront}
+\appendixcontents
+\etocdepthtag.toc{minimalappendix}
+
+\input{appendix/minimal/A_notation_assumptions}
+\input{appendix/v4_cdx/A_dsl_audit}
+\input{appendix/minimal/B_algebraic_background}
+\input{appendix/minimal/C_proofs_formalization}
+\input{appendix/minimal/D_neural_operator}
+\input{appendix/minimal/E_markov_details}
+\input{appendix/v4_cdx/B_supervision_allocation}
+\input{appendix/minimal/F_hll_details}
+\input{appendix/minimal/G_manifesto_details}
+\input{appendix/minimal/H_audit_details}
+\input{appendix/minimal/I_related_scope}
+
+\clearpage
+\bibliographystyle{plainnat}
+\bibliography{../refs}
+
+\end{document}

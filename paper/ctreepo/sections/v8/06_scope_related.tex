@@ -1,0 +1,47 @@
+\section{Scope and Related Work}\label{sec:v8-scope-related}
+
+\subsection{Scope}
+
+C-TreePO is scoped to long-context tasks where the target judgment is global,
+the evidence can be represented through bounded local states, and a finite
+population of leaf, state, and merge checks can be sampled with known
+propensities. The framework separates three layers: representation through one
+learned \(g\), root and local-law objectives through \(f^\ast\) and
+\(\widehat f\), and design-based estimation of the local-law channel.
+
+The guarantee is task-relative. C-TreePO does not claim generic semantic
+compression, preservation of preferences outside the chosen oracle interface,
+or certification of local laws without local oracle evidence. A root-observed
+benchmark can validate document-level performance, as in
+Section~\ref{sec:v8-manifesto-results}; a node-level local-law certificate is a
+stronger and different measurement layer. When a downstream preference depends
+on information outside the chosen oracle interface, the oracle or query family
+must be expanded before the theorem applies.
+
+For LLM measurement, the important distinction is root labels versus local
+evidence labels. Root expert labels train and evaluate the final task. Local
+proxy labels make the C-Tree trainable at scale. Sampled local oracle labels
+identify proxy bias in the law channel. This is why the main math keeps both
+\(f^\ast\) and \(\widehat f\) visible.
+
+\subsection{Related Work}
+
+The closest systems precedent is mergeable summaries for distributed and
+streaming queries \citep{Agarwal2013MergeableTODS}. Database algebraic
+aggregates \citep{GrayEtAl1997DataCube}, unordered MUD-style aggregation
+\citep{FeldmanEtAl2008MUD}, and ordered homomorphism results
+\citep{Gibbons1996ThirdHomomorphism} supply the state/merge/query template.
+C-TreePO uses that template as an auditable target for learned semantic states.
+
+The sampling layer is design-based supervised learning. Logged propensities
+turn sampled local-law outcomes into HT estimates or Hajek-style
+ratio-normalized estimates of the realized tree population, and clipping or
+effective-sample-size diagnostics belong to that estimation layer. The
+objective weights choose the root/local tradeoff; the audit estimates how well
+the fitted tree satisfied the chosen target.
+
+Neural operators and Fourier neural operators are treated as representation
+families for state maps. Markov, HyperLogLog, and broader sketch comparisons
+are appendix-side controls because their valid states are known or testable.
+They serve as backstops for the same state-composition principle, while the
+main text focuses on the LLM-side C-TreePO objective.

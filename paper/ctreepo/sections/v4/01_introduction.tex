@@ -1,0 +1,141 @@
+\section{Introduction}\label{sec:min-introduction}
+
+Two facts are well known. First, LLMs carry their own (sometimes
+substantial) biases on text of any length. Second, even small biases in
+LLM-produced labels translate into substantial biases in downstream
+regression estimates, even when label accuracy looks high
+\citep{EgamiEtAl2024}. Together they raise the bar for using LLMs as
+measurement tools in empirical research: high-accuracy LLM scoring on a
+large corpus does not guarantee unbiased downstream regression
+coefficients, and the size of the resulting bias is not bounded by the
+size of the labeling error. Long documents amplify the problem. LLMs
+degrade on information buried in the middle of long inputs
+\citep{LiuEtAl2024LostMiddle}, and a single long-context read on a
+hundred-page document gives no traceable account of which
+rubric-relevant distinctions the model recovered and which it missed.
+
+Correcting for the bias requires a trusted gold-standard label to
+compare the LLM against. Gold-standard labels for long documents are
+expensive: each one needs an expert to read the full document under a
+rubric, and reading time grows roughly linearly in document length.
+The Manifesto Project illustrates the scale: trained coders score
+party platforms (often $50$--$200$ pages each) along six policy
+dimensions; the released dataset is $2{,}157$ platforms accumulated
+over decades, and the marginal cost of an additional platform is the
+same as the first. A researcher who wants labels at the rate new
+documents arrive cannot scale out of that cost.
+
+Our key assumption is that the oracle judgment of a long document
+decomposes across the leaves and merges of a recursive summarization
+tree. Concretely, we split a document into contiguous leaves
+(uniform chunks of fixed size, paragraph boundaries, section breaks, or
+any other contiguous segmentation), summarize each leaf, merge sibling
+summaries pairwise up a tree, and score the root; we want the root
+score to equal what a trusted coder would have assigned to the full
+document. Three local laws make the assumption precise: each leaf
+summary preserves the evidence its leaf carries (C1), re-summarizing a
+stored summary does not drift (C2), and split-then-merge preserves the
+same cross-leaf interactions as summarize-together (C3). Under those laws, two consequences follow
+(Section~\ref{sec:min-guarantees}): the root summary's task value
+equals the full document's (\emph{root preservation}), and any two
+merge schedules satisfying the same realized laws give the same root
+value (\emph{schedule invariance}). With an additional
+oracle-factorization assumption, the laws also imply that algorithms
+such as DPO and GRPO trained on root summaries target the same
+population minimum as on full documents.
+
+The frame is an approximate sufficient statistic on a tree merge:
+$f(g(g(u)\concat g(v))) \approx f(u\concat v)$, with $g$ the
+summarizer and $f$ the readout. Fisher and Blackwell give the static
+form \citep{Fisher1922,Blackwell1953}. Mergeable summaries
+\citep{Agarwal2013MergeableTODS,FlajoletEtAl2007,CormodeMuthukrishnan2005}
+add an associative merge axiom, with sufficient statistics for a fixed
+catalog of queries (Count-Min for item frequency, HyperLogLog for
+cardinality, GK for quantiles). Sketch-Flip-Merge extends mergeable
+summaries to local differential privacy, where sufficiency must
+survive a noisy local randomizer between leaf and merge
+\citep{HehirTingCormode2023SFM}. In each of these generations, $(f,
+g)$ was hand-crafted: someone wrote down register-wise max,
+hash-and-min, or flip-and-merge so the sufficiency proof would go
+through analytically on the fixed query catalog.
+
+C-TreePO replaces the hand-crafting with optimization in a function
+space. $(f, g)$ live in a parameterized class; the local laws are the
+axioms the joint solution must satisfy; the audit estimates residual
+law violations on the deployed tree. Two regimes cover the
+practical instantiations. For LLM-shaped $g$, the optimization is
+prompt or weight tuning against the oracle, and the genuinely new
+ingredient is observability of the summary itself: $g(x)$ is text, so
+sufficiency becomes empirically auditable by direct reading and
+counterfactual fiber sampling, alongside the algebraic checks
+classical sketches rely on. For continuous structured inputs without
+an LLM as the right vehicle, $g$ is a neural operator, a learned
+mapping between function spaces \citep{Kovachki23NeuralOperator,Li21FNO}.
+The local-law machinery is the same in either regime, and the local
+laws are equivalent to the mergeable-summary axioms on the realized
+state space (Theorem~\ref{thm:sketch-equivalence}), so the classical
+and learned regimes inherit each other's guarantees.
+
+The local laws have two equivalent uses. At audit time, the audit
+estimates how often each law holds on a deployed tree from sampled
+gold-standard labels. At training time, adding a $\lambda$-weighted
+local-law penalty to the oracle-fit objective projects the learned
+operator toward the subspace where the laws hold
+(Section~\ref{sec:min-projection-estimation}). The audit machinery: treat each
+realized leaf, stored summary, and merge node as a finite-population
+unit; sample with logged inclusion probabilities; reweight by inverse
+probability (Horvitz--Thompson) to estimate violation rates and oracle
+distortion. This is design-based supervised
+learning applied at the compression step itself. When the laws hold the
+algebra preserves the root; when they fail the audit reports the size
+of the failure, and the gap-bound theorem
+(Section~\ref{sec:min-guarantees}) converts that into a finite-sample
+envelope on the downstream estimand.
+
+The pair lets a researcher reallocate gold-standard supervision. The
+audit's estimation envelope responds to the total count of labeled
+units, full-document or sampled-node alike. Node labels are often much
+cheaper than document labels (span-level codings, leaf-level scores
+from a deliberation-grade LLM, or the Manifesto Project's own
+quasi-sentence annotations, of which the corpus has $\sim\!2.27$M),
+and the audit certifies their use without bias. Every scored leaf or
+merge then counts toward the same shrinking envelope as one
+gold-standard read of the full document, so the choice of where to
+spend the next gold label is no longer pinned to the document level.
+The object of supervision becomes a design choice: the researcher
+picks the unit of measurement that gives the most signal per unit of
+expert effort, and the audit machinery makes the choice defensible.
+
+On the Manifesto Project six-dimension benchmark of
+\citet{BenoitEtAl2025}, a single open-weight C-tree pipeline equals or
+outperforms their frontier proprietary 18-score ensemble across six
+policy dimensions.
+The structural headline is leaf-size invariance. A researcher can split a
+manifesto into $\sim\!1\mathrm{K}$-token leaves or
+$\sim\!16\mathrm{K}$-token leaves (a $16\times$ range) and the macro
+correlation against expert means stays in a narrow band; the
+alternating prompt ladder shows the same plateau on the economic
+dimension across $1024$--$8192$ token leaves. Schedule invariance
+(Cor.~\ref{cor:schedule}) is the formal version with leaves held fixed;
+Section~\ref{sec:min-manifesto-results} reports the empirical extension
+across leaf partitions, where the choice of how finely to split a
+document becomes an audit-budget question (smaller leaves give more
+sampling sites) and not a question of what is being measured.
+
+The rest of the manuscript builds outward from that application.
+Section~\ref{sec:min-framework} states the algebra: task state,
+compression tree, and three local laws. Section~\ref{sec:min-audit}
+moves immediately to the audit, because the audit is the political-methods
+contribution: it turns local algebra into a design-based
+partial-document supervision scheme. Section~\ref{sec:min-guarantees}
+states the conditional theorem stack.
+Section~\ref{sec:min-manifesto-results} reports the Manifesto results,
+with leaf-size invariance as the headline structural claim.
+Section~\ref{sec:min-discussion} states the finite-sample gap
+decomposition, the global-versus-local label trade, and a forward-looking
+note on the gold-to-strong-to-small distillation chain the same audit
+certifies. Markov, HyperLogLog, mergeable-sketch, and neural-operator
+anchors live in the appendices (Apps.~\ref{app:min-algebra},
+\ref{app:min-neural}, \ref{app:min-markov}, \ref{app:min-hll}) as
+validation evidence that the same invariance pattern holds under
+closed-form and classical-sketch oracles.

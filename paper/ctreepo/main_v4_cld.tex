@@ -1,0 +1,76 @@
+\documentclass[11pt]{article}
+
+\input{preamble_minimal}
+
+\title{C-TreePO: An Algebra and Audit for LLM-Based Long-Document Measurement}
+\author{Mitchell Linegar}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Two facts are well known: LLMs carry their own (sometimes substantial)
+biases on text of any length, and even small biases in LLM-produced
+labels turn into large biases in downstream regression estimates. Long
+documents amplify both problems, and document-level gold-standard
+labels that could correct the gap are expensive. We show that compression trees (or C-trees) preserve the oracle value
+of a full document at the root for a large class of oracle judgments
+and preferences, under three local laws stated on the leaves and
+merges. C-TreePO (Compression-Tree Preference Optimization) pairs that
+algebra with a design-based audit
+(inverse-propensity weighting over sampled leaves, stored summaries,
+and merge nodes) that returns a finite-sample envelope on the
+downstream estimand when the laws hold only approximately. With an
+additional oracle-factorization assumption, algorithms such as DPO and
+GRPO trained on root summaries target the same population minimum as
+trained on full documents. Cheap node-level labels and expensive document-level
+gold-standard labels feed the same shrinking envelope, so a
+researcher can reallocate gold-standard supervision across the tree
+without changing the estimand. The object of supervision becomes a design choice: the
+researcher picks the unit of measurement that gives the most signal
+per unit of expert effort. On the Manifesto Project (a long-document corpus with
+gold-standard expert annotations), a single open-weight C-tree pipeline
+equals or outperforms an ensemble of frontier proprietary LLMs
+\citep{BenoitEtAl2025} across six policy dimensions. The framework treats summaries as approximate
+sufficient statistics on a tree merge, extending the mergeable-sketch
+algebra \citep{Agarwal2013MergeableTODS,HehirTingCormode2023SFM} to
+learned, observable summaries audited at runtime; simulations on
+synthetic settings (where the global oracle is known by construction)
+confirm that the local structure lets us collect gold labels at any
+level of the tree without changing the estimand.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+
+\etocdepthtag.toc{minimalmain}
+\input{sections/v4/01_introduction}
+\input{sections/v4/02_algebra}
+\input{sections/v4/03_audit}
+\input{sections/v4/04_theorem_ladder}
+\input{sections/v4/05_manifesto}
+\input{sections/v4/06_discussion}
+\input{sections/v4/07_related}
+\input{sections/v4/08_conclusion}
+
+\appendix
+\etocdepthtag.toc{minimalappendixfront}
+\appendixcontents
+\etocdepthtag.toc{minimalappendix}
+
+\input{appendix/minimal/A_notation_assumptions}
+\input{appendix/minimal/B_algebraic_background}
+\input{appendix/minimal/C_proofs_formalization}
+\input{appendix/minimal/D_neural_operator}
+\input{appendix/minimal/E_markov_details}
+\input{appendix/minimal/F_hll_details}
+\input{appendix/minimal/G_manifesto_details}
+\input{appendix/minimal/H_audit_details}
+\input{appendix/minimal/I_related_scope}
+
+\clearpage
+\bibliographystyle{plainnat}
+\bibliography{../refs}
+
+\end{document}

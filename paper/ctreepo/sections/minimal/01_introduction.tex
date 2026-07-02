@@ -1,0 +1,69 @@
+\section{Introduction}\label{sec:min-introduction}
+
+The motivating problem is a single social-science measurement task. A party manifesto is a long document, and a researcher wants one
+economic-policy score: where does the party sit on the public-services versus
+taxation dimension used in the Manifesto/Benoit benchmark
+\citep{BenoitEtAl2025,ManifestoProject2025a}? The score is document-level,
+but the evidence is not. Fiscal pledges, welfare commitments, tax positions,
+industrial policy, and the qualifications that govern how any of those
+statements should be read are spread across paragraphs and sections. The
+useful question is therefore whether we can work at a smaller granularity
+than the whole manifesto without changing the economic-position target.
+
+C-TreePO treats that question as a local state-composition problem. We
+assume there is a task-relative economic state $S_{\mathrm{econ}}(x)$ for any
+span $x$: all evidence in that span that a trusted economic-policy coder
+would need for the chosen rubric, and nothing of the slogans or style that
+cannot change the final score. The state is conceptual rather than directly
+observed---the theorems of Section~\ref{sec:min-guarantees} treat
+$S_{\mathrm{econ}}$, its readout $r_{\mathrm{econ}}$, and the implied
+target
+$\fstar_{\mathrm{econ}}(x) = r_{\mathrm{econ}}\!\left(S_{\mathrm{econ}}(x)\right)$
+as assumptions about the measurement problem rather than claims about
+political text. A language-model summary, a hand-coded quasi-sentence
+aggregate, or a learned vector state is only a surrogate for that state. A
+compression tree is valid when those surrogates preserve the oracle-visible
+economic state as spans are summarized and merged;
+Section~\ref{sec:min-manifesto-state} makes that precise on the example, and
+Section~\ref{sec:min-framework} writes it down as three local laws.
+
+The practical promise is granularity reduction. If a paragraph- or
+section-level summary preserves the economic evidence in that span, and if
+merging sibling summaries preserves the interaction visible in their union,
+then a researcher can label, audit, and optimize many smaller units whenever
+the application calls for node-level certification or label-budget
+substitution. That promise sits alongside---not instead of---the
+Manifesto/Benoit evaluation reported in
+Section~\ref{sec:min-manifesto-results}. That evaluation is
+\emph{root-observed}: every sampled platform already carries a full-document
+expert target, and the tree root is scored directly against it on the
+benchmark corpus. It is a complete claim at its own tier. A node-level audit
+of preservation distortion, and a local-label training path that substitutes
+paragraph- or section-level targets for root labels, are stronger tiers on
+top of it, not prerequisites under it. Local labels pay only when they
+measure the same oracle-preservation property the root task cares about---
+Markov changepoints in Section~\ref{sec:min-validation} are the clean
+evidence that they can, and the Manifesto quasi-sentence codings are the
+planned route for this setting. When local checks fail on a deployment that
+claims a node-level certificate, the audit estimates the resulting
+oracle distortion rather than burying the failure as an unobserved
+engineering step.
+
+The paper follows this one example first.
+Section~\ref{sec:min-manifesto-state} defines the economic state, its
+readout, and the sense in which a summary can preserve it.
+Section~\ref{sec:min-framework} turns that setup into a compression tree and
+three local laws. Section~\ref{sec:min-guarantees} states the
+root-preservation, preference-alignment, and finite-sample-certificate
+guarantees in compact form. Section~\ref{sec:min-manifesto-results} reports
+the Manifesto/Benoit headline and its leaf-size robustness.
+Section~\ref{sec:min-validation} returns to Markov changepoints and
+HyperLogLog as mechanism tests where the state is already known: Markov tests
+ordered boundary state, and HLL tests state-level mergeability with an
+irreducible sketch noise floor. Section~\ref{sec:min-backstop} carries the
+algebraic and representation backstop that ties the framework to classical
+mergeable-sketch theory, and Section~\ref{sec:min-audit} describes the
+label-budget audit that converts approximate preservation into a
+reportable certificate. Section~\ref{sec:min-applications} closes on where
+the framework applies and where it fails. The appendices carry
+the proof map, the neural-operator realization, and extended empirics.

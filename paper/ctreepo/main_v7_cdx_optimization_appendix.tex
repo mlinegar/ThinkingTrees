@@ -1,0 +1,20 @@
+\documentclass[11pt]{article}
+
+\input{preamble_minimal}
+\usepackage{array}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\begin{document}
+
+% Focused appendix-only build. Phantom anchors resolve references that point
+% back to the mergeable-sketch section in the full paper.
+\setcounter{section}{1}
+\refstepcounter{section}\label{sec:mergeable-sketches}
+\refstepcounter{subsection}\label{sec:v7-ctreepo-state-machine}
+\refstepcounter{subsection}\label{sec:v7-neural-operator-route}
+
+\appendix
+\setcounter{section}{0}
+\input{appendix/v7_cdx/A_optimization_projection}
+
+\end{document}

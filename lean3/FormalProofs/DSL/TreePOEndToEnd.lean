@@ -97,8 +97,160 @@ theorem treepo_loss_gap_of_exactOracle
     treepo_loss_gap_with_oracleMeasurement
       (loss_true := loss_true) (loss_oracle := loss_oracle) (loss_tree := loss_tree)
       (oracle_err := 0) (tree_bound := tree_bound)
-      h_oracle h_tree
+      (h_oracle := h_oracle) (h_tree := h_tree)
   simpa using h
+
+/-! ## Paper-Facing Error Certificates -/
+
+/-- Local-law contribution to a paper error certificate.
+
+`delta_R` is the expected oracle distortion and `methodTransport` is the
+method-specific constant that transports oracle units into objective units. -/
+structure PaperLocalLawErrorBudget where
+  delta_R : ℝ
+  methodTransport : ℝ
+
+namespace PaperLocalLawErrorBudget
+
+/-- Transported local-law distortion in objective units. -/
+def transportedDistortion (b : PaperLocalLawErrorBudget) : ℝ :=
+  b.methodTransport * b.delta_R
+
+end PaperLocalLawErrorBudget
+
+/-- Paper-facing decomposition of an end-to-end objective certificate:
+method-transported local-law distortion, calibration, sampling estimation, and
+clipping. -/
+structure PaperErrorCertificate where
+  localLaw : PaperLocalLawErrorBudget
+  calibration : ℝ
+  estimation : ℝ
+  clipping : ℝ
+
+namespace PaperErrorCertificate
+
+/-- The local-law part of the certificate after method transport. -/
+def transportedDistortion (c : PaperErrorCertificate) : ℝ :=
+  c.localLaw.transportedDistortion
+
+/-- Total paper certificate bound:
+`C_meth * delta_R + B_cal + B_est + B_clip`. -/
+def totalObjectiveBound (c : PaperErrorCertificate) : ℝ :=
+  c.transportedDistortion + c.calibration + c.estimation + c.clipping
+
+/-- The Lean certificate expands to the displayed paper formula. -/
+theorem totalObjectiveBound_eq_paper_formula (c : PaperErrorCertificate) :
+    c.totalObjectiveBound =
+      c.localLaw.methodTransport * c.localLaw.delta_R +
+        c.calibration + c.estimation + c.clipping := by
+  rfl
+
+/-- Deterministic wrapper: any gap bounded by the displayed decomposition is
+bounded by the paper certificate object. -/
+theorem objective_gap_le_total (c : PaperErrorCertificate) (gap : ℝ)
+    (h_gap :
+      |gap| ≤ c.localLaw.methodTransport * c.localLaw.delta_R +
+        c.calibration + c.estimation + c.clipping) :
+    |gap| ≤ c.totalObjectiveBound := by
+  simpa [totalObjectiveBound, transportedDistortion,
+    PaperLocalLawErrorBudget.transportedDistortion] using h_gap
+
+/-- High-probability paper certificate from calibration, estimation, clipping,
+and a deterministic local-law transport envelope.
+
+This is the paper's finite-sample certificate in one object: the existing
+three-event union bound handles calibration/estimation/clipping, while
+`h_transport` replaces the realized clipped distortion term with
+`C_meth * delta_R`. -/
+theorem high_prob_total_of_events
+    {Ω : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (gap_oracle gap_judge gap_est gap_clip : Ω → ℝ)
+    (c : PaperErrorCertificate)
+    (δ_cal δ_est δ_clip δ_total : ENNReal)
+    (h_transport : ∀ ω, |gap_clip ω| ≤ c.transportedDistortion)
+    (h_cal :
+      μ {ω | |gap_oracle ω - gap_judge ω| ≥ c.calibration} ≤ δ_cal)
+    (h_est :
+      μ {ω | |gap_judge ω - gap_est ω| ≥ c.estimation} ≤ δ_est)
+    (h_clip :
+      μ {ω | |gap_est ω - gap_clip ω| ≥ c.clipping} ≤ δ_clip)
+    (h_split : δ_cal + δ_est + δ_clip ≤ δ_total) :
+    μ {ω | |gap_oracle ω| ≥ c.totalObjectiveBound} ≤ δ_total := by
+  have h_base :=
+    dsl_abs_gap_bound_from_clipped_estimate_high_prob_total
+      (μ := μ)
+      (gap_oracle := gap_oracle) (gap_judge := gap_judge)
+      (gap_est := gap_est) (gap_clip := gap_clip)
+      (b_cal := c.calibration) (b_est := c.estimation) (b_clip := c.clipping)
+      (δ_cal := δ_cal) (δ_est := δ_est) (δ_clip := δ_clip) (δ_total := δ_total)
+      h_cal h_est h_clip h_split
+  refine le_trans (measure_mono ?_) h_base
+  intro ω hω
+  have h_threshold :
+      |gap_clip ω| + c.calibration + c.estimation + c.clipping ≤
+        c.transportedDistortion + c.calibration + c.estimation + c.clipping := by
+    linarith [h_transport ω]
+  exact le_trans h_threshold hω
+
+end PaperErrorCertificate
+
+/-- Paper-facing finite-sample certificate stack.
+
+This packages the probability space, the four error terms used in the paper,
+the numerical certificate, and the three event bounds/failure-budget split into
+one object. The theorem below exposes the final public certificate statement as
+a direct wrapper around `PaperErrorCertificate.high_prob_total_of_events`. -/
+structure PaperErrorStack (Ω : Type*) [MeasurableSpace Ω] where
+  μ : Measure Ω
+  is_probability : IsProbabilityMeasure μ
+  gap_oracle : Ω → ℝ
+  gap_judge : Ω → ℝ
+  gap_est : Ω → ℝ
+  gap_clip : Ω → ℝ
+  certificate : PaperErrorCertificate
+  delta_cal : ENNReal
+  delta_est : ENNReal
+  delta_clip : ENNReal
+  delta_total : ENNReal
+  transport_envelope :
+    ∀ ω, |gap_clip ω| ≤ certificate.transportedDistortion
+  calibration_event :
+    μ {ω | |gap_oracle ω - gap_judge ω| ≥ certificate.calibration} ≤ delta_cal
+  estimation_event :
+    μ {ω | |gap_judge ω - gap_est ω| ≥ certificate.estimation} ≤ delta_est
+  clipping_event :
+    μ {ω | |gap_est ω - gap_clip ω| ≥ certificate.clipping} ≤ delta_clip
+  failure_budget :
+    delta_cal + delta_est + delta_clip ≤ delta_total
+
+namespace PaperErrorStack
+
+/-- Final high-probability paper certificate:
+`Pr(|gap_oracle| >= totalObjectiveBound) <= delta_total`. -/
+theorem high_prob_total
+    {Ω : Type*} [MeasurableSpace Ω] (s : PaperErrorStack Ω) :
+    s.μ {ω | |s.gap_oracle ω| ≥ s.certificate.totalObjectiveBound} ≤
+      s.delta_total := by
+  letI : IsProbabilityMeasure s.μ := s.is_probability
+  exact PaperErrorCertificate.high_prob_total_of_events
+    (μ := s.μ)
+    (gap_oracle := s.gap_oracle)
+    (gap_judge := s.gap_judge)
+    (gap_est := s.gap_est)
+    (gap_clip := s.gap_clip)
+    (c := s.certificate)
+    (δ_cal := s.delta_cal)
+    (δ_est := s.delta_est)
+    (δ_clip := s.delta_clip)
+    (δ_total := s.delta_total)
+    s.transport_envelope
+    s.calibration_event
+    s.estimation_event
+    s.clipping_event
+    s.failure_budget
+
+end PaperErrorStack
 
 /-! ## Method Certificates -/
 

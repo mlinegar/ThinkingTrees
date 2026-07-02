@@ -1,0 +1,62 @@
+\section{Manifesto Policy States as the Running Mechanism}
+\label{sec:v8-manifesto-mechanism}
+
+The running object is a manifesto scored on one policy dimension. For
+concreteness, take the economic-policy scale in the Benoit benchmark. The
+oracle \(f^\ast_{\mathrm{econ}}\) is the expert placement a trusted political
+measurement procedure assigns to the full platform. A C-Tree state for a span
+is useful only if it carries the evidence that can change that placement:
+taxation promises, spending commitments, privatization claims, labor-market
+policy, welfare language, fiscal constraints, and qualifications about who
+benefits or pays.
+
+A local scalar score is too small a state for this task. One leaf may contain
+a tax-cut promise, another may contain a health-spending expansion, and a later
+section may explain that both are conditional on private delivery or deficit
+rules. The economic position of the platform depends on how those pieces fit
+together. A parent state that receives only two child scores cannot recover the
+cross-span qualification. A parent state that receives two policy-evidence
+states can retain the tax position, the welfare position, and the condition
+that changes their joint interpretation.
+
+This is the manifesto analogue of a mergeable state. The query is the
+expert-facing score, but the object that composes is richer than the score. In
+economic policy, the state may say that a party supports tax reduction for
+small businesses, protects health spending, and funds the package through
+privatization. In environmental policy, it may carry both emissions targets and
+exceptions for energy security. In decentralization, it may need to distinguish
+administrative devolution from fiscal autonomy, regional veto power, and
+country-specific institutional language. The readout happens at the root; the
+state must survive every merge before that readout is meaningful.
+
+The three local laws name the failure modes. C1 fails when a leaf summary drops
+rubric-relevant evidence in the original span. C2 fails when a produced state
+drifts after another summarization pass, such as turning a conditional tax cut
+into an unconditional one. C3 fails when two individually adequate child states
+are merged into a parent that loses the interaction between them. The C3
+failure is the characteristic manifesto problem: policy meaning often sits in
+the relation between sections rather than in either section alone.
+
+Decentralization is the stress dimension in the current results because its
+evidence geometry is less uniform than economic policy. A party can endorse
+local administration while opposing fiscal devolution; it can support regional
+identity while keeping central budget authority; it can discuss federal reform
+in country-specific institutional terms. A universal summary trained to serve
+six dimensions may preserve the common evidence well and still blur these
+distinctions. The local diagnostic gap for decentralization marks exactly this
+kind of state-sharing failure.
+
+The mechanism also explains why node labels can matter. A full-document expert
+target calibrates the root. A leaf or merge label checks whether a smaller
+state still carries the same policy evidence for the same dimension. Manifesto
+quasi-sentence codings are a natural source for such checks because they
+already mark local policy statements. They do not automatically certify a tree;
+they become useful when aggregated or sampled in a way that targets the same
+oracle-facing policy dimension as the root score.
+
+The rest of the manuscript formalizes this one picture. A C-Tree fixes the
+realized leaf partition and merge schedule. The state map \(g\) creates and
+merges policy-evidence states. The readout \(f^\ast\), or a learned proxy
+\(\widehat f\), scores those states. The local laws ask whether every realized
+state can replace the manifesto span it represents for the chosen expert
+policy target.

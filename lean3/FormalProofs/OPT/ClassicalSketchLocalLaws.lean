@@ -52,9 +52,9 @@ trees. This makes GK unsuitable for general C-TreePO tree topologies.
 1. **Merge idempotence ≠ C2**: `succMax_not_L3` in `HLLIdempotence.lean`
    shows a sketch with idempotent merge but violated C2.
 
-2. **C2 not derivable from C1 + C3**: `thm10_1_L3_not_derivable` in
-   `CounterexampleExistence.lean` constructs g_bad that satisfies C1 on
-   fresh inputs but violates C2 (re-summarizing flips oracle value).
+2. **C2 not derivable from C1 + C3**: `ex_c2_independent_formalized` in
+   `CounterexampleExistence.lean` constructs g_bad that satisfies C1 and
+   fresh-input C3 but violates C2 (re-summarizing flips oracle value).
 
 3. **Lossy decode breaks C2**: `cmsLossy_not_L3` in `CountMinSketch.lean`
    shows a CMS-like operator with systematic decode error violating C2.
@@ -110,6 +110,166 @@ set_option autoImplicit false
 noncomputable section
 
 namespace FormalProofs.OPT
+
+/-!
+## Scalar Distinct-Count Negative Control
+
+Classical distinct-count sketches are mergeable because the sketch state carries
+overlap information.  The scalar cardinalities of the two children do not.
+-/
+
+/-- Distinct-count oracle over the two-element universe `Bool`. -/
+def boolDistinctCount (xs : List Bool) : Nat :=
+  if false ∈ xs then
+    if true ∈ xs then 2 else 1
+  else
+    if true ∈ xs then 1 else 0
+
+/-- No scalar merge on child distinct counts can recover the distinct count of
+the concatenated/unioned stream for all inputs.  The cases `[true] ++ [true]`
+and `[true] ++ [false]` have the same child cardinalities but different root
+cardinalities. -/
+theorem scalarDistinctCount_not_child_cardinality_mergeable :
+    ¬ ∃ merge : Nat → Nat → Nat,
+      ∀ xs ys : List Bool,
+        merge (boolDistinctCount xs) (boolDistinctCount ys) =
+          boolDistinctCount (xs ++ ys) := by
+  rintro ⟨merge, hmerge⟩
+  have h_overlap := hmerge [true] [true]
+  have h_disjoint := hmerge [true] [false]
+  simp [boolDistinctCount] at h_overlap h_disjoint
+  have h_bad : (1 : Nat) = 2 := by
+    exact h_overlap.symm.trans h_disjoint
+  norm_num at h_bad
+
+/-!
+## HLL Learned-Objective Alignment
+
+The formal HLL theorem is a state-level statement: register states merge by
+pointwise max, and the readout is applied after that state merge. The sampled
+HLL diagnostic runner currently has a scalar local-law objective: a learned
+merge state is scored through a scalar readout at the observed node.
+
+The definitions below line those two problems up. State-row exactness implies
+scalar-row agreement for any readout. The converse requires an additional
+identifiability / fiber condition. A scalar readout collision lets a learned
+merge return the wrong state while paying zero scalar row loss.
+-/
+
+/-- State-level exactness for one merge row. This is the rowwise form of the
+HLL register theorem: the learned merge returns the exact merge state. -/
+def StateMergeRowExact {State : Type*}
+    (mergeHat mergeStar : State → State → State) (left right : State) : Prop :=
+  mergeHat left right = mergeStar left right
+
+/-- Scalar readout agreement for one merge row. This is the rowwise target used
+by a scalar local-law loss: the readout of the learned merge agrees with the
+readout of the exact merge. -/
+def ScalarReadoutRowExact {State Score : Type*}
+    (readout : State → Score)
+    (mergeHat mergeStar : State → State → State)
+    (left right : State) : Prop :=
+  readout (mergeHat left right) = readout (mergeStar left right)
+
+/-- Exact state merge immediately gives zero scalar row loss for any readout. -/
+theorem stateMergeRowExact_implies_scalarReadoutRowExact
+    {State Score : Type*}
+    (readout : State → Score)
+    (mergeHat mergeStar : State → State → State)
+    (left right : State)
+    (h_state : StateMergeRowExact mergeHat mergeStar left right) :
+    ScalarReadoutRowExact readout mergeHat mergeStar left right := by
+  unfold StateMergeRowExact at h_state
+  unfold ScalarReadoutRowExact
+  rw [h_state]
+
+/-- Scalar row agreement does not identify the merge state when the readout has
+a fiber collision at the exact target. The learned merge can return `badState`,
+match the scalar readout, and still violate the state-level merge law. -/
+theorem scalarReadoutRowExact_not_stateMergeRowExact_of_fiber_collision
+    {State Score : Type*}
+    (readout : State → Score)
+    (mergeStar : State → State → State)
+    (left right badState : State)
+    (h_same_readout : readout badState = readout (mergeStar left right))
+    (h_bad_state : badState ≠ mergeStar left right) :
+    ∃ mergeHat : State → State → State,
+      ScalarReadoutRowExact readout mergeHat mergeStar left right ∧
+      ¬ StateMergeRowExact mergeHat mergeStar left right := by
+  refine ⟨fun _ _ => badState, ?_, ?_⟩
+  · unfold ScalarReadoutRowExact
+    exact h_same_readout
+  · unfold StateMergeRowExact
+    exact h_bad_state
+
+/-- Future-context stability required by hierarchical state merging: replacing
+`goodState` by `badState` must remain invisible after every later exact merge. -/
+def FutureContextStable {State Score : Type*}
+    (readout : State → Score)
+    (mergeStar : State → State → State)
+    (badState goodState : State) : Prop :=
+  ∀ context, readout (mergeStar badState context) =
+    readout (mergeStar goodState context)
+
+/-- A current-node scalar collision is weaker than future-context stability.
+This captures the failure mode seen in the learned-HLL diagnostics: a state can
+look scalar-correct at one node and become wrong after another merge. -/
+theorem scalarReadoutEqual_not_futureContextStable_of_context_witness
+    {State Score : Type*}
+    (readout : State → Score)
+    (mergeStar : State → State → State)
+    (badState goodState context : State)
+    (h_same_now : readout badState = readout goodState)
+    (h_future_diff :
+      readout (mergeStar badState context) ≠
+        readout (mergeStar goodState context)) :
+    readout badState = readout goodState ∧
+      ¬ FutureContextStable readout mergeStar badState goodState := by
+  refine ⟨h_same_now, ?_⟩
+  intro h_stable
+  exact h_future_diff (h_stable context)
+
+/-- HLL-specific rowwise state exactness: the target merge is pointwise register
+max. This is the object controlled by the Lean HLL theorem. -/
+def HLLRegisterMergeRowExact {m : ℕ}
+    (mergeHat : HLLState m → HLLState m → HLLState m)
+    (left right : HLLState m) : Prop :=
+  StateMergeRowExact mergeHat HLLState.merge left right
+
+/-- HLL-specific scalar row agreement: a scalar HLL readout agrees at an
+observed merge node. This is weaker than register merge exactness. -/
+def HLLScalarMergeRowExact {m : ℕ} {Score : Type*}
+    (readout : HLLState m → Score)
+    (mergeHat : HLLState m → HLLState m → HLLState m)
+    (left right : HLLState m) : Prop :=
+  ScalarReadoutRowExact readout mergeHat HLLState.merge left right
+
+/-- The Lean HLL route implies the scalar diagnostic row for every readout. -/
+theorem hllRegisterMergeRowExact_implies_hllScalarMergeRowExact
+    {m : ℕ} {Score : Type*}
+    (readout : HLLState m → Score)
+    (mergeHat : HLLState m → HLLState m → HLLState m)
+    (left right : HLLState m)
+    (h_state : HLLRegisterMergeRowExact mergeHat left right) :
+    HLLScalarMergeRowExact readout mergeHat left right := by
+  exact stateMergeRowExact_implies_scalarReadoutRowExact
+    readout mergeHat HLLState.merge left right h_state
+
+/-- A scalar HLL row loss cannot certify the register merge law in the presence
+of a readout collision. Full node labels remove sampling noise; they do not by
+themselves turn scalar readout agreement into exact HLL register merging. -/
+theorem hllScalarMergeRowExact_not_hllRegisterMergeRowExact_of_readout_collision
+    {m : ℕ} {Score : Type*}
+    (readout : HLLState m → Score)
+    (left right badState : HLLState m)
+    (h_same_readout : readout badState = readout (HLLState.merge left right))
+    (h_bad_state : badState ≠ HLLState.merge left right) :
+    ∃ mergeHat : HLLState m → HLLState m → HLLState m,
+      HLLScalarMergeRowExact readout mergeHat left right ∧
+      ¬ HLLRegisterMergeRowExact mergeHat left right := by
+  simpa [HLLScalarMergeRowExact, HLLRegisterMergeRowExact] using
+    scalarReadoutRowExact_not_stateMergeRowExact_of_fiber_collision
+      readout HLLState.merge left right badState h_same_readout h_bad_state
 
 /-!
 ## Cross-Sketch Comparison Theorems
@@ -182,6 +342,18 @@ theorem merge_idempotence_orthogonal_to_c2 :
    ⟨succMax_merge_idempotent,
     fun h => succMax_not_summaryFixedPoint
       (summaryFixedPoint_of_reencodeExact (op := succMaxOperator) h)⟩⟩
+
+/-- HLL and Count-Min have different optional algebraic properties even though
+both can satisfy the local-law bundle in identity/register-state form:
+HLL uses idempotent max; CMS uses non-idempotent addition on nonempty tables. -/
+theorem hll_idempotent_cms_not_idempotent_when_nonempty
+    (hd : 0 < d) (hw : 0 < w) :
+    MergeIdempotent (hllRegisterOperator m) ∧
+    ¬ MergeIdempotent (cmsRegisterOperator d w) := by
+  refine ⟨hllRegisterOperator_merge_idempotent, ?_⟩
+  intro h_idem
+  rcases CMSState.merge_not_idempotent hd hw with ⟨a, ha⟩
+  exact ha (h_idem a)
 
 end CrossSketchComparison
 

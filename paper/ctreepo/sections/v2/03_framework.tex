@@ -1,6 +1,10 @@
 \section{Framework and Local Laws}\label{sec:framework}
 
-Section~\ref{sec:mergeable-sketches} motivated the tree-of-summaries view by analogy to classical mergeable sketches, and stated the reduction theorem (Proposition~\ref{prop:mergeable-reduction}) that governs when the generalization collapses back to a hand-designed sketch. We now formalize the local laws that make that collapse hold in the learned setting.
+Section~\ref{sec:mergeable-sketches} defined the algebraic target:
+compose bounded states locally, preserve the task readout, and reduce to a
+classical mergeable summary when the state and merge are hand-designed
+(Proposition~\ref{prop:mergeable-reduction}). We now formalize the local
+laws that operationalize that target for a learned summarizer.
 
 Before the formal definitions, Table~\ref{tab:settings-comparison} previews the three settings in which we exercise the framework in later sections. Each row names the oracle $\fstar$, the practical approximation we use for it, the summarizer $g$ that feeds the tree, and the objective we optimize or report. The table is a signpost: the rest of this section formalizes $\fstar$, $g$, and the local laws in the abstract, and Sections~\ref{sec:markov-walkthrough}, \ref{sec:hll-parity}, and~\ref{sec:manifesto-llm} instantiate the rows one at a time.
 
@@ -21,7 +25,7 @@ Distinct-item count; or the classical HLL scoring head when \texttt{oracle\_kind
 Classical HLL estimator $\alpha_m m^2 / \sum_j 2^{-r_j}$, applied to a classical register state or (for learned variants) to a learned state &
 Register-wise max (classical); MLP end-to-end (learned $g{+}f$); or learned $g$ with classical $f$ reading a register-space state &
 Byte-level register equality (native) or estimate-equivalence within $2\times$ RSE (DataSketches); relative MAE vs.\ the oracle for the learned variants \\[2pt]
-Manifesto RILE (\S\ref{sec:manifesto-llm}) &
+Manifesto RILE (\S\ref{sec:social-measurement}, \S\ref{sec:manifesto-llm}) &
 Manifesto-Project expert RILE coding on six policy dimensions &
 An open-weight LLM summarizer and scorer (\textsc{Gemma-4-31B-IT-NVFP4}) driven by rubric prompts &
 Tree of prompted-LM leaf summaries merged pairwise by a union-rubric prompt &
@@ -44,6 +48,8 @@ Let $\Strings$ denote the set of all finite token sequences, with concatenation 
 A \emph{summarizer} is a (possibly stochastic) map $g: \Strings \rightsquigarrow \Strings$. When $g$ uses randomness (temperature, seeds), statements about $g(x)$ are interpreted in expectation over this randomness.
 \end{definition}
 
+The formalization takes this stochastic reading as primitive: a summarizer is a $\mathrm{PMF}$-valued map. Deterministic operators, including the neural-operator realizers in Section~\ref{sec:fno-primer}, are the degenerate point-mass subcase.
+
 \begin{definition}[Readout]\label{def:readout}
 A \emph{readout} is a (possibly stochastic) map $f : \Strings \rightsquigarrow \Y$ that takes the final summary and produces the task value. In settings with a closed-form oracle the readout may be taken to be $\fstar$ itself; in learned settings (HLL, Manifesto) it is a separate, optionally learned, component.
 \end{definition}
@@ -60,7 +66,7 @@ Figure~\ref{fig:plain-tree} shows the structure. The partition into leaves is fi
 
 \begin{figure}[t]
     \centering
-    \includegraphics[width=0.95\linewidth]{01_base.pdf}
+    \includegraphics[width=0.95\linewidth]{01_base_plain.pdf}
     \caption{A compression tree for a document partitioned into eight contiguous blocks $b_1, \ldots, b_8$. Each block is summarized to produce a leaf summary $s_i = g(b_i)$; sibling summaries are then merged pairwise ($s_{ij} = g(s_i \concat s_j)$) up to the root. The tree is fixed before summarization begins; only the summaries change as the pipeline runs.}
     \label{fig:plain-tree}
 \end{figure}

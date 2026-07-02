@@ -1,10 +1,13 @@
-# TreePO: Tree-Based Preference Optimization (Formalization Map)
+# TreePO: Tree-Based Supervision Optimization (Formalization Map)
 
 This document records the formal definitions, invariance results, and sampling theory behind TreePO. It ties together the Lean proofs in this repository and the design-based sampling framework in `../FormalProbability/`.
 
 ## Scope
 
-TreePO is not a new optimization algorithm. It is a data-collection and objective-estimation strategy that lets us train DPO, GRPO, or PPO-style objectives using tree summaries and a random oracle-labeled subset, while retaining formal guarantees about loss equivalence or bounded gaps.
+TreePO is not a new optimization algorithm. It is a supervision-collection and objective-estimation strategy that lets us train DPO, GRPO, or PPO-style objectives using tree summaries and a random oracle-labeled subset, while retaining formal guarantees about loss equivalence or bounded gaps.
+
+For the optimizer-facing bridge between Lean certificates, DSPy runtime behavior, and
+recoverable Markov diagnostics, see `docs/optimizer_performance_map.md`.
 
 ## Core Objects and Notation
 
@@ -13,15 +16,15 @@ TreePO is not a new optimization algorithm. It is a data-collection and objectiv
 - `f* : Strings → Y` is the oracle function.
 - `A` is the action space (responses, summaries, or candidate outputs).
 - `μ : PMF Strings` is the document distribution.
-- `gen : Strings → PMF (A × A)` is the pair generator for pairwise preferences.
-- `gen_k : Strings → PMF (Fin k → A)` is the group generator for listwise preferences.
+- `gen : Strings → PMF (A × A)` is the binary projection of the supervision generator.
+- `gen_k : Strings → PMF (Fin k → A)` is the group generator for comparative supervision.
 - `πθ : Strings → A → ℝ` is a policy, with `π_ref` and `π_old` when needed.
 
 Lean references:
 - `lean3/FormalProofs/OPT/PreferenceLearning.lean`
 - `lean3/FormalProofs/OPT/PreferenceBounds.lean`
 
-## Preference Learning Methods (Formal Definitions)
+## Supervision-Driven Learning Methods (Formal Definitions)
 
 DPO, GRPO, and GRPO-RL are already formalized in Lean as pointwise losses and expected objectives.
 
@@ -35,14 +38,19 @@ DPO, GRPO, and GRPO-RL are already formalized in Lean as pointwise losses and ex
 The Lean objectives above are now wired into the Python TRL stack in
 `src/training/trl_training.py` with explicit propensity/IPW semantics:
 
-- `train_dpo` maps pairwise preferences to TRL `DPOTrainer`.
-- `train_reward_model` maps pairwise preferences to TRL `RewardTrainer`.
-- `train_grpo` maps prompt distributions to TRL `GRPOTrainer` with online rewards.
+- `train_dpo` projects supervision data to binary pairs for TRL `DPOTrainer`.
+- `train_reward_model` projects supervision data to chosen/rejected pairs for TRL `RewardTrainer`.
+- `train_grpo` consumes grouped comparative supervision for TRL `GRPOTrainer` with online rewards.
 
 Design-based weighting implementation:
 
-- Every exported training example carries `sample_weight = 1 / joint_propensity`
-  (with global-uniform fallback, so default weight is `1`).
+- Every optimizer-facing export now carries a stable `treepo` metadata block with:
+  `document_id`, `node_id`, `depth`, `channel`, `joint_propensity`,
+  `objective_weight`, `ipw_weight`, `effective_weight`, and `rl_role`.
+- The trainer-facing scalar is standardized as
+  `sample_weight = effective_weight = objective_weight * ipw_weight`.
+- In legacy mode, `objective_weight` matches the existing TreePO channel surface.
+  In discounted mode, `objective_weight = channel_weight(channel) * gamma^depth`.
 - DPO and reward training support native weighted losses:
   - DPO loss is reduced as weighted mean over per-example DPO losses.
   - Reward-model pairwise logistic loss is reduced as weighted mean.
@@ -58,6 +66,21 @@ This is the direct computational analogue of the design-based estimators in
 the runtime objective minimizes a weighted empirical approximation to the same
 population risk targeted by HT/Hajek-style estimators.
 
+TreePO as a standard RL adapter:
+
+- state: prompt plus task context
+- action: candidate completion / response
+- reward surrogate: pairwise preference, scalar oracle score, or learned reward
+- behavior policy: the logged supervision/query policy that produced labeled rows
+- importance weighting: IPW from logged or aggregated propensities
+- discount analogue: `gamma^depth`, matching
+  `lean3/FormalProofs/OPT/DiscountedTreeMetaObjective.lean`
+  and `lean3/FormalProofs/OPT/DiscountedIPWObjective.lean`
+
+This means TreePO is not a separate RL optimizer. It is the weighting and
+supervision adapter layer that lets standard TRL objectives target the TreePO
+population risk.
+
 ## Oracle-Measurability and Loss Equivalence
 
 The fundamental invariance is already formalized: if the loss and generator are oracle-indexed, then the expected loss is unchanged when oracle values are preserved.
@@ -66,6 +89,22 @@ The fundamental invariance is already formalized: if the loss and generator are 
 - Pairwise specialization: `expected_loss_eq_of_zero_dist` in `lean3/FormalProofs/OPT/PreferenceLearning.lean`.
 - Group specialization: `expected_group_loss_eq_of_zero_dist` in `lean3/FormalProofs/OPT/PreferenceLearning.lean`.
 - DPO, GRPO-PL, GRPO-RL equivalence: `dpo_equivalence`, `grpo_equivalence`, `grpo_rl_equivalence_via_pref` in `lean3/FormalProofs/OPT/PreferenceLearning.lean`.
+
+## Optimizer-Certificate Transfer
+
+The optimization-side surface is now explicit and algorithm-agnostic:
+
+- `surrogate_optimizer_certificate_uniform_transfer`
+- `oracle_measurable_surrogate_optimizer_certificate_uniform_transfer`
+- `oracle_measurable_surrogate_optimizer_certificate_two_stage_uniform_transfer`
+
+These are exported from `lean3/FormalProofs/OPT/MainTheorems.lean` and proved in
+`lean3/FormalProofs/OPT/OptimizationPerturbation.lean`.
+
+Interpretation:
+
+- Lean certifies transfer from a good surrogate optimizer output to the target objective.
+- Lean does not certify that GEPA, MIPRO, bootstrap, or labeled-fewshot is the stronger search algorithm.
 
 ## Exact Utility-Transport Surface
 
@@ -115,6 +154,47 @@ Tree summarization is encoded via a summarizer `g`, binary trees `T`, and multi-
 - Local laws and the link to zero distortion: `multi_round_proper` and the summaries in `lean3/FormalProofs/Assumptions.lean`.
 - ZR connection for preference learning: `preference_learning_equivalence_via_ZR` and `grpo_equivalence_via_ZR` in `lean3/FormalProofs/OPT/PreferenceLearning.lean`.
 - Quantitative gaps when distortion is nonzero: `dpo_gap_bounded` and the GRPO Lipschitz axioms in `lean3/FormalProofs/OPT/PreferenceBounds.lean` and `lean3/FormalProofs/Axioms.lean`.
+
+## Information-Sufficiency Bridge for Variable Leaf Size and Sampled Topology
+
+The Lean story is now broader than a single globally fixed leaf size.
+
+- Deterministic document-indexed tree policies are represented as `x ↦ T(x)`.
+  This already covers varying leaf size and topology across documents.
+- Stochastic tree policies are represented as `x ↦ PMF (T)`.
+  This covers the runtime setting where the tree itself is randomly sampled.
+
+Information-sufficiency bridge theorems:
+
+- Deterministic joint-law bridge in `lean3/FormalProofs/OPT/InformationSufficiency.lean`:
+  `jointTreeSummaryLaw_oracle_eq_ae_of_localLaws`,
+  `jointTreeSummaryLaw_oracle_factorizationAE_of_localLaws`,
+  `jointTreeSummaryLaw_score_transport_of_localLaws`,
+  `jointTreeSummaryLaw_taskRelevantKLIC_zero_ae_of_localLaws`.
+- Stochastic tree-policy bridge in `lean3/FormalProofs/OPT/InformationSufficiency.lean`:
+  `stochasticJointTreeSummaryLaw_oracle_eq_ae_of_localLaws`,
+  `stochasticJointTreeSummaryLaw_oracle_factorizationAE_of_localLaws`,
+  `stochasticJointTreeSummaryLaw_score_transport_of_localLaws`,
+  `stochasticJointTreeSummaryLaw_taskRelevantKLIC_zero_ae_of_localLaws`.
+- Export aliases in `lean3/FormalProofs/OPT/MainTheorems.lean`:
+  `stochastic_local_laws_oracle_eq_ae`,
+  `oracle_sufficiency_joint_law_ae`,
+  `score_transport_joint_law`,
+  `zero_task_relevant_klic_joint_law_ae`,
+  plus the stochastic-policy aliases
+  `stochastic_tree_policy_local_laws_oracle_eq_ae`,
+  `oracle_sufficiency_stochastic_tree_policy_ae`,
+  `score_transport_stochastic_tree_policy`,
+  `zero_task_relevant_klic_stochastic_tree_policy_ae`.
+
+Interpretation:
+
+- If local laws hold for every realized tree in the support of the policy, then
+  the induced raw/summary joint law preserves the oracle almost surely.
+- Once that a.e. oracle equality holds, the same score transport and
+  oracle-indexed loss invariance arguments go through exactly as before.
+- This is the theorem-facing bridge for the sampled-tree runtime, not just for
+  a one-leaf or globally fixed-leaf regime.
 
 ## Approximate + Audited + Stochastic Theorem Chain
 
@@ -322,6 +402,9 @@ Recommended applied certificate:
 - Radius 1 (within-doc): Serfling or BM, depending on query design.
 - Radius 2 (across-doc/IPW): empirical Bernstein.
 - Radius 3 (model mismatch): calibration/clipping envelopes.
+- Influence-weighted local-law radius: HT/IPW estimate of
+  `sum_a lambda(a) r(a)`, plus a design-effect or worst-ratio concentration
+  radius, plus proxy-to-oracle calibration.
 - Final one-shot bound: union composition via the DSL high-probability envelopes above.
 
 Assumption status in this stack:
@@ -330,6 +413,10 @@ Assumption status in this stack:
 - Empirical-Bernstein concentration in TreePO wrappers is now event-based.
 - Calibration transfer in TreePO wrappers is now event-based (`h_rmse_upper`), with
   `*_from_axioms` compatibility wrappers retained.
+- Influence-weighted audit overlap is now explicit:
+  `InfluenceWeightedAuditOverlap` and
+  `RootErrorControlledByInfluenceMass` formalize the extra condition needed for
+  local-law samples to yield informative root-error bounds.
 
 Open formal gaps:
 
@@ -337,6 +424,9 @@ Open formal gaps:
   consistency/asymptotic theorem for the adaptive chunk-boundary learner itself.
 - Finite-population without-replacement instantiation for chunk audits is still
   partially pending (see Serfling/Azuma section below).
+- Concrete concentration for every non-uniform/adaptive influence-weighted audit
+  design remains design-specific. The generic influence-weighted certificate
+  accepts the resulting statistical radius as an explicit input.
 
 ## Chunk Sampling: IID vs Without Replacement (Serfling/Azuma)
 
@@ -394,6 +484,94 @@ We have the main Azuma-ready glue:
   - `UniformWithoutReplacementLeafAudit.serfling_style_mean_tail_bound`
 
 What’s still pending is the concrete instantiation for “uniformly sample `m` leaves without replacement” (random permutation / simple random sample), i.e. constructing the martingale differences for the sampling process and discharging the boundedness + conditional-mean-zero hypotheses.
+
+## Influence-Weighted Local-Law Bounds
+
+The useful paper version of the "hidden needle" response is not an IID-within-doc
+assumption. It is an influence-weighted overlap condition for the audit design.
+
+For a document `x`, let `A_R(x)` be the finite set of C1 leaf, C3 merge, and
+round-indexed C2 idempotence rows. Let
+
+\[
+r_a^*(g;x) =
+d\big(f^*(\operatorname{out}_a), f^*(\operatorname{target}_a)\big)
+\in [0,B]
+\]
+
+be the true local-law residual, and let `lambda_x(a) >= 0` be the row's
+propagation influence. The local-to-root assumption is
+
+\[
+\Delta_R^*(g;x)
+\le
+\sum_{a \in A_R(x)} \lambda_x(a)\,r_a^*(g;x).
+\]
+
+The audit-overlap assumption is that consequential rows have logged propensity
+`pi_audit(a|x) > 0` and bounded design proxies
+
+\[
+D_\lambda(x) =
+\sum_{a \in A_R(x)}
+\frac{\lambda_x(a)^2}{\pi_\text{audit}(a\mid x)}
+\le \bar D_\lambda,
+\qquad
+W_\lambda(x) =
+\max_a
+\frac{\lambda_x(a)}{\pi_\text{audit}(a\mid x)}
+\le \bar W_\lambda.
+\]
+
+Given sampled rows `a_i`, the HT estimate is
+
+\[
+\widehat L_\lambda(x)
+=
+\frac{1}{m}\sum_{i=1}^m
+\frac{\lambda_x(a_i)}{\pi_\text{audit}(a_i\mid x)}
+\widehat r_{a_i}(g;x).
+\]
+
+If the proxy scorer `f` is uniformly calibrated to `f*`, then
+
+\[
+\sum_a \lambda_x(a) r_a^*
+\le
+\sum_a \lambda_x(a) \widehat r_a
++ 2\varepsilon_f \sum_a \lambda_x(a).
+\]
+
+So the certificate has the form
+
+\[
+\Delta_R^*(g;x)
+\le
+\widehat L_\lambda(x)
++ B_\text{stat}(\bar D_\lambda,\bar W_\lambda,m,\delta)
++ 2\varepsilon_f \sum_a \lambda_x(a).
+\]
+
+The statistical term can be instantiated by Bernstein/empirical Bernstein,
+Serfling, Azuma, or Freedman depending on whether the audit rows are independent,
+without-replacement, or adaptively selected.
+
+This handles the worst-case "one hidden leaf carries the full score" thought
+experiment cleanly. The bound still holds, but under uniform node sampling over
+`M` possible rows the relevant `D_lambda` and `W_lambda` can scale like `M`, so
+the certificate becomes valid but wide. XOR-style interactions show the real
+failure mode: if a consequential merge or path row has `pi = 0`, overlap fails.
+Restoring an exploration floor on all root-relevant row classes restores the
+formal route, though the bound may still be numerically loose.
+
+Lean anchors:
+
+- `lean3/FormalProofs/OPT/InfluenceWeightedLocalLaws.lean`
+- `InfluenceWeightedAuditOverlap`
+- `RootErrorControlledByInfluenceMass`
+- `weightedOracleMass_le_proxy_plus_calibration`
+- `rootError_le_proxy_estimate_plus_stat_plus_calibration`
+- `InfluenceWeightedErrorCertificate`
 
 ## Two-Level Sampling: #Docs vs #Leaves per Doc
 
@@ -552,12 +730,18 @@ Practical template:
 - Ensure **positivity**: `q(u|x) > 0` for all leaves you might want to make population claims about.
 - Use Horvitz–Thompson style estimators to recover unbiased doc-level/corpus-level means.
 
-What remains to be formalized cleanly is concentration for these *non-uniform, without-replacement* designs (and for adaptive `q`); the existing Lean already contains:
+The generic influence-weighted local-law bridge is now formalized in
+`OPT/InfluenceWeightedLocalLaws.lean`. What remains design-specific is
+concentration for concrete *non-uniform, without-replacement* designs and for
+adaptive `q`; the existing Lean already contains:
 
 - IPW unbiasedness primitives (`FormalProbability/DSL/IPWTheory.lean` and `lean3/FormalProofs/DSL/IPWTheory.lean`)
 - Tree-level IPW wrappers + empirical Bernstein interfaces (`lean3/FormalProofs/DSL/TreeIPW.lean`)
 
-The next step is to connect leaf-level (within-doc) sampling designs to those IPW abstractions and add a concentration layer (Azuma/empirical Bernstein) that respects tree-structured dependence.
+The next step is to instantiate the statistical-radius input in
+`rootError_le_proxy_estimate_plus_stat_plus_calibration` for the exact query
+designs used by experiments, using Azuma/Freedman/empirical Bernstein as
+appropriate for the tree-structured dependence.
 
 ## TreePO Objective (Formal Template)
 

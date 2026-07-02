@@ -1,0 +1,42 @@
+\section{Algebraic and Representation Backstop}\label{sec:min-backstop}
+
+The full algebraic background is deferred, but the main text needs one
+distinction. Classical mergeable summaries compose state, not necessarily
+answers. For distinct count, $|A|$ and $|B|$ do not determine
+$|A\cup B|$; HLL is mergeable because the register state carries
+overlap-relevant information. For ordered text, the corresponding ideal is a
+list homomorphism
+\[
+h(u\concat v)=h(u)\odot h(v),
+\]
+where $\odot$ is associative but not necessarily commutative
+\citep{Gibbons1996ThirdHomomorphism}. Associativity is the schedule-invariance
+condition. Commutativity is specific to unordered tasks, and idempotence is
+specific to semilattice-like merge operations such as HLL's register-wise
+maximum, not frequency states such as Count-Min. This algebraic idempotence is
+separate from C2, which is about re-summarizing an already stored summary.
+
+\begin{proposition}[Strict and state-level mergeable limits]\label{prop:mergeable-reduction}
+Suppose $g$ is deterministic and globally preserves the oracle under leaf
+compression and split-then-merge compression:
+\[
+g(z)\sim z,\qquad
+u\concat v\sim g(g(u)\concat g(v)).
+\]
+Let $\oplus_g(s,t):=g(s\concat t)$. If the task value itself admits a merge
+$m_{\Y}$ with
+$m_{\Y}(\fstar(u),\fstar(v))=\fstar(u\concat v)$, then $\fstar$ is a strict
+homomorphic readout of the induced state modulo oracle equivalence. More
+generally, if $g$ serializes a bounded classical sketch state and $\oplus_g$
+implements the sketch merge, C-TreePO reduces to that classical mergeable
+summary without requiring scalar oracle values to compose. The HLL
+co-appearance example in Section~\ref{sec:min-validation} is the concrete
+case: the state merges, then the noisy cardinality readout is applied.
+\end{proposition}
+
+The learned case replaces inspection with approximation plus audit. A neural
+operator, transformer, or prompt program proposes a state; the local laws say
+what that state must preserve; the audit estimates realized violations.
+Appendices~\ref{app:min-algebra}--\ref{app:min-neural} contain the database,
+MUD, mergeable-sketch, ordered-homomorphism, and neural-operator details
+\citep{GrayEtAl1997DataCube,FeldmanEtAl2008MUD,Agarwal2013MergeableTODS}.

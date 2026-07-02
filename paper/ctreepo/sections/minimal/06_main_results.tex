@@ -1,0 +1,92 @@
+\section{Validation Anchors: Markov and HLL}\label{sec:min-validation}
+
+The Manifesto example is the motivating case, but two anchors make the case
+for the local laws on tasks whose state is already known and whose merge
+rule can be written by hand. First, follow \emph{Hamlet} scene by scene.
+Each scene carries a dominant emotional register drawn from
+\(\{\text{Mourning}, \text{Foreboding}, \text{Political}, \text{Intrigue},
+\text{Madness}, \text{Action}, \text{Comic}\}\), and the words in the scene
+are surface clues to that register. The oracle asks for the number of register
+shifts across the whole play. Two canonical boundary flips illustrate the
+mechanism: 3.3\(\to\)3.4 (Intrigue\(\to\)Action, Claudius-at-prayer\(\to\)
+Polonius-killed) and 4.7\(\to\)5.1 (Intrigue\(\to\)Mourning, the foil plot
+to Ophelia's funeral). A shift at a scene or act boundary is invisible if
+the left summary forgets its last register or the right summary forgets its
+first. The sufficient state for any span is therefore
+\[
+(\mathrm{count},\mathrm{first},\mathrm{last}),
+\qquad
+c=c_L+c_R+\One\{L.\mathrm{last}\ne R.\mathrm{first}\}.
+\]
+The merge is associative because it carries the boundary fields future merges
+need, but it is not commutative: swapping children changes first and last.
+This is the synthetic version of the Manifesto warning: if an economic summary
+drops boundary or cross-section evidence, a later merge cannot recover the root
+score. In the controlled runs, local tree supervision matches or improves on
+a flat FNO baseline across the full supervision budget, including
+regimes where only $10\%$ of documents carry root labels. Appendix~\ref{app:min-markov} gives
+the exact synthetic data-generating process and
+Figure~\ref{fig:min-markov-registers} walks through the boundary-correction
+merge on a twelve-scene Hamlet arc; the empirical numbers come from the
+synthetic DGP, not from any annotated Hamlet text. Unlike the current
+Manifesto benchmark, this controlled setting deliberately includes node-level
+supervision so we can study when local labels substitute for root labels.
+
+The second anchor is HyperLogLog (HLL), the clean classical example of
+mergeable \emph{state} rather than mergeable scalar values. On the same play,
+the load-bearing query is ``how many distinct character co-appearance pairs
+ever share a scene'': each scene emits the set of unordered pairs
+\(\{(c_i,c_j): i<j,\ c_i,c_j\text{ both speak}\}\), each pair is one stream
+item, each act merges by the union of its scenes' pair-sets, and the readout
+is union cardinality. The simpler
+``how many distinct speaking roles appear'' (\(\approx 24\)) is the
+enumerable warm-up; the pairs question is where HLL earns its place, because
+on a \emph{corpus} of plays the union of pair-sets grows while the register
+array stays fixed-size. Cardinality itself is not mergeable:
+\(|A|\) and \(|B|\) do not determine \(|A\cup B|\). HLL is mergeable because
+it carries a bounded register state. Each observed item updates one register;
+two spans merge by register-wise maximum; the readout is a noisy cardinality
+estimate with relative standard error \(1.04/\sqrt{m}\)
+\citep{FlajoletEtAl2007,HeuleEtAl2013}. With \(p=14\), this estimator floor is
+under \(1\%\). Valid compression preserves the sketch state and its readout
+distribution; it does not eliminate the noise. Appendix~\ref{app:min-hll}
+contains the estimator, the learned-merge memory curve, and the query
+taxonomy. Frequency-style queries such as ``how many lines does a character
+speak?'' live in Appendix~\ref{app:min-hll} as the point-frequency and
+heavy-hitter branches of the sketch taxonomy (Count-Min and Frequent
+Items).
+
+\begin{table}[t]
+\centering\small
+\setlength{\tabcolsep}{4pt}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{llll}
+\toprule
+Example & State & What merge must preserve & Failure mode \\
+\midrule
+Emotion arc & Internal shifts, first register, last register &
+Ordered boundary correction & Lost cross-boundary shift \\
+Co-appearance breadth / HLL & Noisy register fingerprint of pair-set union &
+Unordered cardinality estimate & Estimator changes beyond sketch noise \\
+Manifesto economics & Rubric-relevant economic evidence &
+Ordered evidence and calibration target & Dropped evidence or expert-calibration drift \\
+\bottomrule
+\end{tabular}
+}
+\caption{\textbf{The three examples teach three different state requirements.}
+Markov-style emotion arcs need ordered boundary state; HLL-style cardinality
+under set union needs a compact noisy distinct-presence state; Manifesto
+economics needs a learned semantic state that carries both ordered evidence
+and measurement noise.}
+\label{tab:min-state-alignment}
+\end{table}
+
+When C-TreePO is instantiated with a hand-designed sketch state and merge, the
+tree reduction collapses to the corresponding flat sketch implementation. For
+HLL, native register reductions agree byte-for-byte; Apache DataSketches may
+choose different internal encodings by build order, but estimates agree within
+the expected HLL error floor. Together the examples bracket the Manifesto case:
+the Markov anchor shows why ordered boundary evidence matters, HLL shows why a
+valid mergeable summary may still have irreducible estimator noise, and
+economic measurement requires a learned surrogate state that handles ordered
+semantic evidence under expert-calibration noise.

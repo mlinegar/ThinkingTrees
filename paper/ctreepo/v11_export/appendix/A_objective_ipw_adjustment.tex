@@ -1,0 +1,240 @@
+\section{Proxy-Corrected Local-Law Objective}
+\label{app:v8-objective-ipw}
+
+The local laws are oracle statements: a produced state should preserve the
+value assigned by \(f^\ast\). In the LLM setting, most local-law losses are
+observed through a proxy \(\widehat f\), while direct \(f^\ast\) node labels are
+available only on sampled nodes. This appendix spells out the adjustment used
+in Section~\ref{sec:v8-objective}.
+
+\subsection{Local-Law Estimand}
+\label{app:v8-local-law-estimand}
+
+For a realized tree \(T\) with node set \(V(T)\), let \(g\) be the single
+learned C-Tree state map and let \(d(v)\) be node depth. Suppress the C1/C2/C3
+channel index for notation; the same construction applies to a fixed weighted
+mixture of law channels. Let \(\gamma\ge 0\) be the declared depth-discount
+weight. The oracle and proxy node losses are
+\[
+  \ell_v^\ast=\ell_{\mathrm{law}}(v;f^\ast,g),
+  \qquad
+  \widehat\ell_v=\ell_{\mathrm{law}}(v;\widehat f,g).
+\]
+Here \(\ell_{\mathrm{law}}\) is the per-node local-law discrepancy,
+\(f^\ast\) is the target oracle readout, and \(\widehat f\) is the fitted
+proxy readout. The starred loss is oracle-valued and directly observed only
+when the node is sampled for an oracle call; the hatted loss is the proxy
+estimate observed densely.
+The oracle local-law target is
+\begin{equation}
+\label{eq:v8-app-oracle-law-target}
+  L_{\mathrm{law}}^\ast(g,T)
+  =
+  \sum_{v\in V(T)}
+  \gamma^{d(v)}\ell_v^\ast .
+\end{equation}
+This is the oracle-relative local-law channel for the same learned \(g\) that
+would appear in the objective if every node could be evaluated with
+\(f^\ast\).
+
+\subsection{Node-Level Correction}
+\label{app:v8-node-correction}
+
+Let \(R_v\in\{0,1\}\) be the node-oracle observation indicator:
+\[
+  R_v=
+  \begin{cases}
+    1, & \text{if node }v\text{ is sampled and evaluated with }f^\ast,\\
+    0, & \text{otherwise.}
+  \end{cases}
+\]
+Let \(\pi_v>0\) be the logged marginal probability that node \(v\) would be
+sampled under the audit design. The ratio \(R_v/\pi_v\) is therefore the
+inverse-propensity weight attached to an observed oracle residual. The
+corrected node loss is
+\begin{equation}
+\label{eq:v8-app-node-correction}
+  \ell_v^{\mathrm{corr}}
+  =
+  \widehat\ell_v
+  +
+  \frac{R_v}{\pi_v}
+  \left(\ell_v^\ast-\widehat\ell_v\right).
+\end{equation}
+Equivalently, with \(b_v=\widehat\ell_v-\ell_v^\ast\),
+\begin{equation}
+\label{eq:v8-app-node-bias-form}
+  \ell_v^{\mathrm{corr}}
+  =
+  \ell_v^\ast
+  +
+  \left(1-\frac{R_v}{\pi_v}\right)b_v .
+\end{equation}
+The correction keeps the residual bias explicit. If the logged propensity
+matches the true marginal inclusion probability, the conditional expectation of
+the residual term is zero. If the proxy local-law loss is already exact
+\((b_v=0)\), the residual is zero for any observation state.
+
+\subsection{Tree Aggregation}
+\label{app:v8-tree-correction}
+
+The corrected local-law tree loss is
+\begin{equation}
+\label{eq:v8-app-corrected-tree-loss}
+  L_{\mathrm{law}}^{\mathrm{corr}}(g,T)
+  =
+  \sum_{v\in V(T)}
+  \gamma^{d(v)}
+  \left[
+    \widehat\ell_v
+    +
+    \frac{R_v}{\pi_v}
+    \left(\ell_v^\ast-\widehat\ell_v\right)
+  \right].
+\end{equation}
+Substituting the bias form gives
+\[
+  L_{\mathrm{law}}^{\mathrm{corr}}(g,T)
+  =
+  L_{\mathrm{law}}^\ast(g,T)
+  +
+  \sum_{v\in V(T)}
+  \gamma^{d(v)}
+  \left(1-\frac{R_v}{\pi_v}\right)b_v .
+\]
+Under correct logged propensities, this aggregate is conditionally unbiased for
+the oracle law target. Under misspecified propensities, the remaining bias is
+the discounted sum of the displayed residuals.
+
+\subsection{Design-Based Coverage}
+\label{app:v8-design-coverage}
+
+The IPW/HT role is estimation, not target definition. For a finite population
+\(\mathcal U\), let \(Y_i\) be the outcome or loss contribution for unit
+\(i\), let \(Z_i\in\{0,1\}\) indicate whether unit \(i\) is sampled, and let
+\(\pi_i>0\) be its logged inclusion probability. The
+inverse-propensity-weighted (IPW) Horvitz--Thompson (HT) mean is
+\[
+  \widehat\mu_{\mathrm{HT}}
+  =
+  \frac{1}{|\mathcal U|}
+  \sum_{i\in\mathcal U}\frac{Z_i}{\pi_i}Y_i .
+\]
+When the logged propensities match the sampling design, this estimates the
+corresponding full-population component. For root supervision,
+coverage-normalized objectives divide by the selected root-label count or use
+the equivalent constant-inclusion HT mean. For local laws, the sampled
+\(f^\ast\) node calls identify the oracle residuals in
+Equation~\eqref{eq:v8-app-node-correction}, while \(\widehat f\) supplies the
+dense proxy losses.
+
+Coverage therefore changes sampling variance and effective sample size, not
+the population root/local tradeoff. Here effective sample size is the
+variance-facing size of the weighted sample after uneven propensities or
+clipping.
+
+\subsection{Objective Interface}
+\label{app:v8-objective-interface}
+
+The ideal objective has one root channel and one oracle local-law channel:
+\[
+  J_\lambda^\ast(g;T)
+  =
+  (1-\lambda)L_{\mathrm{root}}(g)
+  +
+  \lambda L_{\mathrm{law}}^\ast(g,T).
+\]
+In finite data, the corrected plug-in objective has one root channel and one
+corrected local-law channel:
+\begin{equation}
+\label{eq:v8-app-final-objective}
+  J_\lambda^{\mathrm{corr}}(g;T)
+  =
+  (1-\lambda)L_{\mathrm{root}}(g)
+  +
+  \lambda L_{\mathrm{law}}^{\mathrm{corr}}(g,T).
+\end{equation}
+In lambda mode, the analyst supplies \(\lambda\in[0,1]\) and an active law
+set. The root channel receives weight \(1-\lambda\), and the active local laws
+split \(\lambda\) by a fixed predeclared rule.
+
+In explicit-weight mode, the analyst instead supplies nonnegative weights
+\[
+  w_{\mathrm{root}},w_1,\ldots,w_k
+\]
+for the root channel and the \(k\) active local-law channels. The same
+corrected objective is written as
+\[
+  J(g;T)
+  =
+  \frac{w_{\mathrm{root}}}{W}L_{\mathrm{root}}(g)
+  +
+  \sum_{j=1}^k
+  \frac{w_j}{W}L_j^{\mathrm{corr}}(g,T),
+  \qquad
+  W=w_{\mathrm{root}}+\sum_{j=1}^k w_j .
+\]
+Here \(w_{\mathrm{root}}\) is the root-channel weight,
+\(L_{\mathrm{root}}\) is the root loss, \(w_j\) is the weight for corrected
+local-law channel \(j\), \(L_j^{\mathrm{corr}}\) is that channel's corrected
+tree loss, \(k\) is the number of active local-law channels, and \(W\) is the
+total normalizing weight. The implied local-law share is \(\sum_j w_j/W\). It
+is reported for interpretation and is not supplied as an additional input.
+Lambda mode and explicit-weight mode are alternative interfaces; a single
+mathematical objective should not take both \(\lambda\) and explicit channel
+weights as independent controls.
+
+The proxy-oracle gap, propensity residual, standard error, and clipping
+envelope describe the quality of \(L_{\mathrm{law}}^{\mathrm{corr}}\). They are
+reported with the audit certificate and do not enter
+Equation~\eqref{eq:v8-app-final-objective} as separate optimized loss terms.
+Here the propensity residual is the displayed remaining bias term, the standard
+error is the sampling uncertainty of the corrected aggregate, and the clipping
+envelope is any declared bound applied to weights or residuals.
+
+\subsection{Certificate Decomposition}
+\label{app:v8-certificate-decomposition}
+
+For a sampled node-level certificate, let \(\mathcal U\) be the finite
+population of realized tree units, \(N=|\mathcal U|\), \(Z_i\) the sampled-unit
+indicator, and \(\pi_i>0\) the logged marginal inclusion probability. Let
+\[
+  D_i^J=d_Y(J(s_i),J(S(i)))
+\]
+be the accessible-judge distortion for state \(s_i\) against the represented
+span \(S(i)\). The unclipped HT distortion estimate is
+\[
+  \widehat{\Delta}_{\mathrm{HT}}^J
+  =
+  \frac{1}{N}
+  \sum_{i\in\mathcal U}
+  \frac{Z_i}{\pi_i}D_i^J .
+\]
+The corresponding full-population accessible-judge mean is
+\[
+  \Delta_J
+  =
+  \frac{1}{N}\sum_{i\in\mathcal U}D_i^J .
+\]
+Correct logged propensities give
+\(\mathbb E[\widehat{\Delta}_{\mathrm{HT}}^J\mid\mathcal U]=\Delta_J\).
+
+The reported certificate uses four terms:
+\[
+  |G_{\mathrm{meth}}|
+  \le
+  C_{\mathrm{meth}}\widehat{\Delta}_{\mathrm{HT}}
+  +
+  B_{\mathrm{cal}}
+  +
+  B_{\mathrm{est}}
+  +
+  B_{\mathrm{clip}} .
+\]
+Here \(C_{\mathrm{meth}}\) transports oracle distortion to the downstream
+method gap, \(B_{\mathrm{cal}}\) bounds the accessible-judge/oracle mismatch,
+\(B_{\mathrm{est}}\) bounds sampling error around the HT mean after method
+transport, and \(B_{\mathrm{clip}}\) bounds bias from any declared clipping
+rule. In a high-probability report, each envelope carries its own event
+probability and the total failure probability is the declared union-bound
+sum.

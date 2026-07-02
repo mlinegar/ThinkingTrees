@@ -1,0 +1,106 @@
+% C-TreePO Preamble
+% Adapted from parent paper preamble for NeurIPS-style submission
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usepackage{tikz-cd}
+\usepackage{microtype}
+\usepackage{natbib}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{listings}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!50!black,
+    citecolor=blue!50!black,
+    urlcolor=blue!50!black
+}
+
+% Asset layout (see paper/ctreepo/CONVENTIONS.md). Each example owns a
+% subtree under assets/<example>/{figures,tables}/. Legacy paths kept
+% below as fall-throughs while we finish migrating the older sections;
+% new figures and tables MUST land under the assets/ tree.
+\graphicspath{
+    {assets/markov/figures/}
+    {assets/hll/figures/}
+    {assets/diagrams/figures/}
+    {assets/sketches/figures/}
+    {assets/benoit/figures/}
+    {../../outputs/}
+    {../../outputs/markov_v5_simple_current_plots_20260415_233539/figures/}
+    {../../outputs/markov_v5_sticky_allocation_policy_paper_20260416/figures/}
+    {../../outputs/allocation_figure_variants/}
+    {../../doc/old/figures/cld/}
+    {../figures/}
+    {figures/}
+}
+
+% Listings configuration
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{gray!5},
+    keywordstyle=\color{blue!70!black},
+    commentstyle=\color{green!50!black},
+    stringstyle=\color{red!50!black},
+    literate={→}{$\to$}1 {∈}{$\in$}1 {∀}{$\forall$}1 {∃}{$\exists$}1
+}
+
+% Theorem environments
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+\newtheorem{lemma}{Lemma}
+\newtheorem{remark}{Remark}
+\newtheorem{assumption}{Assumption}
+\newtheorem{example}{Example}
+\newtheorem{axiom}{Axiom}
+\newtheorem{convention}{Convention}
+
+% Custom commands
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Prob}{\mathbb{P}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\X}{\mathcal{X}}
+\newcommand{\Y}{\mathcal{Y}}
+\newcommand{\A}{\mathcal{A}}
+\newcommand{\Strings}{\mathcal{X}}
+\newcommand{\metric}{d_{\Y}}
+\newcommand{\fstar}{f^\ast}
+\newcommand{\sstar}{s^\ast}
+\newcommand{\concat}{\oplus}
+\newcommand{\emptystr}{\emptyset}
+\newcommand{\One}{\mathbb{I}}
+\newcommand{\RegSet}{\mathcal{R}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+% Temporary FIXME marker for work-in-progress passages; remove once
+% the material it marks has been finalized.
+\newcommand{\fixme}[1]{\textbf{\textcolor{red}{[FIXME: #1]}}}
+
+% Lean artifact repo names. Placeholders; swap for final repository URLs
+% when the Lean codebase is published.
+\newcommand{\leanrepo}{\texttt{mlinegar/FormalCTreePO}}
+\newcommand{\probrepo}{\texttt{mlinegar/FormalProbability}}
+
+% TikZ setup
+\usetikzlibrary{arrows.meta, positioning, calc, fit, backgrounds, shapes.geometric, matrix}
+
+\tikzset{
+    doc/.style={rectangle, draw, rounded corners=2pt, minimum width=1.2cm, minimum height=0.6cm, fill=blue!10},
+    sum/.style={rectangle, draw, rounded corners=2pt, minimum width=1.2cm, minimum height=0.6cm, fill=green!10},
+    op/.style={circle, draw, minimum size=0.5cm, fill=yellow!20},
+    plus/.style={circle, draw, minimum size=0.4cm, inner sep=0pt, fill=white},
+}

@@ -325,6 +325,103 @@ theorem thm10_1_L3_not_derivable
     D_real fstar' (g_bad POS NEG fstar' POS) POS > 0 :=
   stability_counterexample POS NEG fstar' hp hn hbin
 
+/-- `g_bad` always returns one of the two distinguished token summaries. -/
+lemma g_bad_value_is_token (x : Strings') :
+    g_bad POS NEG fstar' x = POS ∨ g_bad POS NEG fstar' x = NEG := by
+  by_cases htok : x = POS ∨ x = NEG
+  · simp [g_bad, htok]
+  · by_cases hone : fstar' x = 1
+    · simp [g_bad, htok, hone]
+    · simp [g_bad, htok, hone]
+
+/-- Fresh-input preservation as oracle-value equality rather than zero
+distortion. -/
+lemma fstar_g_bad_eq_of_fresh
+    (hp : fstar' POS = 1) (hn : fstar' NEG = 0)
+    (hbin : ∀ x, fstar' x = 0 ∨ fstar' x = 1)
+    (b : Strings') (h_ne_pos : b ≠ POS) (h_ne_neg : b ≠ NEG) :
+    fstar' (g_bad POS NEG fstar' b) = fstar' b := by
+  rw [g_bad_on_fresh POS NEG fstar' b h_ne_pos h_ne_neg]
+  cases hbin b with
+  | inl h0 =>
+      simp [h0, hn]
+  | inr h1 =>
+      simp [h1, hp]
+
+/-- Public-shape C2 independence counterexample.
+
+This is the Lean-facing version of paper Example `ex:c2-independent`: under
+first-token-style concat assumptions, `g_bad` satisfies C1 on fresh inputs and
+the fresh-input C3 merge chain, but fails C2/idempotence on its own range. -/
+theorem ex_c2_independent_formalized
+    (hp : fstar' POS = 1) (hn : fstar' NEG = 0)
+    (hbin : ∀ x, fstar' x = 0 ∨ fstar' x = 1)
+    (h_mul_left : ∀ a b : Strings', fstar' (a * b) = fstar' a)
+    (h_fresh_mul : ∀ u v : Strings',
+      u ≠ POS → u ≠ NEG → v ≠ POS → v ≠ NEG →
+        (u * v ≠ POS ∧ u * v ≠ NEG))
+    (h_token_mul_fresh : ∀ a b : Strings',
+      (a = POS ∨ a = NEG) → (b = POS ∨ b = NEG) →
+        (a * b ≠ POS ∧ a * b ≠ NEG))
+    (h_pos_fresh_exists : ∃ b : Strings', b ≠ POS ∧ b ≠ NEG ∧ fstar' b = 1) :
+    (∀ b : Strings', b ≠ POS → b ≠ NEG →
+      D_real fstar' (g_bad POS NEG fstar' b) b = 0) ∧
+    (∀ u v : Strings', u ≠ POS → u ≠ NEG → v ≠ POS → v ≠ NEG →
+      D_real fstar' (g_bad POS NEG fstar' (u * v)) (u * v) = 0 ∧
+      D_real fstar'
+        (g_bad POS NEG fstar'
+          (g_bad POS NEG fstar' u * g_bad POS NEG fstar' v))
+        (u * v) = 0) ∧
+    POS ∈ Set.range (g_bad POS NEG fstar') ∧
+    D_real fstar' (g_bad POS NEG fstar' POS) POS > 0 := by
+  constructor
+  · intro b hb_pos hb_neg
+    exact g_bad_preserves_fresh POS NEG fstar' b hb_pos hb_neg hp hn hbin
+  constructor
+  · intro u v hu_pos hu_neg hv_pos hv_neg
+    constructor
+    · have huv_fresh := h_fresh_mul u v hu_pos hu_neg hv_pos hv_neg
+      exact g_bad_preserves_fresh POS NEG fstar' (u * v)
+        huv_fresh.1 huv_fresh.2 hp hn hbin
+    · have hgu_token := g_bad_value_is_token POS NEG fstar' u
+      have hgv_token := g_bad_value_is_token POS NEG fstar' v
+      have hmerge_fresh :=
+        h_token_mul_fresh (g_bad POS NEG fstar' u) (g_bad POS NEG fstar' v)
+          hgu_token hgv_token
+      have hgu_pres :
+          fstar' (g_bad POS NEG fstar' u) = fstar' u :=
+        fstar_g_bad_eq_of_fresh POS NEG fstar' hp hn hbin u hu_pos hu_neg
+      have hmerge_pres :
+          fstar'
+              (g_bad POS NEG fstar'
+                (g_bad POS NEG fstar' u * g_bad POS NEG fstar' v)) =
+            fstar' (g_bad POS NEG fstar' u * g_bad POS NEG fstar' v) :=
+        fstar_g_bad_eq_of_fresh POS NEG fstar' hp hn hbin
+          (g_bad POS NEG fstar' u * g_bad POS NEG fstar' v)
+          hmerge_fresh.1 hmerge_fresh.2
+      have h_eq :
+          fstar'
+              (g_bad POS NEG fstar'
+                (g_bad POS NEG fstar' u * g_bad POS NEG fstar' v)) =
+            fstar' (u * v) := by
+        calc
+          fstar'
+              (g_bad POS NEG fstar'
+                (g_bad POS NEG fstar' u * g_bad POS NEG fstar' v))
+              = fstar' (g_bad POS NEG fstar' u * g_bad POS NEG fstar' v) :=
+                hmerge_pres
+          _ = fstar' (g_bad POS NEG fstar' u) :=
+                h_mul_left (g_bad POS NEG fstar' u) (g_bad POS NEG fstar' v)
+          _ = fstar' u := hgu_pres
+          _ = fstar' (u * v) := (h_mul_left u v).symm
+      unfold D_real
+      rw [h_eq]
+      simp
+  · constructor
+    · rcases h_pos_fresh_exists with ⟨b, hb_pos, hb_neg, hb_one⟩
+      exact ⟨b, POS_in_range_g_bad POS NEG fstar' b hb_pos hb_neg hb_one⟩
+    · exact L3_fails_for_g_bad POS NEG fstar' hp hn
+
 end CounterexampleAliases
 
 end

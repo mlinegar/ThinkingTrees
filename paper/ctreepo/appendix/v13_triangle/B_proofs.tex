@@ -1,0 +1,725 @@
+\section{Full Proofs}\label{app:proofs}
+
+\subsection{Mergeable Summaries Background}\label{app:mergeable-background}
+
+The main text introduces mergeable sketches in one paragraph
+(Section~\ref{sec:mergeable-sketches}). This subsection gives the
+self-contained version of that story. The important pattern is simple:
+build a state on each shard, merge states up the tree, and apply the
+query/readout only at the root. C-TreePO uses the same pattern, except
+that the state can be learned and the local laws audit whether it still
+contains the information needed by the task.
+
+\paragraph{Five older ideas.}
+Database systems already distinguish aggregates whose fixed-size
+intermediate state can be combined before finalization
+\citep{GrayEtAl1997DataCube}. Streaming theory formalizes this as
+mergeable summaries \citep{Agarwal2013MergeableTODS}; distributed
+streaming work studies the symmetric unordered case
+\citep{FeldmanEtAl2008MUD}; and functional programming gives the
+ordered analogue through list, or free-monoid, homomorphisms
+\citep{Gibbons1996ThirdHomomorphism}. Finally, the
+sufficient-statistic tradition explains why a compressed state is
+useful only relative to a downstream target
+\citep{Fisher1922,Blackwell1953}. C-TreePO takes this lineage as its
+algebraic target: learn a bounded state, merge it locally, and audit
+whether the task readout is preserved.
+
+\paragraph{Mergeable summaries in data systems.}
+A \emph{mergeable summary} is a compact state with a merge rule. Given
+two shards, one builds a state for each shard, merges those two states,
+and obtains a state that is valid for the union of the shards. The
+query is then read from that merged state. \citet{Agarwal2013MergeableTODS}
+formalize this for a query $Q$ (cardinality, frequency, quantile,
+membership, \dots): the state obtained from $u\concat v$ and the state
+obtained by merging the states for $u$ and $v$ must answer
+$Q(u\concat v)$ equally well, while staying within the stated size
+bound. The appeal is operational: a MapReduce, Dataflow, or Spark job
+can compute a summary per shard, merge summaries pairwise up a tree,
+and read the query off the root without materializing the full stream.
+The same state-composition pattern appears in massive unordered
+distributed aggregation and in database ``algebraic'' aggregates,
+where fixed-size intermediate state is combined before finalization
+\citep{FeldmanEtAl2008MUD,GrayEtAl1997DataCube}.
+
+The mergeable-summary literature is deep. HyperLogLog
+\citep{FlajoletEtAl2007,HeuleEtAl2013} estimates distinct counts in a
+few kilobytes regardless of stream length; Appendix~\ref{app:hll-primer}
+gives a self-contained primer. Count-Min
+\citep{CormodeMuthukrishnan2005} answers frequency queries under a
+space budget. Bloom filters, Theta/KMV sketches, t-digest, KLL, and GK
+quantile sketches are part of the same systems lane, with different
+exact or approximate merge guarantees. The common thread is that the
+state, merge, and readout are engineered before training, so
+correctness is usually proved from sketch-specific algebra rather than
+inferred from runtime audits. Current Lean-backed instances include
+HLL's max-register merge laws, Count-Min's additive state merge,
+Misra--Gries/GK-style theorem surfaces, typed
+interval/range targets from the mergeable-summary literature, adjacent
+$\varepsilon$-kernel geometry when separately cited, and the paper's bigram
+and Markov-count sketches.
+Separately, the Python benchmark suite wraps Apache DataSketches
+implementations for HLL, CPC, Theta, Count-Min, Frequent Items, KLL,
+classic quantiles, REQ, t-digest, Tuple, and VarOpt as official
+empirical references. CPC, Theta/KMV, Frequent Items, classic
+quantiles, REQ, t-digest, Tuple, and VarOpt should therefore be read
+as empirical-only rows unless a matching local-law artifact is added.
+HLL is the empirical anchor in Section~\ref{sec:hll-parity}, not the
+definition of the classical class.
+
+\paragraph{The algebraic view.}
+Abstractly, a mergeable sketch for a query family indexed by $q \in
+\mathcal{Q}$ is a state-level triple $(\mathrm{encode}, \oplus,
+\mathrm{query})$ with
+\[
+\mathrm{encode} : \Strings \to \mathcal{S}, \quad
+\oplus : \mathcal{S} \times \mathcal{S} \to \mathcal{S}, \quad
+\mathrm{query} : \mathcal{S} \times \mathcal{Q} \to \mathcal{R},
+\]
+and correctness
+\[
+\mathrm{query}\big(\mathrm{encode}(u \concat v),\, q\big)
+\;\approx\;
+\mathrm{query}\big(\mathrm{encode}(u) \oplus \mathrm{encode}(v),\, q\big)
+\]
+for every pair of shards $u, v$ and every query $q$. The merge
+composes \emph{states}, not scalar query answers. Distinct count is
+the canonical warning: $|A \cup B|$ is not determined by $|A|$ and
+$|B|$ alone, while an HLL register vector can still be merged because
+it carries overlap-relevant state. Associativity of $\oplus$ is the
+schedule-invariance condition: any binary aggregation tree reaches the
+same state, or at least the same readout. Commutativity is specific to
+unordered or symmetric inputs. Idempotence is specific to set- or
+semilattice-like unions such as HLL or Bloom-filter-style membership
+sketches; it is not a generic property of frequency or quantile
+summaries.
+
+For ordered text, the corresponding algebraic ideal is a list, or
+free-monoid, homomorphism: $h(u \concat v) = h(u) \odot h(v)$ for an
+associative operator $\odot$ on summary states
+\citep{Gibbons1996ThirdHomomorphism}. The operator $\odot$ need not be
+commutative, because word and paragraph order can matter. C-TreePO is
+an audited learned approximation to this state-level discipline: the
+summaries are learned states, and the local laws test whether those
+states still support the task readout.
+
+\paragraph{Lean artifact.}
+The Lean artifact mirrors exactly this split. It proves the reusable
+state-level algebra---build, merge, validity, tree closure, and final
+readout---and separately exposes the large external facts as typed
+theorem obligations. For HLL, the checked part is the
+hash-to-register pipeline, pointwise-max merge, state-level collapse,
+the Poisson-mixture series package, and the fixed-cardinality
+consequence obtained from a depoissonization-transfer obligation; the
+Mellin-transform estimates and analytic depoissonization proof behind
+the estimator constants remain named obligations, with the Big-O
+consequence of the relative standard-error asymptotic checked in Lean.
+For Agarwal-style summaries, the state-level interface, Count-Min
+contrast, Misra--Gries/GK surfaces, interval and range-space targets,
+finite VC traces, randomized root-validity/readout nesting, and
+hybrid-promotion bookkeeping are typed; the compact randomized discrepancy
+construction remains an explicit citation obligation rather than a hidden
+assumption, and $\varepsilon$-kernel material is adjacent background unless
+separately cited. The standalone Lean entry point for this literature layer is
+\texttt{FormalProbability.ML.MergeableSummaries.Literature}; C-TreePO
+imports that surface and re-exports only the bridge names used by this
+paper. The corresponding Lean names are:
+\begin{center}
+\small
+\path|local_laws_of_sketch|\\
+\path|mergeableSketchSummaryClass_subset_exactLocalLawSubspace|\\
+\path|RelationalMergeablePreferenceShape|\\
+\path|RandomizedRelationalMergeablePreferenceShape|\\
+\path|CTreePOToAgarwalTransform|
+\end{center}
+
+\paragraph{The formal correspondence.}
+The correspondence with C-TreePO is a qualified equivalence, not a bare
+claim that every scalar answer has a merge rule. There are two cases.
+The strict case is an oracle homomorphism, where the task value itself
+has a merge operation. This is clean but too strong for many sketches:
+scalar distinct count cannot merge $|A|$ and $|B|$ into $|A\cup B|$
+without overlap information. The state-level case is the one used by
+classical mergeable summaries. The state carries the missing
+information, the state is merged locally, and the readout happens after
+the root state has been formed.
+
+\begin{proposition}[Strict and State-Level Mergeable Limits]\label{prop:mergeable-reduction-background}
+Under Assumption~\ref{ass:context} (context-compatible oracle), suppose $g$ is deterministic and satisfies global versions of the preservation laws:
+\[
+\text{(A1)}\ \forall z,\ g(z) \sim z,\qquad
+\text{(A2)}\ \forall u,v,\ u \concat v \sim g(g(u)\concat g(v)),
+\]
+Define the induced summary merge $\oplus_g(s,t):=g(s\concat t)$. Then:
+\begin{enumerate}[nosep]
+\item \emph{Strict oracle homomorphism.} If there exists
+$m_{\Y}:\Y\times\Y\to\Y$ such that
+$m_{\Y}(\fstar(u),\fstar(v))=\fstar(u\concat v)$ for all $u,v$, then
+$\fstar$ is a homomorphic readout of the induced state: merging summaries and
+then reading out gives the same oracle value as reading the raw concatenation,
+and $\oplus_g$ is associative modulo $\sim$.
+\item \emph{Classical state-level reduction.} More generally, let
+$(\mathrm{encode},\oplus_B,\mathrm{query})$ be a bounded mergeable-summary
+scheme for a query family $Q_q$ in the sense of
+\citet{Agarwal2013MergeableTODS}. If $g$ serializes the sketch state
+($g(x)=\mathrm{encode}(x)$ on raw shards and
+$g(s\concat t)=s\oplus_B t$ on serialized states) and the C-TreePO readout is
+$f(s,q)=\mathrm{query}(s,q)$, then the C-TreePO tree realizes the same
+state-level mergeable summary under the induced merge $\oplus_g$.
+\end{enumerate}
+\end{proposition}
+
+\noindent\textit{Proof intuition.} The strict case chains A1 and A2
+through context compatibility to recover homomorphic readout and
+associativity modulo the oracle. The classical case is state-level:
+bounded sketch states compose by $\oplus_B$, and the readout is
+applied only after the state has been merged. In the randomized
+Agarwal-style case, the same state-level reduction is interpreted on the
+root-validity event: with the paper's success probability, the merged root
+state is valid for the union stream, and then the readout is correct. The
+full proof is in
+\S\ref{app:proof-mergeable} below.
+
+\paragraph{Exact instantiation checklist.}
+To use this proposition for a concrete mergeable summary, specify
+(i) a state space $\mathcal{S}$, (ii) a validity relation $V(D,s)$,
+(iii) a builder $\mathrm{build}(D)$, (iv) a state merge
+$\mathrm{merge}(s_L,s_R)$, and (v) a readout
+$\mathrm{readout}(s)$.  The required facts are
+\[
+V(D,\mathrm{build}(D)),\qquad
+V(D_L,s_L)\wedge V(D_R,s_R)
+\Rightarrow
+V(D_L\concat D_R,\mathrm{merge}(s_L,s_R)),
+\]
+and
+\[
+V(D,s)\Rightarrow \mathrm{readout}(s)=F(D).
+\]
+C-TreePO implements these facts by choosing $g$ to build states at leaves and
+merge serialized child states at internal nodes, and choosing $f$ to be the
+root readout. C1 checks the leaf build case, C3 checks the merge case, and C2
+is the additional re-use/stability condition needed when an already-produced
+summary can itself be summarized again. None of these conditions says that
+scalar child answers merge; scalar answer mergeability is a stricter special
+case.
+
+\paragraph{Variants the framework covers.}
+Section~\ref{sec:hll-parity} exhibits this collapse numerically on one
+representative mergeable sketch, HyperLogLog. Running a classical HLL
+(native plus the Apache DataSketches reference) through the unified
+\texttt{fit()} framework with $n_{\mathrm{leaves}} \in \{1, 2, 4, 8,
+16\}$ yields byte-identical register states between TreePO-reduced and
+flat pipelines for the register-based implementation, and
+estimate-equivalence within the HLL relative standard error for the
+DataSketches reference. The broader \texttt{treepo-bench suite
+classical-sketches} path repeats the same tree-reduction comparison
+for official DataSketches distinct-counting, frequency, quantile, and
+set-operation sketches plus Tuple/VarOpt sampling checks, reporting
+memory/error curves over capacities and leaf counts, merge-schedule
+spread, bound coverage, and distance to the best official sketch
+floor. It is executed through the same \texttt{fit()} interface as the
+HLL parity experiment. This matters for the learned comparisons: the
+scalar learned-$g{+}f$ companion can take an exact target or an
+official sketch query function as $\fstar$, then learn both the merge
+state and readout without forcing the hidden state to be byte-
+compatible with the reference library. The same pipeline can swap its
+oracle $\fstar$ from analytic cardinality to the HLL's own scoring
+head, and under that oracle a fully end-to-end learned $g$ and $f$
+track the classical sketch within a small multiple of the RSE floor;
+a constrained variant in which $g$ must produce outputs readable by
+the classical HLL estimator degrades with $L$, quantifying the cost of
+the register-space constraint on depth. In the projection language,
+the classical rows start inside the exact local-law subspace, while
+the learned rows test different representable subspaces and readouts
+for how closely training can reach that target. When $\fstar$ is an
+official sketch query function, C-TreePO is being asked to recover
+that classical sketch; when $\fstar$ is semantic, the same laws define
+the learned generalization. The formal claim is not HLL-specific: any
+sketch that supplies the same \texttt{SketchLeafPreserving},
+\texttt{SketchMergeCompatible}, and \texttt{SketchSummaryCompatible}
+witnesses enters the exact local-law subspace through
+\texttt{mergeableSketchSummaryClass\_subset\_exactLocalLawSubspace}.
+
+\subsection{Sketch Sufficiency Boundary}\label{app:proof-m-lt-k}
+
+The following observation motivates the general mechanism: when a bounded sketch cannot represent the interaction the oracle depends on, the failure is structural and more data cannot fix it.
+
+\begin{proposition}[Failure Boundary for $m < k$]\label{prop:m_lt_k}
+For a threshold target $\tau_k(r) := \One\{C(r) \ge k\}$ on binary indicators $r \in \{0,1\}^n$ with $C(r) = \sum_j r_j$, if a top-$m$ sketch retains only $m < k$ indicators, there exist inputs with identical sketch state but different target values. No estimator restricted to that sketch class can recover $\tau_k$ without ambiguity.
+\end{proposition}
+
+\begin{proof}
+Fix integers $k,m$ with $1 \le m < k$.
+Construct two documents:
+\[
+r^{-} = (\underbrace{1,\dots,1}_{m\ \text{times}}, 0, \dots, 0), \qquad
+r^{+} = (\underbrace{1,\dots,1}_{k\ \text{times}}, 0, \dots, 0),
+\]
+with common length $n \ge k$. Then $C(r^-) = m < k$ and $C(r^+) = k \ge k$, so
+$\tau_k(r^-) = 0$ and $\tau_k(r^+) = 1$.
+However, both sequences have at least $m$ unit entries, and all top-$m$ retained entries are ones.
+Hence $S_m(r^-) = S_m(r^+)$.
+Therefore two inputs with identical sketch state yield different target values.
+\end{proof}
+
+\subsection{Proof of Theorem~\ref{thm:one-pass} (Preservation)}\label{app:proof-preservation}
+
+\begin{proof}
+Fix a realized full binary tree $T$ over document $x$.
+For each node $u$, define latent raw span $S(u)$ recursively by setting $S(u) = b$ when $u$ is a leaf containing block $b$, and setting $S(u) = S(u_L) \concat S(u_R)$ when $u$ is an internal node with children $(u_L, u_R)$.
+Define stored summary $s_u$ recursively by setting $s_u = g(S(u))$ at leaves and $s_u = g(s_{u_L} \concat s_{u_R})$ at internal nodes.
+Let $r$ be the root and set $Z^{(1)}(x) := s_r$.
+Assume C1 and C3 hold almost surely on all realized calls.
+
+We show $s_u \sim S(u)$ for every node $u$ by structural induction on node height.
+
+\textbf{Base case.} If $u$ is a leaf, C1 gives $s_u = g(S(u)) \sim S(u)$.
+
+\textbf{Inductive step.} Let $u$ be an internal node with children $u_L, u_R$ and assume $s_{u_L} \sim S(u_L)$ and $s_{u_R} \sim S(u_R)$.
+By context compatibility (Assumption~\ref{ass:context}), applied first to right-concatenation with $s_{u_R}$ and then to left-concatenation with $S(u_L)$:
+\[
+s_{u_L} \concat s_{u_R} \sim S(u_L) \concat s_{u_R} \sim S(u_L) \concat S(u_R) = S(u).
+\]
+The remaining obligation is the realized merge-law check at node $u$. In the paper's two-link C3 notation, applying C3 to the child summaries gives the displayed equivalence below; together with the context-compatibility equivalence above, this is the internal-node zero-distortion conclusion. In Lean, L2 packages that composed conclusion directly. Thus
+\[
+g(s_{u_L} \concat s_{u_R}) \sim s_{u_L} \concat s_{u_R}.
+\]
+Since $s_u = g(s_{u_L} \concat s_{u_R})$, transitivity gives $s_u \sim S(u)$.
+
+At root $r$, we have $s_r \sim S(r) = x$, hence
+\[
+\metric\!\big(\fstar(Z^{(1)}(x)), \fstar(x)\big) = 0
+\]
+almost surely, so $\E[\metric(\fstar(Z^{(1)}(x)), \fstar(x))] = 0$.
+
+\textbf{Multi-round extension (add C2).}
+Define rounds by $Z^{(R+1)}(x) := g(Z^{(R)}(x))$ for $R \ge 1$.
+Because $Z^{(1)}(x) = s_r \in \operatorname{range}(g)$ and $g$ maps into its range, each $Z^{(R)}(x)$ is in $\operatorname{range}(g)$.
+By C2: $Z^{(R+1)}(x) \sim Z^{(R)}(x)$ for all $R \ge 1$.
+We prove $Z^{(R)}(x) \sim x$ by induction on $R$.
+Base $R = 1$ holds from the nodewise equivalence argument above.
+If $Z^{(R)}(x) \sim x$ and $Z^{(R+1)}(x) \sim Z^{(R)}(x)$, transitivity yields $Z^{(R+1)}(x) \sim x$.
+Thus $\E[\metric(\fstar(Z^{(R)}(x)), \fstar(x))] = 0$ for all $R \ge 1$.
+\end{proof}
+
+\subsection{Proof of Proposition~\ref{prop:mergeable-reduction-background} (Strict and State-Level Mergeable Limits)}\label{app:proof-mergeable}
+
+\begin{proof}
+Assume Assumption~\ref{ass:context} and deterministic $g$ with A1--A2 as
+stated in Proposition~\ref{prop:mergeable-reduction-background}. Define
+\[
+\oplus_g(s,t):=g(s\concat t).
+\]
+We first prove the strict oracle-homomorphism case, then the state-level
+classical-sketch reduction.
+
+\textbf{(i) Strict oracle homomorphism.}
+Assume there is an oracle-level merge $m_{\Y}$ with
+$m_{\Y}(\fstar(u),\fstar(v))=\fstar(u\concat v)$ for all $u,v$.
+For any $u,v$,
+\[
+g(u\concat v)\sim \oplus_g(g(u),g(v))
+  \iff g(u\concat v)\sim g(g(u)\concat g(v)).
+\]
+By A1 on $u\concat v$, $g(u\concat v)\sim u\concat v$.
+By A2, $u\concat v\sim g(g(u)\concat g(v))$.
+Transitivity yields merge-route equivalence. Because A1 gives
+$g(u)\sim u$ and $g(v)\sim v$, the definition of $m_{\Y}$ gives
+\[
+m_{\Y}\big(\fstar(g(u)),\fstar(g(v))\big)
+  = m_{\Y}\big(\fstar(u),\fstar(v)\big)
+  = \fstar(u\concat v)
+  = \fstar\big(\oplus_g(g(u),g(v))\big),
+\]
+where the last equality uses merge-route equivalence. Thus $\fstar$ is a
+homomorphic readout of the induced state modulo $\sim$.
+
+For any $a,b,c$, we need
+\[
+\oplus_g(\oplus_g(a,b),c)\sim \oplus_g(a,\oplus_g(b,c)),
+\]
+i.e.
+\[
+g(g(a\concat b)\concat c)\sim g(a\concat g(b\concat c)).
+\]
+By A1, outer $g$ can be removed on both sides modulo $\sim$, so it suffices to compare
+$g(a\concat b)\concat c$ and $a\concat g(b\concat c)$.
+Again by A1, $g(a\concat b)\sim a\concat b$ and $g(b\concat c)\sim b\concat c$.
+Using context compatibility (Assumption~\ref{ass:context}), these imply
+\[
+g(a\concat b)\concat c \sim (a\concat b)\concat c,\qquad
+a\concat g(b\concat c)\sim a\concat(b\concat c).
+\]
+Since concatenation is associative, $(a\concat b)\concat c = a\concat(b\concat c)$, hence both sides are equivalent to the same middle string, so they are equivalent to each other.
+Therefore $\oplus_g$ is associative modulo oracle.
+
+\textbf{(ii) Classical state-level reduction.}
+Let $(\mathrm{encode},\oplus_B,\mathrm{query})$ be a bounded mergeable-summary
+scheme for query family $Q_q$ in the sense of
+\citet{Agarwal2013MergeableTODS}. Instantiate C-TreePO so that serialized
+sketch states are valid summaries: on raw shards $g(x)=\mathrm{encode}(x)$,
+on serialized states $g(s\concat t)=s\oplus_B t$, and
+$f(s,q)=\mathrm{query}(s,q)$. Then for every pair of shards and every query,
+\[
+f(g(u\concat v),q)
+  = \mathrm{query}(\mathrm{encode}(u\concat v),q)
+  \approx
+    \mathrm{query}(\mathrm{encode}(u)\oplus_B\mathrm{encode}(v),q)
+  = f(\oplus_g(g(u),g(v)),q).
+\]
+The state remains bounded because the classical scheme is bounded after
+merge. Associativity and schedule-invariance are inherited from the classical
+merge operation, in the exact-state sense when $\oplus_B$ is exact and in the
+readout-equivalence sense when the sketch guarantee is approximate. Therefore
+the C-TreePO instantiation realizes the same state-level mergeable summary.
+No oracle-level merge on $\Y$ is required; the readout can depend on state
+that is not present in the scalar task value.
+
+For randomized mergeable summaries, let $\Omega$ encode all random choices used
+across the whole tree. Agarwal's randomized condition supplies a probability
+lower bound for the event that the root state obtained by merging leaf states
+is valid for the union stream. The C-TreePO readout is deterministic conditional
+on this validity relation, so the readout-correctness event contains the
+root-validity event and inherits the same probability lower bound. This is a
+state-level nesting theorem, not a law for merging scalar query answers.
+\end{proof}
+
+\subsection{Kovachki Finite-Dimensionalization Lemmas}\label{app:kovachki-finite-dimensionalization}
+
+The neural-operator step used in Section~\ref{sec:fno-primer} is not a
+black box from ``continuous operator'' directly to ``certified
+C-TreePO summarizer.'' It has three parts. Lemma~21 supplies compactness
+for the union of finite-rank approximating images. Lemma~22 uses that
+compactness to finite-dimensionalize the target operator on the compact
+set. Theorems~11 and~13 then supply the neural-architecture
+approximation statements. We record the C-TreePO-used Lemma~21/22 layer
+below and route its output into the local-law bridge of
+Appendix~\ref{app:approx-via-neural-operators}.
+
+\paragraph{Kovachki Lemma 21, compact union.}
+Let $X,Y$ be Banach spaces, $F:X\to Y$ continuous, $K\subset X$
+compact, and $F_n:X\to Y$ continuous with
+\[
+\lim_{n\to\infty}\sup_{x\in K}\|F(x)-F_n(x)\|_Y=0.
+\]
+Then
+\[
+W=\bigcup_{n\ge 1}F_n(K)\cup F(K)
+\]
+is compact in $Y$. In the paper proof this is the device that lets one
+apply uniform continuity of $G$ on one compact set containing both the
+original compact $K$ and the finite-rank approximating images
+$U_n^X(K)$. For the Lipschitz or globally uniformly continuous targets
+we actually use in the C-TreePO bridge, the compact-union premise is
+discharged directly by the uniform continuity of $G$ on the union $W$
+above; the realized-call proof then proceeds without needing the
+Lemma~21 stability hypothesis as a separate assumption.
+
+\paragraph{Kovachki Lemma 22, finite-dimensionalization.}
+Let $X,Y$ be Banach spaces with the approximation property and let
+$G:X\to Y$ be continuous. For every compact $K\subset X$ and
+$\varepsilon>0$, there are $J,J'\in\mathbb{N}$, continuous linear maps
+$F_J:X\to\mathbb{R}^{J}$ and $G_{J'}:\mathbb{R}^{J'}\to Y$, and a
+continuous map $\phi:\mathbb{R}^{J}\to\mathbb{R}^{J'}$ such that
+\[
+\sup_{x\in K}
+\left\|G(x)-\bigl(G_{J'}\circ\phi\circ F_J\bigr)(x)\right\|_Y
+\le \varepsilon.
+\]
+Moreover, $F_J$ can be written as a finite list of input functionals,
+\[
+F_J(x)=(w_1(x),\ldots,w_J(x)),\qquad w_j\in X^\ast,
+\]
+and $G_{J'}$ can be written as a finite expansion,
+\[
+G_{J'}(v)=\sum_{j=1}^{J'}v_j\beta_j,\qquad \beta_j\in Y.
+\]
+If $Y$ has a basis, the output representers can be chosen from a basis
+extension. The two displayed forms (the finite-coordinate encoder $F_J$
+and the finite expansion $G_{J'}$) are the finite-coordinate
+presentation of the approximation property; this is equivalent to the
+standard finite-rank-operator definition of AP. When the target $G$ is
+uniformly continuous, the Lemma~21 stability argument discharges
+automatically; the constructor then produces the full
+$G_{J'}\circ\phi\circ F_J$ witness with its uniform compact error bound
+as a direct corollary.
+
+\paragraph{How this enters C-TreePO.}
+For each realized call site, Lemma~22 produces a finite-dimensionalized
+operator with a chosen tolerance, which is exactly the input the
+uniform-on-compact approximation interface consumes. In the common
+uniformly continuous case, AP, compactness, and uniform continuity
+together yield that interface directly. The same witness is recorded
+separately at each realized leaf, merge, and on-range call, after the
+Banach-space representation has been transported to that call's domain
+and codomain. Composing these witnesses with
+Proposition~\ref{prop:neural-operator-bridge} gives approximate
+theorem-backedness. Thus Lemma~22 helps the proof only up to the point
+of producing realized-call approximation budgets; C1--C3 and the
+audit/local-law theorems still perform the certification step.
+
+\subsection{Neural-Operator Realization-to-Local-Law Bridge}\label{app:approx-via-neural-operators}
+
+Section~\ref{sec:fno-primer} isolates the only part of the neural-operator
+literature this paper uses. The external approximation theorem supplies an
+ideal-to-realized approximation witness on compact realized-call sets. The
+finite-dimensionalization part of that route is the Lemma~21/22 layer
+spelled out in Appendix~\ref{app:kovachki-finite-dimensionalization}; the
+equation-(6) architecture approximation remains the named external
+Theorem~11/13 input.
+
+Let $s^\dagger$ be an ideal deterministic summarizer on a fixed tree $T$,
+and suppose $s^\dagger$ is exact theorem-backed. Choose three compact
+realized-call sets: one for realized leaves, one for realized merge calls,
+and one for the root-level on-range re-summary call. A Section~9-style
+neural-operator approximation theorem is then invoked only to assert the
+existence of a realized operator $s$ with uniform error at most
+$\varepsilon$ on those compact sets.
+
+What does \emph{not} happen is an automatic jump from operator error to
+the paper's approximate local laws. The audit layer is phrased in terms
+of violation probabilities, so one still needs explicit transfer
+assumptions modelling how a uniform approximation tolerance $\varepsilon$
+propagates to leaf, merge, and idempotence budgets
+$(\varepsilon_{\mathrm{leaf}}, \varepsilon_{\mathrm{merge}},
+\varepsilon_{\mathrm{idemp}})$. Proposition~\ref{prop:neural-operator-bridge}
+packages this propagation: the approximate-local-law bundle it produces
+is exactly the three displayed budgets plus a proof that the realized
+operator satisfies C1/C2/C3 up to those budgets.
+
+Once the bridge has produced an approximate-local-law bundle, the rest
+of the proof route is exactly the one already used elsewhere in the
+paper. The approximate-gap theorem gives
+\[
+\Delta_R \;\le\;
+\varepsilon_{\mathrm{leaf}}
+\;+\;
+\varepsilon_{\mathrm{merge}}
+\;+\;
+(R-1)\,\varepsilon_{\mathrm{idemp}},
+\]
+and Theorem~\ref{thm:unified-gap} then transports this distortion budget to
+the method-specific objective gap. So the role of the neural-operator theory
+is precise: it is the realizability argument for obtaining a summarized
+operator with a chosen upstream tolerance on the realized call compacts.
+The local-law and audit machinery still does the certification work.
+The regularized training surface uses the same bridge through
+\texttt{oracleProjectionObjective\_le\_of\_uniformApproxExactTheoremBacked},
+which is why the objective in Equation~\eqref{eq:oracle-projection-objective}
+can be read as oracle approximation plus projection toward the local-law
+subspace rather than as a new proof route. Appendix~\ref{app:projection-interpretation}
+records the accompanying iff: this projection reading is equivalent to
+saying that the approximation error is structured so that its zero set is
+exactly the exact local-law subspace.
+
+\subsection{Supporting Lemmas for the Gap Bound}\label{app:supporting-lemmas}
+
+Before proving the main equivalence and gap theorems, we separate the two quantitative roles. Appendix~\ref{app:approx-via-neural-operators} is the upstream representation step: external neural-operator approximation plus transfer moduli produces a local-law distortion budget. The lemmas below are the downstream transport step: they show how a preference objective converts that oracle distortion budget into objective units.
+
+\begin{lemma}[Sigmoid is 1-Lipschitz]\label{lem:sigmoid-lip}
+$|\sigma(t_1) - \sigma(t_2)| \le |t_1 - t_2|$ for all $t_1, t_2 \in \R$, where $\sigma(t) = (1 + e^{-t})^{-1}$. Standard calculus: $|\sigma'(t)| = \sigma(t)(1-\sigma(t)) \le 1/4$.
+\end{lemma}
+
+\begin{lemma}[$-\log\sigma$ is 1-Lipschitz]\label{lem:neglogsig-lip}
+$|{-}\log\sigma(t_1) - ({-}\log\sigma(t_2))| \le |t_1 - t_2|$ for all $t_1, t_2 \in \R$. Standard calculus: $|\frac{d}{dt}(-\log\sigma(t))| = |1 - \sigma(t)| < 1$.
+\end{lemma}
+
+\begin{lemma}[DPO pointwise loss is Lipschitz]\label{lem:dpo-lip}
+Define the DPO pointwise loss for a preferred--dispreferred pair $(a_w, a_l)$:
+\[
+\ell_{\mathrm{DPO}}(x, a_w, a_l) := -\log\sigma\!\left(\beta\left[\log\frac{\pi_\theta(a_w|x)}{\pi_{\mathrm{ref}}(a_w|x)} - \log\frac{\pi_\theta(a_l|x)}{\pi_{\mathrm{ref}}(a_l|x)}\right]\right).
+\]
+If the policy log-ratio $x \mapsto \log\frac{\pi_\theta(a|x)}{\pi_{\mathrm{ref}}(a|x)}$ is $L_{\mathrm{pol}}$-Lipschitz in $\metric(\fstar(x), \fstar(x'))$ for every action $a$, then
+\[
+|\ell_{\mathrm{DPO}}(x, a_w, a_l) - \ell_{\mathrm{DPO}}(x', a_w, a_l)| \le 2|\beta|\, L_{\mathrm{pol}} \cdot \metric(\fstar(x), \fstar(x')).
+\]
+\end{lemma}
+
+\begin{proof}
+Define the logit difference $\Delta(x) := \log\frac{\pi_\theta(a_w|x)}{\pi_{\mathrm{ref}}(a_w|x)} - \log\frac{\pi_\theta(a_l|x)}{\pi_{\mathrm{ref}}(a_l|x)}$. By the triangle inequality on the two log-ratio terms, each $L_{\mathrm{pol}}$-Lipschitz:
+\[
+|\Delta(x) - \Delta(x')| \le 2 L_{\mathrm{pol}} \cdot \metric(\fstar(x), \fstar(x')).
+\]
+Composing: $\ell_{\mathrm{DPO}}(x, a_w, a_l) = (-\log\sigma)(\beta \cdot \Delta(x))$. By Lemma~\ref{lem:neglogsig-lip}, $-\log\sigma$ is 1-Lipschitz, and scaling by $|\beta|$ gives the claimed constant $2|\beta| L_{\mathrm{pol}}$.
+\end{proof}
+
+\begin{lemma}[DPO loss is oracle-measurable]\label{lem:dpo-oracle-meas}
+If $\pi_\theta(a|\cdot)$ and $\pi_{\mathrm{ref}}(a|\cdot)$ are oracle-measurable---meaning $\metric(\fstar(x), \fstar(x')) = 0$ implies $\pi_\theta(a|x) = \pi_\theta(a|x')$ and $\pi_{\mathrm{ref}}(a|x) = \pi_{\mathrm{ref}}(a|x')$ for all $a$---and the pair generator is oracle-indexed---meaning $\metric(\fstar(x), \fstar(x')) = 0$ implies $\mathrm{gen}(x) = \mathrm{gen}(x')$---then the expected DPO loss $\E_{(a_w,a_l) \sim \mathrm{gen}(x)}[\ell_{\mathrm{DPO}}(x, a_w, a_l)]$ depends on $x$ only through $\fstar(x)$.
+\end{lemma}
+
+\begin{proof}
+If $\metric(\fstar(x), \fstar(x')) = 0$, then by oracle-measurability of the policies, $\pi_\theta(a|x) = \pi_\theta(a|x')$ and $\pi_{\mathrm{ref}}(a|x) = \pi_{\mathrm{ref}}(a|x')$ for all $a$, so $\ell_{\mathrm{DPO}}(x, a_w, a_l) = \ell_{\mathrm{DPO}}(x', a_w, a_l)$ for all pairs. Since $\mathrm{gen}(x) = \mathrm{gen}(x')$, the expectation over pairs is identical.
+\end{proof}
+
+\begin{lemma}[Zero distortion implies pointwise equality on support]\label{lem:zero-dist-support}
+Let $\mu_Z$ be the distribution of $Z^{(R)}(x)$ for fixed $x$, and suppose $\E[\metric(\fstar(Z^{(R)}(x)), \fstar(x))] = 0$. Since $\metric \ge 0$, we have $\metric(\fstar(z), \fstar(x)) = 0$ for all $z$ in the support of $\mu_Z$.
+\end{lemma}
+
+\begin{proof}
+Suppose for contradiction that $\metric(\fstar(z_0), \fstar(x)) > 0$ for some $z_0$ with $\mu_Z(z_0) > 0$. Then
+\[
+\E[\metric(\fstar(Z), \fstar(x))] = \sum_z \mu_Z(z)\,\metric(\fstar(z), \fstar(x)) \ge \mu_Z(z_0) \cdot \metric(\fstar(z_0), \fstar(x)) > 0,
+\]
+contradicting $\E[\metric(\fstar(Z), \fstar(x))] = 0$.
+\end{proof}
+
+\subsection{Proof of Theorem~\ref{thm:pref-equiv} and Theorem~\ref{thm:unified-gap} (Equivalence and Gap Bounds)}\label{app:proof-equivalence}
+
+We prove the results in increasing generality: first the method-agnostic exact equivalence, then the unified gap bound, then the DPO transport instantiation. When a neural-operator realization theorem is available, its output enters this proof only through the already-formed $\Delta_R$ budget.
+
+\paragraph{Step 1: Method-agnostic exact equivalence.}
+
+\begin{proof}[Proof of Theorem~\ref{thm:pref-equiv}]
+Fix a preference learning method with population integrand $\mathcal{J}_\theta(x) = \E_{a \sim \mathrm{gen}(x)}[\ell(x, a)]$, where $\ell$ is the method-specific loss and $\mathrm{gen}$ is the pair or group generator.
+
+Assume (i) oracle-measurability of $\ell$: $\metric(\fstar(x), \fstar(x')) = 0$ implies $\ell(x,a) = \ell(x',a)$ for all $a$; and (ii) oracle-indexing of the generator: $\metric(\fstar(x), \fstar(x')) = 0$ implies $\mathrm{gen}(x) = \mathrm{gen}(x')$. Together these give oracle-measurability of the integrand: there exists $\phi_\theta: \Y \to \R$ such that $\mathcal{J}_\theta(x) = \phi_\theta(\fstar(x))$.
+
+Assume also Assumption~\ref{ass:context} and that C1--C3 hold on realized calls. By Theorem~\ref{thm:multi-round}, $\E[\metric(\fstar(Z^{(R)}), \fstar(x))] = 0$. By Lemma~\ref{lem:zero-dist-support}, $\metric(\fstar(z), \fstar(x)) = 0$ for all $z$ in the support of $Z^{(R)}$. Therefore
+\[
+\mathcal{J}_\theta(z) = \phi_\theta(\fstar(z)) = \phi_\theta(\fstar(x)) = \mathcal{J}_\theta(x)
+\]
+for all $z$ in the support. Taking expectations:
+\[
+\E[\mathcal{J}_\theta(Z^{(R)})] = \E[\mathcal{J}_\theta(X)].
+\]
+Since this holds for all $\theta$, the argmin sets are identical.
+
+For DPO, oracle-measurability of the loss follows from Lemma~\ref{lem:dpo-oracle-meas}. For GRPO-PL, the argument is identical with the Plackett-Luce ranking loss $\ell_{\mathrm{PL}}(x, \sigma) = -\sum_{i=1}^k \log \frac{\exp(s_{\sigma(i)}(x))}{\sum_{j \ge i} \exp(s_{\sigma(j)}(x))}$ in place of the Bradley-Terry loss, and with the ranker assumed oracle-indexed. For GRPO-RL, the objective includes clipped surrogate ratios and a KL penalty, but both depend on $x$ only through oracle-measurable policies and rewards, so the same factorization applies.
+\end{proof}
+
+\paragraph{Step 2: Unified gap bound.}
+
+\begin{proof}[Proof of Theorem~\ref{thm:unified-gap}]
+Let $\mu_X$ and $\mu_Z$ denote the distributions of $X$ and $Z^{(R)}$ respectively. Define the expected integrand $E_\theta(x) := \E_{a \sim \mathrm{gen}(x)}[\ell(x, a)]$.
+
+Assume an $L$-Lipschitz condition: $|E_\theta(x) - E_\theta(z)| \le L \cdot \metric(\fstar(x), \fstar(z))$ for all $x, z$.
+
+Because $Z = Z^{(R)}(X)$ is a function of $X$, we can write the gap using the conditional distribution $\mu_{Z|X}$:
+\begin{align*}
+\E_X[E_\theta(X)] - \E_Z[E_\theta(Z)]
+&= \sum_x \mu_X(x) \left[ E_\theta(x) - \sum_z \mu_{Z|X=x}(z)\, E_\theta(z) \right].
+\end{align*}
+Taking absolute values and applying the Lipschitz bound pointwise:
+\begin{align*}
+\left|\E_X[E_\theta(X)] - \E_Z[E_\theta(Z)]\right|
+&\le \sum_x \mu_X(x) \sum_z \mu_{Z|X=x}(z)\, |E_\theta(x) - E_\theta(z)| \\
+&\le L \sum_x \mu_X(x) \sum_z \mu_{Z|X=x}(z)\, \metric(\fstar(x), \fstar(z)) \\
+&= L \cdot \E\!\left[\metric(\fstar(X), \fstar(Z^{(R)}))\right] =: L \cdot \Delta_R.
+\end{align*}
+The interchange of sum and absolute value uses absolute convergence, which holds because $E_\theta$ is bounded.
+\end{proof}
+
+\noindent If the coupled distortion was produced by the neural-operator route, combine this with Proposition~\ref{prop:neural-operator-bridge}. Writing the transfer moduli as $\omega_{\mathrm{leaf}},\omega_{\mathrm{merge}},\omega_{\mathrm{idemp}}$, the bridge yields
+\[
+\Delta_R
+\le
+\omega_{\mathrm{leaf}}(\varepsilon)
++\omega_{\mathrm{merge}}(\varepsilon)
++(R-1)\omega_{\mathrm{idemp}}(\varepsilon),
+\]
+so the same proof gives
+\[
+|G_{\mathrm{meth}}|
+\le
+L\Big(\omega_{\mathrm{leaf}}(\varepsilon)
++\omega_{\mathrm{merge}}(\varepsilon)
++(R-1)\omega_{\mathrm{idemp}}(\varepsilon)\Big).
+\]
+The observational certificate of Theorem~\ref{thm:e2e} then replaces or supplements this design target with the sampled estimate and its calibration/sampling envelopes.
+
+\paragraph{Step 3: DPO transport constant.}
+
+Instantiating the unified gap bound for DPO requires verifying only the downstream transport condition on $E_\theta$; the summarizer's representational error has already been converted into $\Delta_R$ by the neural-operator/local-law or audit route. Lemma~\ref{lem:dpo-lip} establishes that the pointwise DPO loss is $2|\beta|L_{\mathrm{pol}}$-Lipschitz. When the generator is oracle-indexed (hence constant on oracle equivalence classes), the expected integrand inherits the same Lipschitz constant: for any $x, x'$ with $\mathrm{gen}(x) = \mathrm{gen}(x')$,
+\[
+|E_\theta(x) - E_\theta(x')| = \left|\sum_{(a_w, a_l)} \mathrm{gen}(x)(a_w, a_l)\, [\ell_{\mathrm{DPO}}(x, a_w, a_l) - \ell_{\mathrm{DPO}}(x', a_w, a_l)]\right| \le 2|\beta|\,L_{\mathrm{pol}} \cdot \metric(\fstar(x), \fstar(x')),
+\]
+where the last step uses Lemma~\ref{lem:dpo-lip} inside the sum and the fact that the generator weights sum to~1.
+
+For GRPO-PL and GRPO-RL, the Lipschitz condition on the expected group loss enters as the explicit assumption \texttt{ExpectedGroupLossLipschitz}: the expected loss over group samples is Lipschitz in oracle distance, with the constant determined by the method-specific structure (Plackett-Luce ranking for GRPO-PL; clipped surrogate plus KL penalty for GRPO-RL). It is a hypothesis passed to the gap theorems, and the formalization proves sufficient conditions for it from first principles: a finite fixed-ranker Plackett--Luce condition for GRPO-PL and a finite pointwise Lipschitz condition for GRPO-RL (\texttt{OPT/RUMSufficientConditions.lean}). The Random Utility Model (Section~\ref{sec:verification}) is one way to motivate the assumption when those sufficient conditions are not directly checkable.
+
+\subsection{Proof of Theorem~\ref{thm:e2e} (Audited Preference-Gap Bound)}\label{app:proof-e2e}
+
+The audited preference-gap bound composes the representation/local-law budget with two independently established statistical steps: design-based unbiasedness of the distortion estimator, and deterministic method transport from distortion to the preference gap. Analytic neural-operator bounds can set a design target for the budget; the audit estimates the budget actually realized by the deployed tree.
+
+\begin{proof}
+\textbf{Part (a): Distortion objects and HT unbiasedness.}
+Fix a realized tree-population $\mathcal{U}=\bigcup_x U(x)$ with $N := |\mathcal{U}|$, where $U(x)$ contains \emph{all realized nodes} of document $x$ (including the root). For each unit $i \in \mathcal{U}$, define
+\[
+d_i^{\star}:=\metric\!\big(\fstar(s_i),\fstar(S(i))\big),\qquad
+d_i^{J}:=\metric\!\big(f(s_i),f(S(i))\big),
+\]
+and corresponding finite-population means
+\[
+\mu_{\mathrm{dist}}^{\star}:=\frac{1}{N}\sum_{i\in\mathcal{U}} d_i^{\star},\qquad
+\mu_{\mathrm{dist}}^{J}:=\frac{1}{N}\sum_{i\in\mathcal{U}} d_i^{J}.
+\]
+Let $Z_i \in \{0,1\}$ be the inclusion indicator with propensity $\pi_i := \Prob(Z_i=1\mid\mathcal{F})$ and $0<\pi_i\le 1$. The unclipped HT estimator for judge distortion is
+\[
+\hat{\mu}_{\mathrm{HT}}^{J}:=\frac{1}{N}\sum_{i\in\mathcal{U}} \frac{Z_i}{\pi_i}d_i^{J}.
+\]
+Conditional unbiasedness is immediate:
+\[
+\E\!\left[\hat{\mu}_{\mathrm{HT}}^{J}\mid\mathcal{F}\right]
+=\frac{1}{N}\sum_{i\in\mathcal{U}}\frac{\E[Z_i\mid\mathcal{F}]}{\pi_i}d_i^{J}
+=\frac{1}{N}\sum_{i\in\mathcal{U}} d_i^{J}
+=\mu_{\mathrm{dist}}^{J}.
+\]
+
+The full-document label $y_{\mathrm{doc}}=f^\ast(x)$ is a separate complete-label object and is not itself the node-population estimand unless the top node is explicitly included in $\mathcal{U}$ through the node-sampling law. Likewise the final-summary/tree-side quantity $y_{\mathrm{tree}}$ is a different object from $y_{\mathrm{doc}}$ except under exact preservation or exact-control assumptions. The HT statement here concerns only the sampled-node finite-population mean over $\mathcal{U}$; the document-level top loss is evaluated directly from the complete document labels.
+
+\textbf{Part (b): Method transport.}
+By Theorem~\ref{thm:unified-gap}, for the method-specific constant $C_{\mathrm{meth}}$,
+\[
+|G_{\mathrm{meth}}| \le C_{\mathrm{meth}}\,\mu_{\mathrm{dist}}^{\star}.
+\]
+
+\textbf{Part (c): Envelope decomposition.}
+Let $\hat{\mu}_{\mathrm{dist}}$ denote the deployed distortion estimator (possibly clipped). Suppose on an event $\mathcal{E}$ we have the three envelope inequalities:
+\[
+C_{\mathrm{meth}}\!\left|\mu_{\mathrm{dist}}^{\star}-\mu_{\mathrm{dist}}^{J}\right|\le B_{\mathrm{cal}},\quad
+C_{\mathrm{meth}}\!\left|\mu_{\mathrm{dist}}^{J}-\hat{\mu}_{\mathrm{HT}}^{J}\right|\le B_{\mathrm{est}},\quad
+C_{\mathrm{meth}}\!\left|\hat{\mu}_{\mathrm{HT}}^{J}-\hat{\mu}_{\mathrm{dist}}\right|\le B_{\mathrm{clip}}.
+\]
+Then on $\mathcal{E}$,
+\begin{align*}
+|G_{\mathrm{meth}}|
+&\le C_{\mathrm{meth}}\,\mu_{\mathrm{dist}}^{\star} \\
+&\le C_{\mathrm{meth}}\,\hat{\mu}_{\mathrm{dist}}
+ + C_{\mathrm{meth}}\!\left|\mu_{\mathrm{dist}}^{\star}-\mu_{\mathrm{dist}}^{J}\right|
+ + C_{\mathrm{meth}}\!\left|\mu_{\mathrm{dist}}^{J}-\hat{\mu}_{\mathrm{HT}}^{J}\right|
+ + C_{\mathrm{meth}}\!\left|\hat{\mu}_{\mathrm{HT}}^{J}-\hat{\mu}_{\mathrm{dist}}\right| \\
+&\le C_{\mathrm{meth}}\,\hat{\mu}_{\mathrm{dist}} + B_{\mathrm{cal}} + B_{\mathrm{est}} + B_{\mathrm{clip}}.
+\end{align*}
+The middle step is the telescoping decomposition
+\[
+\mu_{\mathrm{dist}}^{\star}
+=\hat{\mu}_{\mathrm{dist}}
++(\mu_{\mathrm{dist}}^{\star}-\mu_{\mathrm{dist}}^{J})
++(\mu_{\mathrm{dist}}^{J}-\hat{\mu}_{\mathrm{HT}}^{J})
++(\hat{\mu}_{\mathrm{HT}}^{J}-\hat{\mu}_{\mathrm{dist}})
+\]
+followed by triangle inequality and $\hat{\mu}_{\mathrm{dist}}\ge 0$ (nonnegative distortions with nonnegative weights). This is exactly the stated audited bound.
+
+\textbf{Part (d): High-probability form.}
+If $\Prob(\mathcal{E}) \ge 1-\delta$, the same inequality holds with probability at least $1-\delta$. In practice, $\mathcal{E}$ is formed by intersecting concentration/calibration events; e.g., when separate events $\mathcal{E}_{\mathrm{cal}},\mathcal{E}_{\mathrm{est}},\mathcal{E}_{\mathrm{clip}}$ are used, one may set $\mathcal{E}:=\mathcal{E}_{\mathrm{cal}}\cap\mathcal{E}_{\mathrm{est}}\cap\mathcal{E}_{\mathrm{clip}}$ and apply a union bound to obtain an explicit confidence level.
+\end{proof}
+
+\subsection{Audit Robustness: Adversarial Sampling}\label{app:audit-robustness}
+
+The HT guarantee is robust to non-benign sampling designs: unbiasedness does not require friendly sampling, only correct logged marginal propensities and strict positivity. The Lean artifact formalizes this arbitrary-design statement directly and then separately records the variance side condition needed for constrained designs. This supports constrained worst-case analysis without treating the sampling law as benign.
+
+Define a design class
+\[
+\mathcal{D}(\pi_{\min},\kappa)
+:=\left\{\pi:\ \pi_i\in[\pi_{\min},\kappa\pi_{\min}],\ \sum_{i\in\mathcal{U}}\pi_i=n\right\},
+\]
+which constrains the antagonist by a minimum inclusion probability and a propensity spread cap. Within this class, an adversary can increase variance by skewing mass toward high-risk units, but cannot alter the target expectation when HT reweighting uses the true logged $\pi_i$.
+
+For independent Bernoulli inclusion, or more generally for a design whose covariance structure is bounded by the same Bernoulli proxy, bounded distortions $0\le Y_i\le D_{\max}$ imply
+\[
+\mathrm{Var}\!\left(\hat{\mu}_{\mathrm{HT}}\mid\mathcal{F}\right)
+\le
+\frac{D_{\max}^2}{N}\cdot \frac{1-\pi_{\min}}{\pi_{\min}},
+\]
+equivalently $\frac{D_{\max}^2}{N}(1/\pi_{\min}-1)$, so $\pi_{\min}$ is the primary robustness lever. A clipping cap $w_{\max}$ gives the corresponding operational variant by replacing uncontrolled inverse-propensity weights with the reported cap and recording the induced clipping term in the certificate. Practically, certificates should therefore be reported over a stress-test grid of $(\pi_{\min}, w_{\max})$ values rather than for a single nominal design.

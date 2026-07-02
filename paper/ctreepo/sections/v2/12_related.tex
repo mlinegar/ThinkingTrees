@@ -1,27 +1,75 @@
-\section{Related Work}\label{sec:related}
+\section{Neighboring Methods and Assumptions}\label{sec:related}
 
-Our focus on local merge compatibility draws on and extends several established traditions. C-TreePO sits at the intersection of four lines of work: tree-based composition/compression in language generation, mergeable sketches in data systems, design-based supervised learning for valid downstream inference with surrogate labels, and the theory of sufficient statistics \citep{KuznetsovaEtAl2014TreeTalk,Agarwal2013MergeableTODS,EgamiEtAl2024,Fisher1922,Blackwell1953}. We frame C-TreePO as a semantic generalization that makes these links explicit and operational in a single auditable pipeline.
-
-\paragraph{Mergeable Summaries and Sketches.}
-Section~\ref{sec:mergeable-sketches} develops the mergeable-summary lineage in detail and states the collapse theorem (Proposition~\ref{prop:mergeable-reduction}); Section~\ref{sec:hll-parity} gives the empirical HyperLogLog verification. The point we stress here is that in natural-language settings commutativity usually fails (paragraph order changes meaning), so the hand-designed merge operators of \citet{Agarwal2013MergeableTODS,FlajoletEtAl2007,CormodeMuthukrishnan2005} are replaced by a learned summarizer plus a run-level audit. Classical sketches do not require runtime checks because their merge rules are exact by construction; learned sketches do, so we certify them empirically. To the best of our knowledge, the specific combination of random node sampling, design-based concentration, and Lipschitz transport into preference-gap bounds appears uncommon in prior work.
-
-\paragraph{Sufficient Statistics and Blackwell Sufficiency.}
-The idea that a compressed representation can capture everything the data has to say about a quantity of interest goes back to \citet{Fisher1922}: a statistic $T(X)$ is \emph{sufficient} for a parameter $\theta$ if the conditional distribution of the data given $T$ does not depend on $\theta$---the remaining observations are pure noise once $T$ is known. A \emph{proper scoring rule} is a loss function minimized when the forecaster reports the true distribution---logarithmic loss and the Brier score are canonical examples \citep{GneitingRaftery2007,Dawid2007}. Under such rules, the optimal Bayesian action depends only on the posterior of the target, not on incidental features of the input. Our Assumption~\ref{ass:CF} instantiates this principle: if supervision factorizes through $\fstar(X)$, then $\fstar$ is a sufficient statistic for the population decision problem, and replacing $X$ with any summary that preserves $\fstar$ leaves the Bayes risk unchanged. \citet{Blackwell1953} extended sufficiency into a comparison framework---\emph{Blackwell sufficiency}---ranking one experiment as ``more informative'' than another whenever it can be post-processed into the other without loss \citep{Torgersen1991}. Our use of this language is deliberately task-relative: the summary need only preserve information visible to $\fstar$ and oracle-indexed downstream decisions, not all surface-text information in the original document.
-
-\paragraph{Design-based Supervised Learning.}
-\citet{EgamiEtAl2024} develop Design-based Supervised Learning (DSL), showing that naively substituting LLM labels for ground-truth annotations can bias downstream regressions even when prediction errors are small. Their doubly-robust procedure combines surrogate labels with gold-standard annotations. C-TreePO complements DSL by providing a way to generate reliable summaries for annotation: when audits indicate low violation/distortion, summaries can serve as low-distortion proxies for full documents, reducing the burden of gold-standard annotation.
-
-\paragraph{LLMs for Political Measurement.}
-\citet{BenoitEtAl2025} use ensembles of LLMs to score party manifestos on policy dimensions such as economic left--right and social liberalism, producing estimates that correlate highly with expert surveys across dozens of languages. Their work validates LLMs as measurement tools but does not provide formal guarantees about information preservation through summarization. C-TreePO extends this line of research by providing auditable pipelines with assumption-qualified bounds on information loss, enabling reliable scaling to long documents when the stated audit/theorem conditions hold.
-
-\paragraph{Preference Learning and RLHF.}
-Direct Preference Optimization (DPO) fine-tunes a language model directly from pairwise human preferences, bypassing the reward-model step of classical RLHF. It does this by reparameterizing the Bradley--Terry likelihood so that the policy itself serves as an implicit reward model \citep{BradleyTerry1952,RafailovEtAl2023DPO}. A standard assumption is that human preferences depend on the input only through its task-relevant semantics. Under this factorization and the preservation assumptions, our results imply that training on oracle-preserving summaries targets the same population argmin set as training on full documents. We extend these results to GRPO and GRPO-RL objectives. When readability or fluency preferences fall outside $\fstar$, they must be modeled by a richer oracle or handled by separate alignment channels.
-
-\paragraph{Assumption-Centered Guarantees.}
-Recent work in machine-learning theory often separates structural invariance claims from behavioral assumptions on annotator noise and loss geometry. Our analysis follows that pattern: C1--C3 and context compatibility drive the preservation/equivalence results, while quantitative transport to preference gaps uses explicit method-level Lipschitz/integrability conditions (Section~\ref{sec:verification})---for example, policy-Lipschitz conditions for DPO and random-utility-style sufficient conditions for GRPO variants. Keeping this split explicit makes guarantees easier to audit and stress-test in applied settings.
+Section~\ref{sec:mergeable-sketches} covers the algebraic lineage:
+database algebraic aggregates, MUD aggregation, mergeable summaries,
+ordered list homomorphisms, and task-relative sufficient statistics.
+Section~\ref{sec:social-measurement} covers the social-science
+measurement lineage behind the Manifesto experiment. This section
+positions C-TreePO against neighboring methods that share pieces of the
+workflow but do not provide the same local-to-global certificate.
 
 \paragraph{Long-Context Methods.}
-RAG retrieves relevant chunks but provides no guarantee about what is \emph{lost} in retrieval; for non-separable targets, retrieval may miss interaction-bearing information that only becomes decision-relevant when chunks are combined (Section~\ref{sec:markov-interlude}). Sliding window methods, recursive summarization, and extended-context models similarly lack auditable certificates. C-TreePO processes \emph{all} chunks through a tree and uses C3-style audits to certify whether cross-chunk interactions are preserved in the realized pipeline, providing a certification layer that complements these practical approaches.
+RAG retrieves relevant chunks but provides no guarantee about what is
+\emph{lost} in retrieval; for non-separable targets, retrieval may miss
+interaction-bearing information that only becomes decision-relevant when
+chunks are combined (Section~\ref{sec:markov-interlude}). Sliding window
+methods, recursive summarization, and extended-context models similarly
+lack auditable certificates. C-TreePO processes all chunks through a tree
+and uses C3-style audits to certify whether cross-chunk interactions are
+preserved in the realized pipeline, providing a certification layer that
+complements these practical approaches.
 
 \paragraph{Tree-Based Text Composition and Compression.}
-Tree-structured inference has also been used to compose and compress natural-language descriptions, with classical work on sentence compression and fusion providing early structured formulations \citep{KnightMarcu2000SentenceCompression,BarzilayMcKeown2005SentenceFusion,ClarkeLapata2008ILPSentenceCompression}. \citet{KuznetsovaEtAl2014TreeTalk} harvest syntactic tree fragments from web captions and use ILP- and CKY-style structured inference to compose new image descriptions and to generalize captions via parse-tree pruning. The closest conceptual resonance with our framing is that this line already treats composition and compression together in one tree-based workflow. Seen through our lens, captioning is a task-specific instance of compression: a caption is a compact textual state intended to preserve task-relevant visual semantics. This differs from C-TreePO: our C-Trees are semantic compression hierarchies over document spans, and our core contribution is an auditable, local-to-global certificate layer for oracle preservation and preference-objective equivalence rather than grammar-driven parse constraints.
+Tree-structured inference has been used to compose and compress
+natural-language descriptions, with classical work on sentence
+compression and fusion providing early structured formulations
+\citep{KnightMarcu2000SentenceCompression,BarzilayMcKeown2005SentenceFusion,ClarkeLapata2008ILPSentenceCompression}.
+\citet{KuznetsovaEtAl2014TreeTalk} harvest syntactic tree fragments from
+web captions and use ILP- and CKY-style structured inference to compose
+new image descriptions and generalize captions via parse-tree pruning.
+The closest conceptual resonance is that this line already treats
+composition and compression together in one tree-based workflow. C-TreePO
+differs by making the compressed node a task-relative state and by adding
+an auditable local-to-global certificate for oracle preservation and
+preference-objective equivalence.
+
+\paragraph{Neural Sufficient Statistics and Simulation-Based Inference.}
+The learned-state view of $g$ is closest to neural sufficient-statistic
+learning for implicit models. \citet{ChenEtAl2021NASS} learn
+approximate sufficient statistics with infomax objectives; the later
+sliced sufficient-statistic method of \citet{ChenGutmannWeller2023SSS}
+reduces the high-dimensional information problem to many
+low-dimensional slice problems. Recent simulation-based inference work
+pushes the same idea into downstream likelihood modeling:
+\citet{DirmeierAlbertPerezCruz2025SSNL} learn a lower-dimensional
+surjective state on which likelihood inference is performed, with
+software support in \texttt{sbijax} and \texttt{surjectors}
+\citep{DirmeierUlzegaMiraAlbert2024SBIJAX,Dirmeier2024Surjectors}.
+Our contribution is the compositional analogue: $g(x)$ is sufficient
+only when it preserves all downstream contextual responses
+$\fstar(L \concat x \concat R)$. This is why our Markov sketch is a
+validation witness rather than an architectural template. Hybrid summary
+statistics \citep{MakinenEtAl2024HybridSummaryStatistics} motivate the
+same diagnostic discipline: known sketches can be probes or auxiliary
+features without defining the general learned state.
+
+\paragraph{Preference Learning and RLHF.}
+Direct Preference Optimization fine-tunes a language model from pairwise
+human preferences by reparameterizing the Bradley--Terry likelihood so
+that the policy itself serves as an implicit reward model
+\citep{BradleyTerry1952,RafailovEtAl2023DPO}. Our results apply to DPO
+and GRPO variants when the preference signal depends on the input only
+through the preserved oracle value. When readability, fluency, or style
+preferences fall outside $\fstar$, they must be modeled by a richer
+oracle or handled by separate alignment channels.
+
+\paragraph{Assumption-Centered Guarantees.}
+Recent machine-learning theory often separates structural invariance
+claims from behavioral assumptions on annotator noise and loss geometry.
+Our analysis follows that pattern but adds an explicit representational
+layer: neural-operator approximation and transfer moduli propose
+local-law budgets, C1--C3 and context compatibility drive the
+preservation/equivalence results, and quantitative transport to
+preference gaps uses explicit method-level Lipschitz and integrability
+conditions (Section~\ref{sec:verification}). Keeping this split explicit
+makes guarantees easier to audit and stress-test in applied settings.

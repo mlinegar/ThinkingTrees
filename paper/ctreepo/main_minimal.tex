@@ -1,0 +1,62 @@
+\documentclass[11pt]{article}
+
+\input{preamble_minimal}
+
+\title{C-TreePO: Compression Trees for Oracle-Preserving Long-Document Learning}
+\author{Mitchell Linegar}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This minimal draft builds C-TreePO from one running example: estimating a
+party manifesto's economic-policy position. We assume each span has a
+task-relative economic state containing the evidence a trusted rubric oracle
+would need, and we treat summaries as learned surrogates for that state. A
+compression tree is valid when leaf summaries preserve span evidence, merges
+preserve cross-span interactions, and re-summarization does not drift. Under
+those local laws, work can move from whole manifestos to paragraphs, sections,
+or chapters while preserving the document-level target. The main results give
+root preservation, schedule invariance, DPO/GRPO-style objective equivalence,
+and a sampled-audit preference-gap certificate. The main empirical section
+leads with Manifesto economic measurement; Markov and HyperLogLog appear only
+as short validation anchors, with full algebraic, proof, protocol, and
+related-work detail deferred to appendices.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+
+\etocdepthtag.toc{minimalmain}
+\input{sections/minimal/01_introduction}
+\input{sections/minimal/02_algebraic_target}
+\input{sections/minimal/03_framework}
+\input{sections/minimal/04_guarantees}
+\input{sections/minimal/05_learned_merges}
+\input{sections/minimal/06_main_results}
+\input{sections/minimal/07_results_three_settings}
+\input{sections/minimal/08_audit_label_budget}
+\input{sections/minimal/09_applications_scope}
+\input{sections/minimal/10_conclusion}
+
+\appendix
+\etocdepthtag.toc{minimalappendixfront}
+\appendixcontents
+\etocdepthtag.toc{minimalappendix}
+
+\input{appendix/minimal/A_notation_assumptions}
+\input{appendix/minimal/B_algebraic_background}
+\input{appendix/minimal/C_proofs_formalization}
+\input{appendix/minimal/D_neural_operator}
+\input{appendix/minimal/E_markov_details}
+\input{appendix/minimal/F_hll_details}
+\input{appendix/minimal/G_manifesto_details}
+\input{appendix/minimal/H_audit_details}
+\input{appendix/minimal/I_related_scope}
+
+\clearpage
+\bibliographystyle{plainnat}
+\bibliography{../refs}
+
+\end{document}

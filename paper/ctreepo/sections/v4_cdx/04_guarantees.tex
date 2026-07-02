@@ -1,0 +1,107 @@
+\section{What the Guarantees Say}\label{sec:min-guarantees}
+
+The theorem stack is conditional. It gives preservation, schedule invariance,
+and preference-objective transport for applications whose chosen state,
+oracle, local laws, and sampling assumptions hold. These are also the
+assumptions that make node supervision transportable to root objectives:
+sampled leaves and merges are useful because they estimate preservation of
+the same oracle that the root label anchors.
+
+\paragraph{Root preservation.}
+Fix a document partition and a binary merge tree with leaves in contiguous
+order. Let $Z^{(1)}(x)$ be the stored root summary.
+
+\begin{theorem}[Inductive preservation]\label{thm:one-pass}
+If the realized run satisfies C1, C3, and
+Assumption~\ref{ass:context}, then
+\[
+  \E\!\left[
+    \metric\big(\fstar(Z^{(1)}(x)),\fstar(x)\big)
+  \right]=0.
+\]
+\end{theorem}
+
+The proof is the tree induction the picture suggests: C1 handles leaves,
+context compatibility allows an oracle-equivalent child summary to be
+substituted for the raw child span inside the parent, and C3 propagates the
+claim through each merge.
+
+\begin{theorem}[Preservation under re-summarization]\label{thm:multi-round}
+If the run additionally satisfies C2, then the same equality holds for every
+re-summary round $R\ge 1$ with $Z^{(R+1)}(x)=g(Z^{(R)}(x))$.
+\end{theorem}
+
+\begin{corollary}[Schedule invariance]\label{cor:schedule}
+For a fixed contiguous partition, any two reduction schedules that satisfy
+the same realized local laws have the same expected oracle value at the root.
+\end{corollary}
+
+Leaf-size robustness is therefore a conditional claim. Chunking and merge
+schedules are interchangeable inside the class where the realized local-law
+checks hold. The node/root supervision tradeoff is an assumption-backed design
+choice: local labels can substitute for root labels when they measure
+preservation of the same oracle.
+
+\paragraph{Preference-objective equivalence.}
+For DPO, GRPO, or related preference objectives, one more premise is needed:
+the downstream preference must depend on the document only through the
+preserved oracle value. Under that oracle-factorization assumption, training
+on root summaries and training on full documents share the same population
+target. In the approximate case, the deviation is controlled by the remaining
+oracle distortion.
+
+\begin{theorem}[Preference-objective equivalence;
+\textsc{PaperPreferenceStack}]\label{thm:pref-equiv}
+Under recompression plus oracle factorization and the application-specific
+generator-indexing premises, zero residual gives identical full-document and
+summary argmin sets. With residual $\varepsilon$, every minimizer of the
+summary objective is $2\varepsilon$-optimal for the full objective.
+\end{theorem}
+
+\paragraph{Finite-sample certificate.}
+Let
+$\Delta_R=\E[\metric(\fstar(X),\fstar(Z^{(R)}(X)))]$ denote expected oracle
+distortion after $R$ rounds.
+
+\begin{theorem}[Unified preference gap]\label{thm:unified-gap}
+If the method-specific expected inner loss has transport constant
+$C_{\mathrm{meth}}$ in oracle distance, then
+\[
+  |G_{\mathrm{meth}}|\le C_{\mathrm{meth}}\Delta_R.
+\]
+\end{theorem}
+
+\begin{theorem}[Audited preference-gap certificate;
+\textsc{PaperErrorStack}]\label{thm:e2e}
+Let $\hat\Delta_R$ be the design-based estimate of $\Delta_R$ from a
+tree-unit audit with logged positive propensities. On the event where judge
+calibration, sampling error, and clipping are bounded by
+$B_{\mathrm{cal}}$, $B_{\mathrm{est}}$, and $B_{\mathrm{clip}}$ in objective
+units,
+\[
+  |G_{\mathrm{meth}}|
+  \le
+  C_{\mathrm{meth}}\hat{\Delta}_R
+  + B_{\mathrm{cal}} + B_{\mathrm{est}} + B_{\mathrm{clip}}.
+\]
+\end{theorem}
+
+The certificate is the formal expert-attention allocation statement. Gold or
+trusted root labels calibrate the target through $B_{\mathrm{cal}}$; sampled
+node labels estimate the compression residual through $\hat\Delta_R$ and
+$B_{\mathrm{est}}$; clipping records the price of stabilizing the design
+weights.
+
+Local-law weights in an optimizer should be read through this stack, not as a
+new theorem. A weight such as $\lambda$ trades oracle fidelity against
+sufficiency residual. Schematically, an objective of the form
+$L_{\mathrm{oracle}}(f,\fstar)+\lambda L_{\mathrm{laws}}(f,g)$ asks the learned
+readout and summarizer to stay close to the trusted oracle while also making
+$g$ an approximate sufficient statistic for $f$ along the merge route. At
+$\lambda=0$, the scorer can fit the oracle while the compression path remains
+uncertified. At large $\lambda$, the learned pair is pulled toward the
+local-law subspace, possibly at the cost of task fidelity if the state is too
+narrow. This is the same tradeoff shape as an information bottleneck
+\citep{TishbyPereiraBialek1999}, with the extra constraint that the
+representation must compose through the tree. The audit reports the realized
+residual after that design choice.

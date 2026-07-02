@@ -1,0 +1,107 @@
+\section{Design-Based Supervised Learning and Tree Audits}\label{app:v4-dsl-audit}
+
+Section~\ref{sec:min-audit} uses DSL as Design-Based Supervised Learning:
+labels are useful for inference only after the analyst specifies the target
+population, the sampling design, and the probability with which each target
+unit could have been observed. C-TreePO extends that logic from final
+surrogate labels to the compressed representation on which those labels are
+based.
+
+\subsection{Two Nested DSL Problems}
+
+There are two linked designs. The outer design is the document-level
+measurement problem. A corpus of documents is sampled, each selected document
+has or could receive a full-document oracle label, and the target estimand is
+a document-level quantity such as correlation, mean loss, or downstream
+policy/utility risk. With pre-existing root labels, sample splitting or
+held-out evaluation supplies the design-observed validation set.
+
+The inner design is the compression audit. Conditional on a selected document,
+the realized tree contains a finite population of leaves, stored summaries,
+merge nodes, and optional re-summary nodes. These are the units on which the
+local laws are true or false. Random sampling from that population with known
+positive propensities turns local-law checks into design-based estimates of
+tree-wide distortion.
+
+\subsection{Nested Propensities and Logging}
+
+For a document $d$, node $u$, and optional action or candidate summary $a$,
+the minimal logged probabilities are
+\[
+  p_i = p_d\,p_{u\mid d}
+  \quad\text{or}\quad
+  p_i = p_d\,p_{u\mid d}\,p_{a\mid u}.
+\]
+For pairwise preference labels, replace $p_{a\mid u}$ by
+$p_{a,b\mid u}$. The practical log should contain the document id, node id,
+depth, subtree/span id, law type, sampled action or pair id, outcome, judge
+version, oracle/judge source, sampling-policy name, and each factor in the
+propensity product.
+
+Adaptive sampling is compatible with the design if propensities are logged
+and bounded away from zero. A simple mixture policy is enough:
+\[
+  p_{u\mid d}
+  =
+  (1-\epsilon)\,p_{\mathrm{adaptive}}(u\mid d)
+  +
+  \epsilon\,p_{\mathrm{uniform/stratified}}(u\mid d).
+\]
+The exploration component gives every auditable unit support and controls
+the inverse-propensity weights.
+
+\subsection{Estimators and Uncertainty}
+
+For target-unit contribution $Y_i$, inclusion indicator $Z_i$, and marginal
+propensity $\pi_i$, the Horvitz--Thompson mean is
+\[
+  \hat\mu_{\mathrm{HT}}
+  =
+  \frac{1}{N}\sum_{i\in\mathcal U}\frac{Z_i}{\pi_i}Y_i.
+\]
+The H\'ajek ratio form is often more stable in finite samples:
+\[
+  \hat\mu_{\mathrm{H}}
+  =
+  \frac{\sum_i Z_iY_i/\pi_i}{\sum_i Z_i/\pi_i}.
+\]
+Because nodes within a document are correlated, uncertainty should be
+reported with document-level clustering or a document bootstrap. A standard
+cluster sandwich calculation uses
+$g_i=w_i(Y_i-\hat\mu_{\mathrm H})$ and
+$G_d=\sum_{i\in d}g_i$, then scales the variance by the squared total weight.
+The effective sample size
+\[
+  n_{\mathrm{eff}} = \frac{(\sum_i w_i)^2}{\sum_i w_i^2}
+\]
+is a useful diagnostic: when it collapses, the audit needs a stronger
+exploration floor, stratification, or clipping sensitivity analysis.
+
+\subsection{Calibration, Estimation, and Clipping}
+
+The certificate separates three non-local-law sources of slack.
+$B_{\mathrm{cal}}$ is judge calibration error: it compares the accessible
+audit judge to the trusted target oracle on a held-out, design-observed set.
+$B_{\mathrm{est}}$ is sampling error from observing only some nodes.
+$B_{\mathrm{clip}}$ is the bias introduced when inverse-propensity weights are
+clipped for variance control. Additional local labels shrink
+$B_{\mathrm{est}}$; calibration checks and trusted labels identify
+$B_{\mathrm{cal}}$.
+
+\subsection{Repository and Formal Anchors}
+
+The repository contains this layer. The proposal framing lives under
+\texttt{docs/proposals/}, including the PolMeth C-TreePO proposal. The formal
+map in \texttt{lean3/docs/PAPER\_TO\_LEAN\_MAP.md} connects the DSL claims to
+the proof files:
+\begin{itemize}[leftmargin=1.4em,itemsep=2pt]
+  \item \texttt{TreePOEndToEnd.lean} for the audited preference-gap bound;
+  \item \texttt{IPWTheory.lean} and \texttt{TreeIPW.lean} for IPW and audit
+  robustness;
+  \item \texttt{TreeIPW.lean} for clipping envelopes;
+  \item \texttt{JudgeCalibration.lean} for calibration slack;
+  \item \texttt{LabelRateBounds.lean} for label-rate decomposition.
+\end{itemize}
+The conceptual sampling note \texttt{lean3/RLHF\_DSL\_BANDIT\_NOTES.md}
+records the nested document, node, and action sampling design used by the
+audit interpretation here.

@@ -1,0 +1,47 @@
+\section{Audit and Label-Budget Details}\label{app:min-audit}
+
+\subsection{Audit Units and Propensities}
+
+The audit units are realized leaves, stored summaries, and merge nodes. A leaf
+unit checks C1, a stored-summary unit checks C2, and a merge unit checks C3.
+Each unit has an inclusion probability $\pi_i>0$ determined by the audit
+design. Propensities must be logged so the estimator targets the realized tree
+population rather than the sampled subset.
+
+These tree units are not the same as the document-sampling units used for the
+root-observed Manifesto/Benoit benchmark. There, every sampled document has a
+full-document expert target and the tree root score can be evaluated directly.
+The tree-unit design below is needed when the claim is local-law preservation
+inside the realized compression tree.
+
+\subsection{Horvitz--Thompson Estimation}
+
+For sampled indicator $Z_i$ and local distortion $Y_i$, the population mean is
+estimated by
+\[
+\hat{\mu}_{\mathrm{HT}}=\frac{1}{N}\sum_i \frac{Z_i}{\pi_i}Y_i.
+\]
+The design may oversample long spans, high-risk nodes, or boundary-heavy
+merges. Correctness requires positivity and logged propensities; efficiency
+depends on the sampling design.
+
+\subsection{Calibration and Local Labels}
+
+The accessible judge may be a cheaper LLM or domain model rather than the
+trusted expert oracle. Calibration bounds the difference between judge-measured
+distortion and oracle-measured distortion. In the Manifesto economic setting,
+global labels query the whole manifesto/root score, while local labels query
+sampled leaves and merges. Both label types tighten the same certificate only
+when they measure the same economic oracle-preservation property.
+
+\subsection{Reporting Template}
+
+A complete deployment report should state the tree partition, local-law
+sampling design, logged propensities, local distortion estimate, calibration
+residual, estimation envelope, clipping adjustment, and final objective-unit
+gap bound. The reporting object records the probability space, the four
+gap terms, the certificate formula, the three event bounds, and the
+failure-budget split. Reporting root scores against full-document expert
+targets is a valid empirical root-level result. Reporting a C-TreePO local-law
+certificate additionally requires the tree-unit audit design and logged
+propensities above.

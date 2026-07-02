@@ -228,7 +228,7 @@ Required artifact files:
 
 Minimum `steps.jsonl` fields:
 
-1. `run_id`
+1. `experiment_id`
 2. `problem_id`
 3. `step_idx`
 4. `node_id`
@@ -352,23 +352,23 @@ Required implementation discipline:
 source venv/bin/activate
 pytest -q tests/runtime/test_runtime_eval.py
 
-# Initialize a run (expands phases -> units.jsonl under one run_id).
+# Initialize an experiment (expands phases -> units.jsonl under one experiment_id).
 python3 scripts/run_runtime_eval.py init \
   --config config/runtime_eval/ruler_8k_freeform.yaml \
   --output-dir outputs/evals \
-  --run-id ruler8k_freeform_$(date +%Y%m%d_%H%M%S)
+  --experiment-id ruler8k_freeform_$(date +%Y%m%d_%H%M%S)
 
 # Run a small smoke subset (no server required).
 python3 scripts/run_runtime_eval.py run \
-  --run-dir outputs/evals/<RUN_ID> \
+  --experiment-dir outputs/evals/<EXPERIMENT_ID> \
   --phase-id S0_smoke \
-  --mode runtime_full \
+  --method runtime_full \
   --mock-llm \
   --max-units 2 \
   --max-problems 5
 
-# Aggregate per-unit artifacts into run-level files.
-python3 scripts/run_runtime_eval.py aggregate --run-dir outputs/evals/<RUN_ID>
+# Aggregate per-unit artifacts into experiment-level files.
+python3 scripts/run_runtime_eval.py aggregate --experiment-dir outputs/evals/<EXPERIMENT_ID>
 
 # For cluster/job arrays, shard deterministically:
 #   --shard-index 0 --shard-count 64 --skip-done

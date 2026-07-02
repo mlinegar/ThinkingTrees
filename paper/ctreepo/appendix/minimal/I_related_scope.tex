@@ -1,0 +1,71 @@
+\section{Related Work and Extended Scope Notes}\label{app:min-related}
+
+\paragraph{Sufficient statistics and mergeable summaries.}
+The economic state in the main text is task-relative, in the spirit of
+sufficient statistics and Blackwell sufficiency
+\citep{Fisher1922,Blackwell1953,Torgersen1991}. The geometric object is the fiber
+$\{x':\fstar(x')=\fstar(x)\}$: a valid summarizer is required to
+preserve fiber membership but is allowed to discard within-fiber
+variation. C1--C3 are the empirically auditable form of that
+requirement on the realized leaves and merges of a deployed tree, and
+the Lean development (\texttt{OracleSufficientCompression.lean},
+\texttt{InformationSufficiency.lean}) records the formal version. The
+state need not preserve every textual property; it must preserve the
+properties visible to the target oracle and downstream objective.
+The closest algorithmic ancestor is the mergeable-summary literature
+\citep{Agarwal2013MergeableTODS}, with database algebraic aggregates, MUD
+aggregation, and monoid-based production systems as related systems lineages
+\citep{GrayEtAl1997DataCube,FeldmanEtAl2008MUD,BoykinEtAl2014Summingbird}.
+C-TreePO inherits the state-merge-readout discipline but replaces
+hand-designed state with learned summaries and runtime audits.
+
+\paragraph{Sketches, private channels, and learned variants.}
+Streaming sketches such as Count-Min, HyperLogLog, and quantile summaries show
+why the mergeable object is usually state rather than the scalar answer
+\citep{FlajoletEtAl2007,CormodeMuthukrishnan2005,GreenwaldKhanna2001}. The
+size-estimation lineage makes the same point for reachability and related
+set-union queries \citep{Cohen1997SizeEstimation}. Sketch-Flip-Merge
+\citep{HehirTingCormode2023SFM} is the immediate predecessor in the private
+mergeable lineage. It asks the same sufficiency question under a local-DP
+channel between leaf and merge, and shows that only matched
+randomizer-summarizer pairs keep the merged state in a parametric family the
+cardinality estimator can invert. Learned Bloom filters and learning-based
+frequency estimation show another path: use learned structure to improve
+classical data structures while retaining explicit guarantees or fallback
+mechanisms \citep{Mitzenmacher2018LearnedBloom,HsuEtAl2019Frequency}.
+C-TreePO replaces the closed-form state with a learned $(f,g)$ pair under the
+local laws, and replaces the closed-form sufficiency proof with an audit on
+the realized tree.
+
+\paragraph{Information bottleneck.}
+The $\lambda$-weighted optimizer view is closest to an information bottleneck:
+learn a compressed representation that preserves what matters for a target
+variable \citep{TishbyPereiraBialek1999}. C-TreePO adds a compositional
+constraint absent from the classical bottleneck statement: the representation
+must remain sufficient after the tree's leaf, merge, and re-summary calls.
+
+\paragraph{Social-science measurement.}
+LLM-based political measurement can recover expert signals
+\citep{BenoitEtAl2025}. Design-based supervised learning warns that surrogate
+labels can bias downstream estimates when errors interact with the estimand
+\citep{EgamiEtAl2024}. C-TreePO addresses the compression side of the same
+problem by auditing whether the representation being labeled still carries the
+target judgment.
+
+\paragraph{Long-context and retrieval methods.}
+Longer context windows and RAG reduce truncation pressure but do not certify
+what information was lost or distorted. C-TreePO can be combined with those
+methods; its distinct claim is the local-law check plus design-based
+certificate.
+
+\paragraph{Tree-based text composition.}
+Tree-structured compression and generation methods provide useful composition
+machinery
+\citep{KnightMarcu2000SentenceCompression,BarzilayMcKeown2005SentenceFusion,ClarkeLapata2008ILPSentenceCompression,KuznetsovaEtAl2014TreeTalk}.
+C-TreePO adds a task oracle, local laws, and downstream objective transport.
+
+\paragraph{Scope boundary.}
+The framework is conditional. It applies when local equivalence is stable under
+context and downstream supervision factors through the preserved oracle. It
+should fail loudly, through audit distortion, when the target is style, tone,
+persuasion, irony, or another property not localized by the chosen tree state.

@@ -1,0 +1,50 @@
+\section{Classical Mergeable-Sketch Parity: HyperLogLog}\label{sec:hll-parity}
+
+Section~\ref{sec:markov-walkthrough} showed that local supervision can
+move down the tree on a task whose oracle defeats unordered merges.
+We now ask the converse: when the oracle \emph{is} a mergeable
+sketch's query, does C-TreePO recover the classical sketch exactly? The answer is yes for
+HyperLogLog \citep{FlajoletEtAl2007,HeuleEtAl2013}, the canonical
+sketch for distinct counting. Running native HLL through the unified
+\texttt{fit()} pipeline at $n_{\mathrm{leaves}} \in \{1, 2, 4, 8, 16\}$
+produces register vectors that are byte-identical to the flat HLL on
+every cell of the precision-by-leaf-count grid, and the Apache
+DataSketches reference agrees with the flat run within twice the
+relative standard error. This is the empirical face of
+Proposition~\ref{prop:mergeable-reduction}'s state-level collapse:
+when $g$ serializes the HLL register state and the merge is
+register-wise max, the tree reduction inherits the sketch's
+algebraic guarantees verbatim, with no learning required. The Hamlet
+analogue is where the same construction earns its place outside
+synthetic data: each scene emits the set of speaker pairs sharing
+the stage; each act merges by set-union; HLL's register array
+approximates union cardinality without storing the union set.
+
+The same pipeline can swap its oracle from analytic distinct count
+to the classical HLL's own scoring head, then ask whether a
+\emph{learned} $g$ can recover the same behavior under local-law
+supervision. Table~\ref{tab:classical-parity-hll} summarizes the four methods:
+classical-native is byte-exact; classical-DataSketches is estimate-
+exact within RSE; the end-to-end learned $g{+}f$ tracks the classical
+sketch within a small multiple of the RSE floor and \emph{improves}
+as the tree gets deeper; and a constrained learned-$g$-with-classical-
+$f$ variant degrades with $L$, quantifying the cost of forcing a
+learned operator to live inside the classical register-space readout.
+The pattern is consistent: the projection onto the local-law subspace
+is where C-TreePO matches the classical sketch, and the learned
+representations gain a degree of freedom the byte-exact route does
+not. Appendix~\ref{app:classical-parity} carries the protocol, the
+sweep grid, the per-cell numbers, the full precision-by-leaf-count
+parity figure, the register-space constraint analysis, the broader
+\texttt{treepo-bench classical-sketches} discussion, and the
+Count-Min/Frequent-Items taxonomy sidebar (these frequency sketches
+are associative and commutative but not idempotent, so the C2
+machinery applies differently than for HLL).
+
+\begin{table}[t]
+    \centering
+    \small
+    \input{assets/hll/tables/classical_parity_hll.tex}
+    \caption{HLL parity summary across the \texttt{(method, oracle, precision, $L$)} grid. \texttt{RSE} is the HLL theoretical relative standard error $1.04/\sqrt{2^p}$. \texttt{state=} and \texttt{bytes=} are per-cell equality rates for the classical rows; \texttt{rel MAE} is each method's relative mean absolute error against the oracle; \texttt{C1} and \texttt{C3} are the per-leaf and per-merge MAE; \texttt{wall$\times$} is the tree-to-flat wall-time ratio. Full table with all seeds and oracle-kind variants in Appendix~\ref{app:classical-parity}.}
+    \label{tab:classical-parity-hll}
+\end{table}

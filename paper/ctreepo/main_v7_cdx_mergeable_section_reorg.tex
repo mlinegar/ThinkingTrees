@@ -1,0 +1,34 @@
+\documentclass[11pt]{article}
+
+\input{preamble_minimal}
+\usepackage{array}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\begin{document}
+
+% Phantom anchors so cross-references the section makes to material outside
+% its scope resolve to numbers in this standalone build. The full v7
+% manuscript build resolves them naturally from the surrounding sections.
+\setcounter{section}{1}
+\input{sections/v7_cdx/02_mergeable_sketches_reorg}
+
+% Phantom section anchors for forward-references the section makes to
+% downstream sections (sec:framework, sec:estimation, sec:theorems,
+% sec:markov-walkthrough, sec:fno-primer, sec:min-manifesto-results).
+\refstepcounter{section}\label{sec:framework}
+\refstepcounter{section}\label{sec:markov-walkthrough}
+\refstepcounter{section}\label{sec:fno-primer}
+\refstepcounter{section}\label{sec:estimation}
+\refstepcounter{section}\label{sec:theorems}
+\refstepcounter{section}\label{sec:min-manifesto-results}
+
+\appendix
+\setcounter{section}{0}
+\input{appendix/v7_cdx/A_optimization_projection}
+\input{appendix/v7_cdx/B_mergeable_local_law_nesting}
+
+\clearpage
+\bibliographystyle{plainnat}
+\bibliography{../refs}
+
+\end{document}

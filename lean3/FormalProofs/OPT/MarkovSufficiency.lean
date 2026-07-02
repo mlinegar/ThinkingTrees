@@ -1,5 +1,8 @@
 import FormalProofs.OPT.MarkovCountSketchExample
 import FormalProofs.OPT.InformationSufficiency
+import FormalProofs.OPT.ContextualQuerySufficiency
+import FormalProofs.OPT.SlicedContextualSufficiency
+import FormalProofs.OPT.HybridSummarySufficiency
 import Mathlib.Logic.Function.Basic
 
 /-!
@@ -52,6 +55,23 @@ def MarkovCountQuerySufficient
       MarkovCountSketch.count (left * x * right) =
         MarkovCountSketch.count (left * y * right)
 
+/-- The Markov-specific task-facing sufficiency definition is exactly the
+generic two-sided contextual sufficiency definition specialized to
+`fstar = MarkovCountSketch.count`. -/
+theorem markovCountQuerySufficient_iff_twoSidedContextSufficient
+    {Summary : Type*}
+    (summary : MarkovCountSketch n → Summary) :
+    MarkovCountQuerySufficient (n := n) summary ↔
+      TwoSidedContextSufficient
+        summary
+        (fun s : MarkovCountSketch n => MarkovCountSketch.count s) := by
+  constructor
+  · intro hSuff x y hxy ctx
+    rcases ctx with ⟨left, right⟩
+    exact hSuff left right x y hxy
+  · intro hSuff left right x y hxy
+    exact hSuff hxy (left, right)
+
 /-- The exact sketch itself is sufficient for all two-sided changepoint-count
 queries. -/
 theorem exact_markov_sketch_query_sufficient :
@@ -59,9 +79,212 @@ theorem exact_markov_sketch_query_sufficient :
   intro left right x y hxy
   simpa [hxy]
 
+/-- The exact Markov sketch satisfies the generic two-sided contextual
+sufficiency condition. This is the validation witness for the general
+contextual-sufficiency interface. -/
+theorem exact_markov_sketch_twoSidedContextSufficient :
+    TwoSidedContextSufficient
+      (fun s : MarkovCountSketch n => s)
+      (fun s : MarkovCountSketch n => MarkovCountSketch.count s) := by
+  exact
+    (markovCountQuerySufficient_iff_twoSidedContextSufficient
+      (n := n)
+      (fun s : MarkovCountSketch n => s)).mp
+      exact_markov_sketch_query_sufficient
+
 /-- Count-only readout on the theorem-domain state. -/
 def markovCountOnlySummary (s : MarkovCountSketch n) : ℕ :=
   MarkovCountSketch.count s
+
+/-- Endpoint residual for the Markov exact sketch: count-only keeps the
+internal changepoint count, while this residual keeps the boundary regimes
+needed by two-sided contextual count queries. -/
+def markovEndpointResidual (s : MarkovCountSketch n) :
+    Option (Fin n × Fin n) :=
+  match s with
+  | MarkovCountSketch.empty => none
+  | MarkovCountSketch.nonempty _ first last => some (first, last)
+
+/-- Makinen-style hybrid Markov summary: a base count statistic plus the
+endpoint residual.  This is definitionally a `HybridSummary`. -/
+def markovCountEndpointHybrid (s : MarkovCountSketch n) :
+    ℕ × Option (Fin n × Fin n) :=
+  HybridSummary
+    (markovCountOnlySummary (n := n))
+    (markovEndpointResidual (n := n))
+    s
+
+/-- The count-plus-endpoint hybrid is injective on exact Markov sketch states. -/
+theorem markov_countEndpointHybrid_injective :
+    Function.Injective (markovCountEndpointHybrid (n := n)) := by
+  intro x y hxy
+  cases x with
+  | empty =>
+      cases y with
+      | empty =>
+          rfl
+      | nonempty cy fy ly =>
+          have hend := congrArg Prod.snd hxy
+          simp [markovCountEndpointHybrid, HybridSummary, markovEndpointResidual] at hend
+  | nonempty cx fx lx =>
+      cases y with
+      | empty =>
+          have hend := congrArg Prod.snd hxy
+          simp [markovCountEndpointHybrid, HybridSummary, markovEndpointResidual] at hend
+      | nonempty cy fy ly =>
+          have hc : cx = cy := by
+            have hcount := congrArg Prod.fst hxy
+            simpa [
+              markovCountEndpointHybrid,
+              HybridSummary,
+              markovCountOnlySummary,
+              MarkovCountSketch.count
+            ] using hcount
+          have hp : (fx, lx) = (fy, ly) := by
+            have hend := congrArg Prod.snd hxy
+            simpa [
+              markovCountEndpointHybrid,
+              HybridSummary,
+              markovEndpointResidual
+            ] using hend
+          have hf : fx = fy := congrArg Prod.fst hp
+          have hl : lx = ly := congrArg Prod.snd hp
+          subst hc
+          subst hf
+          subst hl
+          rfl
+
+/-- The Markov count-plus-endpoint hybrid is sufficient for all two-sided
+changepoint-count queries. -/
+theorem markov_countEndpointHybrid_query_sufficient :
+    MarkovCountQuerySufficient
+      (n := n)
+      (markovCountEndpointHybrid (n := n)) := by
+  intro left right x y hxy
+  have hstate : x = y := markov_countEndpointHybrid_injective (n := n) hxy
+  subst y
+  rfl
+
+/-- The Markov count-plus-endpoint hybrid satisfies the generic two-sided
+contextual sufficiency condition. -/
+theorem markov_countEndpointHybrid_twoSidedContextSufficient :
+    TwoSidedContextSufficient
+      (markovCountEndpointHybrid (n := n))
+      (fun s : MarkovCountSketch n => MarkovCountSketch.count s) := by
+  exact
+    (markovCountQuerySufficient_iff_twoSidedContextSufficient
+      (n := n)
+      (markovCountEndpointHybrid (n := n))).mp
+      markov_countEndpointHybrid_query_sufficient
+
+/-- Real-valued changepoint count target, used for metric approximate
+sufficiency statements. -/
+def markovCountReal (s : MarkovCountSketch n) : ℝ :=
+  (MarkovCountSketch.count s : ℝ)
+
+/-- Approximate Markov-count query sufficiency after embedding counts into
+`ℝ`: collisions may change any two-sided count query by at most `ε`. -/
+def MarkovCountQuerySufficientWithin
+    {Summary : Type*}
+    (ε : ℝ)
+    (summary : MarkovCountSketch n → Summary) : Prop :=
+  ∀ left right x y,
+    summary x = summary y →
+      dist (markovCountReal (left * x * right))
+        (markovCountReal (left * y * right)) ≤ ε
+
+/-- The approximate Markov-specific definition is exactly generic two-sided
+approximate contextual sufficiency specialized to real-valued changepoint
+counts. -/
+theorem markovCountQuerySufficientWithin_iff_twoSidedContextSufficientWithin
+    {Summary : Type*}
+    (ε : ℝ)
+    (summary : MarkovCountSketch n → Summary) :
+    MarkovCountQuerySufficientWithin (n := n) ε summary ↔
+      TwoSidedContextSufficientWithin
+        ε
+        summary
+        (markovCountReal (n := n)) := by
+  constructor
+  · intro hSuff x y hxy ctx
+    rcases ctx with ⟨left, right⟩
+    exact hSuff left right x y hxy
+  · intro hSuff left right x y hxy
+    exact hSuff hxy (left, right)
+
+/-- The exact Markov sketch is zero-slack sufficient for real-valued two-sided
+count queries. -/
+theorem exact_markov_sketch_twoSidedContextSufficientWithin_zero_real :
+    TwoSidedContextSufficientWithin
+      0
+      (fun s : MarkovCountSketch n => s)
+      (markovCountReal (n := n)) := by
+  intro x y hxy ctx
+  have h : x = y := by
+    simpa using hxy
+  subst y
+  simp
+
+/-- If a composed state/readout pipeline approximates every real-valued
+two-sided Markov count query within `ε`, then the learned leaf state is
+`2ε`-sufficient for all such queries. -/
+theorem markov_composedReadoutWithin_implies_twoSidedContextSufficientWithin_real
+    {State : Type*}
+    {ε : ℝ}
+    {leaf : MarkovCountSketch n → State}
+    {merge : State → State → State}
+    {readout : State → ℝ}
+    (hApprox :
+      ∀ left x right,
+        dist (readout (merge (merge (leaf left) (leaf x)) (leaf right)))
+             (markovCountReal (n := n) (left * x * right)) ≤ ε) :
+    TwoSidedContextSufficientWithin
+      (2 * ε)
+      leaf
+      (markovCountReal (n := n)) := by
+  exact
+    composedTwoSidedReadoutWithinEps_implies_twoSidedContextSufficientWithin
+      (ε := ε)
+      (leaf := leaf)
+      (merge := merge)
+      (readout := readout)
+      (fstar := markovCountReal (n := n))
+      hApprox
+
+/-- Finite selected-slice approximate control implies approximate Markov-count
+query sufficiency when the selected slices cover the real-valued two-sided
+count response family. -/
+theorem markov_finiteSlicedWithin_implies_countQuerySufficientWithin
+    {Summary Slice SliceVal : Type*}
+    [PseudoMetricSpace SliceVal]
+    {selected : Finset Slice}
+    {δ ε : ℝ}
+    {summary : MarkovCountSketch n → Summary}
+    {slice : Slice → ((MarkovCountSketch n × MarkovCountSketch n) → ℝ) → SliceVal}
+    (hCover :
+      FiniteSlicesCoverResponseFibersWithin
+        selected
+        δ
+        ε
+        (TwoSidedContextQuery (markovCountReal (n := n)))
+        slice)
+    (hSliced :
+      SlicedQuerySufficientWithinOn
+        selected
+        δ
+        summary
+        (TwoSidedContextQuery (markovCountReal (n := n)))
+        slice) :
+    MarkovCountQuerySufficientWithin (n := n) ε summary := by
+  have hTwoSided :
+      TwoSidedContextSufficientWithin
+        ε
+        summary
+        (markovCountReal (n := n)) :=
+    finiteSlicedWithin_implies_querySufficientWithin hCover hSliced
+  exact
+    (markovCountQuerySufficientWithin_iff_twoSidedContextSufficientWithin
+      (n := n) ε summary).mpr hTwoSided
 
 /-- In an alphabet with at least two regimes, there is always a probe regime
 different from a given regime. -/
@@ -255,5 +478,18 @@ theorem markov_countOnly_not_query_sufficient
   have : (0 : ℕ) = 1 := by
     simpa [markovCountOnlySummary, left, x, y, MarkovCountSketch.count, MarkovCountSketch.join, hab, Ne.symm hab] using hbad
   norm_num at this
+
+/-- Count-only Markov state also fails the generic two-sided contextual
+sufficiency condition. -/
+theorem markov_countOnly_not_twoSidedContextSufficient
+    (hn : 1 < n) :
+    ¬ TwoSidedContextSufficient
+      (markovCountOnlySummary (n := n))
+      (fun s : MarkovCountSketch n => MarkovCountSketch.count s) := by
+  intro hSuff
+  exact markov_countOnly_not_query_sufficient (n := n) hn
+    ((markovCountQuerySufficient_iff_twoSidedContextSufficient
+      (n := n)
+      (markovCountOnlySummary (n := n))).mpr hSuff)
 
 end FormalProofs.OPT

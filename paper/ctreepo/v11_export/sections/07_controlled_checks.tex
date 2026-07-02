@@ -1,0 +1,118 @@
+\section{Building Intuition}
+\label{sec:v10-controlled-checks}
+\label{sec:v10-markov-check}
+
+A synthetic Markov task fixes the oracle and a known sufficient
+state, so the budget question can be asked directly: when can
+local node labels stand in for some root labels under a fixed
+token budget?
+
+A document is a length-\(128\) token sequence. At each position, a
+hidden Markov chain selects one of \(K\) registers; the selected
+register emits an observed token from a disjoint synonym palette.
+The learner sees the token row, not the hidden registers. The
+oracle \(f^\ast\) counts adjacent hidden-register changes.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+ & Recoverable & Structural \\
+\midrule
+Hidden registers \(K\) & \(4\) & \(12\) \\
+Document length & \multicolumn{2}{c}{\(128\) tokens} \\
+Synonym tokens per register & \multicolumn{2}{c}{\(4\), disjoint palettes} \\
+Switch probability \(h\) & \(0.039\) & \(0.079\) \\
+Expected changepoints & \multicolumn{2}{c}{\({\sim}5\) and \({\sim}10\)} \\
+Training documents & \multicolumn{2}{c}{\(10{,}240\)} \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Markov data-generating process.} The hidden register
+stays fixed with probability \(1-h\), otherwise switches to a uniformly
+chosen alternative. The observed token is drawn uniformly from that
+register's palette.}
+\label{tab:v10-markov-dgp}
+\end{table}
+
+The sufficient state for any span is
+\[
+  (\mathrm{count},\mathrm{first},\mathrm{last}),
+\]
+where the count records transitions inside the span and the boundary
+fields let parent merges add the one transition that may cross the
+child boundary:
+\[
+(c_L,a_L,b_L)\otimes(c_R,a_R,b_R)
+=
+(c_L+c_R+\One\{b_L\ne a_R\},a_L,b_R).
+\]
+The state is ordered and associative. A scalar child count alone
+cannot recover the boundary correction; the triple state can.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{markov_changepoint_combined.pdf}
+\caption{\textbf{Counting register changes through a merge tree.}
+A simplified \(12\)-token document with the same structure used
+in the experiments at scale (\(128\) tokens). Hidden colors run
+\(A,A,A\mid B,B,C\mid C,D,D\mid A,A,B\); the learner sees only the
+word row beneath. Each leaf \(L_i\) holds a triple
+\((\text{count}, \text{first}, \text{last})\). Merges add child
+counts plus the boundary indicator
+\(\One\{\text{last}_{\text{left}}\ne\text{first}_{\text{right}}\}\):
+\(S_{12}\) adds the \(A\!\to\!B\) boundary (count
+\(=0+1+1=2\)); \(S_{34}\) adds the \(D\!\to\!A\) boundary
+(count \(=1+1+1=3\)); the root adds the \(C\!\to\!C\) boundary
+(no change), giving count \(=5\). A scalar leaf score cannot
+carry the boundary information that turns three local counts
+into a correct root.}
+\label{fig:v10-markov-walkthrough}
+\end{figure}
+
+Figure~\ref{fig:v10-markov-walkthrough} reads the mergeable
+summary on a \(12\)-token version of the same data-generating
+process. The full experiments use \(128\)-token documents with the
+same hidden Markov mechanism; the small version makes every leaf
+state, boundary correction, and merge visible. The node label that
+supervises learning is the triple, not the scalar count: a learner
+trained on scalar leaf counts cannot recover the boundary
+information that the merge needs.
+
+The completed allocation grid asks the budget question directly.
+It uses leaf sizes \(128,64,32,16,8\), root-label shares from
+\(100\%\) down to \(10\%\), and three local-allocation policies
+that decide which tree nodes spend the reallocated mass. A
+full-document label on a \(128\)-token sequence costs \(128\) token
+observations; a label on a \(16\)-token leaf costs \(16\), so eight
+such leaf labels spend the same full-document-equivalent mass as
+one root label.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{markov_leaf_size_fixed_recoverable.pdf}
+\caption{\textbf{Performance across leaf size and root-label budget.}
+Tree-vs-oracle root MAE at each leaf size (x-axis) and root-label
+budget share (y-axis); lower is better. The top row (R100) is the
+all-root reference, with the full root-label budget and no local
+labels. Reducing the root-label share down to R20 keeps MAE low
+across most leaf sizes when the missing root-label mass is
+backfilled with local labels. Performance only collapses in the
+R10 row at small leaves, where the budget cannot support either
+channel. Appendix~\ref{app:v10-markov} reports the matching
+structural panel (\(K=12\) registers).}
+\label{fig:v10-markov-budget-grid}
+\end{figure}
+
+Figure~\ref{fig:v10-markov-budget-grid} reads the resulting
+surface: across a broad interior band of (leaf, root-share) cells,
+reallocating missing root-label mass to local count labels keeps
+root MAE near the all-root reference.
+Appendix~\ref{app:v10-markov} gives the full leaf-size grid, the
+three allocation policies, and provenance.
+
+When the local state is known and node labels measure the state
+needed for composition, node supervision can substitute for some
+root supervision at fixed budget. The next section runs the same
+trade on real party platforms, where the sufficient state is no
+longer known in advance.

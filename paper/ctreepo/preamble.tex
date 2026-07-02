@@ -17,6 +17,7 @@
 \usepackage{subcaption}
 \usepackage{xcolor}
 \usepackage{listings}
+\usepackage{longtable}
 
 \hypersetup{
     colorlinks=true,
@@ -32,6 +33,7 @@
 \graphicspath{
     {assets/markov/figures/}
     {assets/hll/figures/}
+    {assets/diagrams/figures/}
     {assets/sketches/figures/}
     {assets/benoit/figures/}
     {../../outputs/}
@@ -82,6 +84,7 @@
 \newcommand{\concat}{\oplus}
 \newcommand{\emptystr}{\emptyset}
 \newcommand{\One}{\mathbb{I}}
+\newcommand{\RegSet}{\mathcal{R}}
 \DeclareMathOperator*{\argmin}{arg\,min}
 
 % Temporary FIXME marker for work-in-progress passages; remove once
@@ -94,7 +97,7 @@
 \newcommand{\probrepo}{\texttt{mlinegar/FormalProbability}}
 
 % TikZ setup
-\usetikzlibrary{arrows.meta, positioning, calc, fit, backgrounds, shapes.geometric}
+\usetikzlibrary{arrows.meta, positioning, calc, fit, backgrounds, shapes.geometric, matrix}
 
 \tikzset{
     doc/.style={rectangle, draw, rounded corners=2pt, minimum width=1.2cm, minimum height=0.6cm, fill=blue!10},

@@ -1,0 +1,78 @@
+\documentclass[11pt]{article}
+
+\input{preamble_minimal}
+\usepackage{array}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\title{C-TreePO: Compression Trees for Oracle-Preserving Long-Document Learning}
+\author{Mitchell Linegar}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Researchers increasingly use large language models to measure long
+texts. Once a document exceeds the practical context limit, the
+analyst no longer observes the original object: the input to the
+final coding step is a compressed surrogate produced by chunking,
+retrieval, or recursive summarization. Design-based supervised
+learning shows that even highly accurate surrogate labels can bias
+downstream estimates when substituted for gold-standard labels
+\citep{EgamiEtAl2024}; in long-document settings the surrogate is
+both the compressed representation and the predicted label. We treat
+long-document coding as an oracle-preserving compression problem on
+a tree. We partition documents into contiguous spans, summarize them
+up the tree, and audit each node locally for sufficiency,
+idempotence, and merge consistency. Sampled oracle calls at any tree
+level (a leaf, a paragraph, a section, or the full document) with
+logged propensities turn compression-induced distortion into a
+finite-sample estimand with a reported uncertainty term. The same
+design lets the analyst trade one expensive full-document expert
+read for several cheaper reads of shorter units and retain a
+comparable accuracy guarantee on the document-level estimate. The
+same supervision design also trains the compression operators under a
+fixed audit budget; that is the optimization side of the framework,
+the ``PO'' in C-TreePO. We instantiate the framework on the
+Manifesto LLM benchmark of \citet{BenoitEtAl2025}, which targets the
+Comparative Manifestos Project (CMP) expert-survey means on six
+policy dimensions. Our C-Tree replication scores \(235\) party
+platforms against the same expert means; the C-Tree root scores
+match frontier LLM baselines, and each run leaves behind readable
+leaf, summary, and merge units for sampled node audit.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+
+\etocdepthtag.toc{minimalmain}
+\input{sections/01_introduction}
+\input{sections/03_ctree_math}
+\input{sections/04_objective_theorem_ladder}
+\input{sections/05_audit_certificate}
+\input{sections/07_related_scope}
+\input{sections/07_controlled_checks}
+\clearpage
+\input{sections/06_manifesto_results}
+\input{sections/08_conclusion}
+
+\appendix
+\etocdepthtag.toc{minimalappendixfront}
+\appendixcontents
+\etocdepthtag.toc{minimalappendix}
+
+\input{appendix/A_objective_ipw_adjustment}
+\input{appendix/B_mergeable_nesting}
+\input{appendix/D_neural_operator_route}
+\input{appendix/E_claim_tiers_manifesto_details}
+\input{appendix/F_theorem_certificate_details}
+\input{appendix/G_manifesto_audit_design}
+\input{appendix/H_markov_mechanism_check}
+\input{appendix/I_ipw_audit_stress_check}
+\input{appendix/E_machine_checked_crosswalk}
+
+\clearpage
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}

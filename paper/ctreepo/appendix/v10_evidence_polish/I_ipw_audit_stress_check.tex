@@ -1,0 +1,74 @@
+\section{IPW Audit Stress Check}
+\label{app:v10-ipw-stress}
+
+The IPW stress ladder checks the audit-estimator component of the
+certificate. The simulation fixes finite populations of tree-like
+units, assigns document-nonseparable preference and violation losses,
+samples units with known propensities, and compares the
+logged-propensity estimator with the finite-population target.
+
+\subsection{Design}
+
+The large hard run covers \(4\) cases, \(7\) document counts, \(64\)
+population seeds, and \(15{,}000\) sampling trials per cell. The
+document counts are \(60,120,240,480,960,1{,}920,3{,}840\), giving
+\(1{,}792\) raw rows and \(28\) summary rows. The cases include a
+balanced additive control, a top-\(k\) spike design with adversarial
+propensities, a boundary-adversarial hybrid design, and a severe
+back-loaded quorum design. Bernoulli and without-replacement designs
+are both represented.
+
+Each cell reports preference-loss coverage, violation-rate coverage,
+IPW bias, interval width, effective sample size, and propensity
+diagnostics. The estimand is the finite-population mean for the
+selected loss. Small propensities change variance and effective
+sample size while leaving the target unchanged.
+
+\subsection{Largest-Scope Slice}
+
+Table~\ref{tab:v10-ipw-largest-slice} reports the \(3{,}840\)-document
+slice. Bias remains close to zero across the hard designs. Coverage
+stays near or above the nominal \(90\%\) target used by the run, while
+the adversarial designs reveal themselves through wider intervals and
+smaller effective sample sizes.
+
+\begin{table}[t]
+\centering
+\scriptsize
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+Case & Min \(\pi\) & Max wt. & ESS & Pref. cov. & Viol. cov. & IPW viol. bias \\
+\midrule
+Balanced additive & \(0.41250\) & \(2.4\) & \(31{,}680\) & \(1.000\) & \(0.999\) & \(1.3{\times}10^{-6}\) \\
+Boundary adversarial & \(0.00091\) & \(1{,}099.2\) & \(7{,}206\) & \(1.000\) & \(0.994\) & \(2.6{\times}10^{-6}\) \\
+Back-loaded quorum & \(0.01878\) & \(53.2\) & \(2{,}270\) & \(0.999\) & \(0.995\) & \(1.7{\times}10^{-5}\) \\
+Top-\(k\) spike & \(0.00231\) & \(433.8\) & \(666\) & \(1.000\) & \(1.000\) & \(-2.9{\times}10^{-5}\) \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{IPW hard stress ladder at \(3{,}840\) documents.}
+The table reports the largest document-count slice of the completed
+run. ESS is the mean effective sample size. Coverage columns are
+averaged over \(64\) population seeds and \(15{,}000\) sampling
+trials per cell.}
+\label{tab:v10-ipw-largest-slice}
+\end{table}
+
+The hardest cells are useful because they separate centering from
+precision. The boundary-adversarial case has minimum joint
+propensity \(0.00091\) and maximum joint weight above \(1{,}000\);
+the IPW violation bias remains \(2.6\times 10^{-6}\), while the
+effective sample size falls to about \(7{,}206\). The top-\(k\)
+spike case has effective sample size about \(666\), and its violation
+interval is correspondingly wide. This is the behavior required by
+Equation~\eqref{eq:v8-finite-sample-certificate}: hard designs widen
+\(B_{\mathrm{est}}\) through the variance term, while correct logged
+propensities keep the target centered.
+
+\subsection{Provenance}
+
+The source summary is
+\path|outputs/ipw_stress_ladder_hard_large_20260302_183753/summary.json|.
+The run started on 2026-03-02 at 18:37:54 UTC and wrote its summary
+on 2026-03-03 at 02:14:42 UTC. The raw and summary CSVs are
+\path|raw_rows.csv| and \path|summary_rows.csv| in the same output
+directory.

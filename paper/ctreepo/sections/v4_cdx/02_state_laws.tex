@@ -1,0 +1,138 @@
+\section{Task State, Trees, and Local Laws}\label{sec:min-framework}
+\label{sec:min-manifesto-state}
+
+The running example is a manifesto's economic-policy position on the
+public-services versus taxation scale used in the Manifesto/Benoit benchmark
+\citep{BenoitEtAl2025,ManifestoProject2025a}. In this section, $f$ denotes
+the target readout for that dimension: given a span $x$, $f(x)$ is the
+economic-policy score a trusted coder or calibrated rubric scorer would assign
+after reading the relevant commitments to public services, taxation, welfare
+expansion or retrenchment, market intervention, privatization, fiscal
+restraint, and the qualifications that determine how those statements should
+be read. The summarizer $g$ is meant to produce an observable state that is
+sufficient for $f$:
+\[
+  f(g(x)) \approx f(x).
+\]
+In this sense $g(x)$ is an oracle-sufficient statistic for the economic score:
+it may discard wording, rhetoric, and document furniture, but not information
+that can change the readout $f$.
+Two texts can look different while sitting in the same task-relevant fiber if
+they contain the same economic evidence for the rubric. Conversely, two texts
+can look similar and fall in different fibers if one contains a fiscal
+qualification the other omits.
+
+Let $\Strings$ be finite token sequences with concatenation
+$u \concat v$. A summarizer is a possibly stochastic map
+$g:\Strings\rightsquigarrow\Strings$; a readout
+$f:\Strings\rightsquigarrow\Y$ scores the root summary. In the Manifesto
+application, $g$ is a prompted language model used for both leaves and merges,
+and $f$ is a rubric scorer returning a seven-point policy score. In controlled
+appendix examples, $g$ may be a hand-designed sketch merge or a learned
+neural operator. The local laws attach to the pair $(f,g)$. Any implementation
+that satisfies those laws is eligible.
+
+A document $x$ is partitioned into contiguous leaves
+$(b_1,\ldots,b_k)$ attached to a binary tree. Each leaf stores
+$s_i=g(b_i)$, and each internal node $u$ stores
+$s_u=g(s_{u_L}\concat s_{u_R})$. Only stored summaries move through the
+pipeline at deployment. The raw span beneath a node, written conceptually as
+$S(u)$, is retained for audit and analysis.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.92\linewidth]{01_base_plain.pdf}
+    \caption{\textbf{A compression tree reduces a document to one root
+    summary by recursively merging adjacent child summaries.} In the
+    Manifesto application, every stored summary is treated as a surrogate for
+    the policy-evidence state of the span beneath it.}
+    \label{fig:min-plain-tree}
+\end{figure}
+
+Write $u\sim_f v$ when the task readout cannot distinguish the two strings:
+\[
+  \metric\big(f(u),f(v)\big)=0.
+\]
+Preservation is always relative to this task relation. A valid summary keeps
+the evidence and qualifications that can move the economic score. Style,
+rhetoric, and other surface features enter only when $f$ uses them.
+
+\begin{assumption}[Context-compatible readout]\label{ass:context}
+For every context $w\in\Strings$, $u\sim_f v$ implies both
+$w\concat u\sim_f w\concat v$ and
+$u\concat w\sim_f v\concat w$.
+\end{assumption}
+
+Context compatibility is an application assumption. It is plausible for
+content rubrics whose evidence can be localized and substituted. It can fail
+for targets such as tone, irony, or persuasion, where a locally equivalent span
+may change how neighboring text is read.
+
+\paragraph{C1: Leaf sufficiency.}
+\begin{equation*}\tag{C1}
+  \forall\text{ realized leaf }b:\qquad g(b)\sim_f b.
+\end{equation*}
+A leaf summary must be sufficient for $f$ on its source span: it keeps the
+evidence the readout would use and can discard the rest.
+
+\paragraph{C2: Re-summary stability.}
+\begin{equation*}\tag{C2}
+  \forall\text{ stored summary }s\in\operatorname{range}(g):\qquad
+  g(s)\sim_f s.
+\end{equation*}
+Re-summarization of an already reduced string preserves the task value. This
+is idempotence relative to the oracle, not equality of text.
+
+\paragraph{C3: Merge consistency.}
+\begin{equation*}\tag{C3}
+  \forall u,v\in\Strings:\qquad
+  u\concat v
+  \sim_f g(u\concat v)
+  \sim_f g\!\left(g(u)\concat g(v)\right).
+\end{equation*}
+The disjoint route (summarize children, concatenate summaries, summarize
+again) must preserve the same cross-span interaction as summarizing the raw
+union at once.
+
+This is the learned-sketch view of C-TreePO. Classical sketches compose
+\emph{state}. Scalar answers can leave the merged answer underdetermined:
+$|A|$ and $|B|$ leave $|A\cup B|$ open. A HyperLogLog register state can still
+merge by register-wise maximum and then read out a noisy cardinality estimate.
+C-TreePO asks for the same state discipline in semantic form. For manifestos,
+the state is an observable text surrogate carrying rubric-relevant evidence,
+and the audit estimates how well the deployed surrogate behaved.
+
+\begin{table}[t]
+\centering
+\small
+\renewcommand{\arraystretch}{1.12}
+\begin{tabular}{p{0.20\linewidth}p{0.23\linewidth}p{0.24\linewidth}p{0.22\linewidth}}
+\hline
+Regime & Fixed object & State map & Sufficiency certificate \\
+\hline
+Mergeable summaries & Closed-form query family & Engineered registers or tuples with an associative merge & Algebraic proof for the query \citep{Agarwal2013MergeableTODS} \\
+Sketch-Flip-Merge & Query plus local privacy channel & Channel-compatible noisy bitmap & Parametric proof that merging preserves the estimable channel \citep{HehirTingCormode2023SFM} \\
+C-TreePO & Task readout and local laws & Learned or prompted, readable summary state & Design-based C1/C2/C3 audit plus recovery theorem \\
+\hline
+\end{tabular}
+\caption{\textbf{C-TreePO generalizes mergeable sketches by learning the
+state.} Classical schemes fix the query and hand-design a sufficient state.
+C-TreePO fixes the local-law certificate and learns an observable
+task-relative state for the readout $f$.}
+\label{tab:learned-sketch-lineage}
+\end{table}
+
+\begin{proposition}[Strict and state-level mergeable limits]\label{prop:mergeable-reduction}
+If the task value itself admits an associative merge, then oracle-preserving
+compression reduces to a strict homomorphic readout. More generally, if a
+bounded state carries the information needed by the readout and that state has
+an associative merge, C-TreePO reduces to a classical mergeable summary on the
+state even when the scalar answer lacks its own merge rule.
+\end{proposition}
+
+Classical full mergeable summaries nest through this relational state-level
+shape. Randomized mergeable summaries nest in probability: root readout is
+correct on the event that the merged root state is valid for the union stream.
+The approximation parameter $\varepsilon$ and any training-data or sample-size
+requirement remain separate profile or concentration conditions, not scalar
+answer-merge laws.

@@ -1,0 +1,110 @@
+\section{Scope and Related Work}\label{sec:v8-scope-related}
+
+\subsection{Scope}
+
+C-TreePO is scoped to rubric-driven long-document measurement where the target
+judgment is global, evidence appears in local spans, and a finite population
+of leaf, state, and merge checks can be sampled with known propensities. Party
+manifestos are the motivating case. The same structure can arise in policy
+platforms, legislative records, clinical narratives, and book-length reports,
+provided the target can be expressed as a task-relative state that survives
+local replacement.
+
+The guarantee is task-relative. It applies to readouts that depend on
+the manifesto only through the policy oracle: any score, comparison,
+or downstream estimate built from \(f^\ast\)-equivalence classes (the
+oracle-compatible readouts of
+Corollary~\ref{cor:v8-preferences-pass-to-root}). A C-Tree trained to
+preserve economic policy evidence does not automatically preserve
+rhetoric, coalition strategy, or writing style. Those quantities
+require either a wider oracle or a separate measurement channel. The
+current Manifesto evidence is also tiered: the root-observed
+benchmark is complete at the document-score tier, while the
+node-level local-law certificate requires sampled local oracle
+labels.
+
+\subsection{Design-Based LLM Measurement}
+
+\citet{EgamiEtAl2024} show why high-quality surrogate labels are insufficient
+for social-science inference when prediction error is correlated with the
+estimand. Their design-based supervised-learning framework uses logged
+sampling over trusted labels to make downstream inference valid. C-TreePO
+applies the same discipline one layer earlier, at the compression step. The
+audit unit is a realized tree node rather than only a final document label,
+and the estimand is local-law distortion in the state map.
+
+The Manifesto setting adds a construct-validity question. Expert-survey means,
+Manifesto quasi-sentence codings, and LLM teacher traces are related
+measurement objects, but they are not interchangeable without a declared
+target. C-TreePO keeps the target \(f^\ast\), the proxy \(\widehat f\), and
+the sampled correction channel separate.
+
+\subsection{Long-Context and Retrieval Methods}
+
+Extended-context models, sliding-window scoring, recursive summarization, and
+retrieval-augmented generation reduce practical input-length pressure. They do
+not provide a local certificate that a policy distinction survived
+compression. For nonseparable manifesto targets, the decisive evidence may be
+an interaction between a spending commitment and a later qualification. A
+retrieval or long-context score may be accurate on average while still giving
+no sampled account of which interactions were preserved. C-TreePO is a
+certification layer for that question.
+
+\subsection{Tree Text Compression}
+
+Tree-structured text compression and fusion have a long history in natural
+language processing \citep{KnightMarcu2000SentenceCompression,BarzilayMcKeown2005SentenceFusion,ClarkeLapata2008ILPSentenceCompression}.
+\citet{KuznetsovaEtAl2014TreeTalk} compose descriptions through structured
+tree fragments. This lineage treats composition and compression as a joint
+problem. C-TreePO adds the task oracle and local laws: a compressed node is a
+state for a specified policy measurement target, and the audit estimates
+whether the state remained valid on the deployed tree.
+
+\subsection{Sufficiency and Mergeable Summaries}
+
+The state/readout distinction connects to sufficient statistics
+\citep{Fisher1922,Blackwell1953} and mergeable summaries
+\citep{Agarwal2013MergeableTODS}. Classical sketches such as
+HyperLogLog \citep{FlajoletEtAl2007}, Count-Min
+\citep{CormodeMuthukrishnan2005}, and Greenwald-Khanna quantiles
+\citep{GreenwaldKhanna2001} choose the state by hand and prove the
+merge algebra once. HyperLogLog stores a vector of leading-zero
+counts per hash bucket and reads off cardinality estimates at the
+root; merging two states takes a coordinatewise maximum. Count-Min
+stores a small array of hashed-bucket frequency counts; merging
+takes a coordinatewise sum, and the readout is a clipped row-min.
+Greenwald-Khanna stores quantile waypoints; merging interleaves two
+waypoint summaries with a controlled error guarantee, and the
+readout returns approximate ranks. In each case the state, the
+merge, and the readout are hand-designed and the merge law is proved
+on construction. Sketch-Flip-Merge extends this discipline to local
+differential privacy \citep{HehirTingCormode2023SFM}.
+
+C-TreePO uses the same encode-merge-readout discipline for learned
+semantic states. Classical sketches are exact state-machine
+instances of the local-law idea; the manifesto state is learned,
+inspectable text or structured evidence, and its validity is
+estimated rather than proved algebraically.
+
+\subsection{Preference Learning}
+
+Direct Preference Optimization learns from pairwise preferences by
+reparameterizing the Bradley--Terry likelihood
+\citep{BradleyTerry1952,RafailovEtAl2023DPO}. Group-relative preference
+objectives use richer ranking or reward structures. C-TreePO's preference
+claim is conditional: summary-based and document-based objectives align only
+when the preference input dependence is oracle-compatible. For manifesto
+applications, this means the preference must depend on preserved policy
+content rather than on formatting, fluency, or rhetoric outside the chosen
+measurement target.
+
+\subsection{Neural Operators and LLM Programs}
+
+Neural operators and Fourier neural operators provide representation families
+for maps between structured function spaces
+\citep{Kovachki23NeuralOperator,Li21FNO}. In C-TreePO they are capacity
+routes for the same state map \(g\). Prompt programs are the LLM analogue:
+they implement the leaf and merge calls, while the local laws and audit decide
+whether those calls produced a valid task-relative state. The representation
+family supplies candidates; the certificate comes from the oracle, local laws,
+and sampling design.

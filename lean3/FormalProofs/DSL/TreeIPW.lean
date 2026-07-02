@@ -1044,6 +1044,96 @@ theorem ipw_tree_distortion_abs_sq_le
       (hbound := h_dist_bound) (hpi_pos := hpi_pos)
       (pi_min := pi_min) (hpi_min_pos := hpi_min_pos) (hpi_min_le := hpi_min_le) ω)
 
+/-!
+## Audit Robustness Wrappers
+
+The appendix robustness note uses the uniform finite population of realized
+audit units. These wrappers instantiate the generic HT robustness results for
+TreePO distortion units.
+-/
+
+/-- Uniform finite-population HT estimator for TreePO distortion audit units. -/
+abbrev treeAuditUniformDistortionEstimator
+    (model : OPT.TreePreferenceSamplingModel Strings Node A k)
+    (fstar : Strings → Y)
+    (pi : TreeUnit Strings Node A k → ℝ) :
+    (TreeUnit Strings Node A k → Bool) → ℝ :=
+  htUniformMeanEstimator pi (treeDistortion model fstar)
+
+/-- Uniform finite-population variance proxy for TreePO distortion audit units. -/
+abbrev treeAuditUniformDistortionVarianceProxy
+    (model : OPT.TreePreferenceSamplingModel Strings Node A k)
+    (fstar : Strings → Y)
+    (pi : TreeUnit Strings Node A k → ℝ) : ℝ :=
+  htUniformMeanVarianceProxy pi (treeDistortion model fstar)
+
+/-- TreePO distortion version of logged-marginal HT unbiasedness. -/
+theorem treeAuditUniformDistortion_unbiased_of_logged_marginals
+    (model : OPT.TreePreferenceSamplingModel Strings Node A k)
+    (fstar : Strings → Y)
+    (pi : TreeUnit Strings Node A k → ℝ)
+    (μ : Measure (TreeUnit Strings Node A k → Bool)) [IsFiniteMeasure μ]
+    (hpi_pos : ∀ i, 0 < pi i)
+    (h_marginal : ∀ i, ∫ ω, indicator i ω ∂μ = pi i) :
+    ∫ ω, treeAuditUniformDistortionEstimator model fstar pi ω ∂μ =
+      uniformFiniteMean (treeDistortion model fstar) :=
+  htUniformMean_unbiased_of_logged_marginals
+    (μ := μ) (pi := pi) (y := treeDistortion model fstar)
+    hpi_pos h_marginal
+
+/-- TreePO distortion version of the constrained-design variance bound. -/
+theorem treeAuditUniformDistortion_variance_bound_of_constrained_design
+    (model : OPT.TreePreferenceSamplingModel Strings Node A k)
+    (fstar : Strings → Y)
+    (μ : Measure (TreeUnit Strings Node A k → Bool))
+    (pi : TreeUnit Strings Node A k → ℝ)
+    (pi_min D_max : ℝ)
+    (hcard_pos : 0 < (Fintype.card (TreeUnit Strings Node A k) : ℝ))
+    (hcontrol :
+      HTUniformMeanCovarianceControlled μ pi (treeDistortion model fstar))
+    (hpi_pos : ∀ i, 0 < pi i)
+    (hpi_le : ∀ i, pi i ≤ 1)
+    (hpi_min_pos : 0 < pi_min)
+    (hpi_min_le_one : pi_min ≤ 1)
+    (hpi_min_le : ∀ i, pi_min ≤ pi i)
+    (hD_nonneg : 0 ≤ D_max)
+    (h_dist_bound : ∀ t, |treeDistortion model fstar t| ≤ D_max) :
+    ProbabilityTheory.variance
+        (treeAuditUniformDistortionEstimator model fstar pi) μ ≤
+      (D_max^2 / (Fintype.card (TreeUnit Strings Node A k) : ℝ)) *
+        (1 / pi_min - 1) :=
+  htUniformMean_variance_bound_of_constrained_design
+    (μ := μ) (pi := pi) (y := treeDistortion model fstar)
+    (pi_min := pi_min) (D_max := D_max)
+    hcard_pos hcontrol hpi_pos hpi_le hpi_min_pos hpi_min_le_one
+    hpi_min_le hD_nonneg h_dist_bound
+
+/-- TreePO distortion version specialized to the Bernoulli product sampling
+measure used by the existing IPW theory. -/
+theorem treeAuditUniformDistortion_variance_bound_of_independent_bernoulli
+    (model : OPT.TreePreferenceSamplingModel Strings Node A k)
+    (fstar : Strings → Y)
+    (pi : TreeUnit Strings Node A k → ℝ)
+    (pi_min D_max : ℝ)
+    (hcard_pos : 0 < (Fintype.card (TreeUnit Strings Node A k) : ℝ))
+    (hpi_pos : ∀ i, 0 < pi i)
+    (hpi_le : ∀ i, pi i ≤ 1)
+    (hpi_min_pos : 0 < pi_min)
+    (hpi_min_le_one : pi_min ≤ 1)
+    (hpi_min_le : ∀ i, pi_min ≤ pi i)
+    (hD_nonneg : 0 ≤ D_max)
+    (h_dist_bound : ∀ t, |treeDistortion model fstar t| ≤ D_max) :
+    ProbabilityTheory.variance
+        (treeAuditUniformDistortionEstimator model fstar pi)
+        (bernoulliProductMeasure pi hpi_pos hpi_le) ≤
+      (D_max^2 / (Fintype.card (TreeUnit Strings Node A k) : ℝ)) *
+        (1 / pi_min - 1) :=
+  htUniformMean_variance_bound_of_independent_bernoulli
+    (pi := pi) (y := treeDistortion model fstar)
+    (pi_min := pi_min) (D_max := D_max)
+    hcard_pos hpi_pos hpi_le hpi_min_pos hpi_min_le_one
+    hpi_min_le hD_nonneg h_dist_bound
+
 /-- Bridge lemma: any Lipschitz gap bound in terms of expected tree distortion
     can be rewritten in terms of the IPW estimator's expectation. -/
 theorem tree_gap_bounded_by_ipw

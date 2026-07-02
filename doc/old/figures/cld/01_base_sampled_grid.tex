@@ -1,0 +1,34 @@
+% 2x3 grid of the plain tree, each panel showing a different random-audit
+% sample set highlighted on the upper-summary nodes.
+%
+% Six panels (left-to-right, top-to-bottom):
+%   P1: {s12}                           — sparse, left-only
+%   P2: {s56, s78, s5678, sroot}        — right-heavy + apex
+%   P3: {s12, s34, s1234}               — left subtree, no root
+%   P4: {sroot}                         — apex only
+%   P5: {s12, s34, s56, s78, sroot}     — dense depth-2 + apex
+%   P6: {s34, s56, s1234}               — mid-band, no root
+\documentclass[border=10pt, varwidth=16cm]{standalone}
+\input{styles.tex}
+
+% Helper: render one grid panel with its sampled-node set.
+% \gridpanel{<comma-list>} opens a TeX group, sets \samplednodes locally,
+% \input's the shared tikz, and scales the result to the panel width.
+\newcommand{\gridpanel}[1]{%
+  \begingroup
+    \renewcommand{\samplednodes}{#1}%
+    \resizebox{4.6cm}{!}{\input{01_base_plain.tikz}}%
+  \endgroup
+}
+
+\begin{document}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{ccc}
+  \gridpanel{s12} &
+  \gridpanel{s56,s78,s5678,sroot} &
+  \gridpanel{s12,s34,s1234} \\[10pt]
+  \gridpanel{sroot} &
+  \gridpanel{s12,s34,s56,s78,sroot} &
+  \gridpanel{s34,s56,s1234} \\
+\end{tabular}
+\end{document}

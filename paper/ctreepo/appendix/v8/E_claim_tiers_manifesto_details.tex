@@ -1,0 +1,283 @@
+\section{Claim Tiers, Benoit Replication, and Manifesto Provenance}
+\label{app:v8-claim-tiers-manifesto}
+\label{app:v8-benoit-replication}
+
+This appendix records the evidence tiers and reproduction details behind
+Section~\ref{sec:v8-manifesto-results}. No new experiment is introduced here:
+the purpose is to make explicit which claims are root-observed, which are
+diagnostic, and which would require a completed node-level audit.
+
+\subsection{Claim Tiers}
+
+The v8 manuscript separates the evidence channels because they support
+different claims.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}p{0.22\linewidth}p{0.28\linewidth}p{0.36\linewidth}@{}}
+\toprule
+Tier & Observation unit & Claim supported \\
+\midrule
+Root-observed evaluation & Full documents with external targets &
+The C-Tree root agrees with the task target on the evaluated corpus. \\
+Node-level local-law certificate & Sampled leaves, states, and merge nodes
+with logged propensities &
+The realized tree satisfies C1/C2/C3 up to estimated oracle distortion. \\
+Local supervision & Teacher, rubric, or expert labels on smaller tree units &
+The learned \(g\) receives dense task-aligned pressure before or between
+oracle audits. \\
+Theorem stack & Mathematical assumptions on \(g\), \(T\), and \(f^\ast\) &
+Conditional preservation for oracle-compatible readouts. \\
+Application narrative & Domain setup and measurement target &
+How a concrete task instantiates the state, oracle, and audit units. \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Claim tiers used in v8.} The tiers can reinforce one another,
+but they should not be collapsed.}
+\label{tab:v8-claim-tiers}
+\end{table}
+
+The Manifesto/Benoit benchmark in the main text is root-observed: each held-out
+document has an external full-document expert target, and the tree root is
+scored against that target. The node-level local-law certificate is stronger:
+it requires sampling realized tree units and evaluating C1/C2/C3 losses through
+\(f^\ast\) with logged propensities. The two tiers answer different questions:
+the root tier asks whether the final score agrees with experts, while the node
+tier asks whether the score is carried by locally faithful policy states.
+
+\subsection{Corpus, Targets, and Expert Benchmarks}
+
+The Manifesto application uses party election programs from the Manifesto
+Project matched to expert-survey means from \citet{BenoitEtAl2025}. The
+headline benchmark contains \(235\) party election platforms from parliamentary
+democracies in election years where Benoit--Laver and CHES expert surveys
+provide party-position estimates. Raw text is taken from the Manifesto Corpus
+2025a release \citep{ManifestoProject2025a,ManifestoCorpus2025}; the target
+labels are the harmonized expert means released in the Benoit replication
+archive.
+
+The six dimensions are economic policy, social policy, immigration, European
+integration, environmental policy, and decentralization. Pearson \(r\) is
+computed across held-out documents for one dimension, and macro \(r\) is the
+unweighted average of the six dimension-level correlations. Benoit's
+split-expert row is a measurement-agreement reference rather than a training
+target: experts are randomly divided into two groups, each group forms a mean
+party-position estimate, and the two mean vectors are correlated. The economic
+split-expert reference used in the ladder discussion is \(r=0.880\); the macro
+reference across the six dimensions is \(0.873\).
+
+The current generated C-Tree artifacts use \(218\) manifestos after local
+availability and preprocessing filters. They are split into \(140\) training
+documents, \(30\) reserved documents used for model selection and diagnostics,
+and \(48\) held-out test documents for final reporting. This \(218\)-document
+artifact split is therefore distinct from the \(235\)-document benchmark
+definition. The difference is a provenance fact about the generated run, not a
+new measurement target.
+
+\subsection{Pipeline Protocol}
+
+Each C-Tree configuration has three components.
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Leaf summarizer.} Each contiguous text span is summarized
+          under a preservation rubric for the active policy dimension or under
+          the universal-summary rubric. The prompt targets Benoit's
+          \(300\)--\(400\)-word summary regime but allows longer outputs when
+          aggressive compression would drop policy-relevant evidence.
+    \item \textbf{Merge summarizer.} Adjacent child states are merged under the
+          same preservation target. The merge prompt is allowed to carry both
+          child summaries forward when that is the least lossy state.
+    \item \textbf{Scorer.} The root state is scored with the Benoit rubric for
+          dimension \(d\) and mapped to the seven-point policy scale. Invalid
+          responses are recorded as missing rather than coerced.
+\end{itemize}
+
+The C-Tree rows in Table~\ref{tab:v8-benoit-headline} use an open-weight
+\textsc{Gemma-4-31B-IT-NVFP4} model served locally. The exact Benoit scoring
+contexts are used where the run is meant to compare directly against the
+released Benoit prompts. For the universal-summary run, root states are first
+generated for all manifestos and then scored dimension by dimension; this
+two-pass schedule keeps the scoring rubric fixed across consecutive calls and
+avoids interleaving six long rubric prefixes.
+
+Character-leaf and token-leaf runs are different axes. The main
+Manifesto/Benoit table uses the reported character-leaf comparison. The
+alternating \(f/g\) ladder reports token leaf sizes because it is generated by
+the prompt-optimization artifacts. The two should not be compared as if they
+were one continuous leaf-size sweep.
+
+\subsection{Controls and Robustness Diagnostics}
+
+The full per-cell grid behind the main table includes direct and local
+controls. A flat baseline scores raw manifesto text directly after truncation;
+across truncation sizes it gives macro \(r\) in the \(0.786\)--\(0.827\) band.
+This is the long-context measurement control: it measures how much of the
+expert-survey signal is visible to a direct read before the document is
+distributed over tree leaves. A concat baseline chunks the document and scores
+the concatenated leaf summaries without recursive merges; it gives macro
+\(r\) around \(0.827\)--\(0.837\) at the strongest reported settings. The
+concat row shows that the first local compression step preserves much of the
+benchmark signal before the tree merge operator is introduced.
+
+Decoding sensitivity was checked by low-temperature and medium-temperature
+runs, with and without three-sample aggregation. At the \(8\mathrm{K}\)
+character setting, the per-dimension C-Tree macro lies in
+\([0.832,0.841]\) across these variants, while the universal-summary C-Tree
+lies in \([0.800,0.808]\). The rank ordering of the main configurations is
+therefore not driven by one decoding temperature.
+
+The older replication materials also include an exact-model Gemma-3 control on
+Benoit's anonymized summaries. Running the scorer on those summaries with the
+Gemma-3-27B BF16 model used in Benoit's Table 6 produces macro \(r\) in the
+\(0.723\)--\(0.731\) band across rubric and prompt-format variants. This
+control is used only to document model-version sensitivity; it is not the
+reported v8 C-Tree result.
+
+Robustness slices are consistent with the main interpretation. Among
+manifestos longer than \(100\mathrm{K}\) characters, the per-dimension C-Tree
+reports Pearson \(r=0.89\) on economic policy, \(0.85\) on social policy,
+\(0.87\) on immigration, \(0.88\) on European integration, and \(0.83\) on
+environment. Decentralization remains weaker at \(0.47\), matching the main
+table rather than creating a new long-document failure mode. Election-era
+slices show the same pattern: economic, social, environmental, immigration,
+and European integration remain high across available periods, while
+decentralization stays lower.
+
+Benoit et al. also discuss Manifesto Project quasi-sentence counts transformed
+into coded logit scores. We treat those as a construct-validity check, not as
+the target benchmark here, because they measure a different object from
+expert-survey party-position means. In the generated checks, tree, flat,
+concat, and universal variants produce substantially lower macro correlations
+against the coded-score target than against expert means. That gap is evidence
+that the expert-survey target and coded-count target should not be treated as
+interchangeable validation labels.
+
+\subsection{Decentralization as the Stress Dimension}
+
+Decentralization is the dimension where both Benoit and the C-Tree artifacts
+show the strongest warning signal. In Benoit's expert benchmark it has a lower
+split-expert reference than the other five dimensions. In the C-Tree artifacts
+it is the dimension most sensitive to leaf size and shared-state compression.
+Older fixed-prompt sweeps show decentralization improving as leaves shrink:
+\(r=0.489\) at \(64\mathrm{K}\) characters, \(0.543\) at \(8\mathrm{K}\), and
+\(0.584\) at \(2\mathrm{K}\). The v8 interpretation is that finer leaves force
+the tree to carry institutional qualifications, regional claims, and
+central-local tradeoffs into the merge state instead of smoothing them away in
+one large leaf summary.
+
+This pattern is why the main text treats decentralization as a local-law
+diagnostic rather than as a generic model-quality failure. The root score
+identifies the weak dimension, but the local diagnostic gap identifies where
+new node labels would be most valuable.
+
+\subsection{Compute and Call Accounting}
+
+The cost comparison is reported as call accounting, not as a universal price
+claim.
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Benoit proprietary ensemble.} Per
+          manifesto--dimension, the released ensemble uses
+          \(3\) LLMs \(\times\) \(2\) prompt settings \(\times\)
+          \(3\) summaries, or \(18\) calls. Across \(235\) manifestos and
+          \(6\) dimensions this is \(25{,}380\) LLM calls routed through
+          frontier APIs.
+    \item \textbf{Universal-summary C-Tree.} Per manifesto, the run uses
+          \(2\lceil n_{\mathrm{chars}}/c\rceil-1\) summarize/merge calls plus
+          \(6\) scoring calls. At \(c=8\mathrm{K}\) and a typical
+          \(40\)--\(48\)K-character manifesto, this is about \(15\)--\(17\)
+          calls on one local open-weight model.
+    \item \textbf{Per-dimension C-Tree.} Six dimension-specific trees are
+          built per manifesto. At \(c=8\mathrm{K}\), this is roughly
+          \(60\)--\(70\) calls per manifesto on the same local model.
+\end{itemize}
+
+Dollar costs depend on hardware ownership, utilization, and API pricing, so
+the manuscript does not claim a precise head-to-head price ratio. The
+reproducible point is the call structure: one local open-weight model with a
+tree state map versus a proprietary ensemble with multiple frontier models and
+multiple prompt settings.
+
+\subsection{Optimization-Stage Provenance}
+\label{app:v8-rile-fg-ladder}
+
+The \(f/g\) stage labels in Section~\ref{sec:v8-manifesto-results} come from
+alternating prompt-program search on the scorer \(f\) and state map \(g\).
+Model weights are not updated; the optimized object is the prompt program. A
+stage label \(f^a g^b\) means that the scorer-side prompt has been updated
+\(a\) times and the summarizer-side prompt has been updated \(b\) times. It is
+a stage label, not multiplication.
+
+Two initialization lanes are tracked. The Benoit-init lane starts from
+archived Benoit summaries, so its anchor is already a scorer-optimized
+\(f^1g^0\) state. The raw-init lane starts from the local Gemma baseline
+summary and an untuned scorer, so the first step isolates scorer adaptation.
+When a later stage reused the same evaluation as the preceding stage, the
+table reports only the first stage at which the distinct number appeared.
+
+The Benoit-init lane reaches an external \(r\) plateau of
+\([0.879,0.886]\) from \(1024\) tokens onward, straddling the economic
+split-expert reference of \(0.880\). The raw-init lane contains the strongest
+single economic cell, \(r=0.909\), at \(256\) tokens after the first
+summarizer update. These ladder numbers are not compared directly to the
+per-dimension headline row because the leaf axis and optimization budget differ.
+The full generated grid is kept as
+\path|assets/benoit/tables/manifesto_fg_ladder.tex| for provenance, but v8
+does not render it as a second results table.
+
+\subsection{Asset Provenance}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}p{0.32\linewidth}p{0.52\linewidth}@{}}
+\toprule
+Artifact & Use in v8 \\
+\midrule
+\path|assets/benoit/tables/benoit_comparison_pearson.tex| &
+Main six-dimension Manifesto/Benoit comparison,
+Table~\ref{tab:v8-benoit-headline}. \\
+\path|assets/benoit/figures/manifesto_singledim_per_dim_live.pdf| &
+Single-dimension held-out trajectories,
+Figure~\ref{fig:v8-benoit-singledim-per-dim}. \\
+\path|assets/benoit/figures/manifesto_fg_combined_ladder_f1g0_f1g1.pdf| &
+Universal-summary held-out trajectories,
+Figure~\ref{fig:v8-benoit-combined-ladder}. \\
+\path|assets/benoit/figures/manifesto_fg_combined_audit_gap.pdf| &
+Universal-summary teacher-trace diagnostic gaps,
+Figure~\ref{fig:v8-benoit-combined-audit-gap}. \\
+\path|assets/benoit/figures/manifesto_singledim_per_dim_live_audit_gap.pdf| &
+Single-dimension teacher-trace diagnostic gaps,
+Figure~\ref{fig:v8-benoit-single-audit-gap}. \\
+\path|assets/benoit/tables/manifesto_fg_ladder.tex| &
+Generated economic \(f/g\) stage grid retained for provenance; not rendered as
+a second v8 results table. \\
+\path|assets/benoit/tables/length_buckets.md| and
+\path|assets/benoit/tables/era_breakdown.md| &
+Robustness diagnostics summarized in this appendix. \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Manifesto artifact provenance.} The current v8 manuscript
+treats these generated files as fixed artifacts; it documents them rather than
+regenerating them.}
+\label{tab:v8-benoit-asset-provenance}
+\end{table}
+
+\subsection{Oracle-Grounded Local-Law Path}
+
+The present Manifesto result is meaningful as a root-observed evaluation. The
+stronger local-law path is to sample realized leaves, state re-entry calls,
+and merge nodes, then evaluate their C1/C2/C3 losses against \(f^\ast\). In
+the Manifesto domain, expert quasi-sentence codings or high-quality teacher
+judgments are natural candidates for such local oracle calls, provided they
+measure the same policy dimension as the root target.
+
+The audit design must declare the span aggregation rule, the active law
+channels, and the logged inclusion propensities before reporting the
+finite-population estimate. Quasi-sentence labels are therefore presented here
+as the natural route to node-level oracle evidence, not as already-used node
+audit evidence. Teacher traces and \(\widehat f\) provide dense local
+supervision for \(g\); sampled \(f^\ast\) node calls estimate
+\(b_v=\widehat\ell_v-\ell_v^\ast\) and correct the local-law channel without
+changing the root/local population objective.

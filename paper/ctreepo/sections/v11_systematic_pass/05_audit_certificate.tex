@@ -1,0 +1,326 @@
+\section{The Audit}
+\label{sec:v8-audit-certificate}
+
+\subsection{Audit Units}
+
+The audit treats the realized tree as a finite population. Every
+node in \(T\) whose C1/C2/C3 losses define the local-law channel is
+a unit in the population, and the audit samples some of them under
+a known design.
+Figure~\ref{fig:v8-audit-grid} shows six different sampled
+node-sets on the same tree: each panel highlights a candidate
+audit, and the certificate uses the inclusion probability that
+generated the highlighting to reweight observed losses to the
+finite population.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{01_base_sampled_grid.pdf}
+\caption{\textbf{Sampled audit designs on a fixed C-Tree.}
+Six audits over the same tree of leaves \(b_1,\ldots,b_8\),
+leaf summaries \(s_i\), pairwise merges \(s_{ij}\), grandparent
+merges \(s_{1234},s_{5678}\), and root \(s_{\mathrm{root}}\).
+Highlighted nodes mark the realized sample; unhighlighted nodes
+are unsampled. Each design has its own logged propensities
+\(\pi_i\), and the Horvitz--Thompson estimator below reweights
+the observed losses to the finite-population mean.}
+\label{fig:v8-audit-grid}
+\end{figure} We index audit units by \(i\) (the
+survey-statistics convention; each \(i\) is a node \(v\) from
+Section~\ref{sec:v8-ctree-math}). Unit \(i\) carries a represented
+raw span \(S(i)=x_v\), a produced state \(s_i=z_v\), a law channel
+(C1, C2, or C3), and a logged marginal inclusion probability
+\(\pi_i>0\) recording how often the audit design samples this node.
+
+Two diagnostics come out of the audit. The first is the violation
+rate per law channel: how often C1 fails, how often C2 fails, how
+often C3 fails. This tells the analyst which kind of failure is
+driving the residual: leaves dropping evidence, states changing
+when summarized again, or merges losing the interaction between
+siblings. The second is the mean distortion across nodes, which is
+what feeds the certificate. A run can have many small violations
+whose root impact is limited, or a few large ones that move the
+score a lot. Reporting both quantities lets the analyst tell the
+two cases apart.
+
+\subsection{Dense Proxy, Sparse Oracle}
+
+We cannot compute \(L_{\mathrm{law}}^\ast\) in
+Equation~\eqref{eq:v8-local-law-estimand} directly, because it
+requires an \(f^\ast\) call at every node and oracle calls are
+scarce. Long-document settings typically expose oracle labels at
+the root (e.g., expert-survey means on the whole document) and
+leave internal nodes without a direct oracle. What is available at
+internal nodes is some accessible substitute: a cached teacher
+trace, an aggregated label from a span-grounded coding scheme, or
+the proxy \(\widehat f\). The fix is to use the proxy densely and
+correct it with sampled oracle calls.
+
+The dense local quantity is the same C1/C2/C3 comparison measured
+through the proxy:
+\[
+  \widehat\ell_v
+  =
+  \ell_{\mathrm{law}}(v;\widehat f,g).
+\]
+\(\widehat\ell_v\) gives a training signal at every node, but the
+proxy is not the oracle. The gap between them at node \(v\) is the
+node bias:
+\[
+  b_v=\widehat\ell_v-\ell_v^\ast .
+\]
+Sampled \(f^\ast\) calls estimate \(b_v\) on the nodes they cover, and
+inverse-propensity weighting carries that estimate to the population.
+
+Let \(R_v\in\{0,1\}\) indicate whether node \(v\) is sampled and
+evaluated with \(f^\ast\), and let \(\pi_v>0\) be the logged marginal
+probability that the audit design samples \(v\). The corrected node
+loss is
+\begin{equation}
+\label{eq:v8-corrected-node-loss}
+  \ell_v^{\mathrm{corr}}
+  =
+  \widehat\ell_v
+  +
+  \frac{R_v}{\pi_v}
+  \left(\ell_v^\ast-\widehat\ell_v\right).
+\end{equation}
+Unsampled nodes contribute proxy loss. Sampled nodes add back the
+observed oracle--proxy difference, scaled up by \(1/\pi_v\) so the
+correction stands in for the population mean. This is the standard
+inverse-propensity correction: rare nodes are sampled less, so the
+few times they are sampled they count more.
+
+\begin{proposition}[Corrected Node Loss Is Unbiased for the Oracle
+Loss]\label{prop:v10-corrected-loss-unbiased}
+For each node \(v\) with logged inclusion probability \(\pi_v>0\),
+\[
+  \mathbb E\!\left[\ell_v^{\mathrm{corr}}\mid T\right]
+  =\ell_v^\ast .
+\]
+\end{proposition}
+
+\begin{proof}[Proof sketch]
+Assume the audit design samples node \(v\) with logged inclusion
+probability \(\pi_v>0\). Conditional on the realized tree, the
+sampling indicator \(R_v\) is Bernoulli with mean \(\pi_v\), so the
+correction factor \(R_v/\pi_v\) has mean \(1\). Take expectations of
+the corrected node loss in
+Equation~\eqref{eq:v8-corrected-node-loss}: the proxy term
+\(\widehat\ell_v\) is non-random and stays put; the correction term
+\((R_v/\pi_v)(\ell_v^\ast-\widehat\ell_v)\) has mean
+\(\ell_v^\ast-\widehat\ell_v\); summing the two leaves
+\(\ell_v^\ast\). Strict positivity of \(\pi_v\) is the only place the
+argument uses; the design can otherwise be adversarial. The full
+argument and the variance bound are in
+Appendix~\ref{app:v8-objective-ipw}.
+\end{proof}
+
+The corrected local-law channel sums the corrected node losses with
+the same depth weights as the oracle channel:
+\[
+  L_{\mathrm{law}}^{\mathrm{corr}}(g,T)
+  =
+  \sum_{v\in V(T)}\gamma^{d(v)}\ell_v^{\mathrm{corr}} .
+\]
+Plugging \(L_{\mathrm{law}}^{\mathrm{corr}}\) into the
+theorem-facing objective from Section~\ref{sec:v8-objective} gives
+the trainable version of the C-TreePO objective:
+\begin{equation}
+\label{eq:v8-corrected-objective}
+  J_\lambda^{\mathrm{corr}}(g;T)
+  =
+  (1-\lambda)L_{\mathrm{root}}(g)
+  +
+  \lambda L_{\mathrm{law}}^{\mathrm{corr}}(g,T).
+\end{equation}
+\(J_\lambda^{\mathrm{corr}}\) estimates the oracle objective
+\(J_\lambda^\ast\) from
+Equation~\eqref{eq:v8-main-objective}. With no audit calls
+(\(R_v=0\) at every node), the corrected channel reduces to the
+dense-proxy channel; sampled \(f^\ast\) calls add the correction.
+
+\subsection{HT Distortion Certificate}
+
+The corrected local-law loss is the training object. The certificate
+uses the same sampled nodes to estimate the realized tree's
+remaining representation distortion, which the bound on the
+downstream drift \(G_{\mathrm{meth}}\) then transports into the
+reported quantity. Let \(\mathcal U\) be the finite population of
+sample-eligible tree units, \(N=|\mathcal U|\), and let
+\[
+  D_i^J
+  =
+  d_Y\!\left(J(s_i),J(S(i))\right)
+\]
+be the distortion measured by an accessible scorer \(J\). \(J\) is
+whichever scorer the audit instantiates: in the corrected-loss form
+above it is the proxy \(\widehat f\), and on a sampled subset of nodes
+\(J\) can be the oracle \(f^\ast\) itself. If \(Z_i\) is the audit
+inclusion indicator and \(\pi_i\) is the logged inclusion probability,
+the Horvitz--Thompson estimator is
+\begin{equation}
+\label{eq:v8-ht-distortion}
+  \widehat{\Delta}_{\mathrm{HT}}^{J}
+  =
+  \frac{1}{N}
+  \sum_{i\in\mathcal U}
+  \frac{Z_i}{\pi_i}D_i^J .
+\end{equation}
+
+\begin{proposition}[HT Distortion Estimator Is Unbiased]
+\label{prop:v10-ht-unbiased}
+Assume strict positivity (\(\pi_i>0\) for every \(i\in\mathcal U\)) and
+that \(\pi_i\) is the correct logged marginal inclusion probability
+for unit \(i\). Then
+\[
+  \mathbb E\!\left[\widehat{\Delta}_{\mathrm{HT}}^{J}\mid T\right]
+  =
+  \frac{1}{N}\sum_{i\in\mathcal U}D_i^J ,
+\]
+the finite-population mean of the per-unit distortions. Unequal
+propensities affect variance and effective sample size, not the
+target being estimated.
+\end{proposition}
+
+\begin{proof}[Proof sketch]
+Assume strict positivity (\(\pi_i>0\) for every unit) and that
+\(\pi_i\) is the correct logged marginal inclusion probability of
+unit \(i\). The argument is the standard Horvitz--Thompson identity
+applied unit by unit. For unit \(i\), the inclusion indicator
+\(Z_i\) has mean \(\pi_i\), so \(Z_i/\pi_i\) has mean \(1\) and
+\((Z_i/\pi_i)D_i^J\) has mean \(D_i^J\). Summing across the finite
+population and dividing by \(N\) gives the claimed finite-population
+mean. Strict positivity is what makes \(Z_i/\pi_i\) well defined and
+prevents any unit from being unreachable. Unequal propensities
+change the variance through the same identity but leave the mean
+alone, since the per-unit factors have not changed.
+Appendix~\ref{app:v10-ipw-stress} reports empirical coverage of the
+HT estimator on adversarial finite populations. The full argument
+with the matching variance bound is in
+Appendix~\ref{app:v8-objective-ipw}.
+\end{proof}
+
+The certificate has four terms. The first is the audit's estimate of
+the representation distortion, transported through the downstream
+method. The other three are correction terms for calibration,
+sampling error, and clipping.
+
+\begin{proposition}[Finite-Sample Certificate]
+\label{prop:v10-finite-sample-certificate}
+Under strict positivity and correct logged propensities for the
+audit design, oracle-compatibility of the downstream method with
+transport constant \(C_{\mathrm{meth}}\), bounded clipping radius,
+and declared calibration, sampling, and clipping envelopes on an
+event \(\mathcal E\), the downstream drift admits the four-term
+decomposition
+\begin{equation}
+\label{eq:v8-finite-sample-certificate}
+  |G_{\mathrm{meth}}|
+  \le
+  C_{\mathrm{meth}}\widehat{\Delta}_{\mathrm{HT}}
+  +
+  B_{\mathrm{cal}}
+  +
+  B_{\mathrm{est}}
+  +
+  B_{\mathrm{clip}} .
+\end{equation}
+If the component envelopes hold with total failure probability at
+most \(\delta\), then the certificate holds with probability at least
+\(1-\delta\).
+\end{proposition}
+
+\begin{proof}[Proof sketch]
+Assume strict positivity and correct logged propensities (so that
+Proposition~\ref{prop:v10-ht-unbiased} applies),
+oracle-compatibility of the downstream method through the transport
+constant \(C_{\mathrm{meth}}\), and a bounded clipping radius on
+the inverse-propensity weights. Also assume that the calibration,
+sampling, and clipping envelopes hold on the event \(\mathcal E\).
+The argument adds and subtracts two intermediate quantities inside
+the transport bound: the accessible-judge population distortion and
+the unclipped HT estimate. The four resulting pieces are the
+method-transported audit estimate
+\(C_{\mathrm{meth}}\widehat\Delta_{\mathrm{HT}}\); the calibration
+gap \(B_{\mathrm{cal}}\) between the proxy scorer and the oracle;
+the sampling deviation \(B_{\mathrm{est}}\) of the HT estimator from
+its mean; and the clipping bias \(B_{\mathrm{clip}}\) introduced
+when large inverse-propensity weights are truncated for variance
+control. The deterministic inequality holds on \(\mathcal E\). The
+high-probability version assigns failure budgets to the component
+envelopes and combines them by a union bound. Full derivation in
+Appendix~\ref{app:v8-full-proofs}, with the per-component bounds
+spelled out in Appendix~\ref{app:v8-objective-ipw}.
+\end{proof}
+
+\(C_{\mathrm{meth}}\widehat{\Delta}_{\mathrm{HT}}\) is the sampled
+distortion times the method transport constant from
+Section~\ref{sec:v8-objective}. \(B_{\mathrm{cal}}\) is the gap
+between the accessible scorer and \(f^\ast\): the part of error that
+more sampled labels cannot remove. \(B_{\mathrm{est}}\) is sampling
+uncertainty after method transport. \(B_{\mathrm{clip}}\) is bias
+introduced by clipping inverse-propensity weights or residuals.
+
+\subsection{Reading the Certificate}
+
+The four certificate terms each point at a different lever. The
+first term \(C_{\mathrm{meth}}\widehat\Delta_{\mathrm{HT}}\) is the
+sampled estimate of local distortion on the realized tree, scaled
+by the method's Lipschitz constant. It answers a direct audit
+question: among the leaves, re-summarized states, and merges that
+the pipeline actually used, how far did the produced states move
+from their represented raw spans? A pipeline can score well at the
+root while the intermediate states drift far from the spans they
+represent. The first term flags exactly this case: a low root error
+with a high \(\widehat{\Delta}_{\mathrm{HT}}\) is a prediction
+whose mechanism the audit cannot certify, even when the headline
+number looks fine.
+
+\(B_{\mathrm{cal}}\) is the gap between the accessible judge used
+for local evidence and the trusted oracle. More sampled nodes do
+not remove a calibration mismatch. If quasi-sentence aggregates,
+teacher traces, or LLM readouts measure a different construct from
+the target, then local labels can be plentiful and still point at
+the wrong target. Coded emphasis scores and expert-position scores
+must be kept separate unless a calibration exercise links them.
+
+\(B_{\mathrm{est}}\) is the term that expert sampling can shrink.
+It reflects design uncertainty around the finite population of tree
+units. More sampled leaves and merges reduce this term when
+propensities are logged and positive. \(B_{\mathrm{clip}}\) is the
+price of variance control: clipping large inverse-propensity
+weights stabilizes the estimate, and the induced bias must be
+reported rather than hidden.
+
+The method constant \(C_{\mathrm{meth}}\) carries its own signal. A
+procedure that is sensitive to small score changes, or to rank
+reversals near a decision threshold, needs a larger transport
+constant than a procedure that only needs coarse ordering. A
+certified tree is therefore certified against a particular tree,
+oracle, audit design, and method-specific tolerance.
+
+\subsection{Root Labels and Node Labels}
+
+Root labels and node labels do different work. Root expert labels
+define and evaluate the document-level measurement. Without root
+labels, C-TreePO would have no external test of the final task.
+Node labels ask a narrower question: whether a leaf, state, or
+merge preserved the rubric-relevant evidence in the span it
+represents.
+
+A node audit on the realized tree completes the stack. Root labels
+anchor the expert target; sampled node labels estimate local
+distortion and proxy bias. In the Manifesto LLM replication,
+quasi-sentence codings are attractive node labels because they are
+already span-grounded political evidence, but they must be
+aggregated under a declared rule for the active dimension. A
+decentralization audit should not reuse an economic-policy
+aggregation rule, and a universal-summary audit should report
+whether one state is being asked to preserve incompatible evidence
+geometries.
+
+The HT estimator has been stressed separately on hard finite
+populations (Appendix~\ref{app:v10-ipw-stress}). The next section
+asks the same budget question on a synthetic Markov task with a
+known sufficient state.

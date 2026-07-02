@@ -4,6 +4,10 @@ import FormalProofs.OPT.ScoreTransport
 import FormalProofs.OPT.InformationSufficiency
 import FormalProofs.OPT.PreferenceLearning
 import FormalProofs.OPT.PreferenceBounds
+import FormalProofs.OPT.InfluenceWeightedLocalLaws
+import FormalProofs.DSL.Honesty
+import FormalProofs.DSL.DocumentStructure
+import FormalProofs.DSL.UnifiedLearningCertificate
 
 /-!
 # FormalProofs/Assumptions.lean
@@ -19,6 +23,7 @@ the logical structure of the formalization.
 | Assumption Class | Theorems Implied | File |
 |------------------|------------------|------|
 | L1 + L2 + L3 (Local Laws) | Multi-round preservation: E[D(Z^R, x)] = 0 | ExpectationTheory |
+| + Influence-weighted audit overlap | Informative finite-sample local-law certificates | InfluenceWeightedLocalLaws |
 | + Oracle-Measurability | Preference learning equivalence | PreferenceLearning |
 | + Lipschitz | Quantitative gap bounds (DPO) | PreferenceBounds |
 | + Random Utility Model | GRPO-PL/RL gap bounds (expected Lipschitz) | PreferenceBounds |
@@ -32,7 +37,17 @@ the logical structure of the formalization.
 | L3 | C2 (Idempotence) | Re-summary is inert: E[D(g(Z), Z)] = 0 for Z ∈ range(g) |
 | A1_global | Global Sufficiency | ∀ z, D(g z, z) = 0 |
 | A2_global | Two-Route Identity | ∀ u v, D(u*v, g(g u * g v)) = 0 |
-| A3_global | Merge Function | ∃ M : Y → Y → Y with properties |
+| A3_global | Strict Oracle Merge | ∃ M : Y → Y → Y with properties |
+| TopLevelIID / TopLevelExchangeable | Sampling unit assumption | IID/exchangeability applies to `(X_i, Y_i*)`, not rows |
+| TopLevelSplit | Honest unit split | Train/eval roles live on top-level units, not derived rows |
+| ParentOf | Derived-row parent map | Leaves/nodes/audit rows inherit roles from their top-level unit |
+| ChunkerObjectiveTerms | Chunker objective | Downstream loss + law mass + radius + cost + boundary regularization |
+| Span / AdmissiblePartition | Document support | Finite ordered spans and non-overlapping covering chunk partitions |
+| RunManifestContract | Run manifest | Parent IDs, artifacts, propensities, influence weights, and split roles |
+| UnifiedLearningErrorCertificate | Unified certificate | Reported estimate plus law/calibration/estimation/clipping radii |
+| UnifiedLearningPaperAssumptions | Final paper theorem context | Sampling + honesty + chunk/manifest contracts |
+| RootErrorControlledByInfluenceMass | Influence propagation | root error ≤ weighted local-law mass |
+| InfluenceWeightedAuditOverlap | Audit overlap | consequential rows have non-tiny logged propensity |
 
 ## Theorem Dependency Structure
 
@@ -81,6 +96,121 @@ variable {A : Type*}
 variable {Y : Type*} [PseudoMetricSpace Y]
 
 /-!
+## Section 0: Top-Level Units, Derived Rows, and Chunker Objective
+
+The paper's statistical train/eval split is over top-level cases/documents
+`X_i`.  Sub-document spans, tree nodes, and local-law rows are dependent derived
+objects, so their roles are inherited through a parent map rather than treated
+as separate IID samples.
+-/
+
+/-- **Top-level honest split**:
+the train/eval split lives on the case/document unit supporting the reported
+generalization claim. -/
+abbrev TopLevelUnitSplit := @DSL.TopLevelSplit
+
+/-- **Top-level paired observation**:
+the case/document together with its truth target. -/
+abbrev TopLevelObservation := @DSL.topLevelObservation
+
+/-- **Top-level IID assumption**:
+IID is asserted over paired top-level observations `(X_i, Y_i*)`, not over
+spans, nodes, or local-law rows. -/
+abbrev TopLevelIIDAssumption := @DSL.TopLevelIID
+
+/-- **Top-level exchangeability assumption**:
+finite-dimensional exchangeability is asserted over paired top-level
+observations `(X_i, Y_i*)`, not over derived rows. -/
+abbrev TopLevelExchangeabilityAssumption := @DSL.TopLevelExchangeable
+
+/-- **Derived-row parent map**:
+maps spans, tree nodes, and local-law audit rows back to their top-level unit. -/
+abbrev DerivedRowParent := @DSL.ParentOf
+
+/-- **Sibling relation for derived rows**:
+two rows are siblings when they share the same top-level unit. -/
+abbrev SameTopLevelUnit := @DSL.SameTopLevelUnit
+
+/-- **Inherited split role**:
+a derived row's train/eval role is determined by its parent top-level unit. -/
+abbrev InheritedSplitRole := @DSL.inheritedSplitRole
+
+/-- **Derived-row honest training**:
+training over rows may depend only on rows whose parent units are in train. -/
+abbrev DerivedRowHonestTraining := @DSL.DerivedRowHonestTraining
+
+/-- **Derived-row honest evaluation**:
+evaluation over rows may depend only on rows whose parent units are in eval. -/
+abbrev DerivedRowHonestEvaluation := @DSL.DerivedRowHonestEvaluation
+
+/-- **K-fold honest artifact training**:
+fold-`k` artifacts are trained only on top-level units outside fold `k`. -/
+abbrev KFoldHonestArtifactTraining := @DSL.KFoldHonestTraining
+
+/-- **K-fold honest evaluation**:
+fold-`k` evaluation depends only on top-level units inside fold `k`. -/
+abbrev KFoldHonestArtifactEvaluation := @DSL.KFoldHonestEvaluation
+
+/-- **Chunker policy**:
+maps a top-level unit and a frozen artifact bundle to a partition. -/
+abbrev ChunkerPolicy := @DSL.ChunkerPolicy
+
+/-- **Chunker objective terms**:
+downstream loss, local-law residual mass, certificate radius, compute/query
+cost, and boundary regularization with explicit weights. -/
+abbrev ChunkerObjectiveTerms := @DSL.ChunkerObjectiveTerms
+
+/-- **Chunker objective minimizer**:
+the selected partition minimizes the weighted objective over admissible
+partitions for a fixed top-level unit and frozen artifacts. -/
+abbrev ChunkerObjectiveMinimizer := @DSL.IsChunkerObjectiveMinimizer
+
+/-- **Unified learning honesty**:
+chunker, `g`, and oracle/readout training are each honest on their three-layer
+split, and final evaluation uses a frozen artifact bundle on the joint eval
+view. -/
+abbrev UnifiedLearningHonesty := @DSL.UnifiedLearningHonesty
+
+/-- **Document span**:
+half-open support interval used for chunks, nodes, and audit rows. -/
+abbrev DocumentSpan := DSL.Span
+
+/-- **Admissible chunk partition**:
+nonempty valid spans that cover the finite ordered document without overlap. -/
+abbrev AdmissibleChunkPartition := DSL.AdmissiblePartition
+
+/-- **Finite top-level unit**:
+top-level case/document with a positive finite ordered length. -/
+abbrev FiniteTopLevelUnit := DSL.FiniteTopLevelUnit
+
+/-- **Chunk partition contract**:
+each top-level unit receives an admissible chunk partition. -/
+abbrev ChunkPartitionContract := DSL.ChunkPartitionContract
+
+/-- **Run manifest contract**:
+the theorem-facing log with parent unit IDs, artifact lineage, propensities,
+effective propensities, and influence weights. -/
+abbrev RunManifestContract := DSL.RunManifestContract
+
+/-- **Manifest roles consistent with the three-layer split**:
+logged chunker/g/oracle roles agree with top-level split roles. -/
+abbrev ManifestRolesConsistent := @DSL.ManifestRolesConsistent
+
+/-- **Unified learning error certificate**:
+reported honest estimate plus local-law, calibration, estimation, and clipping
+radii for the final paper-facing envelope. -/
+abbrev UnifiedLearningErrorCertificate := DSL.UnifiedLearningErrorCertificate
+
+/-- **Unified learning paper assumptions**:
+the final theorem context bundling top-level sampling, honesty, admissible
+chunking, manifest consistency, and row-support validity. -/
+abbrev UnifiedLearningPaperAssumptions := @DSL.UnifiedLearningPaperAssumptions
+
+/-- **Unified component evidence**:
+provenance records for local-law, calibration, estimation, and clipping radii. -/
+abbrev UnifiedLearningComponentEvidence := @DSL.UnifiedLearningComponentEvidence
+
+/-!
 ## Section 1: Local Laws (Consistency Conditions)
 
 The local laws are the core testable conditions on a summarizer g.
@@ -109,10 +239,80 @@ This is Lean's L2 (note the numbering swap from paper). -/
 abbrev C3_MergeConsistency := @L2
 
 /-!
+## Section 1b: Influence-Weighted Audit and Bounds Assumptions
+
+Approximate local laws alone give a valid finite-depth sum bound, but the bound
+can be uninformative if all root-relevant error is concentrated on a row with
+vanishing audit probability.  The influence-weighted layer makes the additional
+finite-sample assumption explicit:
+
+1. root/document error is controlled by an influence-weighted local-law mass;
+2. the audit design assigns enough logged propensity to consequential rows.
+
+This is weaker than a "no hidden needles" assumption.  Needles may exist; they
+must not be adversarially hidden in rows whose `lambda / pi` ratio is arbitrarily
+large.
+-/
+
+/-- **Influence-weighted local-law mass**:
+`sum_a lambda(a) * residual(a)` over finite C1/C2/C3 audit rows. -/
+abbrev InfluenceWeightedLocalLawMass :=
+  @FormalProofs.OPT.weightedLocalLawMass
+
+/-- **Influence-weighted design effect**:
+`sum_a lambda(a)^2 / pi(a)`, the variance/design-effect proxy for the audit. -/
+abbrev InfluenceWeightedDesignEffect :=
+  @FormalProofs.OPT.influenceDesignEffect
+
+/-- **Worst influence-to-propensity ratio**:
+`lambda(a) / pi(a) <= W` for every audit row. -/
+abbrev InfluenceWeightedWorstRatioBound :=
+  @FormalProofs.OPT.influenceWorstRatioBound
+
+/-- **Influence-weighted audit overlap**:
+positive logged propensities plus bounded design effect and worst ratio.
+
+This is the formal "no adversarially hidden consequential needles" assumption. -/
+abbrev InfluenceWeightedAuditOverlapAssumption :=
+  @FormalProofs.OPT.InfluenceWeightedAuditOverlap
+abbrev InfluenceWeightedAuditOverlapAxiom :=
+  @InfluenceWeightedAuditOverlapAssumption
+
+/-- **Influence propagation assumption**:
+root/document error is bounded by influence-weighted local-law residual mass. -/
+abbrev RootErrorControlledByInfluenceMassAssumption :=
+  @FormalProofs.OPT.RootErrorControlledByInfluenceMass
+abbrev RootErrorControlledByInfluenceMassAxiom :=
+  @RootErrorControlledByInfluenceMassAssumption
+
+/-- Uniform proxy calibration transfers proxy local-law residuals to true
+oracle residuals with `2 * eps` row slack. -/
+abbrev InfluenceWeightedCalibrationTransfer :=
+  @FormalProofs.OPT.weightedOracleMass_le_proxy_plus_calibration
+
+/-- Root-error certificate from any influence-weighted local-law mass upper
+bound. -/
+abbrev InfluenceWeightedRootErrorBound :=
+  @FormalProofs.OPT.rootError_le_of_influence_weighted_mass_upper
+
+/-- Root-error certificate combining proxy estimation, statistical radius, and
+calibration radius. -/
+abbrev InfluenceWeightedProxyRootErrorBound :=
+  @FormalProofs.OPT.rootError_le_proxy_estimate_plus_stat_plus_calibration
+
+/-- Packaged finite-sample influence-weighted error certificate. -/
+abbrev InfluenceWeightedErrorCertificateAssumptionSurface :=
+  @FormalProofs.OPT.InfluenceWeightedErrorCertificate
+
+/-!
 ## Section 2: Global Assumptions
 
 The global assumptions (A1, A2, A3) are STRONGER than local laws.
 They imply the local laws for ANY tree structure.
+
+`A3_global` is the strict oracle-output case: it requires the oracle values
+themselves to compose. Classical mergeable sketches are more general because
+bounded sketch states can merge before applying a final readout.
 
 **Key Derivation** (GlobalAssumptions.lean):
   A1_global + A2_global + A3_global ⟹ L1 + L2 + L3 for any tree
@@ -128,7 +328,7 @@ abbrev A1_GlobalSufficiency := @A1_global
 ∀ u v : Strings, D(u*v, g(g u * g v)) = 0 -/
 abbrev A2_TwoRouteIdentity := @A2_global
 
-/-- **Merge Function Existence (A3)**: Oracle-level merge function exists.
+/-- **Strict Merge Function Existence (A3)**: Oracle-level merge function exists.
 
 ∃ M : Y → Y → Y such that f*(g(g u * g v)) = M(f*(g u), f*(g v)) -/
 abbrev A3_MergeFunction := @A3_global
@@ -434,16 +634,18 @@ abbrev unified_preference_gap_bound := @unified_preference_gap_bounded
 
 These theorems show the assumptions are NECESSARY, not just sufficient.
 
-**Theorem 10.1 (L3 is independent)**: Located in CounterexampleExistence.lean
+**C2 independence counterexample**: Located in CounterexampleExistence.lean
 
-There exists a summarizer g_bad satisfying L1 on fresh inputs but violating L3.
-This shows idempotence (L3/C2) is an independent axiom, not derivable from L1 + L2.
+There exists a summarizer g_bad satisfying C1/L1 and fresh-input C3/L2 but
+violating C2/L3. This shows idempotence is an independent axiom, not derivable
+from the one-pass fresh-input laws.
 
 The construction builds g_bad such that:
-- For fresh inputs b ≠ POS, NEG: D(g_bad(b), b) = 0 (would satisfy L1)
+- For fresh inputs b ≠ POS, NEG: D(g_bad(b), b) = 0 (satisfies C1/L1)
+- For fresh merge inputs: the C3/L2 merge chain is oracle-preserving
 - For POS in range: D(g_bad(POS), POS) > 0 (violates L3)
 
-See `thm10_1_L3_not_derivable` in CounterexampleExistence.lean.
+See `ex_c2_independent_formalized` in CounterexampleExistence.lean.
 -/
 
 end PaperAssumptions

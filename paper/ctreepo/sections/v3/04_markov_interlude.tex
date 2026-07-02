@@ -1,0 +1,147 @@
+\section{A Non-Linear Interlude: Counting Register Shifts in a Scene Arc}\label{sec:markov-interlude}
+
+Before the main theorems, a short example worth walking through.
+Section~\ref{sec:mergeable-sketches} gave the classical recipe for a tree
+of summaries: encode shards, merge bounded states, and read out an
+aggregate query. Section~\ref{sec:framework} generalized that recipe to a
+learned summarizer under three local laws. The simplest task that shows
+why the learned generalization matters is one whose oracle is an aggregate
+but cannot be computed by an unordered register-wise merge unless the
+state carries boundary information. We walk through that task here as a
+scene-register arc illustrated through \emph{Hamlet}, and motivate why
+$g$ must be a richer operator than a set-like sketch merge.
+
+\subsection{The Running Example: A Scene-Register Arc}\label{sec:scene-register-example}
+
+Consider one judgment about a play's emotional shape: how many times
+does the dominant emotional register change from one scene to the
+next? Computing this by hand requires reading every scene, deciding
+which register it sits in, and walking the sequence of decisions
+end-to-end. We take \emph{Hamlet}, partition it at the scene level,
+and assign each scene a single dominant register from the
+seven-element alphabet
+\[
+  \RegSet \;=\; \{\text{Mourning},\, \text{Foreboding},\, \text{Political},\, \text{Intrigue},\, \text{Madness},\, \text{Action},\, \text{Comic}\}.
+\]
+The boundary between 3.3 and 3.4 (Claudius at prayer to Polonius killed)
+flips from Intrigue to Action, and the boundary between 4.7 and 5.1 (the
+poisoned-foil plot to the gravediggers) flips from Intrigue to Comic.
+These two flips give a concrete picture of what the oracle counts.
+
+The oracle $\fstar$ counts register shifts across adjacent scene
+boundaries. It is an integer aggregate of the same shape as a classical
+sketch query, but its value depends on an \emph{ordered} pair of
+neighbouring states, not on an unordered bag of features. That is why
+the example matters: the moment we split the play into two halves and
+summarize each half independently, we risk losing the pair of registers
+on either side of the split point.
+
+\subsection{What We Assume and What Is Illustrative}\label{sec:scene-register-assumptions}
+
+Three things are load-bearing in this example, and they are worth
+distinguishing.
+
+First, we assume that each scene has a \emph{dominant register} (a
+single label that best describes its emotional tone), and that the
+register can shift across adjacent scenes. This is the structural
+assumption: scenes are labelable, labels live in a finite alphabet, and
+the oracle is count-of-shifts. Everything the framework proves about
+this example holds as long as that structural assumption holds.
+
+Second, we assume a specific alphabet $\RegSet$ and a specific labeling
+of Hamlet scenes into that alphabet. This is \emph{illustrative}. A
+reader who disagrees with ``Mourning'' or thinks Act~1 Scene~2 is
+Foreboding rather than Political is doing literary criticism; the
+framework is indifferent to the answer, because the mechanism (leaf
+summaries must carry enough information to reconstruct the boundary
+registers) does not depend on which specific register any scene gets.
+We chose seven registers because seven is large enough to be a real
+categorical distinction and small enough to be readable. Four would
+work. Twelve would work. The only thing that would not work is an
+alphabet so fine-grained that adjacent scenes almost always differ, or
+so coarse that they almost never do.
+
+Third, we do not claim to have coded Hamlet. The empirical results in
+Section~\ref{sec:markov-walkthrough} come from a \emph{synthetic
+data-generating process} that produces sequences with the same shift
+structure as this example but uses neutral register labels.
+\emph{Hamlet} is a narrative container; the DGP is what the MAE
+curves actually measure. The example shows a task whose oracle defeats
+unordered register-wise merges, and that pedagogical purpose does not
+require a literary-critical commitment.
+
+\subsection{The Synthetic Data-Generating Process}\label{sec:synthetic-dgp}
+
+The DGP is a Markov chain on $K$ hidden registers whose transition
+matrix is chosen so that adjacent states differ about as often as
+adjacent scenes differ in the Hamlet illustration. A generated document
+is a sequence of $128$ positions, each emitting one observed token from
+a small palette per register. The palettes are disjoint (no token
+belongs to two registers), but the learner does not know which tokens
+share a register. It must discover the groupings from data. The oracle $\fstar$ counts the positions at which the hidden
+register changes. A typical document has about five shifts;
+Appendix~\ref{app:mechanism-checks} gives the full specification,
+including the $K$-register variants used for the hard-case regime and
+the per-seed sample sizes underlying every reported curve.
+
+We refer to positions here as ``tokens'' and to the hidden state as a
+``register'' because that terminology matches the Fourier-neural-operator
+architecture we will plug in at Section~\ref{sec:fno-primer}. The
+Hamlet framing of \S\ref{sec:scene-register-example} is the same
+mechanism viewed at scene granularity: positions become scenes, the
+hidden state becomes a dominant emotional register, and the oracle
+becomes the count of register shifts. The structural claim that an
+unordered leaf summary erases boundary information does not care
+whether the unit is a token or a scene.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{markov_scene_arc_hamlet.pdf}
+    \caption{\textbf{An illustrative scene-register arc for \emph{Hamlet}.} Consecutive scenes are arrayed left to right; colors encode the dominant register assigned to each scene under the seven-register alphabet $\RegSet$. The canonical boundary flips at Acts 3.3$\to$3.4 and 4.7$\to$5.1 motivate why leaf summaries must carry boundary state. The register assignments are an illustrative mood taxonomy, not a literary-critical claim; the empirical results come from the synthetic data-generating process of~\S\ref{sec:synthetic-dgp}, not from annotated Hamlet text.}
+    \label{fig:hamlet-registers}
+\end{figure}
+
+\subsection{What Goes Wrong with an Unordered Merge}
+
+Suppose we attempt to apply the HyperLogLog recipe directly: encode each
+leaf into a register-like summary, merge pairwise with a commutative
+operator, read out the count. For this to succeed the encode step would
+have to reduce each leaf to a feature set that, under commutative merge,
+still distinguishes between (i) a document whose two halves happen to end
+and begin with the same register and (ii) a document whose two halves end
+and begin with different registers. No register-wise max, additive count,
+or bitmap-OR merge can distinguish these two cases: both produce the
+same leaf-level aggregate. The only distinguishing information is
+\emph{ordered and positional}: which register is at the right edge of
+the left leaf, and which register is at the left edge of the right
+leaf. A commutative merge by definition cannot preserve such
+information.
+
+The hand-designed sketch that makes the example work carries two pieces
+of boundary metadata in addition to the internal shift count: the first
+register and the last register of the span the leaf covers. The merge
+is then
+\[
+\text{merge}(L, R) \;=\; \Big(L.\text{count} + R.\text{count} + \One\{L.\text{last} \neq R.\text{first}\},\; L.\text{first},\; R.\text{last}\Big),
+\]
+which is associative but \emph{not} commutative. This works, but it
+required a human to recognize that the oracle depends on ordered
+boundaries and to hand-engineer a state that preserves them. For the
+political-science application of Section~\ref{sec:manifesto-llm}, the
+analogous engineering for RILE scoring would have to carry forward
+every span-level cue the rubric touches (a specification no one has
+written down). We instead let $g$ \emph{learn} what boundary
+information to carry.
+
+This hand-designed state is also part of the Lean artifact. The
+formalization defines the type \texttt{MarkovCountSketch} with cases
+\texttt{empty} and \texttt{nonempty(count, first, last)}, proves the
+merge operation is a monoid, proves that the exact point-mass
+summarizer satisfies the leaf and merge local laws, and invokes the
+general preservation theorem to obtain zero root distortion. The same
+file shows that C2 is independent of leaf and merge correctness: a
+simple on-range ``flip'' summarizer satisfies the one-pass laws but
+breaks under re-summarization. Appendix~\ref{app:proof-artifacts}
+records the corresponding theorem names.
+
+We instantiate $g$ as a Fourier neural operator (a position-aware architecture whose frequency-domain mixing carries boundary context across the full sequence window). That architecture supplies representational capacity, not certification by itself. The certification target is still the local-law subspace: C1 asks each leaf to keep the internal count and boundary registers it needs, and C3 asks the merge to preserve the ordered boundary correction. Section~\ref{sec:fno-primer} introduces the realizability layer. Section~\ref{sec:markov-walkthrough} then shows that a tree of FNO leaves solves this task; Section~\ref{sec:hll-parity} shows the same framework recovering the classical HyperLogLog sketch when the oracle is a register-friendly query.

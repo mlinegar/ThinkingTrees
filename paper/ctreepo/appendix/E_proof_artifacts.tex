@@ -27,12 +27,97 @@ Theorem~\ref{thm:fixed-partition} &
 \texttt{OPT/MainTheorems.lean} \\
 
 Proposition~\ref{prop:mergeable-reduction} &
-\texttt{prop3\_mergeable\_classical}, \texttt{ops\_reduction\_to\_classical\_mergeable} &
-\texttt{OPT/GlobalAssumptions.lean}, \texttt{OPT/MergeableReduction.lean} \\
+\texttt{prop3\_mergeable\_classical}, \texttt{ops\_reduction\_to\_classical\_mergeable} (strict oracle-output);
+\texttt{sketch\_state\_level\_reduction\_to\_classical\_mergeable} (state-level sketch);
+\texttt{ctreepo\_agarwal2013\_state\_level\_hierarchical\_readout},
+\texttt{ctreepo\_gibbons1996\_third\_homomorphism},
+\texttt{ctreepo\_gibbons1996\_ordered\_schedule\_invariance},
+\nolinkurl{ctreepo_gibbons1996_referenceSection5RuntimeClaims},
+\texttt{ctreepo\_feldman2008\_mud\_state\_level\_mergeable},
+\texttt{ctreepo\_gray1997\_state\_level\_summary\_is\_algebraic},
+\texttt{ctreepo\_gray1997\_cubeMask\_card},
+\texttt{ctreepo\_gray1997\_superAggregateMask\_card},
+\texttt{ctreepo\_gray1997\_cubeAddressD\_card},
+\texttt{ctreepo\_gray1997\_rollupSuperLevel\_card},
+\texttt{ctreepo\_gray1997\_rollupPrefixMask\_injective},
+\nolinkurl{ctreepo_gray1997_directRollupUpdates_le_directCubeUpdates},
+\nolinkurl{ctreepo_gray1997_directRollupSuperAggregateUpdates_le_directCubeSuperAggregateUpdates},
+\texttt{ctreepo\_gray1997\_average\_not\_distributive\_oracle},
+\texttt{ctreepo\_gray1997\_max\_no\_scalar\_delete\_front},
+\nolinkurl{ctreepo_gray1997_modeBool_state_card_lower_bound},
+\nolinkurl{ctreepo_gray1997_modeBool_no_finite_state_homomorphic_realization},
+\texttt{ctreepo\_feldman2008\_public\_randomness\_seedwise\_extension\_statement},
+\nolinkurl{ctreepo_feldman2008_representativeMUDFromStreaming_computesOnAllTrees},
+\nolinkurl{ctreepo_feldman2008_publicRandom_successSet_eq_univ_of_computesSeedwise},
+\nolinkurl{ctreepo_feldman2008_publicRandom_successProbability_eq_one_of_computesSeedwise},
+\nolinkurl{ctreepo_feldman2008_public_randomness_seedwise_general_mud},
+\texttt{ctreepo\_feldman2008\_theorem3\_private\_randomness\_separation\_statement},
+\texttt{ctreepo\_flajolet2007\_hll\_state\_level\_mergeable},
+\texttt{ctreepo\_flajolet2007\_idealHash\_state\_level\_mergeable},
+\nolinkurl{ctreepo_flajolet2007_randomIdealHash_seedFamily_hierarchical},
+\nolinkurl{ctreepo_flajolet2007_PoissonizedBySeries},
+\nolinkurl{ctreepo_flajolet2007_PoissonizationDepoissonizationAnalysis},
+\nolinkurl{ctreepo_flajolet2007_fixedCardinality_asymptotic_of_poissonization_analysis},
+\texttt{ctreepo\_flajolet2007\_relativeStandardErrorBigO\_of\_asymptotic},
+\nolinkurl{ctreepo_agarwal2013_executableMisraGries_totalCounterMass_le_length},
+\nolinkurl{ctreepo_agarwal2013_stateLevelEpsilonApproximation_tree_error},
+\nolinkurl{ctreepo_agarwal2013_exactStateLevelEpsilonApproximation_tree_error},
+\nolinkurl{ctreepo_agarwal2013_finiteRangeSpace_shattered_card_le_vcDim},
+\nolinkurl{ctreepo_agarwal2013_finiteRangeSpace_trace_card_le_sauerShelah},
+\nolinkurl{ctreepo_agarwal2013_exactRangeSpaceSizedMergeableQuerySketch},
+\nolinkurl{ctreepo_agarwal2013_sameWeightInterval_tree_error_on_equalLength},
+\nolinkurl{ctreepo_agarwal2013_sameWeightHalving_unbiased_interval_count},
+\nolinkurl{ctreepo_agarwal2013_sameWeightHalving_interval_error_abs_le_one},
+\nolinkurl{ctreepo_agarwal2013_sameWeightHalving_hoeffdingDenominator_le},
+\nolinkurl{ctreepo_agarwal2013_sameWeightHalving_root_error_to_epsilon_n_of_scale},
+\nolinkurl{ctreepo_agarwal2013_sameWeightHalving_completeTree_hoeffding_tail},
+\nolinkurl{ctreepo_agarwal2013_sameWeightHalving_completeTree_epsilon_n_tail},
+\texttt{ctreepo\_agarwal2013\_epsilonKernel\_hierarchical},
+\nolinkurl{ctreepo_agarwal2013_epsilonKernel_toSizedMergeableQuerySketch},
+\nolinkurl{ctreepo_agarwal2013_epsilonKernel_tree_widthError},
+\nolinkurl{ctreepo_agarwal2013_directionalWidth_append},
+\nolinkurl{ctreepo_agarwal2013_directionalWidth_translateStream},
+\nolinkurl{ctreepo_agarwal2013_directionalWidth_scaleStream_of_nonneg},
+\nolinkurl{ctreepo_agarwal2013_exactEpsilonKernel_tree_widthError},
+\texttt{ctreepo\_agarwal2013\_hybridTrace\_level\_monotone},
+\texttt{ctreepo\_gk2001\_executable\_build\_gapMassValid},
+\texttt{ctreepo\_kll2016\_theorem4\_mergeable\_variant\_of\_algorithm},
+\texttt{ctreepo\_kll2016\_executable\_build\_massValid},
+\texttt{ctreepo\_gray1997\_medianMajorityBool\_no\_finite\_state\_homomorphic\_realization},
+\texttt{ctreepo\_flajolet2007\_hll\_rse\_p14\_under\_one\_percent} &
+\texttt{OPT/GlobalAssumptions.lean}, \texttt{OPT/MergeableReduction.lean};
+\texttt{FormalProbability/ML/MergeableSummaries.lean};
+\texttt{FormalProbability/ML/MergeableSummaries/Literature.lean};
+\texttt{FormalProbability/ML/MergeableSummaries/Gibbons1996.lean};
+\texttt{FormalProbability/ML/MergeableSummaries/Gray1997.lean};
+\texttt{FormalProbability/ML/MergeableSummaries/Feldman2008.lean};
+\texttt{FormalProbability/ML/MergeableSummaries/Flajolet2007.lean};
+\texttt{FormalProbability/ML/MergeableSummaries/Agarwal2013.lean};
+\texttt{FormalProbability/ML/MergeableSummaries/GKExecutable.lean};
+\texttt{FormalProbability/ML/MergeableSummaries/KLLExecutable.lean};
+\texttt{FormalProbability/ML/MergeableSummaries/LiteratureChronology.lean} \\
+
+Scene-register changepoint sketch (Section~\ref{sec:markov-interlude}) &
+\texttt{MarkovCountSketch}, \texttt{MarkovCountSketch.mul}, monoid instance,
+\texttt{reduce\_gExact}, \texttt{L1\_gExact}, \texttt{L2\_gExact},
+\texttt{exactSketch\_root\_distortion\_zero}, \texttt{not\_L3\_gFlip} &
+\texttt{OPT/MarkovCountSketchExample.lean} \\
+
+Proposition~\ref{prop:m_lt_k} (appendix-only sketch boundary) &
+No dedicated Lean theorem; finite counterexample used as a paper-only mechanism diagnostic &
+\texttt{paper/ctreepo/appendix/B\_proofs.tex} \\
 
 Proposition~\ref{prop:neural-operator-bridge} &
 \texttt{DiscretizationInvariantFamily}, \texttt{UniformOperatorApproxOnCompact}, \texttt{NeuralOperatorUniversalApproxUniform}, \texttt{approxLocalLawsBundle\_of\_uniformApproxExactTheoremBacked}, \texttt{approxTheoremBacked\_of\_uniformApproxExactTheoremBacked} &
 \texttt{ML/NeuralOperatorCore.lean}, \texttt{ML/NeuralOperatorApproximation.lean}, \texttt{OPT/NeuralOperatorTheoremBridge.lean} \\
+
+Stochastic summarizer interface and deterministic neural-operator specialization &
+\texttt{stochastic\_direct\_exact\_theorem\_backed}, \texttt{stochastic\_direct\_approx\_theorem\_backed}, \texttt{deterministic\_summarizer\_embedding}, \texttt{deterministic\_exact\_theorem\_backed\_of\_global\_preservation} &
+\texttt{OPT/CoreDefinitions.lean}, \texttt{OPT/SketchSummaryOperators.lean}, \texttt{OPT/MainTheorems.lean} \\
+
+Neural-operator-to-preference gap bridge &
+\texttt{neural\_operator\_transfer\_local\_law\_budget}, \texttt{neural\_operator\_transfer\_method\_gap\_budget}, \texttt{neural\_operator\_delta\_r\_transfer\_moduli\_bound}, \texttt{expectedObjectiveGap\_via\_neuralOperatorTransferModuli}, \texttt{expectedObjectiveGap\_via\_neuralOperatorFDTransferModuli}, \texttt{dpo\_gap\_via\_neuralOperatorUniformBridge}, \texttt{dpo\_gap\_via\_neuralOperatorFDBridge}, \texttt{grpo\_pl\_gap\_via\_neuralOperatorUniformBridge}, \texttt{grpo\_pl\_gap\_via\_neuralOperatorFDBridge}, \texttt{grpo\_rl\_gap\_via\_neuralOperatorUniformBridge}, \texttt{grpo\_rl\_gap\_via\_neuralOperatorFDBridge} &
+\texttt{OPT/NeuralOperatorPreferenceBridge.lean}, \texttt{OPT/MainTheorems.lean} \\
 
 Kovachki Lemmas~21--22 finite-dimensionalization layer &
 \texttt{FiniteCoordinateEncoder}, \texttt{FiniteCoordinateDecoder}, \texttt{finiteRankApproximationProperty\_iff\_standard}, \texttt{KovachkiLemma21Stability}, \texttt{kovachkiLemma21Stability\_of\_uniformContinuous}, \texttt{kovachki\_compact\_iUnion\_image\_of\_uniform\_limit}, \texttt{FiniteDimensionalizationOnCompact}, \texttt{kovachki\_finiteDimensionalization\_on\_compact}, \texttt{kovachki\_finiteDimensionalization\_on\_compact\_of\_uniformContinuous}, \texttt{uniformOperatorApproxOnCompact\_of\_kovachkiFiniteDimensionalization}, \texttt{uniformApproxOnCompact\_exists\_of\_kovachkiFiniteDimensionalization\_of\_uniformContinuous}, \texttt{approxTheoremBacked\_of\_kovachkiFiniteDimensionalization} &
@@ -54,21 +139,70 @@ Oracle/projection objective, Equation~\eqref{eq:oracle-projection-objective} &
 \texttt{oracleProjectionObjectiveWeights}, \texttt{oracleProjectionObjective}, \texttt{oracleProjectionObjective\_lam\_zero}, \texttt{oracleProjectionObjective\_lam\_one}, \texttt{oracleProjectionObjective\_le\_of\_uniformApproxExactTheoremBacked} &
 \texttt{OPT/RegularizedObjective.lean} \\
 
+Bayes and posterior-state formal layer (information/SBI appendix) &
+\texttt{mathlib\_conditional\_bayes\_rule}, \texttt{mathlib\_kernel\_posterior},
+\nolinkurl{mathlib_conditional_probability_finite_fiber_total},
+\nolinkurl{mathlib_kernel_posterior_compProd_eq_map_swap},
+\nolinkurl{mathlib_kernel_posterior_with_density_countable},
+\nolinkurl{mathlib_kernel_posterior_eq_with_density},
+\nolinkurl{mathlib_kernel_posterior_rn_deriv},
+\nolinkurl{mathlib_kernel_posterior_unique_ae},
+\nolinkurl{mathlib_kernel_posterior_comp_self},
+\texttt{mathlib\_pdf\_map\_eq\_with\_density},
+\texttt{mathlib\_pdf\_lintegral\_lotus},
+\texttt{finite\_bayes\_posterior\_sum\_eq\_one},
+\nolinkurl{finite_bayes_posterior_map_iff_numerator_map},
+\nolinkurl{state_finite_bayes_posterior_map_iff_numerator_map},
+\nolinkurl{finite_bayes_posterior_odds_eq_numerator_odds},
+\nolinkurl{state_finite_bayes_posterior_odds_eq_numerator_odds},
+\nolinkurl{finite_bayes_posterior_expectation_likelihood_on_state_eq_state},
+\nolinkurl{finite_bayes_posterior_expectation_likelihood_on_state_sufficient},
+\nolinkurl{finite_bayes_posterior_predictive_likelihood_on_state_eq_state},
+\nolinkurl{finite_bayes_posterior_predictive_likelihood_on_state_sufficient_observed},
+\texttt{finite\_bayes\_posterior\_pmf},
+\nolinkurl{finite_bayes_posterior_pmf_to_measure_singleton},
+\nolinkurl{finite_bayes_posterior_pmf_to_measure_set},
+\texttt{state\_finite\_bayes\_posterior\_pmf},
+\nolinkurl{state_finite_bayes_posterior_pmf_to_measure_set},
+\nolinkurl{finite_bayes_posterior_pmf_likelihood_on_state_eq_state_pmf},
+\nolinkurl{posterior_consistent_iff_mathlib_tendsto_in_measure},
+\nolinkurl{finite_posterior_mass_concentrates_at_iff_mathlib_tendsto_in_measure},
+\nolinkurl{finite_bayes_consistency_likelihood_on_state_iff},
+\texttt{state\_readout\_finite\_bayes\_consistency} &
+\texttt{OPT/MathlibBayesBridge.lean}, \texttt{OPT/FiniteBayesOnState.lean},
+\texttt{OPT/PosteriorConsistency.lean}, \texttt{OPT/MainTheorems.lean};
+mathlib \texttt{Probability/ConditionalProbability.lean},
+\texttt{Probability/Kernel/Posterior.lean},
+\texttt{Probability/Density.lean},
+\texttt{Probability/ProbabilityMassFunction/Basic.lean} \\
+
 Theorem~\ref{thm:pref-equiv} &
-\texttt{preference\_learning\_equivalence}, \texttt{grpo\_equivalence}, \texttt{grpo\_rl\_equivalence}, \texttt{dpo\_equivalence} &
-\texttt{OPT/PreferenceLearning.lean}, \texttt{OPT/PreferenceBounds.lean} \\
+\texttt{PaperPreferenceStack}, \texttt{paper\_preference\_stack\_same\_argmin}, \texttt{paper\_preference\_stack\_summary\_argmin\_full\_epsilon}; exact method surfaces \texttt{preference\_learning\_equivalence}, \texttt{same\_oracle\_measurable\_argmin\_general\_of\_loss\_eq}, \texttt{dpo\_exact\_metric}, \texttt{grpo\_pl\_exact\_metric}, \texttt{grpo\_rl\_exact\_metric}, \texttt{dpo\_equivalence}, \texttt{grpo\_equivalence}, \texttt{grpo\_rl\_equivalence} &
+\texttt{OPT/MainTheorems.lean}, \texttt{OPT/PreferenceLearning.lean}, \texttt{OPT/PreferenceBounds.lean} \\
+
+Application-facing DPO/GRPO assumption packages &
+\texttt{DPOApplicationAssumptionBundle}, \texttt{dpo\_application\_bundle\_supplies\_premises}, \texttt{GRPOPLApplicationAssumptionBundle}, \texttt{grpo\_pl\_application\_bundle\_supplies\_premises}, \texttt{GRPORLApplicationAssumptionBundle}, \texttt{grpo\_rl\_application\_bundle\_supplies\_premises}; predicate exports \texttt{dpo\_application\_oracle\_measurable\_policies}, \texttt{dpo\_application\_oracle\_indexed\_pair\_generator}, \texttt{grpo\_pl\_application\_oracle\_measurable\_bundle}, \texttt{grpo\_rl\_application\_oracle\_measurable\_policy}, \texttt{grpo\_rl\_application\_oracle\_measurable\_reward}, \texttt{grpo\_rl\_application\_oracle\_indexed\_group\_generator} &
+\texttt{OPT/MainTheorems.lean} \\
 
 Theorem~\ref{thm:unified-gap} &
-\texttt{unified\_preference\_gap\_bounded} &
-\texttt{OPT/PreferenceBounds.lean} \\
+\texttt{unified\_preference\_gap\_bounded}; ZR coupling wrapper \texttt{coupling\_delta\_eq\_delta\_r\_zr} &
+\texttt{OPT/PreferenceBounds.lean}, \texttt{OPT/MainTheorems.lean} \\
 
 Example~\ref{ex:c2-independent} (C2 independence) &
-\texttt{thm10\_1\_L3\_not\_derivable} &
+\texttt{ex\_c2\_independent\_formalized}, \texttt{thm10\_1\_L3\_not\_derivable} &
 \texttt{OPT/CounterexampleExistence.lean} \\
 
 Theorem~\ref{thm:e2e} &
-\texttt{treepo\_objective\_unbiased}, \texttt{treepo\_distortion\_unbiased}, \texttt{ExpectedFullNodePopulationPreferenceLoss}, \texttt{ExpectedDocumentOracleUtility}, \texttt{ExpectedFinalSummaryOracleUtility}, \texttt{document\_label\_vs\_tree\_oracle\_utility\_gap\_bounded\_ipw}, \texttt{document\_truth\_vs\_sampled\_tree\_estimation\_decomposition}, \texttt{dpo\_treepo\_end\_to\_end\_certificate}, \texttt{grpo\_pl\_treepo\_end\_to\_end\_certificate}, \texttt{grpo\_pl\_treepo\_end\_to\_end\_gen\_certificate}, \texttt{grpo\_rl\_treepo\_end\_to\_end\_certificate} &
-\texttt{DSL/TreePOEndToEnd.lean} \\
+\texttt{treepo\_objective\_unbiased}, \texttt{treepo\_distortion\_unbiased}, \texttt{PaperLocalLawErrorBudget}, \texttt{PaperErrorCertificate}, \texttt{PaperErrorStack}, \texttt{paper\_error\_certificate\_formula}, \texttt{paper\_error\_certificate\_high\_prob}, \texttt{paper\_error\_stack\_high\_prob}, \texttt{ExpectedFullNodePopulationPreferenceLoss}, \texttt{ExpectedDocumentOracleUtility}, \texttt{ExpectedFinalSummaryOracleUtility}, \texttt{document\_label\_vs\_tree\_oracle\_utility\_gap\_bounded\_ipw}, \texttt{document\_truth\_vs\_sampled\_tree\_estimation\_decomposition}, \texttt{dpo\_treepo\_end\_to\_end\_certificate}, \texttt{dpo\_treepo\_end\_to\_end\_certificate\_with\_oracleMeasurement}, \texttt{grpo\_pl\_treepo\_end\_to\_end\_certificate}, \texttt{grpo\_pl\_treepo\_end\_to\_end\_gen\_certificate}, \texttt{grpo\_pl\_treepo\_end\_to\_end\_certificate\_with\_oracleMeasurement}, \texttt{grpo\_rl\_treepo\_end\_to\_end\_certificate}, \texttt{grpo\_rl\_treepo\_end\_to\_end\_certificate\_with\_oracleMeasurement} &
+\texttt{DSL/TreePOEndToEnd.lean}, \texttt{OPT/MainTheorems.lean} \\
+
+Clipping envelopes for the certificate stack &
+\texttt{clipped\_ipw\_weight}, \texttt{clipped\_ipw\_excess}, \texttt{clipped\_ipw\_bias\_abs\_bound}, \texttt{clipped\_ipw\_total\_bias\_bound}, \texttt{clipped\_hajek\_gap\_bound}, \texttt{clipped\_hajek\_gap\_bound\_relative\_excess}, \texttt{clipped\_hajek\_gap\_bound\_unit} &
+\texttt{DSL/TreeIPW.lean}, \texttt{OPT/MainTheorems.lean} \\
+
+Audit robustness note (Appendix~\ref{app:audit-robustness}) &
+\texttt{ht\_unbiased\_of\_logged\_marginals}, \texttt{ht\_uniform\_mean\_unbiased\_of\_logged\_marginals}, \texttt{ht\_uniform\_mean\_covariance\_controlled\_independent\_bernoulli}, \texttt{ht\_uniform\_mean\_variance\_bound\_constrained}, \texttt{ht\_uniform\_mean\_variance\_bound\_independent\_bernoulli}, \texttt{tree\_audit\_uniform\_distortion\_unbiased\_logged}, \texttt{tree\_audit\_uniform\_distortion\_variance\_bound\_constrained}, \texttt{tree\_audit\_uniform\_distortion\_variance\_bound\_independent\_bernoulli} &
+\texttt{DSL/IPWTheory.lean}, \texttt{DSL/TreeIPW.lean}, \texttt{OPT/MainTheorems.lean} \\
 
 Discussion headline: gap-bound decomposition and its three pieces &
 \texttt{paper\_main\_gap\_bound\_theorem}, \texttt{paper\_calibration\_fixed\_theorem}, \texttt{paper\_envelope\_rate\_theorem}, \texttt{paper\_global\_local\_decomposition\_theorem}, \texttt{labelEnvelope\_strict\_mono}, \texttt{labelEnvelope\_antitone} &
@@ -108,6 +242,85 @@ packages L2 directly as internal-node zero distortion,
 $E[D(\mathrm{reduce}\,g\,\mathrm{node},\,S(\mathrm{node}))]=0$, absorbing
 some context-propagation steps into the local hypothesis form. This is
 a presentation choice; the certified target is the same.
+
+\paragraph{Literature formalization boundary.} The mergeable-sketch layer is
+formalized at two levels. The algebraic/state layer is checked directly:
+ordered list homomorphisms, Gray-style algebraic aggregate state, MUD tree
+invariance, Feldman public-random seedwise streaming-to-general-MUD conversion,
+Feldman exact seedwise success-probability bookkeeping, HLL max-register state
+merge, Count-Min additive state merge, Misra-Gries executable
+capacity/mass/positivity/decrement-debt accounting, SpaceSaving executable
+capacity/mass bookkeeping, and the state-level sketch/readout reduction. The stricter coverage
+pass also checks a Gibbons Section 5 reference runtime package, direct
+ROLLUP-vs-CUBE update-count comparisons, Gray-style Boolean median/majority
+finite-state lower bounds, HyperLogLog random ideal-hash seedwise algebra,
+HyperLogLog `p=14' relative-standard-error arithmetic, and the HLL
+Poisson-mixture series package plus its checked fixed-cardinality consequence
+from a depoissonization-transfer obligation.
+The Agarwal interval/range and epsilon-kernel interfaces now include checked
+state-level tree-error transport theorems and exact all-points witnesses.  For
+range queries, Lean verifies that exact all-points state has zero
+\(\varepsilon n\) error for every nonnegative \(\varepsilon\), merges by
+concatenation, and instantiates the generic mergeable query-sketch interface;
+the finite trace layer additionally reuses mathlib's \texttt{Finset.Shatters},
+\texttt{Finset.vcDim}, and Sauer--Shelah theorem to check the VC growth
+bound for finite range spaces, and combines per-trace tails into a uniform
+failure bound by a finite union bound.
+For kernels, Lean verifies the common-reference-frame projection algebra:
+max-projection state merges by optional \(\max\), min-projection state merges
+by optional \(\min\), directional width is read from those merged extrema, and
+directional width is invariant under translating all points by a common offset
+and scales under nonnegative coordinate scaling.
+The exact all-points
+kernel has zero width error after arbitrary merge-tree evaluation.  The compact
+range discrepancy and epsilon-kernel size constructions remain the external
+randomized/geometric content of Agarwal's theorems.
+For the hybrid quantile layer, Lean checks both the deterministic
+promotion-monotonicity invariant and the finite-level random-buffer union bound
+from per-level tail budgets.
+For the same-weight interval construction, the Lean layer also checks the
+deterministic core of Agarwal's random-halving analysis: the even/odd retained
+halves give an unbiased two-point interval-count estimator, each one-step
+over-count has absolute value at most one, the level-scaled over-count has
+radius \(2^\ell\), and the complete-tree Hoeffding denominator and final
+\(\varepsilon n\) scaling arithmetic are explicit. The complete-tree stochastic
+step is also checked: Lean applies the reusable Azuma--Hoeffding theorem to an
+adapted, bounded, conditional-mean-zero halving-error process and derives both
+the two-sided root tail and the final \(\varepsilon n\) tail event.
+The standalone entry point is
+\texttt{FormalProbability.ML.MergeableSummaries.Literature}; the C-TreePO file
+\texttt{OPT/MergeableReduction.lean} re-exports only the theorem names used by
+the paper. Large external analytic or complexity facts are exposed as typed
+theorem obligations. This includes HLL's remaining Mellin estimates and
+analytic depoissonization proof, Agarwal's compact randomized discrepancy and
+geometry constructions beyond the checked union-bound/bookkeeping layers, and
+Feldman's randomized/private-coin communication lower bounds.
+Checked bridge lemmas then consume those typed obligations where the paper only
+needs their algebraic consequence.
+
+\paragraph{Bayes/mathlib backing.} The repo-specific Bayes layer remains
+bounded, but it now uses mathlib where mathlib has the right object. Lean
+aliases mathlib's event-conditioned Bayes theorem, conditional-probability
+algebra and finite-fiber law of total probability, kernel/disintegration
+posterior construction, posterior density/Radon--Nikodym formulas,
+dominated-density/PDF facts, and \texttt{PMF} construction. The finite
+learned-state posterior is packaged as a
+mathlib \texttt{PMF} under nonnegative-prior, nonnegative-likelihood, and
+positive-evidence assumptions, with singleton and arbitrary-event masses of
+the induced measure identified explicitly.  The finite Bayes layer also checks
+that positive normalization preserves MAP decisions, posterior odds cancel the
+evidence, and posterior expectations/fixed posterior functionals factor
+through the learned state whenever the likelihood does. It also checks the
+corresponding finite posterior-predictive readout over a fixed future
+observation; when the likelihood
+factors through the learned state, the raw and state finite Bayes \texttt{PMF}s
+are equal. The
+posterior-consistency predicates used by the paper are proved definitionally
+equal to mathlib \texttt{TendstoInMeasure}. This
+formalizes Bayes alignment and exact state/readout transport, not posterior
+calibration, continuous learned-state Bayes, SSNL flow-density/Jacobian
+semantics, or classical posterior consistency from primitive regularity
+conditions.
 
 \paragraph{Distortion symbols.} The formalization distinguishes the
 document-level $\Delta_R$ from the generic audited-population means

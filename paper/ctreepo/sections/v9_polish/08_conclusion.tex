@@ -1,0 +1,22 @@
+\section{Conclusion}\label{sec:v8-conclusion}
+
+C-TreePO treats long-document measurement as a state-composition
+problem. The expert score is global; the evidence that determines it
+is local and relational. A C-Tree stores policy-evidence states at
+the leaves and at every internal merge, and the local laws say when
+those states can replace the raw spans they represent. The objective
+separates two channels: a root loss fits the document-level expert
+target, and a local-law channel trains and audits the state map
+inside the realized tree. Sparse oracle calls and logged
+propensities correct proxy bias in the local channel.
+
+The Manifesto/Benoit results give us the root-observed tier. The
+per-dimension tree reaches macro \(r=0.829\); the universal-summary
+configuration reaches \(0.807\). Five of the six policy dimensions
+track their per-dimension ceilings under shared compression.
+Decentralization is where shared compression breaks down, and the
+local diagnostic gap flags that breakdown directly, without any
+appeal to root-score comparisons.
+
+\fixme{Next-tier paragraph (sampled node audit, certificate
+end-to-end): drop in once the audit has been run.}

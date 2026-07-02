@@ -1,0 +1,24 @@
+% Minimal C-TreePO preamble.
+% Reuses the main paper preamble so notation, theorem environments, and
+% figure paths stay compatible with the existing C-TreePO paper sources.
+\input{preamble}
+\usepackage{etoc}
+
+\setcounter{tocdepth}{1}
+\setcounter{secnumdepth}{2}
+\etocsetlevel{notoc}{-1}
+
+\newcommand{\appendixcontents}{%
+  \clearpage
+  \phantomsection
+  \addcontentsline{toc}{section}{Appendix Contents}
+  \begingroup
+    \etocobeydepthtags
+    \etocsettagdepth{minimalmain}{notoc}
+    \etocsettagdepth{minimalappendixfront}{notoc}
+    \etocsettagdepth{minimalappendix}{section}
+    \etocsetnexttocdepth{section}
+    \etocsettocstyle{\section*{Appendix Contents}}{}
+    \tableofcontents
+  \endgroup
+}

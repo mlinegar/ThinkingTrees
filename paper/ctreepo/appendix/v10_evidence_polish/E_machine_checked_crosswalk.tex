@@ -1,0 +1,227 @@
+\section{Proof-Assistant Crosswalk}
+\label{app:v8-lean-crosswalk}
+
+This appendix is the single Lean crosswalk. The mathematical proofs
+are in Appendix~\ref{app:v8-full-proofs}; nothing in the body or the
+other appendices depends on the Lean side. Reading this appendix is
+optional and confers no theorem or estimate beyond the paper proof
+stack.
+
+Separately from the written proof stack, the load-bearing theorems
+have been formalized in the Lean theorem prover. The repository is
+\path|lean3/| in the source tree; the canonical entry point is
+\path|FormalProofs/OPT/MainTheorems.lean| and the full
+theorem-name index is \path|lean3/docs/PAPER_TO_LEAN_MAP.md|. The
+formalization is experimental in the sense that it represents a
+parallel record of the same arguments rather than a replacement
+for them, and the build is current at the time of writing. We will
+note that C-TreePO has not been applied to audit its own proofs; the
+calibration term \(B_{\mathrm{cal}}\) for that self-audit is presumed
+nonzero.
+
+Table~\ref{tab:v10-claim-status} records the evidence status of each
+load-bearing claim. Every body theorem, proposition, and corollary has
+a row, paired with the paper location of its statement and proof and
+with a one-line description of its current evidence type.
+Table~\ref{tab:v8-lean-crosswalk} then lists the named Lean surfaces
+behind each row for readers who want to inspect the formalization
+directly.
+
+\begin{table}[t]
+\centering
+\scriptsize
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}p{0.26\linewidth}p{0.30\linewidth}p{0.36\linewidth}@{}}
+\toprule
+Claim & Paper location & Evidence status \\
+\midrule
+Exact local laws preserve the root and every represented span &
+Theorem~\ref{thm:v8-root-preservation};
+Corollary~\ref{cor:v8-preferences-pass-to-root};
+Appendix~\ref{app:v8-full-proofs} &
+Mathematical proof in App.~F. Formalized in Lean through the
+preservation and local-law nesting surfaces. \\
+\addlinespace
+Manifesto preference objective is unchanged when raw inputs are
+replaced by valid C-Tree roots &
+Proposition~\ref{prop:v8-manifesto-preference-equivalence};
+Appendix~\ref{app:v8-full-proofs} &
+Mathematical proof in App.~F. Formalized in Lean for exact
+oracle-compatible readouts and for the named preference methods;
+the method-specific Lipschitz premises are explicit assumptions. \\
+\addlinespace
+Population gap bound:
+\(|G_{\mathrm{meth}}|\le C_{\mathrm{meth}}\Delta_R\) &
+Proposition~\ref{prop:v10-population-gap};
+Appendix~\ref{app:v8-full-proofs} &
+Mathematical proof in App.~F (Population Transport). Formalized in
+Lean for the unified preference gap, with DPO and GRPO method-specific
+wrappers. \\
+\addlinespace
+Proxy-corrected node loss is unbiased for the oracle node loss &
+Proposition~\ref{prop:v10-corrected-loss-unbiased};
+Appendix~\ref{app:v8-objective-ipw} &
+Mathematical proof in App.~A. Formalized in Lean for matched-propensity
+or exact-proxy residual cancellation, with the corresponding weighted
+objective surfaces. \\
+\addlinespace
+HT distortion estimator is unbiased for the finite-population mean &
+Proposition~\ref{prop:v10-ht-unbiased};
+Appendix~\ref{app:v8-objective-ipw} &
+Mathematical proof in App.~A. Formalized in Lean as the
+logged-marginal HT identity and the tree-audit specialization. The
+IPW stress check in Section~\ref{sec:v10-ipw-check} reports empirical
+coverage on adversarial finite populations. \\
+\addlinespace
+Finite-sample certificate decomposition (distortion, calibration,
+sampling, clipping) &
+Proposition~\ref{prop:v10-finite-sample-certificate};
+Appendix~\ref{app:v8-full-proofs} &
+Mathematical proof in App.~F. Formalized in Lean for the
+deterministic formula and the high-probability stack, plus the
+clipping envelopes. \\
+\addlinespace
+Markov sufficient state supports local supervision at fixed budget &
+Section~\ref{sec:v10-markov-check};
+Appendix~\ref{app:v10-markov} &
+Empirical claim from the completed allocation grid. The exact Markov
+count sketch is also formalized in Lean as a controlled symbolic
+example. \\
+\addlinespace
+Benoit replication: C-Tree root scores match the
+\citet{BenoitEtAl2025} pipeline against the same expert targets &
+Section~\ref{sec:v8-manifesto-results};
+Appendix~\ref{app:v8-claim-tiers-manifesto} &
+Empirical, root-observed claim with teacher-trace local diagnostics.
+A sampled human node audit is the next evidence tier. \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Claim and evidence status.} The first six rows are
+mathematical statements with a paper proof in App.~A or App.~F and a
+parallel Lean formalization. The last two rows are empirical claims
+backed by completed runs.}
+\label{tab:v10-claim-status}
+\end{table}
+
+\begin{table}[t]
+\centering
+\begingroup
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.40\linewidth}p{0.54\linewidth}@{}}
+\toprule
+Paper claim & Lean theorem surfaces \\
+\midrule
+\textbf{Theorem~\ref{thm:v8-root-preservation}} (Local laws preserve
+the root) &
+\path|one_pass|; \path|multi_round_proper|;
+\path|exactLocalLaws_root_validSummaryPMF|;
+\path|exactLocalLaws_multiround_validSummaryPMF|.
+Files: \path|FormalProofs/OPT/PreservationTheorems.lean|;
+\path|FormalProofs/OPT/ExpectationTheory.lean|;
+\path|FormalProofs/OPT/LocalLawNesting.lean|. \\
+\addlinespace
+\textbf{Corollary~\ref{cor:v8-preferences-pass-to-root}}
+(Oracle-compatible readouts pass through C-Tree nodes) &
+\path|node_support_sameOracleFiber_of_exactTheoremBacked|;
+\path|oracleCompatibleReadout_eq_on_node_support_of_exactTheoremBacked|;
+\path|oracleCompatibleReadout_eq_on_ZR_support_of_exactTheoremBacked|;
+\path|pairwiseOracleCompatiblePreference_eq_on_ZR_support_of_exactTheoremBacked|.
+File: \path|FormalProofs/OPT/PreferenceScope.lean|. \\
+\addlinespace
+\textbf{Proposition~\ref{prop:v8-manifesto-preference-equivalence}}
+(Manifesto preference objective equivalence) &
+\path|paper_preference_stack_same_argmin|; method-specific exact
+metrics \path|dpo_exact_metric|, \path|grpo_pl_exact_metric|, and
+\path|grpo_rl_exact_metric|.
+Files: \path|FormalProofs/OPT/MainTheorems.lean|;
+\path|FormalProofs/OPT/PreferenceLearning.lean|. \\
+\addlinespace
+\textbf{Proposition~\ref{prop:v10-population-gap}}
+(Population gap bound) &
+\path|unified_preference_gap_bounded|;
+\path|dpo_loss_pointwise_lipschitz|; method-specific wrappers
+\path|dpo_gap_via_neuralOperatorUniformBridge|,
+\path|grpo_pl_gap_via_neuralOperatorUniformBridge|,
+\path|grpo_rl_gap_via_neuralOperatorUniformBridge|.
+Files: \path|FormalProofs/OPT/PreferenceBounds.lean|;
+\path|FormalProofs/OPT/MainTheorems.lean|. \\
+\addlinespace
+\textbf{Proposition~\ref{prop:v10-corrected-loss-unbiased}}
+(Corrected node loss is unbiased) &
+\path|treepo_objective_unbiased|;
+\path|nodeAIPWAdjustedLawLoss_expectation_eq_zero_of_matched_propensity_or_exact_proxy|.
+Files: \path|FormalProofs/DSL/TreePOEndToEnd.lean|;
+\path|FormalProofs/OPT/DoublyRobustLocalLawAdjustment.lean|. \\
+\addlinespace
+\textbf{Proposition~\ref{prop:v10-ht-unbiased}}
+(HT distortion estimator is unbiased) &
+\path|ht_unbiased_of_logged_marginals|;
+\path|ht_uniform_mean_unbiased_of_logged_marginals|;
+\path|tree_audit_uniform_distortion_unbiased_logged|;
+\path|tree_audit_uniform_distortion_variance_bound_constrained|.
+Files: \path|FormalProofs/DSL/IPWTheory.lean|;
+\path|FormalProofs/DSL/TreeIPW.lean|. \\
+\addlinespace
+\textbf{Proposition~\ref{prop:v10-finite-sample-certificate}}
+(Finite-sample certificate) &
+\path|paper_error_certificate_formula|;
+\path|paper_error_certificate_high_prob|;
+\path|paper_error_stack_high_prob|; clipping envelopes
+\path|clipped_ipw_total_bias_bound|,
+\path|clipped_hajek_gap_bound|.
+Files: \path|FormalProofs/DSL/TreePOEndToEnd.lean|;
+\path|FormalProofs/OPT/MainTheorems.lean|;
+\path|FormalProofs/DSL/TreeIPW.lean|. \\
+\addlinespace
+\textbf{Appendix~\ref{app:v8-full-proofs}} (Fixed-partition extension,
+all-node preservation, DPO transport, population transport) &
+\path|fixed_partition_extension_instantiation|;
+\path|multi_round_preservation|;
+\path|coverageNormalized_expectedObjective_same_paramArgmin|;
+{\tiny\path|expectedIPWWeightedDocumentObjective_eq_fullWeightedDocumentObjective|};
+{\tiny\path|fullWeightedDocumentObjective_eq_fullSupervisionTreeObjectiveFn|}.
+Files: \path|FormalProofs/OPT/MainTheorems.lean|;
+\path|FormalProofs/OPT/CoverageNormalizedObjective.lean|;
+\path|FormalProofs/OPT/DiscountedIPWObjective.lean|. \\
+\addlinespace
+\textbf{Markov mechanism check}
+(Section~\ref{sec:v10-markov-check}; Appendix~\ref{app:v10-markov}) &
+The exact Markov count sketch is formalized as
+\path|MarkovCountSketch| with merge \path|MarkovCountSketch.mul|,
+reduction \path|reduce_gExact|, sufficient-state laws
+\path|L1_gExact|, \path|L2_gExact|, and root-distortion identity
+\path|exactSketch_root_distortion_zero|; the C2 non-redundancy
+witness is \path|not_L3_gFlip|.
+File: \path|FormalProofs/OPT/MarkovCountSketchExample.lean|. \\
+\addlinespace
+\textbf{Mergeable summaries / classical sketches} (scope discussion;
+Appendix~\ref{app:v8-mergeable-nesting}) &
+Containment of classical sketches in the exact local-law subspace:
+\path|mergeableSketchSummaryClass_subset_exactLocalLawSubspace|;
+\path|mergeableSketch_overlap_subset_exactLocalLawNeuralOperators|.
+File: \path|FormalProofs/OPT/NeuralOperatorSpaces.lean|. \\
+\bottomrule
+\end{tabular}
+\endgroup
+\caption{\textbf{Lean surfaces by paper claim.} For readers who want
+to inspect the formalization directly. The full repository theorem
+map is in \protect\path|lean3/docs/PAPER_TO_LEAN_MAP.md|; the surfaces above
+are the load-bearing entries.}
+\label{tab:v8-lean-crosswalk}
+\end{table}
+
+The active Lean build uses one named axiom outside the standard
+mathematical foundations: \path|ExpectedGroupLossLipschitz| in
+\path|FormalProofs/Axioms.lean|, which supplies the Lipschitz premise
+behind expected group-loss transport for the named preference
+methods. The local-law, IPW, root-preservation,
+preference-scope, and Markov-count surfaces listed above do not
+depend on this axiom.
+
+The point of this appendix is the parallel record. The proofs that
+matter for the paper's claims are in
+Appendices~\ref{app:v8-objective-ipw}
+and~\ref{app:v8-full-proofs}; the formalization is the work
+of someone who wanted to be sure twice and did not, as already
+noted, run a sampled audit on the audit.

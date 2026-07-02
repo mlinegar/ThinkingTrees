@@ -23,18 +23,18 @@ method where:
 ### Paper Reference
 
 This file generalizes Section 6 of the paper. The original DPO-specific theorems are
-preserved in DPO.lean as concrete instantiations of the abstract framework defined here.
+preserved in PreferenceBounds.lean (formerly DPO.lean) as concrete instantiations of the abstract framework defined here.
 
 ### Structure
 
 1. **Abstract Definitions**: `PreferenceLearningMethod` typeclass
 2. **General Pair Generator**: `PairGenerator`, `OracleIndexedPairGen` (method-agnostic)
-3. **Coupling Lemmas**: Abstract coupling bounds (imported from DPO.lean)
+3. **Coupling Lemmas**: Abstract coupling bounds (imported from PreferenceBounds.lean (formerly DPO.lean))
 4. **Main Theorems**: `preference_learning_equivalence` - the generalized zero-gap theorem
 
-### Connection to DPO.lean
+### Connection to PreferenceBounds.lean (formerly DPO.lean)
 
-DPO.lean provides:
+PreferenceBounds.lean (formerly DPO.lean) provides:
 - `DPOMethod`: A concrete instance of `PreferenceLearningMethod`
 - All existing DPO theorems remain valid and are now understood as instantiations
 
@@ -300,6 +300,30 @@ def SameOracleMeasurableArgminGeneral {Strings Y Θ : Type*} [PseudoMetricSpace 
   OracleMeasurableParamArgmin loss₁ isMeasurable fstar =
   OracleMeasurableParamArgmin loss₂ isMeasurable fstar
 
+/-- If two losses agree on every oracle-measurable parameter, then they have the
+same oracle-measurable argmin set. -/
+theorem same_oracle_measurable_argmin_general_of_loss_eq
+    {Strings Y Θ : Type*} [PseudoMetricSpace Y]
+    (loss₁ loss₂ : Θ → ℝ) (isMeasurable : Θ → (Strings → Y) → Prop)
+    (fstar : Strings → Y)
+    (h_eq : ∀ θ, isMeasurable θ fstar → loss₁ θ = loss₂ θ) :
+    SameOracleMeasurableArgminGeneral loss₁ loss₂ isMeasurable fstar := by
+  unfold SameOracleMeasurableArgminGeneral OracleMeasurableParamArgmin
+  ext θ
+  constructor
+  · intro ⟨h_meas, h_min⟩
+    constructor
+    · exact h_meas
+    · intro θ' h_meas'
+      rw [← h_eq θ h_meas, ← h_eq θ' h_meas']
+      exact h_min θ' h_meas'
+  · intro ⟨h_meas, h_min⟩
+    constructor
+    · exact h_meas
+    · intro θ' h_meas'
+      rw [h_eq θ h_meas, h_eq θ' h_meas']
+      exact h_min θ' h_meas'
+
 /-!
 ## Main Theorem: Preference Learning Equivalence
 
@@ -309,7 +333,7 @@ data is equivalent to preference learning on original data.
 
 /-- **Main Theorem: Preference Learning Equivalence under Local Laws**
 
-This generalizes Theorem 6.1 from DPO.lean to arbitrary preference learning methods.
+This generalizes Theorem 6.1 from PreferenceBounds.lean (formerly DPO.lean) to arbitrary preference learning methods.
 
 When the summarization satisfies local laws (L1, L2, L3) ensuring zero expected
 distortion, any oracle-measurable preference learning method achieves the same
@@ -335,7 +359,7 @@ theorem preference_learning_equivalence {Strings A Y : Type*}
   expected_loss_eq_of_zero_dist_general fstar loss gen μ_X μ_Z h_zero h_meas h_pair
 
 /-- Zero gap version: the absolute difference is exactly zero.
-This is the form used in most DPO.lean theorems. -/
+This is the form used in most PreferenceBounds.lean (formerly DPO.lean) theorems. -/
 theorem preference_learning_gap_zero {Strings A Y : Type*}
     [Monoid Strings] [MetricSpace Y]
     (fstar : Strings → Y)
@@ -354,7 +378,7 @@ theorem preference_learning_gap_zero {Strings A Y : Type*}
 ## Connection to ZR (Multi-Round Reduction)
 
 When μ_X = pure(x) and μ_Z = ZR(g, x, R, T), the zero-distortion hypothesis
-is satisfied when local laws L1, L2, L3 hold. This is proven in DPO.lean
+is satisfied when local laws L1, L2, L3 hold. This is proven in PreferenceBounds.lean (formerly DPO.lean)
 via `dpo_gap_zero_of_local_laws` and now applies to all preference methods.
 -/
 
@@ -410,12 +434,12 @@ theorem preference_learning_equivalence_via_ZR {Strings A Y : Type*}
 /-!
 ## Lipschitz Gap Bound (Quantitative Version)
 
-For quantitative gap bounds (when distortion is not exactly zero), see DPO.lean
+For quantitative gap bounds (when distortion is not exactly zero), see PreferenceBounds.lean (formerly DPO.lean)
 which provides:
 - `dpo_gap`: The original DPO-specific gap bound
 - `dpo_gap_typeclass`: Uses BoundedMetricSpace for automatic bounds
 
-The coupling argument in DPO.lean can be adapted to any preference learning method
+The coupling argument in PreferenceBounds.lean (formerly DPO.lean) can be adapted to any preference learning method
 by instantiating the abstract framework. The key lemmas (`coupling_expansion`,
 `coupling_bound_ineq`) are proven there.
 -/
@@ -657,6 +681,29 @@ theorem grpo_equivalence {Strings A Y : Type*} [Monoid Strings] [MetricSpace Y] 
     (fun x g => GRPOLossPointwise pol x g (ranker x g)) gen μ_X μ_Z h_zero h_meas h_gen
   simpa [ExpectedGroupLoss, ExpectedGRPOLoss] using h_eq
 
+/-- GRPO-PL same-argmin form of `grpo_equivalence`.
+
+For fixed ranker and group generator, if summaries and originals are
+oracle-equivalent on support, then the full-document and summary GRPO-PL losses
+have the same argmin set among oracle-measurable policies. -/
+theorem grpo_pl_exact_metric {Strings A Y : Type*} [Monoid Strings] [MetricSpace Y] {k : ℕ}
+    (fstar : Strings → Y)
+    (ranker : Strings → GroupRanker A k)
+    (gen : GroupGenerator Strings A k)
+    (μ_X μ_Z : PMF Strings)
+    (h_zero : ∀ z x, z ∈ μ_Z.support → x ∈ μ_X.support → dist (fstar z) (fstar x) = 0)
+    (h_ranker : OracleIndexedRanker (Y := Y) ranker fstar)
+    (h_gen : OracleIndexedGroupGen (Y := Y) gen fstar) :
+    SameOracleMeasurableArgminGeneral
+      (fun pol : Policy' Strings A => ExpectedGRPOLoss pol ranker μ_X gen)
+      (fun pol : Policy' Strings A => ExpectedGRPOLoss pol ranker μ_Z gen)
+      (fun pol fstar => GRPOOracleMeasurable pol fstar)
+      fstar := by
+  apply same_oracle_measurable_argmin_general_of_loss_eq
+  intro pol h_pol
+  exact grpo_equivalence (Y := Y) fstar pol ranker gen μ_X μ_Z
+    h_zero h_pol h_ranker h_gen
+
 /-- GRPO equivalence via ZR: connecting to tree-based summarization. -/
 theorem grpo_equivalence_via_ZR {Strings A Y : Type*} [Monoid Strings] [MetricSpace Y] {k : ℕ}
     (fstar : Strings → Y)
@@ -854,6 +901,39 @@ theorem grpo_rl_equivalence {Strings A Y : Type*} [Monoid Strings] [MetricSpace 
   have h_eq := expected_group_loss_eq_of_zero_dist fstar loss gen μ_X μ_Z h_zero h_meas' h_gen
   simpa [ExpectedGroupLoss, ExpectedGRPORLLoss, loss] using h_eq
 
+/-- GRPO-RL same-argmin form of `grpo_rl_equivalence`.
+
+For fixed old/reference policies, reward, and group generator, if summaries and
+originals are oracle-equivalent on support, then the full-document and summary
+GRPO-RL losses have the same argmin set among oracle-measurable current
+policies. -/
+theorem grpo_rl_exact_metric {Strings A Y : Type*} [Monoid Strings] [MetricSpace Y] {k : ℕ}
+    (fstar : Strings → Y)
+    (pol_old pol_ref : Policy' Strings A)
+    (reward : Strings → A → ℝ) (eps beta : ℝ)
+    (gen : GroupGenerator Strings A k)
+    (μ_X μ_Z : PMF Strings)
+    (h_zero : ∀ z x, z ∈ μ_Z.support → x ∈ μ_X.support → dist (fstar z) (fstar x) = 0)
+    (h_old : GRPOOracleMeasurable pol_old fstar)
+    (h_ref : GRPOOracleMeasurable pol_ref fstar)
+    (h_reward : OracleMeasurableReward reward fstar)
+    (h_gen : OracleIndexedGroupGen (Y := Y) gen fstar) :
+    SameOracleMeasurableArgminGeneral
+      (fun pol : Policy' Strings A =>
+        ExpectedGRPORLLoss pol pol_old pol_ref reward eps beta μ_X gen)
+      (fun pol : Policy' Strings A =>
+        ExpectedGRPORLLoss pol pol_old pol_ref reward eps beta μ_Z gen)
+      (fun pol fstar => GRPOOracleMeasurable pol fstar)
+      fstar := by
+  apply same_oracle_measurable_argmin_general_of_loss_eq
+  intro pol h_pol
+  have h_meas :
+      OracleMeasurableGRPORLLoss k pol pol_old pol_ref reward eps beta fstar :=
+    grpo_rl_loss_oracle_measurable k pol pol_old pol_ref reward eps beta fstar
+      h_pol h_old h_ref h_reward
+  exact grpo_rl_equivalence (Y := Y) k fstar pol pol_old pol_ref reward eps beta
+    gen μ_X μ_Z h_zero h_meas h_gen
+
 /-- GRPO-RL equivalence via ZR: connecting to tree-based summarization. -/
 theorem grpo_rl_equivalence_via_ZR {Strings A Y : Type*} [Monoid Strings] [MetricSpace Y] (k : ℕ)
     (fstar : Strings → Y)
@@ -941,7 +1021,7 @@ framework. DPO uses the Bradley-Terry-Luce (BTL) preference model with sigmoid l
 - `dpo_equivalence`: DPO training on summaries equals training on originals when local laws hold
 - `dpo_gap`: Quantitative Lipschitz bounds on training gap
 
-This section was originally in DPO.lean and has been consolidated here.
+This section was originally in PreferenceBounds.lean (formerly DPO.lean) and has been consolidated here.
 -/
 
 section DPO

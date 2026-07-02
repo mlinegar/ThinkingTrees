@@ -8,6 +8,7 @@ import FormalProofs.DSL.IPWMeasurementError
 -- Cross-fitting
 import FormalProofs.DSL.CrossFitting
 import FormalProofs.DSL.Honesty
+import FormalProofs.DSL.DocumentStructure
 
 -- Moment functions for GLMs
 import FormalProofs.DSL.MomentFunctions
@@ -41,6 +42,7 @@ import FormalProofs.DSL.RuntimeCertificates
 import FormalProofs.DSL.MergeableCertificates
 import FormalProofs.DSL.MainTheorems
 import FormalProofs.DSL.TreePOEndToEnd
+import FormalProofs.DSL.UnifiedLearningCertificate
 import FormalProofs.DSL.LabelRateBounds
 
 /-!

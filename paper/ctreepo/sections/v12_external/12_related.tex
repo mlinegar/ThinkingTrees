@@ -1,0 +1,75 @@
+\section{Neighboring Methods and Assumptions}\label{sec:related}
+
+Section~\ref{sec:mergeable-sketches} covers the algebraic lineage:
+database algebraic aggregates, MUD aggregation, mergeable summaries,
+ordered list homomorphisms, and task-relative sufficient statistics.
+Section~\ref{sec:social-measurement} covers the social-science
+measurement lineage behind the Manifesto experiment. The neighboring
+methods below share pieces of the workflow; what distinguishes C-TreePO
+from each is the local-to-global certificate.
+
+\paragraph{Long-Context Methods.}
+RAG retrieves relevant chunks but provides no guarantee about what is
+\emph{lost} in retrieval; for non-separable targets, retrieval may miss
+interaction-bearing information that only becomes decision-relevant when
+chunks are combined (Section~\ref{sec:markov-interlude}). Sliding window
+methods, recursive summarization, and extended-context models similarly
+lack auditable certificates. C-TreePO processes all chunks through a tree
+and uses C3-style audits to certify whether cross-chunk interactions are
+preserved in the realized pipeline, providing a certification layer that
+complements these practical approaches.
+
+\paragraph{Tree-Based Text Composition and Compression.}
+Tree-structured inference has been used to compose and compress
+natural-language descriptions, with classical work on sentence
+compression and fusion providing early structured formulations
+\citep{KnightMarcu2000SentenceCompression,BarzilayMcKeown2005SentenceFusion,ClarkeLapata2008ILPSentenceCompression}.
+\citet{KuznetsovaEtAl2014TreeTalk} harvest syntactic tree fragments from
+web captions and use ILP- and CKY-style structured inference to compose
+new image descriptions and generalize captions via parse-tree pruning.
+The closest conceptual resonance is that this line already treats
+composition and compression together in one tree-based workflow. C-TreePO
+differs by making the compressed node a task-relative state and by adding
+an auditable local-to-global certificate for oracle preservation and
+preference-objective equivalence.
+
+\paragraph{Neural Sufficient Statistics and Simulation-Based Inference.}
+The learned-state view of $g$ is closest to neural sufficient-statistic
+learning for implicit models. \citet{ChenEtAl2021NASS} learn
+approximate sufficient statistics with infomax objectives; the later
+sliced sufficient-statistic method of \citet{ChenGutmannWeller2023SSS}
+reduces the high-dimensional information problem to many
+low-dimensional slice problems. Recent simulation-based inference work
+pushes the same idea into downstream likelihood modeling:
+\citet{DirmeierAlbertPerezCruz2025SSNL} learn a lower-dimensional
+surjective state on which likelihood inference is performed, with
+software support in \texttt{sbijax} and \texttt{surjectors}
+\citep{DirmeierUlzegaMiraAlbert2024SBIJAX,Dirmeier2024Surjectors}.
+Our contribution is the compositional analogue: $g(x)$ is sufficient
+only when it preserves all downstream contextual responses
+$\fstar(L \concat x \concat R)$. This is why our Markov sketch is a
+validation witness rather than an architectural template. Hybrid summary
+statistics \citep{MakinenEtAl2024HybridSummaryStatistics} motivate the
+same diagnostic discipline: known sketches can be probes or auxiliary
+features without defining the general learned state.
+
+\paragraph{Preference Learning and RLHF.}
+Direct Preference Optimization fine-tunes a language model from pairwise
+human preferences by reparameterizing the Bradley--Terry likelihood so
+that the policy itself serves as an implicit reward model
+\citep{BradleyTerry1952,RafailovEtAl2023DPO}. Our results apply to DPO
+and GRPO variants when the preference signal depends on the input only
+through the preserved oracle value. When readability, fluency, or style
+preferences fall outside $\fstar$, they must be modeled by a richer
+oracle or handled by separate alignment channels.
+
+\paragraph{Assumption-Centered Guarantees.}
+Recent machine-learning theory often separates structural invariance
+claims from behavioral assumptions on annotator noise and loss geometry.
+Our analysis follows that pattern but adds an explicit representational
+layer: neural-operator approximation and transfer moduli propose
+local-law budgets, C1--C3 and context compatibility drive the
+preservation/equivalence results, and quantitative transport to
+preference gaps uses explicit method-level Lipschitz and integrability
+conditions (Section~\ref{sec:verification}). Keeping this split explicit
+makes guarantees easier to audit and stress-test in applied settings.

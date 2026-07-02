@@ -1,0 +1,327 @@
+\section{Manifesto Results: Main Application}\label{sec:min-manifesto-results}
+
+The Manifesto application asks whether a learned compression tree can preserve
+a social-science measurement target while leaving behind readable intermediate
+states. The source documents are party election programs from the Manifesto
+Project. The project collects party platforms, releases document text through
+the Manifesto Corpus, and releases hand-coded policy-emphasis data through the
+Manifesto Data Collection \citep{ManifestoProject2025a,ManifestoCorpus2025}.
+Its coding tradition goes back to the Manifesto Research Group and
+Comparative Manifestos Project books on spatial policy measurement
+\citep{BudgeRobertsonHearl1987,BudgeEtAl2001,KlingemannEtAl2006,VolkensEtAl2013};
+\citet{MerzEtAl2016} describe the modern corpus as a multilingual text
+resource. The unit of human coding in the Manifesto Project is the
+quasi-sentence: a text unit expressing one political statement, assigned to a
+policy category. The Benoit benchmark below uses expert means as targets;
+quasi-sentence labels are the natural next source of human node labels for C1
+and C3 audits.
+
+We use the benchmark organized by \citet{BenoitEtAl2025}. It contains $235$
+party platforms matched to expert-survey means on six seven-point policy
+dimensions: economic policy, social policy, immigration, European integration,
+environmental policy, and decentralization. For each manifesto--dimension
+pair, the target is the mean expert placement of the party on that issue
+scale. This target differs from both the Manifesto Project quasi-sentence
+categories and any individual coder label. A method is evaluated by Pearson
+correlation between its root score and the expert mean within each dimension;
+the macro score is the unweighted mean of the six dimension correlations.
+Pearson is unchanged by the affine rescaling from Benoit's released non-EU
+expert means to the $1$--$7$ score scale; corrected MAE and calibration
+diagnostics use the normalized $1$--$7$ scale.
+
+Benoit et al. also give the LLM replication target. Their pipeline first
+summarizes each manifesto--dimension pair into a short English summary, then
+scores that summary on the seven-point expert scale. Their headline ensemble
+uses $3$ LLMs, $2$ prompting regimes, and $3$ generated summaries, giving $18$
+scores per manifesto--dimension. The three reference values we use are the
+split-expert agreement row, macro $r=0.873$; the proprietary LLM ensemble,
+macro $r=0.817$; and the matched Gemma-3 open-weight replication, macro
+$r=0.793$. The split-expert row is a measurement agreement reference:
+experts are split into two groups and the group means are correlated. It
+serves as measurement context; no ladder is trained or selected on it.
+
+These results are a root-observed corpus evaluation. Each held-out
+manifesto--dimension pair has a full-document expert target, and we evaluate
+the tree's root score directly against that target. A node-level local-law
+audit is stronger and different: it would sample leaves and merge spans with
+logged propensities and compare their local evidence to an application-aligned
+oracle. The current section reports the root-observed LLM application and the
+available teacher-trace diagnostics, not a completed human node-level audit.
+
+\subsection{Tree Setup and Splits}\label{sec:min-manifesto-tree-setup}
+
+The C-TreePO version keeps Benoit's document-level target but changes the
+representation being scored. The query $f$ is the policy score and the
+summarizer/merger $g$ is the learned state map. A flat baseline asks $f$ to
+score the manifesto text directly. A tree run chunks the manifesto into
+contiguous leaves, maps each leaf into a readable policy-evidence state,
+recursively merges adjacent states, and applies $f$ at the root. The root
+comparison instantiates $f(g(x))\approx f(x)$; each internal merge
+instantiates the C3 route
+$f(g(g(u)\concat g(v)))\approx f(u\concat v)$.
+
+The current f/g ladder artifacts are a subset of the reference benchmark with
+complete text, expert targets, and teacher-trace preprocessing. They contain
+$218$ manifestos split into $140$ training documents, $30$ reserved documents,
+and $48$ held-out test documents. Each manifesto is materialized as one tree
+for each leaf size. The phrase ``$48$ test trees'' therefore means $48$
+held-out manifestos, each with one root prediction for a given method and leaf
+size. Reported ladder metrics are held-out test metrics. The $30$ reserved
+documents are materialized for later checks; the DSPy prompt search described
+here uses node examples from the $140$ training documents in its compile loop.
+The node count changes with leaf size. In the joint all-six run, $256$-token
+leaves create $3{,}249$ total teacher nodes across the $218$ documents, while
+$8{,}096$-token leaves create $218$ total teacher nodes. In the
+decentralization single-target run, $256$-token leaves create $1{,}841$ total
+teacher nodes and $1{,}024$-token leaves create $467$.
+
+The f/g ladder alternates the two operators. First, teacher traces create
+target summaries and target scores for every realized node. With the query
+fixed, we optimize $g$ so the current query recovers the node target from the
+candidate summary. With $g$ fixed, we optimize $f$ on the summaries produced
+by the current tree. The table label $f^a g^b$ records the number of
+query-side and summarizer-side optimization rounds. The important point is
+co-adaptation: the state map is trained against the query, and the query
+is trained on the state distribution produced by the map.\footnote{Some
+legacy JSON artifacts label the initial query artifact as
+\texttt{identity}. Operationally, that row loads the pre-tuned dimension
+query, while the initial summarizer is teacher-summary passthrough.}
+
+The result artifacts are generated tables and figures under
+\texttt{assets/benoit/}. The headline table is
+\texttt{benoit\_comparison\_pearson.tex}; the f/g ladder figures use the
+same $140/30/48$ split and report held-out Pearson against expert means.
+Character-leaf sweeps and token-leaf prompt ladders are separate axes and are
+reported separately below.
+
+\subsection{Six-Dimension Results}\label{sec:min-manifesto-six-dim}
+
+\begin{table}[t]
+  \centering
+  \resizebox{\linewidth}{!}{\input{assets/benoit/tables/benoit_comparison_pearson.tex}}
+  \caption{\textbf{Pearson $r$ against Benoit expert-survey means.}
+  The first block reproduces published Benoit reference rows; the remaining
+  blocks report C-TreePO and controls using Gemma-4-31B-NVFP4. The
+  per-dimension tree at $8\mathrm{K}$-character leaves reaches macro
+  $r=0.829$ while reporting every dimension separately.}
+  \label{tab:min-benoit-headline}
+\end{table}
+
+Table \ref{tab:min-benoit-headline} gives the full six-dimension benchmark.
+The per-dimension tree at $8\mathrm{K}$ characters reaches macro $r=0.829$,
+with dimension scores $0.939$ economic, $0.869$ social, $0.884$
+immigration, $0.901$ European integration, $0.839$ environment, and $0.543$
+decentralization. The corresponding combined-summary tree at the same leaf
+size reaches macro $r=0.807$, with $0.927$, $0.874$, $0.911$, $0.917$,
+$0.801$, and $0.413$ on the same six dimensions. This is the central
+tradeoff: a shared summary is cheaper and operationally simpler, but it can
+dilute dimensions whose evidence is sparse or institutionally specific.
+
+The leaf-size sweep is also informative. In the fixed per-dimension pipeline,
+macro Pearson is $0.815$ at $64\mathrm{K}$ characters, $0.824$ at
+$32\mathrm{K}$, $0.824$ at $16\mathrm{K}$, $0.829$ at $8\mathrm{K}$,
+$0.842$ at $4\mathrm{K}$, $0.827$ at $2\mathrm{K}$, and $0.827$ at
+$1\mathrm{K}$. Economic policy stays between $0.916$ and $0.939$ across
+those rows. Decentralization is lower but has a meaningful small-leaf signal:
+$0.543$ at $8\mathrm{K}$, $0.580$ at $4\mathrm{K}$, and $0.584$ at
+$2\mathrm{K}$. This is the local-law intuition in empirical form. Leaf
+states can become small enough to inspect while the root measurement remains
+visible.
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=\linewidth]{manifesto_fg_combined_ladder_f1g0_f1g1.pdf}
+  \caption{\textbf{First f/g step in the joint all-six ladder, by dimension.}
+  External Pearson is measured on the $48$-document held-out split; each
+  panel uses the held-out manifestos with expert labels for that dimension.
+  The joint summary is shared across all six dimensions. The green curve is
+  the best available $f^xg^y$ cell at each leaf for that dimension.
+  Horizontal lines mark Benoit's proprietary LLM ensemble, the best
+  open-weight Benoit reference row, and the split-expert reference for the
+  same dimension.}
+  \label{fig:v6-manifesto-combined-ladder}
+\end{figure}
+
+Figure \ref{fig:v6-manifesto-combined-ladder} gives the corresponding
+joint all-six f/g ladder. The $f^1g^0$ macro row is $0.776$, $0.789$,
+$0.773$, $0.788$, $0.783$, and $0.789$ at $256$, $512$, $1{,}024$,
+$2{,}048$, $4{,}096$, and $8{,}096$ tokens. The first summarizer step,
+$f^1g^1$, gives $0.764$, $0.774$, $0.803$, $0.777$, $0.785$, and
+$0.789$. The best common first-step row is therefore $r=0.803$ at
+$1{,}024$ tokens: above the best open-weight macro reference $0.793$ and
+below Benoit's proprietary ensemble macro $0.817$ and the split-expert macro
+$0.873$. If each dimension is allowed to take its best available $f^xg^y$
+cell at the same leaf, the macro row is $0.782$, $0.791$, $0.806$, $0.793$,
+$0.801$, and $0.809$. The dimension panels show why the macro is not the full
+story. Economic, immigration, and European integration remain close to the
+Benoit reference rows across the leaf sweep; environment is usable but below
+the open-weight reference; decentralization is the main point of stress even
+when later cells help at $8{,}096$ tokens.
+
+For Environment, a root-only cold-start control clarifies the source of the
+gap. We score the stored full-document Environment summaries with Gemma-4 and
+the raw Benoit prompt; this is a single root-summary control, not a leaf-size
+sweep. It reaches $r=0.784$ on the $48$-document held-out split, essentially
+tied with the first ladder row at $256$ tokens. The shortfall is therefore
+already present before learned tree updates; the ladder mostly preserves that
+signal rather than degrading it.
+
+\begin{table}[t]
+  \centering
+  \begin{tabular}{lrrrr}
+    \toprule
+    Dimension & Best $r$ & Leaf tokens & Stage & $n$ \\
+    \midrule
+    Economic & $0.886$ & $4{,}096$ & $f^2g^1$ & $47$ \\
+    Social & $0.886$ & $1{,}024$ & $f^2g^2$ & $43$ \\
+    Immigration & $0.938$ & $4{,}096$ & $f^3g^3$ & $29$ \\
+    European integration & $0.965$ & $2{,}048$ & $f^1g^1$ & $35$ \\
+    Environment & $0.795$ & $1{,}024$ & $f^1g^1$ & $42$ \\
+    Decentralization & $0.461$ & $8{,}096$ & $f^1g^1$ & $42$ \\
+    \bottomrule
+  \end{tabular}
+  \caption{\textbf{Best dimension-specific cells in the current joint
+  all-six f/g optimization.} One summary is trained to preserve evidence for
+  all six policy dimensions. These are best cells by dimension; a common
+  deployed row would choose one leaf size and one stage.}
+  \label{tab:v6-joint-dim-best}
+\end{table}
+
+The joint all-six f/g optimization makes the tension more explicit. A single
+summary is asked to preserve evidence for all six scales at once. The best
+dimension-specific cells in Table \ref{tab:v6-joint-dim-best} are higher
+than any single deployed row for economic, social, immigration, and European
+integration. Environment remains usable at $r=0.795$. Decentralization is
+the outlier at $0.461$. Comparing this with the single-target
+decentralization ladder and the fixed per-dimension sweep points to the
+failure mode: decentralization evidence is easy for a multi-purpose summary
+to lose, and optimizing the common summary can improve teacher agreement
+while leaving the expert target mostly unmoved.
+
+\subsection{Single-Dimension Ladders}\label{sec:min-manifesto-single-dim}
+
+We first separate the single-target evidence. Economic policy is the complete
+replication lane: the teacher, expert target, and tree representation agree
+strongly, and the Benoit-initialized ladder is populated at every plotted leaf
+size. Decentralization is the current stress lane. It is still a partial
+single-target ladder, but it is the useful counterexample because Benoit's own
+ensemble reaches only $r=0.490$ on this dimension, the best open-weight
+reference reaches $0.450$, and the split-expert reference is
+$0.780$.
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=0.90\linewidth]{manifesto_fg_econ_decent_f1g0_f1g1.pdf}
+  \caption{\textbf{Single-dimension f/g ladders for economic policy and
+  decentralization.}
+  External Pearson is measured against Benoit expert means on the $48$-document
+  held-out split. The economic panel uses the complete Benoit-initialized
+  economic lane; because $g^0$ is Benoit's summary in that lane, the plotted
+  initial row is $f^1g^0$. The decentralization panel shows the current
+  single-target lane: $f^1g^0$ is available through $4{,}096$ tokens and
+  $f^1g^1$ through $2{,}048$ tokens. In both panels, the green curve is the
+  best available $f^xg^y$ cell at each leaf. Horizontal lines mark Benoit's
+  proprietary LLM ensemble, the best open-weight reference value, and the
+  split-expert reference for the same dimension.}
+  \label{fig:v6-manifesto-econ-decent-ladder}
+\end{figure}
+
+Figure \ref{fig:v6-manifesto-econ-decent-ladder} compares the tuned query on
+the initial summaries, $f^1g^0$, with the first optimized summarizer step
+where that step is available, $f^1g^1$. On economic policy, the complete
+Benoit-initialized $f^1g^0$ row gives $r=0.824$, $0.861$, $0.885$, $0.874$,
+$0.865$, and $0.866$ at $256$, $512$, $1{,}024$, $2{,}048$, $4{,}096$, and
+$8{,}192$ token leaves. The best $f^xg^y$ cell at each economic leaf is
+$0.830$, $0.861$, $0.885$, $0.886$, $0.886$, and $0.879$. Thus the complete
+economic lane stays in the same range as Benoit's proprietary ensemble
+($0.870$), the best open-weight reference ($0.860$), and the split-expert
+reference ($0.880$), even as the leaf size changes by a factor of $32$. The
+separate raw-init economic branch is not the main plotted lane because it is
+only complete through $1{,}024$ tokens; it does contain the current best
+single economic cell, $r=0.909$ at $256$ tokens.
+
+Decentralization behaves differently. At $256$ tokens, the first summarizer
+step raises external Pearson from $0.534$ to $0.557$. At $512$ tokens it moves
+from $0.476$ to $0.449$, and at $1{,}024$ tokens it moves from $0.510$ to
+$0.435$. At $2{,}048$ tokens it moves from $0.479$ to $0.452$. Later ladder
+cells recover part of the loss at $1{,}024$ tokens: $f^2g^2$ reaches
+$r=0.536$. The best available decentralization cells by leaf are $0.557$,
+$0.476$, $0.536$, $0.479$, and $0.485$ at $256$, $512$, $1{,}024$,
+$2{,}048$, and $4{,}096$ tokens. These single-target cells improve on the
+current joint all-six optimized run on decentralization, whose best
+dimension-specific cell is $0.461$, but they remain well below the
+split-expert reference of $0.780$. This is the contrast we want:
+decentralization separates compression quality from teacher/expert alignment.
+The internal teacher correlation stays high while external expert correlation
+moves much less, so the ladder shows where the model is learning the teacher
+distribution while only partly recovering the expert target.
+
+\paragraph{Scope of the single-target ladders.}
+The same-split individual f/g ladder is complete for economic policy and
+partially populated for decentralization. The six-dimension headline in
+Table~\ref{tab:min-benoit-headline} is the complete root-observed benchmark;
+the single-target ladders are diagnostic slices showing how alternating
+query and summarizer optimization behaves on one strong dimension and one
+stress dimension.
+
+\subsection{Audit-Gap Diagnostics}\label{sec:min-manifesto-audit-gap}
+
+The available local diagnostics come from teacher traces and local residual
+checks. They are useful for seeing where the learned state drifts, but they
+should not be read as the final design-based human audit from
+Section~\ref{sec:v7-neural-operator-route}. In the notation of
+Section~\ref{sec:v7-tree-comparisons}, they are empirical local-law
+measurements for the fitted LLM pipeline, while the root-observed benchmark
+above remains the external validation target.
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=\linewidth]{manifesto_fg_combined_audit_gap.pdf}
+  \caption{\textbf{Joint all-six local diagnostic gaps.}
+  The figure reports available teacher-trace/local residual diagnostics for
+  the joint all-six ladder. These gaps diagnose where the learned state and
+  query drift across leaf and merge calls; they are not a substitute for a
+  future human node-level audit with logged propensities.}
+  \label{fig:v6-manifesto-combined-audit-gap}
+\end{figure}
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=0.90\linewidth]{manifesto_singledim_per_dim_live_audit_gap.pdf}
+  \caption{\textbf{Single-dimension local diagnostic gaps.}
+  Economic policy and decentralization illustrate the same distinction as the
+  root ladders: one dimension largely preserves the external target, while the
+  other exposes teacher/expert and summary-capacity stress.}
+  \label{fig:v6-manifesto-single-audit-gap}
+\end{figure}
+
+\clearpage
+
+\subsection{Takeaways}\label{sec:min-manifesto-takeaways}
+
+The Manifesto result should be read as an auditable-compression result. The
+per-dimension tree reaches the published frontier range at the root, and the
+combined tree remains close on five of six dimensions, while every run
+produces a finite population of leaves, summaries, and merge states. That is
+the structure flat scoring and concat-no-merge controls lack. They are useful
+controls because they show that long-context scoring can be strong; the tree
+adds local units that can be trained, read, sampled, and audited.
+
+The next measurement layer is human node supervision. The current results use
+root expert means for evaluation and teacher traces for node training. The
+Manifesto Project quasi-sentence codings can be aggregated inside sampled
+leaf or merge spans, turning the same tree population into a source of local
+C1 and C3 labels. Root labels continue to calibrate the document-level expert
+target; quasi-sentence aggregates supply local evidence labels; sampled nodes
+then feed the audit certificate. The practical question has shifted from
+whether the root score can survive tree compression to how much human node
+labeling is needed to certify that the surviving score is carried by locally
+faithful states.
+
+The limitations are the same distinctions used throughout
+Section~\ref{sec:v7-tree-comparisons}. Exact classical parity is a
+state-level claim; learned LLM compression is an empirical approximation;
+dimensions such as decentralization expose structural or measurement gaps;
+and audit uncertainty belongs to the sampling design. The paper therefore
+claims a complete root-observed LLM result here, plus a concrete route to the
+stronger node-level certificate.

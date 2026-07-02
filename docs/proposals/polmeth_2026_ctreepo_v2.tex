@@ -1,0 +1,44 @@
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb}
+\usepackage{microtype}
+\usepackage{natbib}
+\usepackage[hidelinks]{hyperref}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.2em}
+
+\begin{document}
+\begin{center}
+{\Large\bf C-TreePO: Design-Based Partial-Document Supervision for Long-Document Political Measurement}
+\end{center}
+
+\textbf{Abstract.} Large language models are increasingly used to produce political measurements from text at scale, but for long documents the analyst rarely observes the full object: the input to the final coding step is a compressed representation produced by chunking, retrieval, or recursive summarization. Design-based Supervised Learning (DSL) shows that substituting cheap surrogate labels for gold-standard labels can bias downstream inference \citep{EgamiEtAl2024}, yet in long-document settings the surrogate is often not just a label but a representation. We introduce C-TreePO (Compression Tree Preference Optimization), an auditable compression-tree framework that treats long-document coding as an oracle-preserving design problem. C-TreePO defines three locally checkable laws (sufficiency, idempotence, merge consistency) and combines local audits with logged node sampling so compression-induced distortion can be estimated and reported under a finite supervision budget. We illustrate the approach with Manifesto Project RILE scoring \citep{ManifestoProject2025a} and argue more generally that design-based political measurement must account for the compression path that produces the object being labeled.
+
+\paragraph{Motivation.}
+Large language models are increasingly used to turn political texts into measurements, but once documents exceed context limits the methodological problem is not only prediction error. It is design. In practice, the analyst does not observe the full document; they observe a pipeline-dependent representation produced by chunking, retrieval, or recursive summarization. That representation is the object that gets scored. Design-based Supervised Learning (DSL) shows why naively swapping gold-standard labels for cheap surrogates can bias downstream inference \citep{EgamiEtAl2024}, but long-document pipelines add a missing middle: even a perfectly calibrated labeler cannot recover information that the representation has already dropped. Compression therefore creates a distinct, nonclassical measurement error channel---target shift induced by preprocessing---that is usually treated as an engineering convenience.
+
+\paragraph{Oracle-preserving compression.}
+C-TreePO treats long-document coding as an oracle-preserving compression problem. The anchor is an \emph{oracle}: the full-information judgement the researcher would trust if full reads were feasible (a professional label, an expert protocol, or a rubric-governed full-document procedure). Compression is introduced only because oracle evaluation is expensive. A document is partitioned into contiguous spans, summarized locally, and merged up a fixed tree into a bounded representation that is then scored. The claim is not lossless compression; it is task-relative validity: the representation is acceptable only insofar as it preserves the distinctions the oracle uses, in the spirit of sufficiency ideas in decision theory \citep{Blackwell1953}. In particular, C-TreePO does not propose a new ideological scaling model; it proposes a design-based way to (i) build a surrogate representation for an existing full-document target and (ii) estimate how much that representation can move the oracle judgement.
+Because supervision is collected on leaves and merges, the same design can be used to \emph{optimize} the summarization and merge operators under a fixed budget---that is the ``TreePO'' part of C-TreePO---rather than treating compression as a frozen preprocessing choice.
+
+\paragraph{Three locally testable laws.}
+C-TreePO makes the compression path auditable by organizing it around three local laws. (C1) \emph{sufficiency}: does a leaf summary retain the evidence a full-information coder would cite from that span, or does it merely sound plausible? (C2) \emph{idempotence}: do cleanup passes (re-summarization, normalization) preserve the task signal, or do they silently rewrite it? (C3) \emph{merge consistency}: when two children are combined, does the parent preserve cross-span interactions, or do those interactions disappear during recursive compression? These checks are local: they compare a summary to its source span or a merge to the corresponding combined span, rather than requiring a full-document read at every step. Methodologically, they play the same role as mergeability conditions for classical sketches \citep{Agarwal2013MergeableTODS}: they define an interface under which local summaries can be safely aggregated, and they make failures attributable (leaf omission, drift under recompression, interaction loss at merges).
+Intuitively, the laws turn ``summarize this long thing'' into a sequence of answerable audit questions at well-defined points in the pipeline.
+
+\paragraph{Design-based partial supervision on tree nodes.}
+C-TreePO then applies the design-based logic of DSL at the representation layer. Leaves and merges form a finite population of audit units. Under the same overlap requirement that underlies DSL---gold-standard oracle judgements are observed with positive probability for the units we care about---we sample nodes for oracle audits, log inclusion propensities, and use standard IPW/Horvitz--Thompson logic to estimate compression-induced distortion and uncertainty from partial supervision. This turns what is usually hand-waved into something reportable: ``how much did the pipeline change the target, under this budget and this design?'' It also makes supervision efficient. Rather than paying for full reads everywhere, the analyst can spend a fixed budget on a small number of leaf and merge audits, because those are exactly where information is lost (or distorted) during compression. And because audits happen \emph{inside} the pipeline, they support actionable diagnosis: one can distinguish leaf-level omissions from merge-level interaction loss and quantify which stage drives measurement drift. Importantly, adaptive supervision budgets (e.g., oversampling uncertain merges) are compatible with design-based estimation as long as propensities are logged.
+This is the core extension beyond standard DSL: the design-based logic is applied not only to the final surrogate label, but also to the compressed representation on which that label depends.
+
+\paragraph{Illustration and payoff.}
+We illustrate the framework with Manifesto Project RILE scoring \citep{ManifestoProject2025a}, a canonical case where the full-document judgement depends on interactions distributed across sections (issue emphasis, tradeoffs, and balancing language), so locally reasonable summaries can still distort the global signal after merging. Substantively, C-TreePO bridges scalable LLM-based political measurement \citep{BenoitEtAl2025} and design-based inference with imperfect surrogates \citep{EgamiEtAl2024} by making compression---not just prediction---part of the inferential design. The payoff is a measurement procedure with three reportable deliverables: (i) a surrogate label produced from an auditable compression tree, (ii) an uncertainty-aware certificate of compression-induced distortion under a logged supervision design, and (iii) diagnostics indicating which local law fails when the pipeline breaks. More broadly, the same design applies to legislative speeches, hearings, debates, and court opinions: whenever full reads are infeasible but the target is rubric-governed, researchers need to audit and sample the representation that stands in for the original document, not only the final label.
+
+\clearpage
+\bibliographystyle{plainnat}
+{\small\bibliography{../../paper/refs}}
+
+\end{document}

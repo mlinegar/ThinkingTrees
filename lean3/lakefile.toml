@@ -1,7 +1,7 @@
 name = "lean3"
 version = "0.1.0"
 keywords = ["math"]
-defaultTargets = ["FormalProofs"]
+defaultTargets = ["FormalProofs", "FormalProofsEconometrics"]
 
 [leanOptions]
 pp.unicode.fun = true # pretty-prints `fun a ↦ b`
@@ -29,3 +29,10 @@ path = "../../FormalProbability"
 
 [[lean_lib]]
 name = "FormalProofs"
+
+# Quarantined legacy econometrics subtree: kept out of the FormalProofs
+# umbrella (namespace clash with FormalProbability.Econometrics.*) but built
+# as its own target so it cannot bitrot. See FormalProofs/Econometrics.lean.
+[[lean_lib]]
+name = "FormalProofsEconometrics"
+roots = ["FormalProofs.Econometrics"]

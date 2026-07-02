@@ -1,0 +1,48 @@
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{natbib}
+\usepackage[hidelinks]{hyperref}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.2em}
+\pagestyle{empty}
+\raggedbottom
+
+\begin{document}
+
+\begin{center}
+{\Large \textbf{C-TreePO: Design-Based Partial-Document Supervision for Long-Document Political Measurement}\par}
+\end{center}
+
+\textbf{Abstract.} Large language models are increasingly used to turn long political texts into measurements, but once documents exceed practical context limits the analyst is often no longer observing the original object. The substantive input to the final coding step is instead a compressed representation produced by chunking, retrieval, or recursive summarization. Design-based Supervised Learning (DSL) shows why replacing gold-standard labels with cheap surrogates can distort downstream inference \citep{EgamiEtAl2024}. We argue that long-document measurement poses an earlier problem: compression can change the target before any final label is assigned. C-TreePO treats long-document coding as an oracle-preserving compression problem. Documents are summarized up a tree, audited locally for sufficiency, idempotence, and merge consistency, and supervised with random node sampling plus logged propensities so compression-induced distortion can be estimated rather than assumed away. The running application is Manifesto Project RILE scoring, but the contribution is methodological: a design-based account of how compressed representations enter political measurement.
+
+\paragraph{Why Compression Matters.}
+Long political texts are increasingly measured through LLM pipelines, but once those texts exceed context limits the main methodological problem is no longer only prediction error. It is design. The analyst typically no longer observes the original document; they observe a compressed surrogate produced by chunking, retrieval, or recursive summarization. For many political tasks, that matters because the relevant judgment depends on interactions distributed across the full text: relative emphasis across issues, combinations of positions across sections, or silences that matter only in context. If compression changes the observed object before labeling, then even a perfectly calibrated downstream labeler is acting on the wrong thing.
+
+\paragraph{The Missing Middle.}
+Current work covers the two ends of this pipeline, but not the middle. Recent applications show that LLMs can recover useful political measurements at scale \citep{BenoitEtAl2025}. DSL shows that surrogate labels cannot simply be substituted for gold-standard labels without attention to sampling, overlap, and downstream estimands \citep{EgamiEtAl2024}. Long-document settings add an earlier representational problem: the final label is often assigned not to the full document but to a compressed representation of it. If that representation has already dropped interaction-bearing information, downstream correction is targeting a distorted estimand. The question is therefore not just whether an LLM can predict a label, but whether the representation passed to it still preserves the distinctions the full-information target requires.
+
+\paragraph{C-TreePO.}
+We study that problem through C-TreePO, an oracle-centered compression tree. The oracle is the full-information judgment the researcher would trust if cost and context were not binding: in the running example, a full-document RILE judgment under the Manifesto Project coding logic \citep{ManifestoProject2025a}. A document is partitioned into contiguous spans, summarized into a fixed tree, and audited locally. The claim is deliberately narrow. C-TreePO is not a theory of generic lossless summarization. It asks when a compressed representation preserves the distinctions that matter for the oracle, a task-relative notion of validity close in spirit to sufficiency arguments in decision theory \citep{Blackwell1953}.
+
+The framework is organized around three local laws, and the empirical paper asks whether they hold at the leaf and merge levels. First, \emph{sufficiency}: leaf summaries must preserve the evidence that matters for the task rather than merely sounding plausible in isolation. Second, \emph{idempotence}: once a summary is already valid, re-summarizing it should not move the target. Third, \emph{merge consistency}: combining two children must preserve interactions that only become visible when evidence from different spans is brought together. These conditions turn recursive summarization into an auditable measurement design.
+
+Those local laws also create a design-based supervision problem on the tree itself. C-TreePO treats leaves and internal merges as a finite population of audit units. Some nodes receive additional oracle attention, inclusion propensities are logged, and inverse-probability weighting is used to estimate distortion in the full node population under the same overlap logic that motivates DSL. This moves design-based correction upstream from labels to representations: the analyst can report not only a surrogate label, but also estimated compression distortion and uncertainty under a known audit design.
+
+\paragraph{Empirical Payoff.}
+This changes what it means to use LLMs for long-document measurement. The output is not just a predicted label. It is a label paired with a certificate about the compression path that produced it. The empirical question is whether the local laws hold exactly, approximately, or not at all in the setting of interest. If they hold exactly, the compression tree is oracle-preserving and compression introduces no measurement error. If they hold only approximately, sampled node audits turn the residual violations into an object of estimation: one can bound the remaining compression error and attach design-based confidence intervals under a fixed supervision budget. If they fail badly, the same design shows where the pipeline breaks and why.
+
+Manifesto Project RILE is a natural running case because the target depends on how issue emphases combine across sections rather than on any single span taken alone. The empirical exercise is not to offer another ideology-scaling benchmark. It is to test whether the local laws hold at the leaf and merge levels in practice, whether any observed violations are small enough to support useful bounds and intervals, and which local failures account for the remaining gap between full-document judgments and summary-based surrogates.
+
+This reframes long-document political measurement as a two-stage design problem: documents are first reduced to representations, and only then labeled. DSL formalizes the second stage. C-TreePO supplies a design-based account of the first. For political methodology, the contribution is not another prompting recipe, but a way to make compression itself auditable, estimable, and reportable in long-text measurement.
+
+\clearpage
+\bibliographystyle{plainnat}
+{\small\bibliography{../../paper/refs}}
+
+\end{document}

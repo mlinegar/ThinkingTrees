@@ -1,0 +1,194 @@
+\section{Discussion}\label{sec:v8-discussion}
+
+C-TreePO separates three questions that long-document measurement
+usually collapses. Does the root score agree with the expert target?
+Do the intermediate states preserve the evidence they represent? And
+if the intermediate evidence is read through a proxy, how much
+uncertainty remains after sampling true-oracle nodes? For political
+manifestos, the separation shapes both how the current results
+should be read and where the next unit of expert effort should go.
+
+\subsection{Reading the Certificate}
+
+The finite-sample certificate in
+Equation~\eqref{eq:v8-finite-sample-certificate} has four terms:
+\[
+  |G_{\mathrm{meth}}|
+  \le
+  C_{\mathrm{meth}}\widehat{\Delta}_{\mathrm{HT}}
+  +
+  B_{\mathrm{cal}}
+  +
+  B_{\mathrm{est}}
+  +
+  B_{\mathrm{clip}} .
+\]
+The first term is the sampled estimate of local distortion on the
+realized manifesto tree. It answers a direct audit question: among
+the leaves, re-summarized states, and merges that the pipeline
+actually used, how far did the produced policy states move from
+their represented raw spans? A pipeline can score well at the root
+while the intermediate states drift far from the spans they
+represent. The first term flags exactly this case: a low root error
+with a high \(\widehat{\Delta}_{\mathrm{HT}}\) is a prediction whose
+mechanism the audit cannot certify, even when the headline number
+looks fine.
+
+\(B_{\mathrm{cal}}\) is different. It is the gap between the accessible judge
+used for local evidence and the trusted policy oracle. More sampled nodes do
+not remove a calibration mismatch. If quasi-sentence aggregates, teacher
+traces, or LLM readouts measure a different construct from the expert-survey
+dimension, then local labels can be plentiful and still point at the wrong
+target. In manifesto work, this is why coded emphasis scores and
+expert-position scores must be kept separate unless a calibration exercise
+links them.
+
+\(B_{\mathrm{est}}\) is the term that expert sampling can shrink. It reflects
+design uncertainty around the finite population of tree units. More sampled
+leaves and merges reduce this term when propensities are logged and positive.
+\(B_{\mathrm{clip}}\) is the price of variance control: clipping large
+inverse-propensity weights can make the estimate stable, but the induced bias
+must be reported rather than hidden.
+
+The method constant \(C_{\mathrm{meth}}\) carries its own signal. A
+procedure that is sensitive to small score changes, or to rank
+reversals near a decision threshold, needs a larger transport
+constant than a procedure that only needs coarse ordering. A
+certified tree is therefore certified against a particular tree,
+oracle, audit design, and method-specific tolerance, not against
+every downstream use of the score.
+
+\subsection{Root Labels and Node Labels}
+
+Root labels and node labels do different work. Root expert labels define and
+evaluate the document-level political measurement: a party's economic-policy
+placement, immigration position, or decentralization stance. Without
+root labels, C-TreePO would have no external test of the final task.
+Node labels ask a narrower question: whether a leaf, state, or merge preserved the
+rubric-relevant evidence in the span it represents.
+
+This difference matters for interpreting the current Manifesto
+LLM replication result. The reported correlations are root-observed evidence: the
+C-Tree root state matches strong document-level benchmarks on
+held-out manifestos. The local diagnostic figures identify where the
+proxy channel diverges from the expert-survey target.
+
+A node audit on the realized tree completes the stack. Root labels
+anchor the expert target; sampled node labels estimate local
+distortion and proxy bias. Quasi-sentence codings are attractive
+because they are already span-grounded political evidence, but they
+must be aggregated under a declared rule for the active dimension. A
+decentralization audit should not reuse an economic-policy
+aggregation rule, and a universal-summary audit should report whether
+one state is being asked to preserve incompatible evidence
+geometries.
+
+\subsection{When Local Labels Pay}
+
+Local labels pay when three conditions hold. First, the target has meaningful
+local evidence. Manifesto policy scores usually do: tax pledges, welfare
+commitments, immigration restrictions, European integration claims, and
+regional-autonomy statements appear in identifiable spans. Second, the tree
+state has enough capacity to carry cross-span interactions, such as a tax cut
+qualified by a later welfare promise or a devolution claim limited by central
+budget authority. Third, the local labels measure the same construct as the
+root target.
+
+Under those conditions, node labels are more than cheaper labels. They tell the
+learner what to preserve before the root score is read. They also tell the
+auditor where the root score is fragile. If changing leaf size leaves the root
+estimate stable, smaller leaves create more auditable sites without changing
+the estimand. If a local diagnostic gap is concentrated in one dimension, as it
+is for decentralization in the current artifacts, the next label should usually
+go to that dimension's nodes rather than to another random root score.
+
+Local labels pay less when calibration, not sampling, is the
+bottleneck. If the accessible local target is misaligned with the
+expert-survey dimension, adding more of it shrinks
+\(B_{\mathrm{est}}\) while leaving \(B_{\mathrm{cal}}\) large. They
+also pay less when the target is intrinsically global in a way the
+state map cannot localize. A rhetorical-style judgment or a
+party-brand interpretation may depend on document-wide framing that no
+span-level evidence can preserve. In that case the audit should show
+high C1 or C3 distortion, and the certificate should widen rather than
+manufacture confidence.
+
+\subsection{Where It Works, What It Doesn't, and Where Leaves Help}
+
+The reported run sorts cleanly. Five of six dimensions clear the
+matched open-weight reference under the universal summary;
+per-dimension trees clear the proprietary 18-score ensemble. The
+leaf-size sweep shows a wide invariance band on economic policy,
+with held-out Pearson moving within \(0.04\) across \(32\times\)
+in leaf size. Decentralization is the dimension that doesn't sort
+the same way. Held-out Pearson stays well below split-expert
+agreement at every leaf size, the trajectory wanders round-by-round,
+and the universal-summary cost over the per-dimension peak is large.
+
+Where leaves help is visible in the same run. The local diagnostic
+gap is widest exactly where shared compression averages over
+dimensions whose evidence geometry differs, and it flagged the
+decentralization breakdown without the single-dimension comparison
+being available. That is the gap and the
+corrected-node-loss working as a pair: the gap points at the nodes
+where sampled \(f^\ast\) calls would estimate and correct
+\(b_v=\widehat\ell_v-\ell_v^\ast\) at the highest return per call.
+A node audit is the next labeling decision, not another root score.
+
+Three failure modes account for the cases where the framework
+breaks. The first is a disagreement between root accuracy and local
+faithfulness. A tree can predict the right root score while losing
+the evidence an expert would want to inspect. That matters for
+measurement, because the same score is then used in downstream
+inference, in cross-country comparisons, and in arguments about
+which claims drove the placement. Those uses are inspectable only
+when the local states remain faithful.
+
+The second is state sharing across incompatible dimensions. The
+universal-summary run asks one policy state to support six readouts.
+That is efficient when dimensions share evidence, but it dilutes a
+dimension whose evidence geometry is different. Decentralization is
+the warning case because it depends on institutional distinctions,
+country-specific arrangements, and boundary-spanning qualifications
+that are easy to compress away. The available fixes are a
+dimension-specific state map, a higher local-law weight for that
+dimension, or a sampling design that oversamples its high-risk
+nodes; a larger backbone model is not the obvious first step.
+
+The third is proxy overconfidence. A dense LLM judge can provide
+smooth local losses everywhere, but if its errors are correlated
+with the same distinctions that experts care about, the local
+channel can train the state map toward the wrong geometry. On
+economic policy, this might look like an LLM judge that
+systematically under-weights labor-market language and over-weights
+tax language; the local channel then trains the state map toward
+tax-emphasis evidence at the cost of labor evidence, even when the
+root score still tracks the expert mean. The audit gap is what
+makes that drift visible.
+Equation~\eqref{eq:v8-corrected-node-loss} uses sampled \(f^\ast\)
+nodes to estimate and correct exactly this proxy bias.
+
+\subsection{Deployment Guidance}
+
+A manifesto deployment should declare the measurement target first.
+The target is a policy dimension, a scale, and an expert oracle. The
+state rubric, root scorer, local labels, and calibration set should
+all be written against that target.
+
+The next step is to run the root-observed benchmark and the local diagnostics
+together. Root correlation says whether the final score is useful. Local gaps
+say where the mechanism needs audit. If the root score is strong and local
+gaps are small, the certificate can focus on sampling enough nodes to tighten
+\(B_{\mathrm{est}}\). If the root score is strong but local gaps are large,
+the right response is targeted node labeling, not celebration of the root
+number. If both root and local evidence are weak, the state map or target
+rubric needs redesign.
+
+Finally, the reported result should include the tier of evidence. A
+root-observed benchmark supports a claim about held-out document scores. A
+teacher-trace diagnostic supports a claim about proxy behavior. A sampled
+node-level certificate supports a claim about realized local-law distortion.
+Those tiers can reinforce one another, but they should not be
+collapsed. The point of C-TreePO is to make the measurement stack
+inspectable enough that any consumer of the result can tell which
+claim has actually been earned.

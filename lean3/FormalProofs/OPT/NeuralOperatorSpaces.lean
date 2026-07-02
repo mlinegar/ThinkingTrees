@@ -33,28 +33,27 @@ Discussion and in Appendix~I. The ambient class is the space of operators
    theorem-backed instances here.
 
 Both classes act on the same ambient function-space
-(`Strings → Strings`). They are not disjoint: the paper's Proposition~1
-(mechanized as `ops_reduction_to_classical_mergeable`) proves that any
-deterministic neural operator that satisfies the global identities A1,
-A2, A3 inhabits the mergeable-sketch class as well. This file gives that
-intersection a named Lean object, states the overlap theorem, and
-exposes it for Appendix~I.
+(`Strings → Strings`). They are not disjoint: the strict branch of the
+paper's Proposition~1 (mechanized as `ops_reduction_to_classical_mergeable`)
+proves that any deterministic neural operator satisfying global A1/A2/A3
+inhabits the oracle-homomorphism special case. The state-level sketch branch
+is represented separately by `MergeableSketchSummaryClass`.
 
 ## Paper-facing identifiers
 
 - `NeuralOperator` — the ambient type of string-to-string operators.
 - `NeuralOperatorClass` — a named subset of the ambient operator space.
 - `CertifiedSubfamily` — intersection of a class with a certified predicate.
-- `MergeableNeuralOperator` — the intersection: neural operators that also
-  satisfy A1/A2/A3 and therefore inhabit the classical mergeable-sketch
-  class.
+- `MergeableNeuralOperator` — the strict oracle-output intersection: neural
+  operators that also satisfy A1/A2/A3 and therefore inhabit the
+  oracle-homomorphism special case of mergeability.
 - `MergeableSketchSummaryClass` — operators induced by an encode/merge/decode
   sketch with exact local-law witnesses.
 - `ExactLocalLawNeuralOperators` and `ApproxLocalLawNeuralOperators` — neural
   operators constrained by exact or approximate local-law witnesses.
 - `paper_neural_operator_mergeable_overlap_theorem` — the paper-facing
-  overlap statement: every `MergeableNeuralOperator` is a classical
-  mergeable summary (via Proposition~1).
+  overlap statement: every `MergeableNeuralOperator` is oracle-level
+  mergeable (via the strict branch of Proposition~1).
 - `paper_neural_operator_induces_sketch_adapter_theorem` — shows the
   same overlap from the `SketchOperator` side: every
   `MergeableNeuralOperator` induces a `SketchOperator` whose decode
@@ -116,11 +115,11 @@ def NeuralOperatorMergeableSketchOverlap
 
 /-! ## The intersection: mergeable neural operators -/
 
-/-- A neural operator that simultaneously satisfies the deterministic
-global identities A1/A2/A3 of Proposition~1. By
-`ops_reduction_to_classical_mergeable`, any such operator is a classical
-mergeable summary; it therefore inhabits both the neural-operator
-function space and the mergeable-sketch class. -/
+/-- A neural operator that simultaneously satisfies the deterministic global
+identities A1/A2/A3 of Proposition~1. By
+`ops_reduction_to_classical_mergeable`, any such operator is in the strict
+oracle-homomorphism mergeable limit. Classical state-level sketch membership is
+tracked separately through `MergeableSketchSummaryClass`. -/
 structure MergeableNeuralOperator
     (Strings : Type*) [Monoid Strings]
     (Y : Type*) [PseudoMetricSpace Y]
@@ -137,11 +136,10 @@ structure MergeableNeuralOperator
 
 /-! ## Paper-facing overlap theorems -/
 
-/-- **Paper-facing theorem (overlap via Proposition 1).** Every
-`MergeableNeuralOperator` is a classical mergeable summary. This is the
-function-space-operator form of Proposition~1's reduction: when a neural
-operator satisfies the global A1/A2/A3 identities, it inhabits the
-mergeable-sketch class from the classical data-systems literature. -/
+/-- **Paper-facing theorem (overlap via strict Proposition 1 branch).** Every
+`MergeableNeuralOperator` is oracle-level mergeable. This is the
+function-space-operator form of the strict reduction: when a neural operator
+satisfies global A1/A2/A3, oracle values themselves compose. -/
 theorem paper_neural_operator_mergeable_overlap_theorem
     (fstar : Strings → Y) (g : MergeableNeuralOperator Strings Y fstar) :
     IsMergeableSummary g.operator fstar :=

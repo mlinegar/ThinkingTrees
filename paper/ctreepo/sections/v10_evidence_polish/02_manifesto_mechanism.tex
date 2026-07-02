@@ -1,0 +1,79 @@
+\section{Identifying Policy Positions in Political Manifestos}
+\label{sec:v8-manifesto-mechanism}
+
+Political manifestos are election platforms, and political
+scientists have spent decades turning them into numbers. The
+numbers feed downstream models of voting, government formation,
+coalition bargaining, and policy outcomes, and the established
+pipeline is human reading: a trained coder or country expert reads
+the platform and places the party on a handful of issue scales.
+The supply of expert reads is finite, the documents are long, and
+any automated stand-in has to compress before it can score. The
+question we set up here is whether a tree of compressed states can
+carry the same evidence the expert reading does, on the same
+target.
+
+Take the economic-policy scale of the Benoit replication as a
+running example. A trusted coder reads the full party platform and places it
+on the seven-point scale; that placement is the oracle \(f^\ast\)
+we want a learned tree to recover. To be useful for the same
+target, a C-Tree state for a span has to carry whatever evidence
+could move that placement: tax promises, spending commitments,
+privatization claims, labor-market policy, welfare language, fiscal
+constraints, and the qualifications about who benefits or pays.
+
+A scalar score per leaf is too small a state for this work. Suppose
+one section of a platform promises a tax cut for small businesses,
+and a later section expands health spending. Suppose a third section
+makes both conditional on private delivery and on a deficit rule.
+The economic position of the platform turns on how those three
+pieces fit together. A parent that only inherits two scalar child
+scores cannot recover the qualification. A parent that inherits two
+policy-evidence states can carry the tax position, the spending
+position, and the condition that ties them together.
+
+A C-Tree state is the working memory the tree keeps about a span.
+The query that comes out at the end is a number, but the state has
+to carry more than a number. In economic policy, a state may record
+that a party supports tax cuts for small businesses, protects health
+spending, and funds the package through privatization. In
+environmental policy, it may carry both emissions targets and
+exceptions for energy security. In decentralization, it may need to
+distinguish administrative devolution from fiscal autonomy, regional
+veto power, and country-specific institutional language. The score
+is read off the root, so the state has to survive every merge before
+that read is meaningful.
+
+The three local laws name the failure modes. C1 (sufficiency) fails
+when a leaf summary drops the evidence the rubric needs. C2
+(idempotence) fails when a state drifts after a re-summarization
+pass, for example when a conditional tax cut becomes unconditional.
+C3 (merge consistency) fails when two child states are each fine on
+their own and lose their interaction once merged. C3 is the
+characteristic manifesto problem: meaning often sits in the relation
+between sections, not in either section alone.
+
+Decentralization is the stress dimension in the current results
+because the evidence is less consistent across parties and countries
+than economic-policy evidence is. A party can endorse local
+administration while opposing fiscal devolution. It can support
+regional identity while keeping central budget authority. It can
+discuss federal reform in country-specific institutional terms. A
+universal summary trained to serve all six dimensions can preserve
+the shared evidence well and still blur these
+decentralization-specific distinctions. The local diagnostic gap
+for decentralization is exactly that signal.
+
+This picture also explains why node labels matter. A full-document
+expert score calibrates the root. A leaf or merge label checks
+whether a smaller state still carries the same evidence for the same
+dimension. Manifesto quasi-sentence codings are a natural fit
+because they already mark local policy statements. They certify a
+tree only when sampled or aggregated under a rule that targets the
+same policy dimension as the root score.
+
+Sections~\ref{sec:v8-ctree-math}--\ref{sec:v8-audit-certificate}
+formalize this picture. Section~\ref{sec:v8-ctree-math} defines the
+C-Tree and the local laws,
+Section~\ref{sec:v8-objective} writes the training objective, and
+Section~\ref{sec:v8-audit-certificate} develops the audit.

@@ -1,0 +1,101 @@
+\section{Neighboring Methods and Assumptions}\label{sec:min-related}
+
+C-TreePO sits between three literatures: design-based supervised learning
+in social-science measurement, mergeable algebraic aggregation in
+data-systems, and preference optimization in language-model alignment.
+Appendix~\ref{app:min-related} records the longer scope notes;
+Section~\ref{sec:min-related} positions the framework against the
+neighboring methods that share pieces of the workflow but do not provide
+the same local-to-global certificate.
+
+\paragraph{Design-Based Supervised Learning.}
+\citet{EgamiEtAl2024} introduce the design-based-supervised-learning (DSL)
+framework for social-science applications of LLMs. They show that high
+prediction quality on surrogate labels is not enough when those labels
+enter downstream inference: errors can be correlated with the estimand,
+and a logged sampling design over a small gold set is what makes the
+imputation provably valid. C-TreePO's audit is the same idea applied one
+layer earlier in the pipeline, at the compression step rather than at
+final-label imputation. The local laws name what has to be preserved by
+each compression call, and the IPW estimator over realized tree nodes
+turns realized compression into the kind of design-based estimand DSL
+already trusts at the document level. Related lineages on
+imperfect-surrogate inference, measurement validity, and structural-topic
+modeling \citep{RobertsStewartTingley2014} share the construct-validity
+framing the audit operationalizes.
+
+\paragraph{Long-Context Methods.}
+RAG retrieves relevant chunks but provides no guarantee about what is
+\emph{lost} in retrieval; for non-separable targets, retrieval may miss
+interaction-bearing information that only becomes decision-relevant when
+chunks are combined. Sliding-window methods, recursive summarization, and
+extended-context models similarly lack auditable certificates. C-TreePO
+processes all chunks through a tree and uses C3-style audits to certify
+whether cross-chunk interactions are preserved in the realized pipeline,
+providing a certification layer that complements these practical
+approaches.
+
+\paragraph{Tree-Based Text Composition and Compression.}
+Tree-structured inference has been used to compose and compress
+natural-language descriptions, with classical work on sentence compression
+and fusion providing early structured formulations
+\citep{KnightMarcu2000SentenceCompression,BarzilayMcKeown2005SentenceFusion,ClarkeLapata2008ILPSentenceCompression}.
+\citet{KuznetsovaEtAl2014TreeTalk} harvest syntactic tree fragments from
+web captions and use ILP- and CKY-style structured inference to compose
+new image descriptions and generalize captions via parse-tree pruning.
+The closest conceptual resonance is that this line already treats
+composition and compression together in one tree-based workflow. C-TreePO
+differs by making the compressed node a task-relative state and by adding
+an auditable local-to-global certificate for oracle preservation and
+preference-objective equivalence.
+
+\paragraph{Sufficient Statistics, Mergeable Summaries, and Sketch-Flip-Merge.}
+The local-law machinery sits at the end of a four-generation lineage
+of approximate-sufficiency results. Fisher and Blackwell define
+sufficient statistics and the sufficiency ordering of experiments
+\citep{Fisher1922,Blackwell1953}: a statistic is sufficient for a
+parameter when the conditional distribution of the data given the
+statistic does not depend on the parameter. Mergeable summaries
+\citep{Agarwal2013MergeableTODS,FlajoletEtAl2007,CormodeMuthukrishnan2005,GreenwaldKhanna2001}
+add an associative merge axiom and a sublinear-state requirement;
+Count-Min, HyperLogLog, Greenwald-Khanna quantiles, and Bloom filters
+each pair an exact sufficient statistic with a fixed query function,
+and correctness is proved once algebraically. Sketch-Flip-Merge
+\citep{HehirTingCormode2023SFM} extends the mergeable abstraction to
+local differential privacy: sufficiency must survive a local
+randomizer between leaf and merge, and only matched
+randomizer-summarizer pairs keep the merged channel in a parametric
+family the cardinality estimator can invert.
+
+C-TreePO inherits the encode-merge-readout discipline. It replaces
+hand-designed sketch state with a learned summarizer, replaces the
+closed-form sufficiency proof with an audit that estimates residual
+local-law violations, and replaces opaque register state with text
+summaries that are inspectable in the same units as the leaf.
+Theorem~\ref{thm:sketch-equivalence} states the equivalence between
+the local laws and the mergeable-summary algebra; the proof is in
+Appendix~\ref{app:min-algebra} and is verified in Lean
+(\texttt{SketchRecovery.lean}). The empirical HLL parity result is in
+Appendix~\ref{app:min-hll}, and Appendix~\ref{app:min-related} records
+the longer sufficient-statistics scope notes.
+
+\paragraph{Preference Learning and RLHF.}
+Direct Preference Optimization fine-tunes a language model from pairwise
+human preferences by reparameterizing the Bradley--Terry likelihood so
+that the policy itself serves as an implicit reward model
+\citep{BradleyTerry1952,RafailovEtAl2023DPO}. The results above apply to
+DPO and GRPO variants when the preference signal depends on the input only
+through the preserved oracle value. When readability, fluency, or style
+preferences fall outside $\fstar$, they must be modeled by a richer oracle
+or handled by separate alignment channels.
+
+\paragraph{Assumption-Centered Guarantees.}
+Recent machine-learning theory often separates structural invariance
+claims from behavioral assumptions on annotator noise and loss geometry.
+The analysis here follows that pattern but adds an explicit
+representational layer: neural-operator approximation and transfer moduli
+propose local-law budgets, C1--C3 and context compatibility drive the
+preservation/equivalence results, and quantitative transport to preference
+gaps uses explicit method-level Lipschitz and integrability conditions.
+Keeping this split explicit makes guarantees easier to audit and
+stress-test in applied settings.

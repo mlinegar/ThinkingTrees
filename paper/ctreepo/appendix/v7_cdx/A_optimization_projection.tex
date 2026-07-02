@@ -1,0 +1,602 @@
+\section{Optimization View: Local-Law-Compatible Summarizers}
+\label{app:v7-optimization-projection}
+
+The mergeable-summary discussion identifies the algebraic target: a tree
+should build local states, merge those states, and apply the query only at the
+root. This appendix spells out the corresponding optimization problem.
+We choose a representable class of summarizers and train inside that
+class while penalizing violations of the local laws. When a classical
+or semantic target cannot be represented by a local-law-compatible
+summarizer in that class, the remaining error is structural rather than
+only an optimizer failure.
+
+\subsection{The Objects Being Optimized}
+\label{app:v7-optimization-objects}
+
+Fix a tree \(T\) and an object space \(\mathcal X\). A node \(v\) in
+the tree represents an object \(X_v\in\mathcal X\); leaves represent
+raw blocks, and internal nodes represent the fixed composition of their
+children. Let \(\Y\) be the task-value space with task distance
+\(d_Y\), and let
+\[
+  \fstar:\mathcal X\to \Y
+\]
+be the oracle value we would like to preserve. In the experiments this
+may be a classical sketch query, a Markov-count target, or an expert
+score such as a manifesto dimension.
+
+The learned tree has two maps. The summarizer
+\[
+  g_\theta:\mathcal I\to \mathcal Z
+\]
+is used both to summarize a raw leaf and to merge two child states by
+calling it on their fixed composition \(z_L\oplus z_R\). Here
+\(\mathcal I\) is the local input interface for \(g_\theta\): it
+contains raw represented objects \(X\in\mathcal X\) and composed or
+serialized state pairs \(z_L\oplus z_R\). The query
+\[
+  \widehat f_\phi:\mathcal X_{\mathrm{score}}\to\Y
+\]
+is evaluated on raw represented objects and on states through the same
+fixed query interface. Concretely, either states already live in the
+queryable domain, or a renderer
+\(\rho:\mathcal Z\to\mathcal X_{\mathrm{score}}\) is applied before
+the query is read; we suppress \(\rho\) and write
+\(\widehat f_\phi(X)\) and \(\widehat f_\phi(z)\) directly. At the
+root, this query turns the stored state into the final prediction.
+The parameters
+\(\theta\) may be weights of a neural operator, LoRA/adapter weights of
+a transformer, or a prompt/program choice for an LLM-style operator. The
+same notation covers all of these cases: the representable class is the
+set
+\[
+  \mathcal C
+  =
+  \{\,g_\theta:\theta\in\Theta\,\}.
+\]
+
+For a document \(i\), the tree recursion is
+\[
+  z_{i,v}^{\theta}=g_\theta(X_{i,v})
+    \quad\text{for leaves }v,
+  \qquad
+  z_{i,v}^{\theta}
+    =
+    g_\theta(z_{i,L}^{\theta}\oplus z_{i,R}^{\theta})
+    \quad\text{for internal }v,
+\]
+and the root prediction is
+\[
+  \widehat y_i(\theta,\phi)
+  =
+  \widehat f_\phi(z_{i,\mathrm{root}}^{\theta}).
+\]
+The population target is the oracle answer
+\(\fstar(X_{i,\mathrm{root}})\). The training problem is therefore to
+choose \(g_\theta\in\mathcal C\) and \(\widehat f_\phi\) so that the
+root prediction is accurate and the intermediate states behave like
+mergeable summaries for that query.
+
+For any query \(q:\mathcal X_{\mathrm{score}}\to\Y\), write
+\[
+  E_{\mathrm{root}}(g,q;T)
+  =
+  d_Y\!\left(q(z_{\mathrm{root}}^{g}),q(X_{\mathrm{root}})\right)
+\]
+for the root error of the tree summarizer \(g\) on tree \(T\), measured
+under the query \(q\). When \(q=f^\star\), this is the true oracle root
+error. When \(q=\widehat f\), it is the root error seen by the learned
+teacher.
+
+\subsection{Local Residuals}
+\label{app:v7-local-residuals}
+
+Let \(\ell_Y(y,y')\) be a nonnegative loss on task values, usually
+\(d_Y(y,y')\) or \(d_Y(y,y')^2\). The three local laws become three
+families of residuals.
+
+\paragraph{C1: leaf sufficiency.}
+For a leaf \(v\), the leaf state should preserve the answer the raw
+block would receive:
+\[
+  r_{1,i,v}(\theta,\phi)
+  =
+  \ell_Y\!\left(
+    \widehat f_\phi(g_\theta(X_{i,v})),
+    \widehat f_\phi(X_{i,v})
+  \right).
+\]
+If a gold oracle label is available at the leaf, the second argument may
+be replaced by \(\fstar(X_{i,v})\). The displayed version is the
+query-equivalence form used by the tree: it asks whether the learned
+state is sufficient for the learned query.
+
+\paragraph{C3: merge consistency.}
+For an internal node \(v\) with children \(L,R\), the merged state
+should preserve the answer for the parent object:
+\[
+  r_{3,i,v}(\theta,\phi)
+  =
+  \ell_Y\!\left(
+    \widehat f_\phi(g_\theta(
+      z_{i,L}^{\theta}\oplus z_{i,R}^{\theta})),
+    \widehat f_\phi(X_{i,v})
+  \right).
+\]
+This is the learned version of the mergeable-summary condition: valid
+child states should merge into a valid parent state.
+
+\paragraph{C2: re-summary stability.}
+For any produced state \(z_{i,v}^{\theta}\), passing it back through
+the summarizer should not change its answer-relevant content:
+\[
+  r_{2,i,v}(\theta,\phi)
+  =
+  \ell_Y\!\left(
+    \widehat f_\phi(g_\theta(z_{i,v}^{\theta})),
+    \widehat f_\phi(z_{i,v}^{\theta})
+  \right).
+\]
+C2 is the stability law needed when summaries themselves become inputs
+to later summarization calls.
+
+Let \(\mathcal A_1,\mathcal A_3,\mathcal A_2\) be the audited or
+training sets of C1, C3, and C2 units. If every unit is evaluated, the
+empirical residuals are simple averages:
+\[
+  \widehat C_j(\theta,\phi)
+  =
+  \frac{1}{|\mathcal A_j|}
+  \sum_{(i,v)\in\mathcal A_j}r_{j,i,v}(\theta,\phi),
+  \qquad j\in\{1,2,3\}.
+\]
+Under a design-based audit, unit \((i,v)\) is sampled with known
+probability \(\pi_{i,v}\). The corresponding inverse-probability
+weighted form is
+\[
+  \widehat C_j^{\mathrm{IPW}}(\theta,\phi)
+  =
+  \frac{1}{|\mathcal U_j|}
+  \sum_{(i,v)\in\mathcal U_j}
+  \frac{A_{i,v}}{\pi_{i,v}}
+  r_{j,i,v}(\theta,\phi),
+\]
+where \(A_{i,v}\in\{0,1\}\) records whether the unit was checked and
+\(\mathcal U_j\) is the finite population of auditable units of type
+\(j\). The optimization formulas below can use either the full
+averages or their IPW versions; the difference is how the residuals are
+estimated, not what they mean.
+
+\subsection{The Empirical Objective}
+\label{app:v7-training-objective}
+
+The empirical objective is the loss used to fit the learned summarizer
+and query. The summarizer \(g_\theta\) enters through the tree
+recursion: changing \(\theta\) changes every produced state
+\(z_{i,v}^{\theta}\). The query \(\widehat f_\phi\) enters when
+we read the answer at the root, when we calibrate against available labels, and
+when we measure C1/C3/C2 residuals through query equivalence.
+
+The gold-standard loss measures whether the final tree prediction
+matches the available document-level target:
+\[
+  \widehat L_{\mathrm{gold}}(\theta,\phi)
+  =
+  \frac{1}{n}
+  \sum_{i=1}^n
+  \ell_Y\!\left(
+    \widehat f_\phi(z_{i,\mathrm{root}}^{\theta}),
+    y_i
+  \right).
+\]
+Here \(y_i\) is the available global label for document \(i\). In
+settings with direct oracle access, \(y_i=\fstar(X_{i,\mathrm{root}})\).
+In LLM and human-label settings, \(y_i\) is the observed global label
+used to train a learned teacher.
+
+The proxy-oracle gap loss trains the query against labeled objects,
+usually full documents or raw concatenations during the first pass:
+\[
+  \widehat L_{\mathrm{gap}}(\phi)
+  =
+  \frac{1}{|\mathcal A_{\mathrm{gap}}|}
+  \sum_{(a,y_a)\in\mathcal A_{\mathrm{gap}}}
+  \ell_Y\!\left(
+    \widehat f_\phi(a),
+    y_a
+  \right).
+\]
+
+The local-law part of the empirical loss is the weighted residual
+\[
+  \widehat E_{\mathrm{law},R}(\theta,\phi)
+  =
+  \rho_1\widehat C_1(\theta,\phi)
+  +\rho_3\widehat C_3(\theta,\phi)
+  +\rho_2(R-1)\widehat C_2(\theta,\phi),
+\]
+where the \(R-1\) factor records the number of possible re-summary
+steps. The no-cost empirical objective is then
+\begin{equation}
+\label{eq:v7-learned-objective}
+  \begin{aligned}
+  \widehat L_{\mathrm{emp}}(\theta,\phi)
+  =
+  &\underbrace{\alpha_{\mathrm{gap}}\widehat L_{\mathrm{gap}}(\phi)}
+    _{\text{proxy-oracle gap}}
+  +\underbrace{\alpha_{\mathrm{gold}}\widehat L_{\mathrm{gold}}(\theta,\phi)}
+    _{\text{root prediction}} \\
+  &+\underbrace{\lambda\,\widehat E_{\mathrm{law},R}(\theta,\phi)}
+    _{\text{local-law residuals}} .
+  \end{aligned}
+\end{equation}
+The coefficients
+\(\alpha_{\mathrm{gap}},\alpha_{\mathrm{gold}},\lambda,\rho_1,\rho_3,\rho_2\)
+are training weights. They say how strongly the empirical procedure
+cares about proxy-oracle agreement, distance to the gold standard, and
+local-law violations. They are not error thresholds. The equivalent
+notation with independent local-law weights
+\(\lambda_1 C1+\lambda_3 C3+\lambda_2 C2\) is obtained by absorbing
+\(\lambda\rho_j\) into the three coefficients.
+
+\paragraph{Direct local-oracle regime.}
+When local oracle labels are available, the local residuals may be
+measured directly against \(\fstar\). For example, C1 can compare
+\(\widehat f_\phi(g_\theta(b))\) or \(f(g_\theta(b))\) to
+\(\fstar(b)\), and C3 can compare a merged parent state to the true
+parent answer. This is the cleanest supervised version, and it matches
+classical sketches whose local targets are exactly known.
+
+\paragraph{Teacher-first LLM regime.}
+When local oracle calls are unavailable, the training signal is
+different. We first initialize the ladder with a simple summarizer:
+the root state is the raw document or raw concatenation, so the first
+query learner sees the same object that has the global label. Using
+pairs \((X_i,y_i)\), we learn or select a teacher
+\(\widehat f_\phi\) that predicts the global label on full documents.
+After this first pass, \(\widehat f_\phi\) supplies the local
+comparison used to train \(g_\theta\):
+\[
+  C1:\ \widehat f_\phi(g_\theta(b))\approx \widehat f_\phi(b),
+  \qquad
+  C3:\ \widehat f_\phi(g_\theta(z_L\oplus z_R))
+      \approx \widehat f_\phi(X_L\oplus X_R),
+  \qquad
+  C2:\ \widehat f_\phi(g_\theta(z))\approx \widehat f_\phi(z).
+\]
+This does not claim that the teacher is the true oracle. It says that,
+when local true labels are unavailable, the local laws are optimized in
+the learned teacher's score space, and the final guarantee must add the
+teacher's proxy-oracle gap.
+
+\paragraph{From teacher residuals to oracle residuals.}
+The conversion is just the triangle inequality. For any two objects or
+states \(a,b\), write the teacher residual and true residual as
+\[
+  \widehat r(a,b)=d_Y(\widehat f(a),\widehat f(b)),
+  \qquad
+  r^\star(a,b)=d_Y(f^\star(a),f^\star(b)).
+\]
+If the teacher has pointwise oracle-prediction error
+\[
+  \eta(a)=d_Y(\widehat f(a),f^\star(a)),
+\]
+then
+\[
+  r^\star(a,b)
+  \le
+  \underbrace{\widehat r(a,b)}_{\text{teacher residual}}
+  +
+  \underbrace{\eta(a)+\eta(b)}_{\text{proxy-oracle gap slack}}.
+\]
+Thus a uniform proxy-oracle gap bound
+\(\eta(\cdot)\le\varepsilon_{\mathrm{orc}}\) gives
+\[
+  r^\star(a,b)\le \widehat r(a,b)+2\varepsilon_{\mathrm{orc}}.
+\]
+Applied to C1, C3, and C2 separately, this says that the true-oracle
+law residuals are controlled by the teacher-law residuals plus a
+recovery charge for each local comparison. With the unweighted
+composition below,
+\[
+  E_{\mathrm{law}}(g,f^\star;R)
+  \le
+  \underbrace{E_{\mathrm{law}}(g,\widehat f;R)}
+    _{\text{teacher-law error}}
+  +
+  \underbrace{2(R+1)\varepsilon_{\mathrm{orc}}}
+    _{\text{component proxy-oracle gap}},
+\]
+because the composed law error has one C1 term, one C3 term, and
+\((R-1)\) C2 terms. This componentwise inequality is useful when we
+want to interpret the local laws themselves in the true-oracle scale.
+For final root prediction, the sharper route is to bound the root
+distortion through \(\widehat f\) and then transfer that one root
+comparison to \(f^\star\), which costs only
+\(2\varepsilon_{\mathrm{orc}}\).
+
+\subsection{Three Error Paths}
+\label{app:v7-three-error-paths}
+
+The same notation covers the three cases that arise in practice. Let
+\(q:\mathcal X_{\mathrm{score}}\to\Y\) denote the query used to define
+local-law residuals. In the direct-oracle case \(q=f^\star\). In the
+teacher-first case \(q=\widehat f\). Let
+\[
+  \varepsilon_{\mathrm{score}}(q,f^\star)
+\]
+denote a uniform bound on the difference between \(q\) and the true
+oracle on the objects and states compared by the tree. Thus
+\(\varepsilon_{\mathrm{score}}(f^\star,f^\star)=0\), while the
+teacher-first route has
+\(\varepsilon_{\mathrm{score}}(\widehat f,f^\star)=\varepsilon_{\mathrm{orc}}\).
+The first transfer is only calibration:
+\[
+  E_{\mathrm{root}}(g,f^\star;T)
+  \le
+  \underbrace{E_{\mathrm{root}}(g,q;T)}
+    _{\text{checked root error}}
+  +
+  \underbrace{2\,\varepsilon_{\mathrm{score}}(q,f^\star)}
+    _{\text{score approximation}}.
+\]
+If local laws also certify the learned-score root error by
+\[
+  E_{\mathrm{root}}(g,q;T)\le E_{\mathrm{law}}(g,q;R),
+\]
+then the corresponding true-oracle root error is bounded by
+\[
+  \underbrace{E_{\mathrm{law}}(g,q;R)}
+    _{\text{local-law certificate}}
+  +
+  \underbrace{2\,\varepsilon_{\mathrm{score}}(q,f^\star)}
+    _{\text{score approximation}}.
+\]
+This is the common certificate: root error for the checked score, plus
+the price of using an estimated score instead of the true oracle.
+
+The remaining distinction is whether \(f^\star\) itself is compatible
+with mergeable state updates in the chosen class. In the online
+non-mergeable case, training still chooses a summarizer \(g_\theta\) by
+balancing root error against local-law error, now with the true oracle
+\(f^\star\) available for both terms.
+If \(f^\star\) has an exact mergeable witness in \(\mathcal C\), both
+terms can in principle be driven to zero. If not, the learned tree is
+the best tradeoff the chosen class can express; its remaining
+\(E_{\mathrm{root}}(g_\theta,f^\star;T)\) and
+\(E_{\mathrm{law}}(g_\theta,f^\star;R)\) are structural, not merely
+optimizer noise.
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}p{0.23\linewidth}p{0.22\linewidth}p{0.25\linewidth}p{0.21\linewidth}@{}}
+\toprule
+Regime & Local-law query & Main error terms & Interpretation \\
+\midrule
+Only root labels are available &
+\(q=\widehat f\), learned from global labels &
+\(E_{\mathrm{law}}(g,\widehat f;R)+2\varepsilon_{\mathrm{orc}}\) &
+We certify the tree through a calibrated teacher. Local checks are not
+oracle calls. \\
+Online oracle, mergeable target &
+\(q=f^\star\) &
+\(E_{\mathrm{law}}(g,f^\star;R)\), with zero possible when the class
+contains the exact state law &
+The local laws can hold exactly; the tree is estimating the oracle
+itself. \\
+Online oracle, non-mergeable target &
+\(q=f^\star\), but no zero-gap mergeable \(g\) is available in
+\(\mathcal C\) &
+\(E_{\mathrm{root}}(g_\theta,f^\star;T)\) and
+\(E_{\mathrm{law}}(g_\theta,f^\star;R)\), plus optimization, sampling,
+and audit residuals &
+The tree fits the best available root-accuracy/local-law tradeoff in
+the chosen representation. \\
+\bottomrule
+\end{tabular}
+\caption{The three error paths use the same local-law notation. The
+difference is whether the local checks use the true oracle or a learned
+teacher, and whether the true oracle lies in the mergeable summarizer
+class being certified.}
+\label{tab:v7-error-paths}
+\end{table}
+
+\subsection{Total Error, Certification, and Local-Law Pressure}
+\label{app:v7-certified-objective}
+
+The empirical objective is what training optimizes. The certificate is
+stated separately in terms of audited residual bounds. Let
+\[
+  \varepsilon_{\mathrm{leaf}},\qquad
+  \varepsilon_{\mathrm{merge}},\qquad
+  \varepsilon_{\mathrm{idemp}}
+\]
+be audited upper bounds for the C1, C3, and C2 residual components.
+For a tree run with \(R\) rounds, the local-law error is
+\[
+  E_{\mathrm{law}}(g,\widehat f;R)
+  =
+  \underbrace{\varepsilon_{\mathrm{leaf}}}_{\text{C1}}
+  +
+  \underbrace{\varepsilon_{\mathrm{merge}}}_{\text{C3}}
+  +
+  \underbrace{(R-1)\varepsilon_{\mathrm{idemp}}}_{\text{C2 reuse}}.
+\]
+If local laws are checked directly against the true oracle, the run is
+certified at task accuracy \(\varepsilon\) when
+\[
+  E_{\mathrm{law}}(g,f^\star;R)\le \varepsilon.
+\]
+If the laws are checked through a learned teacher \(\widehat f\) whose
+uniform proxy-oracle gap is \(\varepsilon_{\mathrm{orc}}\), the total certified
+root-prediction error is
+\[
+  E_{\mathrm{tot}}(g,\widehat f;R)
+  =
+  \underbrace{E_{\mathrm{law}}(g,\widehat f;R)}
+    _{\text{audited local laws}}
+  +
+  \underbrace{2\varepsilon_{\mathrm{orc}}}
+    _{\text{root proxy-oracle gap}},
+\]
+and the acceptance condition is simply
+\[
+  E_{\mathrm{tot}}(g,\widehat f;R)\le \varepsilon.
+\]
+
+For set-restricted optimization arguments, it is useful to write an
+idealized population objective. This is not the literal empirical
+training loss; it is the abstraction saying that distance to the
+gold-standard task value is balanced against local-law error. With
+local-law shares
+\(\rho_1,\rho_3,\rho_2\ge 0\), normalized so
+\(\rho_1+\rho_3+\rho_2=1\), define
+\[
+  E_{\mathrm{law},\rho}(g,f;R)
+  =
+  \rho_1\varepsilon_{\mathrm{leaf}}
+  +\rho_3\varepsilon_{\mathrm{merge}}
+  +\rho_2(R-1)\varepsilon_{\mathrm{idemp}}.
+\]
+The balanced objective is
+\begin{equation}
+\label{eq:v7-oracle-projection-objective}
+  \begin{aligned}
+  J_{\lambda,\rho}(g;f)
+  =
+  &\underbrace{(1-\lambda)E_{\mathrm{root}}(g,f;T)}
+    _{\text{root accuracy}} \\
+  &+\underbrace{\lambda E_{\mathrm{law},\rho}(g,f;R)}
+    _{\text{local-law pressure}} .
+  \end{aligned}
+\end{equation}
+Here \(E_{\mathrm{root}}\) is the tree's root answer error. In the
+direct regime, \(f=f^\star\). In the teacher-first regime,
+\(f=\widehat f_\phi\) during training and the final true-oracle claim
+adds the \(2\varepsilon_{\mathrm{orc}}\) proxy-oracle gap slack.
+At \(\lambda=0\), this is pure gold-standard fitting. At
+\(\lambda=1\), the objective minimizes only the local-law residual
+penalty. The display explains the training pressure toward
+local-law-compatible summarizers; it is not a claim that every
+empirical optimizer minimizes exactly this displayed population
+functional.
+
+\subsection{Local-Law-Compatible Sets and Structural Error}
+\label{app:v7-projection-sets}
+
+The optimization view is clearest after separating the representable
+class from the mergeable subset. Let \(\mathcal C\) be the class of
+summarizers representable by the chosen neural operator, LLM prompt
+family, or other learned operator. For a fixed tree \(T\) and query
+\(f\), define the exact local-law set
+\[
+  \mathcal M_0(\mathcal C,T,f)
+  =
+  \{\,g\in\mathcal C:
+      C1(g,f;T)=C2(g,f;T)=C3(g,f;T)=0\,\}.
+\]
+For approximate component bounds
+\(\boldsymbol\varepsilon=(\varepsilon_{\mathrm{leaf}},
+\varepsilon_{\mathrm{merge}},\varepsilon_{\mathrm{idemp}})\), define
+\[
+  \mathcal M_{\boldsymbol\varepsilon}(\mathcal C,T,f)
+  =
+  \{\,g\in\mathcal C:
+      C1(g,f;T)\le\varepsilon_{\mathrm{leaf}},\
+      C3(g,f;T)\le\varepsilon_{\mathrm{merge}},\
+      C2(g,f;T)\le\varepsilon_{\mathrm{idemp}}\,\}.
+\]
+These are sets of functions, not necessarily linear spaces. The
+word ``projection,'' when used below, means risk minimization over one
+of these sets. If \(\mathcal R(g)\) is a target risk, the
+set-restricted candidate is any minimizer of \(\mathcal R\) over
+\(\mathcal M_{\boldsymbol\varepsilon}(\mathcal C,T,f)\).
+
+\begin{proposition}[Set-restricted risk interpretation]
+\label{prop:v7-projection-interpretation}
+Set-restricted candidates minimize the chosen risk over the learnable
+mergeable set. If that set contains a zero-risk representative and the
+risk is nonnegative, every minimizer has zero residual gap. If every
+member of the learnable mergeable set has positive risk, every
+minimizer has a positive structural gap.
+\end{proposition}
+
+If the exact target is representable by a local-law-compatible
+learned summarizer, set-restricted fitting can recover it in principle;
+otherwise the best local-law-compatible learned summarizer still leaves
+irreducible error. That error is structural: it comes from the chosen
+representation class and local-law set, not from failing to optimize
+hard enough.
+
+\begin{proposition}[Local-law endpoint]
+\label{prop:v7-local-law-endpoint}
+Suppose the local-law penalty is faithful, meaning its zero set inside
+\(\mathcal C\) is exactly the exact local-law set
+\(\mathcal M_0(\mathcal C,T,f)\), and suppose the penalty is
+nonnegative. If \(\lambda=1\) in the balanced objective and
+\(\mathcal C\) contains at least one zero-penalty representative, then
+any class-restricted minimizer lies in
+\(\mathcal M_0(\mathcal C,T,f)\).
+\end{proposition}
+
+At the local-law endpoint, a faithful penalty forces minimizers onto
+the exact mergeable set when that set is nonempty. For intermediate
+\(0<\lambda<1\), the objective encourages this behavior but does not by
+itself prove exact mergeability without additional convexity,
+optimization, or margin assumptions.
+
+\subsection{Proxy-Oracle Gap and Final Certification}
+\label{app:v7-gap-certification}
+
+The local laws are usually checked with the learned score
+\(\widehat f_\phi\). The final scientific claim is about the true
+oracle \(\fstar\). If the learned score has uniform proxy-oracle gap,
+\[
+  d_Y(\widehat f_\phi(a),\fstar(a))\le\varepsilon_{\mathrm{orc}}
+  \qquad\text{for all relevant objects or states }a,
+\]
+then comparing through \(\widehat f_\phi\) costs at most
+\(2\varepsilon_{\mathrm{orc}}\). Thus the operational certificate is
+\[
+  E_{\mathrm{law}}(g_\theta,\widehat f_\phi;R)+2\varepsilon_{\mathrm{orc}}
+  \le
+  \varepsilon
+  \quad\Longrightarrow\quad
+  \text{the tree is certified for }\fstar\text{ at accuracy }\varepsilon.
+\]
+The two terms have different meanings. \(E_{\mathrm{law}}\) is the
+audited local-law error from C1, C3, and C2. The \(2\varepsilon_{\mathrm{orc}}\)
+term is the price of using a calibrated learned score instead of the
+oracle directly. Training weights such as \(\lambda\), \(\rho\), and
+\(\alpha_{\mathrm{gap}}\) influence how the model is fit; they do not
+replace the final inequality.
+
+\subsection{How to Read Non-Mergeable Targets}
+\label{app:v7-nonmergeable-targets}
+
+The local-law-compatible set is most useful when the target is not a
+known mergeable sketch. Suppose \(h^\star\) is an external behavior: a
+non-mergeable library update rule, a one-way sketch being forced into
+arbitrary tree merges, or a semantic oracle with no hand-designed
+state. Training solves a constrained approximation problem:
+\[
+  \text{find the best }g_\theta\in\mathcal C
+  \text{ that also lies near }
+  \mathcal M_{\boldsymbol\varepsilon}(\mathcal C,T,\widehat f_\phi).
+\]
+If the gap after training and audit remains positive, the right
+interpretation is that the chosen learned state class and local-law
+constraints have found the closest mergeable approximation they can
+represent. Increasing model capacity, changing the state format, or
+changing the query may shrink that gap; lowering the optimizer
+loss alone need not.
+
+This is the optimization analogue of the mergeable-sketch story.
+Classical sketches are the zero-gap case: the state, merge, and query
+were designed so the local laws hold exactly. Learned C-Trees are the
+learned case: the architecture supplies candidate summarizers, the
+objective pushes them toward root accuracy and local-law compatibility,
+and the audit decides whether the resulting tree is certified at the
+target \(\varepsilon\).

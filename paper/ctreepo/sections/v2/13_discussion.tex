@@ -39,6 +39,17 @@ the examples above: HLL starts inside the subspace, the Markov tree learns
 an ordered boundary-sensitive member of it, and the manifesto pipeline
 uses audits to estimate how close the LLM operator lands to it.
 
+Long context windows do not remove that issue; they change where the
+engineering pressure appears. A million-token window may make truncation
+less common, but it does not certify that a single read made the same
+rubric decision an expert would have made after tracking evidence across
+the whole document. The local architecture gives a different claim: if
+small leaves and pairwise merges preserve the oracle-relevant evidence,
+then the root measurement is stable under divide-and-conquer and the
+audit has localized places to look when it is not. The manifesto results
+are meant in exactly that sense, not as a claim that context length is
+irrelevant.
+
 \subsection{Global and Local Labels}
 
 The global/local separation is exactly what the budget-split
@@ -49,6 +60,10 @@ unchanged all the way down to about $40\%$ root share, because the
 envelope responds to the \emph{total} label count, not to the ratio
 of its two components. The global/local decomposition theorem referenced
 above is the formal statement that backs this empirical observation.
+Leaf-size invariance is what makes the same trade meaningful in
+long-document settings: when changing the leaf grid leaves the root
+estimate stable, each smaller leaf becomes another less expensive site
+for sampling and supervision rather than a change in the estimand.
 
 \subsection{Scope}
 

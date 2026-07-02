@@ -1,0 +1,34 @@
+\section{Preference Training, Distillation, and Scope}\label{sec:min-applications}
+
+The practical training path is a supervision cascade. At the top, gold root
+labels or trusted expert measurements calibrate the full-document target
+oracle. A high-quality proxy judge, such as a deliberation-grade LLM or
+human-in-the-loop workflow, can then score more nodes than the gold process can
+afford. Local-law audits and quasi-sentence-style span labels turn those node
+judgments into supervision for cheaper summarizers and scorers. Repeating the
+process distills the compression tree downward: each cheaper stage is useful
+only insofar as it continues to preserve the same task state measured by the
+stronger stage.
+
+For preference optimization, the extra premise is oracle factorization. If a
+preference, reward, or loss depends on a manifesto only through the preserved
+oracle value, then DPO, GRPO, and related objectives can be trained on root
+summaries without changing the population target. If preferences also depend
+on tone, persuasion, writing style, or other surface features not included in
+the oracle, the premise fails. The state must widen, or the certificate must
+report the remaining residual.
+
+The same caution applies to the node/root supervision tradeoff. Local labels
+shrink estimation uncertainty when they measure the same preservation property
+as the root task. Judge calibration remains a separate problem. In the
+certificate, additional local labels reduce $B_{\mathrm{est}}$; root labels
+and held-out calibration checks identify $B_{\mathrm{cal}}$, the gap between
+the accessible judge and the trusted social-science target.
+
+C-TreePO is therefore best understood as a methods layer for long, sectioned,
+rubric-driven documents: manifestos, policy platforms, legal records,
+clinical narratives, and book-length reports. It is useful when a domain can
+name a task-relative state, a readout, and local checks that preserve that
+state. The method makes the preservation claim observable: root accuracy,
+local-law distortion, calibration error, and sampling uncertainty are separate
+objects with separate evidence.

@@ -1,0 +1,40 @@
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{natbib}
+\usepackage{hyperref}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.4em}
+
+\begin{document}
+
+\begin{center}
+{\LARGE \textbf{C-TreePO: Design-Based Partial Document Supervision for Long-Document Political Measurement}\par}
+\end{center}
+
+\textbf{Abstract.} Large language models are increasingly used to turn long political texts into measurements, but once a document has been chunked, retrieved, or recursively summarized, the analyst is no longer observing the original object. Design-based Supervised Learning (DSL) shows that naively replacing gold-standard labels with cheap surrogates can bias downstream inference, but in long-document settings the surrogate is often not just a predicted label; it is a compressed representation \citep{EgamiEtAl2024}. This paper studies that setting explicitly. C-TreePO treats long-document coding as an oracle-preserving compression problem and, under the same overlap assumption that underlies DSL---namely, that gold-standard oracle labels are observed with positive probability on the document and node populations of interest---shows that random node sampling with logged propensities can recover downstream labels or preferences that factor through the oracle from partial document supervision rather than a full read of every document. Local audits enforce sufficiency, idempotence, and merge consistency, so compression-induced distortion can be estimated rather than assumed away. We illustrate the framework with Manifesto Project RILE scoring and argue more generally that design-based political measurement must account not only for surrogate labels, but also for the compressed representations on which those labels are built.
+
+\textbf{Proposal.} Long political texts are increasingly measured through LLM pipelines, but once those texts exceed practical context limits the main methodological problem is no longer only prediction error. It is design. The analyst typically observes a truncated excerpt, a retrieved subset of passages, or a recursively summarized representation rather than the original document itself. DSL shows why this matters: replacing gold-standard labels with cheaper surrogates can bias downstream inference even when the surrogate looks accurate on headline metrics \citep{EgamiEtAl2024}. Long-document settings add a further complication. Here the surrogate is often not a label but a representation, and compression itself can change the quantity being measured. The question is therefore not just whether we can summarize a long document, but whether we can do so without changing the task signal the downstream analysis is supposed to preserve.
+
+That question is becoming central in political methodology. Work such as \citet{BenoitEtAl2025} shows that LLMs can recover useful ideological measurements from manifestos and other political texts at scale. DSL shows that those measurements cannot simply be treated as plug-in replacements for gold-standard data. What remains underspecified is the object in between. In practice, the thing that enters the final coding step is often already a compressed version of the original text: a summary, a retrieved context, a span selection, or a tree of summaries. If that compressed object drops interaction-bearing information, then downstream correction is acting on the wrong object. Preprocessing choices become part of the inferential design, even when they are treated as if they were merely engineering.
+
+We study this problem through C-TreePO. A document is partitioned into contiguous spans, summarized up a tree, and audited locally. The oracle is the full-information judgment the researcher actually wants and would trust if cost and context were not binding. In the manifesto application, that oracle is the full-document RILE judgment a trusted coder, or a high-quality rubric-governed coding procedure, would assign after reading the whole manifesto \citep{ManifestoProject2025a}. C-TreePO does not claim lossless compression. Its claim is narrower and more useful. It asks when the compressed object preserves the distinctions that matter for the oracle. In that sense, the framework connects task-relative sufficiency \citep{Blackwell1953} to the mergeable-summary discipline \citep{Agarwal2013MergeableTODS}, but in a form suited to political text rather than purely algebraic sketches.
+
+The design assumption is the same one that makes DSL possible in the first place: gold-standard oracle labels must be available with positive probability on the populations about which we want to learn. In the standard DSL setting, that population is a set of documents. Here it includes both documents and sampled nodes in a summary tree. C-TreePO applies the design-based logic at that node level. Some leaves and internal nodes are sampled at random, gold-standard labels are obtained only there, and propensities are logged so that distortion in the full node population can be estimated with IPW or DSL-style correction rather than trusted naively. This is the step beyond standard DSL: the design-based logic is applied not only to the final label, but to the internal compressed representation on which that label depends.
+
+Local audits enforce sufficiency, idempotence, and merge consistency. Leaf summaries must retain task-relevant evidence; re-summarizing an already valid summary should not move the target; and merged summaries must preserve the cross-span interactions that can otherwise disappear during recursive compression. The role of these conditions is not merely diagnostic. They identify when a compressed object still supports the same oracle judgment as the full document, and therefore when downstream labels or preferences that factor through the oracle can be recovered from partial document supervision. In this sense, C-TreePO extends the design-based logic of DSL to the representation layer itself.
+
+Manifesto Project RILE scoring is a natural running case for this argument because it makes the interaction problem visible. Manifestos are internally structured documents whose ideological content depends on how issue emphases combine across sections. A party may sound left on welfare policy, centrist on institutional reform, and right on law and order or market organization. A local summary can therefore be perfectly plausible and still fail to support the same overall RILE judgment as the full document. That makes manifesto coding a clean place to ask whether a compressed representation preserves the target researchers actually care about. The point of the application is not to present benchmark-style performance claims. It is to show how partial document supervision can preserve, estimate, or certify a full-document ideological target.
+
+The broader implication is that long-document measurement should be understood as a two-stage design problem: first the document is reduced to a representation, then that representation is labeled. DSL addresses the second stage. C-TreePO adds a design-based account of the first. This shifts attention from whether an LLM can assign a plausible label to whether the representation passed to the labeler still supports the same judgment as the full document. For political methodology, that is the relevant extension. As long political texts move more fully into LLM-based pipelines, the inferential object of interest is no longer only the surrogate label; it is the surrogate label together with the compression path that produced it.
+
+\clearpage
+\bibliographystyle{plainnat}
+\bibliography{../../paper/refs}
+
+\end{document}

@@ -1,0 +1,183 @@
+\section{Introduction: From Hand-Crafted Sketches to Learned Sufficiency}\label{sec:min-introduction}
+
+Long-document measurement is usually presented as a scoring problem: given a
+manifesto, report where a party stands on economic policy, social liberalism,
+immigration, European integration, environmental policy, or decentralization.
+For a language-model system, however, the more basic object is a compression
+problem. A long document is split, shortened, retrieved from, summarized, or
+otherwise transformed before a final readout is applied. The final score is
+therefore not only a property of the original document. It is also a property
+of the representation that survived the path from raw text to the model's
+context window.
+
+That distinction matters for political methodology. Fiscal commitments, tax
+qualifications, public-service promises, market-intervention claims, and
+welfare retrenchment cues often appear in different parts of a manifesto. The
+document-level judgment depends on their joint interpretation. A compression
+step can lose the caveat that changes a tax pledge, overweight a rhetorically
+salient paragraph, or erase the boundary fact that turns two neighboring
+sections into a coherent policy position. If the final model reads the
+compressed object faithfully, it can still answer the wrong question because
+the compressed object is not sufficient for the full-document oracle.
+
+The core question is therefore:
+\[
+  \text{when is the state that reaches the root sufficient for the target
+  readout?}
+\]
+C-TreePO answers this question by treating recursive LLM summarization as a
+learned mergeable sketch. The word \emph{sketch} is doing real work here, not
+only supplying an analogy. A sketch is a small state that is designed so a
+query can be answered after local states are merged. The state must contain
+the information the query needs, and the merge path must preserve that
+information.
+
+The simplest example is Count-Min \citep{CormodeMuthukrishnan2005}. Given a
+stream or multiset $A$, a hand-designed state map $g$ stores a small
+$d\times w$ matrix of counters. Each item increments one counter per row.
+Two disjoint stream segments merge by adding their counter matrices:
+\[
+  g(A\uplus B)=g(A)+g(B).
+\]
+For an item $q$, the readout $f_q$ estimates its frequency by checking the
+counters to which $q$ hashes and taking the row minimum:
+\[
+  f_q(g(A))=\min_{j\le d} g(A)_{j,h_j(q)}.
+\]
+The merge is exact at the state level. The readout is approximate only because
+other items can collide with $q$ in the same counters. This is the classical
+template: choose a fixed query family, hand-design a state function $g$ and an
+associative merge, then prove that the readout remains valid after parallel or
+tree-shaped aggregation. HyperLogLog, quantile summaries, Bloom filters, and
+many streaming summaries follow the same pattern
+\citep{FlajoletEtAl2007,Agarwal2013MergeableTODS,BoykinEtAl2014Summingbird}.
+
+This template is also a sufficiency statement. In Fisher's language, the state
+is a statistic that preserves all information relevant to the target
+\citep{Fisher1922}; in Blackwell's language, the compressed experiment is
+equivalent to the original for the decision problem induced by the query
+\citep{Blackwell1953}. The Count-Min counter matrix is not a lossless copy of
+the stream. It deliberately discards order, syntax, and identities not needed
+for the chosen frequency query. Its success comes from being sufficient for
+that query up to a controlled collision residual.
+
+Classical sketches get this property by hand-crafting both sides of the
+interface. The readout $f$ is chosen from a small catalog: frequency,
+cardinality, quantile, membership, or a related closed-form query. The state
+function $g$ is engineered to match that query: counters for frequencies,
+register maxima for cardinality, ordered tuples for quantiles, bit arrays for
+membership. The proof is algebraic because the designer knows what state is
+sufficient before the algorithm runs.
+
+C-TreePO keeps the interface but changes where the design burden sits. In
+long-document measurement, the target readout is not a closed-form streaming
+query. It may be a trusted human coding rule, a calibrated rubric judge, a
+downstream loss, or an expert-survey target. We write that target-facing
+readout as $f$. The sufficient state is not known in advance. C-TreePO learns
+a state map $g$ that tries to make
+\[
+  f(g(x)) \approx f(x)
+\]
+on the objects the tree actually creates. For a binary merge, the local
+identity becomes
+\[
+  f\!\left(g(g(u)\concat g(v))\right)
+  \approx
+  f(u\concat v).
+\]
+This is the mergeable-sketch identity in semantic form: summarize the left
+span, summarize the right span, merge those states, and recover the same
+readout that would have been obtained from the raw union.
+
+The move from hand-crafted sketches to C-TreePO is a move from analytic state
+design to learned state design. In an LLM application, $g$ may be a prompted
+summarizer, a DSPy/GEPA-optimized prompt program, an instruction-tuned model,
+or a weight-tuned model trained against oracle labels and local-law feedback.
+The readout $f$ may likewise be a prompted scorer, a calibrated judge, or a
+learned evaluator. In a non-language domain, the same pair may be realized by
+ordinary neural networks, transformers over structured states, or neural
+operators such as Fourier neural operators that learn mappings between
+function spaces \citep{Kovachki23NeuralOperator,Li21FNO}. The architecture is
+not the definition. The definition is the state--merge--readout contract and
+the empirical certificate that the contract held on the deployed tree.
+
+This is also where LLMs make the learned-sketch problem unusually attractive.
+Classical sketch states are often opaque to domain experts. A Count-Min matrix
+can be audited for dimensions, hashes, and collision bounds, but a political
+scientist cannot read a counter matrix and see which fiscal qualification it
+contains. An LLM state $g(x)$ is natural language. It can name the economic
+pledges, quote or paraphrase qualifications, record uncertainty, and expose
+what evidence the downstream readout will see. The summary can be inspected,
+compared with the source span, and stress-tested by counterfactual examples
+that share the same summary but should or should not share the same oracle
+value. Observability does not prove sufficiency, but it makes sufficiency
+auditable in a way numeric sketches are not.
+
+The audit is necessary because LLM pipelines otherwise create black-box
+compression. A long-context model may score a whole document directly, but it
+can still use information unevenly, including the familiar
+``lost-in-the-middle'' pattern \citep{LiuEtAl2024LostMiddle}. A retrieval or
+recursive-summary pipeline is more transparent operationally, but it can hide
+which evidence was dropped and which cross-span interactions survived. Either
+way, the representation being scored must be checked against the oracle, not
+only trusted because the final prediction is plausible.
+
+Design-Based Supervised Learning supplies the measurement discipline for that
+check. DSL's warning is that model-produced labels can have high accuracy and
+still induce biased downstream estimands when errors align with the target
+analysis \citep{EgamiEtAl2024}. C-TreePO applies the same logic one level
+earlier, to the representation being labeled. Root labels anchor the
+full-document target. Sampled leaf and merge labels estimate whether the
+compression path preserved the target. Logged inclusion probabilities make the
+sampled checks a design-based estimate of the finite population of local
+failures rather than a convenience sample of examples the researcher happened
+to inspect.
+
+The method therefore has two linked pieces. The first is algebraic: split a
+document into contiguous leaves, map each leaf to a state with $g$, recursively
+merge adjacent states with $g$, and apply $f$ at the root. Three local laws
+ask whether each step preserved the task-relevant state. Leaf summaries must
+be sufficient for their source spans, re-summarizing stored states must not
+drift, and merging child states must preserve the same cross-span information
+as summarizing the raw union. Under exact laws, the root state is sufficient
+for the full-document readout. Under approximate laws, the accumulated local
+residual supplies a certificate for compression-induced distortion.
+
+The second piece is design-based. A realized tree contains roots, leaves,
+stored summaries, and internal merge nodes. These are finite-population units.
+The researcher can sample them with logged positive propensities, query a
+gold-standard coder or high-grade judge on the sampled checks, and use
+IPW/Horvitz--Thompson estimators to estimate tree-wide violation rates and
+distortion. This changes the supervision problem. Instead of spending every
+expensive label on a full document, the researcher can allocate some expert
+attention to cheaper partial-document units, as long as the local-law audit
+certifies that those units measure the same target-preservation property.
+
+The Manifesto/Benoit application is the running example. The target is a set
+of document-level policy positions. The representation is a tree of
+policy-evidence summaries. The readout $f$ is a rubric-facing scorer for a
+policy dimension. The state map $g$ is an LLM summarizer trained or prompted
+to preserve the evidence that the rubric uses. On the six-dimension benchmark,
+a per-dimension C-Tree pipeline using a single open-weight model reaches macro
+Pearson $r=0.829$ against expert-survey means at $8\mathrm{K}$-character
+leaves, above Benoit's proprietary 18-score ensemble ($0.817$) and their
+matched Gemma-3 open-weight replication ($0.793$)
+\citep{BenoitEtAl2025,ManifestoProject2025a}. The economic dimension is the
+detailed granularity case: the $8\mathrm{K}$-character tree reaches
+$r=0.939$ against expert means, and an alternating prompt ladder shows a
+narrow plateau across $1024$--$8192$ token leaves.
+
+The empirical results are important, but the paper's methodological claim is
+the frame: LLM compression can be treated as a learned, observable,
+mergeable-sketch problem. Classical sketches verify sufficiency by proof
+because the state is hand-designed. C-TreePO verifies approximate sufficiency
+by local law, design-based audit, and direct inspection of the learned state.
+The rest of the manuscript builds outward from that claim.
+Section~\ref{sec:min-framework} gives the state interface, Count-Min warm-up,
+compression tree, and local laws. Section~\ref{sec:min-audit} turns those laws
+into a partial-document supervision design. Section~\ref{sec:min-guarantees}
+states the conditional theorem stack. Section~\ref{sec:min-manifesto-results}
+reports the Manifesto results. Section~\ref{sec:min-validation} connects the
+application back to controlled sketch, Markov, and neural-operator anchors.
+Section~\ref{sec:min-applications} closes with preference training,
+distillation, and scope.

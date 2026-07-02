@@ -1,0 +1,248 @@
+\section{Task State, Trees, and Local Laws}\label{sec:min-framework}
+\label{sec:min-manifesto-state}
+
+The algebra is small. At each node of the tree we want a summary the
+oracle cannot distinguish from the raw span beneath it, and three local
+laws say how that property propagates from leaves to root. Whatever the
+summarizer is, the local laws, the audit, and the gap bound treat it the
+same way.
+
+\subsection{Two Pieces a Researcher Chooses: $f$ and $g$}\label{sec:min-fg-pieces}
+
+Let $\Strings$ be finite token sequences with concatenation
+$u \concat v$. The two pieces a researcher chooses are the summarizer
+$g:\Strings\rightsquigarrow\Strings$ and the readout
+$f:\Strings\rightsquigarrow\Y$. The summarizer compresses each leaf
+or merge call into a stored summary; the readout scores the root summary.
+The pair is an approximate sufficient statistic for the task on a
+tree merge: knowing $g(x)$ should determine $f(x)$ up to a controlled
+error, and the same identity should hold after pairwise merges.
+
+The pair can be hand-crafted in closed form, as in the classical
+mergeable-sketch line, or learned in a parameterized function class.
+C-TreePO is the same algebra under the second choice, with the
+particular function class fixed by the application: prompt or weight
+optimization against the oracle for LLM-shaped $g$, a neural operator
+\citep{Kovachki23NeuralOperator} for continuous structured inputs, or
+a fine-tuned small model for distillation cascades. The Manifesto
+application below uses LLM summaries and LLM scores: $g$ is a
+prompted Gemma summarizer applied at every leaf and merge, and $f$ is
+a prompted Gemma scorer that returns a seven-point policy score. The
+framework runs unchanged across instantiations along the lineage:
+
+\begin{itemize}[leftmargin=1.5em]
+  \item \textbf{Classical mergeable sketches.} For Count-Min
+    \citep{CormodeMuthukrishnan2005}, $g$ hashes each item into one
+    counter per row and merges by element-wise counter sum; $f$
+    returns the row-minimum for a queried item. The pair is an exact
+    sufficient statistic for item frequency on a fixed query catalog.
+    HyperLogLog (cardinality) and Bloom filters (membership) fit the
+    same template with different hand-designed states
+    (Apps.~\ref{app:min-hll}, \ref{app:min-algebra}).
+  \item \textbf{Learned neural operators.} $g$ is a Fourier neural
+    operator and $f$ is a small MLP readout. The Markov changepoint task
+    is the worked example (Apps.~\ref{app:min-neural},
+    \ref{app:min-markov}).
+  \item \textbf{Prompted LLMs (the case studied here).} $g$ is a
+    prompted LLM summarizer, $f$ is a prompted LLM scorer; the
+    Manifesto results in Section~\ref{sec:min-manifesto-results}.
+  \item \textbf{Distillation cascade (forward-looking).} $g$ is a small
+    fine-tuned LM trained on node-level labels from a stronger proxy;
+    $f$ is a light scorer trained alongside it
+    (Section~\ref{sec:min-discussion}).
+\end{itemize}
+
+The local laws, the audit, and the gap bound do not see which $(f, g)$
+pair was chosen.
+
+\subsection{Running Example: Economic Policy Position}\label{sec:min-running-example}
+
+The running example throughout is a manifesto's economic-policy
+position on the public-services-versus-taxation scale used in the
+Manifesto Project benchmark \citep{BenoitEtAl2025,ManifestoProject2025a}.
+The trusted oracle $\fstar$ is the seven-point score a rubric-trained
+coder would assign to the full text. The summarizer $g$ is asked to
+preserve the rubric-relevant evidence in any span: commitments to
+public services, taxation, welfare, market intervention, privatization,
+fiscal restraint, and the qualifications that determine how those
+claims should be read. The readout $f$ scores a (raw or summarized)
+string on the same seven-point scale, so $f\circ g$ is what the
+deployed pipeline computes on a leaf or merged summary. Two texts can
+look different and sit in the same fiber of $\fstar$ if they carry the
+same economic evidence. Two texts can look similar and sit in
+different fibers if one contains a fiscal qualification the other
+omits.
+
+\subsection{The Tree}\label{sec:min-tree}
+
+A document $x$ is partitioned into contiguous leaves
+$(b_1,\ldots,b_k)$, and those leaves are attached to a binary tree.
+Both pieces of structure are application choices. The partition can
+be uniform chunks of fixed size, paragraph boundaries, section breaks,
+or any other contiguous segmentation. The binary merge tree built on
+top of the partition is similarly free; under the local laws below,
+any two merge trees on the same leaves give the same expected root
+value (Corollary~\ref{cor:schedule}, schedule invariance).
+Section~\ref{sec:min-manifesto-results} reports the empirical
+extension: across a wide range of partition choices on the Manifesto
+Project benchmark, the root estimand stays stable as well.
+
+Each leaf stores $s_i = g(b_i)$. Each internal node $u$ stores
+$s_u = g(s_{u_L}\concat s_{u_R})$. Only stored summaries move through
+the pipeline at deployment; the raw span beneath a node, written
+conceptually as $S(u)$, is retained for audit.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.92\linewidth]{01_base_plain.pdf}
+    \caption{\textbf{A compression tree reduces a document to one root
+    summary by recursively merging adjacent child summaries.} In the
+    Manifesto application, every stored summary stands in for the
+    policy-evidence state of the span beneath it.}
+    \label{fig:min-plain-tree}
+\end{figure}
+
+\subsection{The Three Local Laws}\label{sec:min-laws}
+
+\begin{definition}[Oracle equivalence]\label{def:oracle-equivalence}
+For strings $u,v\in\Strings$ and oracle $\fstar:\Strings\rightsquigarrow\Y$
+with metric $\metric$ on $\Y$,
+\[
+  u\sim_{\fstar}v
+  \iff
+  \metric\big(\fstar(u),\fstar(v)\big)=0.
+\]
+We write $u\sim v$ for $u\sim_{\fstar}v$ when the oracle is clear from
+context. The relation is the equivalence kernel of $\fstar$, and its
+fibers are the level sets $\{x:\fstar(x)=\fstar(x_0)\}$. Expectations
+of distances under $\fstar$ are taken with respect to $\sim_{\fstar}$.
+\end{definition}
+
+Preservation is always relative to this task relation. A valid summary
+need not preserve style, rhetoric, or facts irrelevant to the
+seven-point score. It must preserve whatever can move $\fstar$.
+
+\begin{assumption}[Context-compatible oracle]\label{ass:context}
+For every context $w\in\Strings$, $u\sim_{\fstar}v$ implies both
+$w\concat u\sim_{\fstar}w\concat v$ and
+$u\concat w\sim_{\fstar}v\concat w$.
+\end{assumption}
+
+This is an application assumption. It is plausible for content rubrics
+whose evidence can be localized and substituted. It can fail for
+targets like tone, irony, or persuasion, where a locally equivalent
+span may change how neighboring text is read.
+
+\paragraph{C1: Sufficiency.}
+\begin{equation}\tag{C1}\label{eq:leaf_sufficiency}
+  \forall\text{ realized leaf }b:\qquad g(b)\sim_{\fstar}b.
+\end{equation}
+A leaf summary keeps the evidence the oracle would read in its source
+span.
+
+\paragraph{C2: Idempotence.}
+\begin{equation}\tag{C2}\label{eq:leaf_idempotence}
+  \forall\text{ stored summary }s\in\operatorname{range}(g):\qquad
+  g(s)\sim_{\fstar}s.
+\end{equation}
+Re-summarizing an already-reduced string does not shift the task value.
+
+\paragraph{C3: Merge consistency.}
+\begin{equation}\tag{C3}\label{eq:leaf_compatibility}
+  \forall u,v\in\Strings:\qquad
+  u\concat v
+  \sim_{\fstar}g(u\concat v)
+  \sim_{\fstar}g\!\left(g(u)\concat g(v)\right).
+\end{equation}
+Summarizing children separately and then merging preserves the same
+cross-span interaction as summarizing the raw union at once.
+
+\subsection{From Hand-Crafted to Learned Mergeable Sketches}\label{sec:min-sketch-reduction}
+
+Classical mergeable sketches and C-TreePO instantiate the same
+encode-merge-query template. What differs is who designs $(f, g)$ and
+what guarantees they carry. In the classical case $(f, g)$ is
+hand-crafted to make an exact sufficiency proof go through on a fixed
+query catalog: Count-Min picks a counter-array state, an element-wise
+sum merge, and a row-min readout for item frequency; HyperLogLog
+picks register-wise max and a cardinality estimator that handles the
+harder case where $|A|$ and $|B|$ alone do not determine
+$|A\cup B|$. The state can carry strictly more information than the
+per-query answer, which is why sketches compose \emph{state} and not
+scalars.
+
+C-TreePO keeps the encode-merge-query shape and replaces hand-crafting
+with optimization. $(f, g)$ live in a parameterized function class
+(a prompted or weight-tuned LLM, a neural operator, a fine-tuned small
+model), and the closed-form sufficiency proof becomes an audit over
+residual local-law violations on the realized calls of the deployed
+tree. For the manifesto application, the state is a learned or
+prompted surrogate for rubric-relevant evidence; for continuous
+structured-input tasks (the Markov walkthrough in
+App.~\ref{app:min-markov}), the state is the latent function the
+neural operator learns. The local-law machinery does not see which
+function class was chosen.
+
+\begin{theorem}[Local laws $\Leftrightarrow$ mergeable-summary algebra]\label{thm:sketch-equivalence}
+The following are equivalent for an oracle $\fstar$ and a tree
+operator $(g, f)$:
+\begin{enumerate}[leftmargin=1.5em]
+  \item $(g, f)$ satisfies C1, C2, and C3 of
+    Definition~\ref{def:oracle-equivalence};
+  \item there is a mergeable-summary scheme
+    $(\mathrm{encode}, \oplus, \mathrm{query})$ on a state space
+    $\mathcal{S}$ with a decoder $\mathrm{decode}:\mathcal{S}\to\Strings$
+    such that
+    $g(x)=\mathrm{decode}(\mathrm{encode}(x))$,
+    $\mathrm{decode}(\mathrm{encode}(s_L)\oplus\mathrm{encode}(s_R))=g(s_L\concat s_R)$, and
+    $f=\mathrm{query}\circ\mathrm{encode}$.
+\end{enumerate}
+The pointwise approximate version transports one-to-one: nodewise
+$\varepsilon$-budgets at C1/C3 correspond to leaf-preservation and
+merge-compatibility budgets on the sketch side, and conversely.
+\end{theorem}
+
+The reverse construction takes $\mathcal{S}=\operatorname{range}(g)$
+with $\mathrm{encode}=g$, $\oplus(s,t)=g(s\concat t)$, and
+$\mathrm{query}=f$; C3 supplies the mergeable axiom directly. The
+proof of both directions, including the approximate transport, is in
+Appendix~\ref{app:min-algebra}; the Lean development verifies the
+forward direction (\texttt{local\_laws\_of\_sketch} in
+\texttt{SketchRecovery.lean}) and its approximate variant
+(\texttt{approx\_bundle\_of\_sketch}). The C-TreePO theorem stack
+(root preservation, schedule invariance, DPO/GRPO equivalence) lifts
+to any mergeable sketch through this equivalence, and a learned
+summarizer that satisfies the audit inherits the same closed-form
+guarantees.
+
+\subsection{What LLM-Shaped $g$ Adds: Observability}\label{sec:min-observability}
+
+Classical sketch state is a register tuple. It is inspectable
+algebraically (the sufficiency proof goes through on paper) and opaque
+to a reader: an HLL register array does not tell anyone which items
+were hashed into it. LLM-shaped $g(x)$ is text. It is inspectable
+directly, by a reader or by another LLM, in the same units the leaf
+$x$ already lives in.
+
+Two consequences carry through to the audit machinery
+(Section~\ref{sec:min-audit}). First, the C2 idempotence check has a
+literal reading: a sampled stored summary $s$ either preserves the
+load-bearing economic evidence under the rubric or it does not, and a
+gold-standard coder can score it on the same rubric used at the
+document level. Second, sufficiency on a fiber can be probed by
+counterfactual sampling. Pairs $(x, x')$ with $g(x)\approx g(x')$
+under a textual similarity check, audited for
+$\fstar(x)\approx\fstar(x')$, give a sufficiency diagnostic with no
+gradient information. Classical sketches have no analogue; their
+fibers are not in human-comparable units.
+
+The summary itself becomes a supervision target alongside the
+downstream loss. Distillation against teacher summaries, stylistic
+constraints on the summary text, and rubric-shaped scaffolding all act
+on $g$ directly rather than on $f\circ g$
+(Section~\ref{sec:min-distillation}).
+
+The laws are stated globally; the framework only ever needs them on the
+realized calls of a deployed tree. Whether they hold often enough on
+those calls is not something one asserts. It is something the audit
+estimates, and Section~\ref{sec:min-audit} is how.

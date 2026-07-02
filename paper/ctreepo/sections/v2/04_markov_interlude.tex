@@ -1,6 +1,15 @@
 \section{A Non-Linear Interlude: Counting Color Transitions}\label{sec:markov-interlude}
 
-Before the main theorems, a short example worth walking through. Section~\ref{sec:mergeable-sketches} gave the classical recipe for a tree of summaries: encode shards, merge with a commutative operator, read out an aggregate query. Section~\ref{sec:framework} generalized that recipe to a learned summarizer under three local laws. The smallest task that exposes why the generalization is needed is one whose oracle is a natural aggregate but cannot be computed by any commutative register-wise merge. This interlude walks through that task and motivates why $g$ has to be a richer operator than a hand-designed sketch.
+Before the main theorems, a short example worth walking through.
+Section~\ref{sec:mergeable-sketches} gave the classical recipe for a tree
+of summaries: encode shards, merge bounded states, and read out an
+aggregate query. Section~\ref{sec:framework} generalized that recipe to a
+learned summarizer under three local laws. The smallest task that exposes
+why the learned generalization is useful is one whose oracle is a natural
+aggregate but cannot be computed by an unordered register-wise merge unless
+the state carries boundary information. This interlude walks through that
+task and motivates why $g$ has to be a richer operator than a set-like
+sketch merge.
 
 \subsection{A Synthetic Document with a Non-Linear Oracle}\label{sec:color-sequences}
 
@@ -35,7 +44,7 @@ boundary signal entirely.
     \label{fig:markov-tree-walkthrough}
 \end{figure}
 
-\subsection{What Goes Wrong with a Classical Mergeable Sketch}
+\subsection{What Goes Wrong with an Unordered Merge}
 
 Suppose we attempt to apply the HyperLogLog recipe directly: encode each
 leaf into a register-like summary, merge pairwise with a commutative

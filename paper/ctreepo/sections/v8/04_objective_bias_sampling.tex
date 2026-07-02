@@ -1,0 +1,159 @@
+\section{C-TreePO Objective, Bias, and Sampling}
+\label{sec:v8-objective}
+
+\subsection{The C-TreePO Objective}
+
+Section~\ref{sec:v8-ctree-math} gives the structural goal: learn one state map
+\(g\) whose node states can replace the raw spans they represent for
+oracle-compatible readouts. C-TreePO turns that structural goal into an
+optimization problem for the same learned \(g\). The root should be useful for
+the document-level task, and the internal states should behave like valid
+C-Tree states.
+
+The objective therefore has two channels. The root channel fits the final
+document-level target. The local-law channel asks whether the same \(g\)
+behaves correctly at leaves, on re-entry, and at merges. Start with the clean
+oracle-available version, where \(f^\ast\) can be queried at every relevant
+node. This is not the usual training regime, but it is the target objective.
+
+Let \(L_{\mathrm{root}}(g)\) be the full-document root loss, measured against
+the available document-level expert target. For the local channel, attach one
+node loss to each \(v\in V(T)\). This node loss collects the local checks that
+apply at \(v\): C1 for a leaf, C2 for the produced state, and C3 for an
+internal merge. If every check could be measured by the target oracle, the
+quantity we would calculate at node \(v\) is
+\[
+  \underbrace{\ell_v^\ast}_{\text{oracle loss we want}}
+  =
+  \underbrace{\ell_{\mathrm{law}}(v;f^\ast,g)}_{\text{C1/C2/C3 discrepancy through }f^\ast}.
+\]
+The star marks the target quantity: the local-law loss as it would be measured
+by \(f^\ast\), not by the cheaper proxy used during dense training.
+
+Let \(d(v)\) be the depth of node \(v\), with the root at depth \(0\), and let
+\(\gamma\ge 0\) be a declared depth-discount weight. If every relevant node
+could be evaluated by \(f^\ast\), the local-law part of the objective would be
+\begin{equation}
+\label{eq:v8-local-law-estimand}
+  L_{\mathrm{law}}^\ast(g,T)
+  =
+  \sum_{v\in V(T)}\gamma^{d(v)}\ell_v^\ast .
+\end{equation}
+The theorem-facing objective is then
+\begin{equation}
+\label{eq:v8-main-objective}
+  J_\lambda^\ast(g)
+  =
+  (1-\lambda)L_{\mathrm{root}}(g)
+  +
+  \lambda L_{\mathrm{law}}^\ast(g,T),
+  \qquad 0\le\lambda\le 1 .
+\end{equation}
+Here \(\lambda\) is the analyst-chosen local-law share. This is the target
+objective in principle: root supervision plus the oracle local-law losses that
+would make the exact theorem relevant to the fitted \(g\).
+
+\subsection{Why the Objective Becomes an Estimation Problem}
+
+The statistical problem is not that we want an alternate target. It is that
+\(L_{\mathrm{law}}^\ast\) is usually not fully observed. At scale, \(f^\ast\)
+is sparse, while the local laws create many node-level checks.
+
+We usually observe three different things. First, the root channel has
+document-level labels or expert targets for some documents. Second, the
+local-law channel has cheap proxy measurements at many nodes. Third, a smaller
+sample of nodes is sent to \(f^\ast\), so that the proxy can be checked against
+the oracle.
+
+The dense local quantity is the same C1/C2/C3 comparison measured through the
+fitted proxy readout \(\widehat f\):
+\[
+  \underbrace{\widehat\ell_v}_{\text{proxy loss we observe densely}}
+  =
+  \underbrace{\ell_{\mathrm{law}}(v;\widehat f,g)}_{\text{same local check through }\widehat f}.
+\]
+The proxy is useful because it gives local training signal everywhere. It is
+not an independent target. It supplies the dense local geometry that constrains
+\(g\) between sparse oracle calls. The sparse oracle calls then tell us how
+the dense proxy surface differs from the target oracle surface, and therefore
+how much bias must be corrected in the local-law channel.
+
+The difference between the dense proxy loss and the oracle loss is
+\[
+  b_v=\widehat\ell_v-\ell_v^\ast .
+\]
+This \(b_v\) is the proxy bias for node \(v\). If it were always zero, the
+proxy channel would already be the oracle local-law channel. In general it is
+not zero, so sampled oracle calls are used to estimate and correct it.
+
+Let \(R_v\in\{0,1\}\) indicate whether node \(v\) is sampled and evaluated
+with \(f^\ast\). Let \(\pi_v>0\) be the logged marginal probability that the
+audit design would sample node \(v\). Thus \(R_v/\pi_v\) is zero for unsampled
+nodes and \(1/\pi_v\) for sampled oracle nodes.
+
+\subsection{Correcting the Local-Law Channel}
+
+The corrected node loss is
+\begin{equation}
+\label{eq:v8-corrected-node-loss}
+  \ell_v^{\mathrm{corr}}
+  =
+  \widehat\ell_v
+  +
+  \frac{R_v}{\pi_v}
+  \left(\ell_v^\ast-\widehat\ell_v\right).
+\end{equation}
+If \(R_v=0\), the node contributes the proxy loss. If the node is sampled, the
+observed oracle--proxy difference is added back with its inverse-propensity
+weight. With correct logged propensities,
+\(\mathbb E[\ell_v^{\mathrm{corr}}\mid T]=\ell_v^\ast\).
+
+Aggregating the corrected node losses gives the practical local-law channel:
+\[
+  L_{\mathrm{law}}^{\mathrm{corr}}(g,T)
+  =
+  \sum_{v\in V(T)}\gamma^{d(v)}\ell_v^{\mathrm{corr}} .
+\]
+It estimates \(L_{\mathrm{law}}^\ast(g,T)\); it is not a replacement population
+target. In finite data, the objective actually optimized or reported is the
+plug-in version
+\begin{equation}
+\label{eq:v8-corrected-objective}
+  J_\lambda^{\mathrm{corr}}(g;T)
+  =
+  (1-\lambda)L_{\mathrm{root}}(g)
+  +
+  \lambda L_{\mathrm{law}}^{\mathrm{corr}}(g,T).
+\end{equation}
+
+The remaining bookkeeping is design-based estimation. Coverage changes the
+variance of the root and local-law estimates, not the population objective.
+Explicit channel weights are an equivalent interface to \(\lambda\) mode, but
+the two interfaces should not be supplied at the same time. Proxy-oracle gaps,
+propensity residuals, sampling standard errors, and clipping envelopes are
+diagnostics for the corrected channel, not additive loss terms. The full
+Horvitz--Thompson algebra, explicit-weight form, and diagnostic decomposition
+are in Appendix~\ref{app:v8-objective-ipw}.
+
+\subsection{Putting the Pieces Together}
+
+The full C-TreePO picture is therefore short enough to state without the
+estimation details. First, choose a realized C-Tree for a document, so every
+leaf, internal node, and root has a represented span. Second, learn one state
+map \(g\) that is used throughout that tree. Third, train \(g\) against two
+channels: a root channel for the document-level target and a local-law channel
+for C1/C2/C3 validity at the nodes. Fourth, because \(f^\ast\) is usually
+sparse, use \(\widehat f\) for dense local training and sampled \(f^\ast\)
+node calls to audit and correct the local-law channel.
+
+Section~\ref{sec:v8-ctree-math} supplies the semantic reason this stack is
+meaningful: if the local laws hold exactly, node and root states can replace
+their raw spans for oracle-compatible readouts. This section supplies the
+optimization and observation layer: \(J_\lambda^\ast\) is the oracle objective,
+and \(J_\lambda^{\mathrm{corr}}\) is its proxy-corrected finite-data version.
+The correction estimates the oracle local-law channel; it is not a new target.
+
+The Manifesto study below should be read as an LLM instantiation of this stack.
+Expert-survey scores anchor the root channel, teacher traces and proxy scores
+shape the learned state map \(g\), and the stronger node-level \(f^\ast\) audit
+is the next measurement layer.

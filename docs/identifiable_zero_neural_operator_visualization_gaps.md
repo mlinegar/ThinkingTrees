@@ -35,7 +35,7 @@ This note is a checklist of **what we still cannot “see”** clearly from the 
 
 The default overnight sweep script builds and runs the two “density” sweeps above:
 
-- `scripts/run_identifiable_zero_neural_operator_overnight.sh`
+- `venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-neural-operator ...`
 
 It writes outputs under an `OUT_ROOT` like:
 
@@ -44,4 +44,3 @@ It writes outputs under an `OUT_ROOT` like:
 and logs under:
 
 - `logs/<timestamp>_neural_operator_overnight_run.log`
-

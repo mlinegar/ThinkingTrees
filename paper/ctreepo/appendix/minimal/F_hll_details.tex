@@ -1,0 +1,97 @@
+\section{HLL and Classical Sketch Details}\label{app:min-hll}
+
+\subsection{HLL as Mergeable State}
+
+HyperLogLog isolates the state-versus-value distinction. The scalar answer
+to a cardinality query is not mergeable: knowing \(|A|\) and \(|B|\) does
+not tell us \(|A\cup B|\). The sketch is mergeable because it stores a
+bounded register state carrying overlap information. Each item is hashed
+to a register index and a leading-one count; the register stores the
+largest count seen for that index; two summaries merge by pointwise
+maximum.
+
+On the running \emph{Hamlet} analogy, the warm-up query ``how many distinct
+speaking roles appear'' is enumerable on a single play ($\approx 24$) and is
+too small to motivate HLL on its own. The load-bearing query is ``how many
+distinct character co-appearance pairs ever share a scene'': each scene emits
+the set of unordered pairs
+\(\{(c_i,c_j):i<j,\ c_i,c_j\text{ both speak}\}\); each pair is one stream
+item; each act merges by taking the union of its scenes' pair-sets; the
+readout is union cardinality. The merge is exactly set-union, and HLL's
+pointwise-register-max approximates union cardinality without storing the
+union-set itself. A single play is still the mechanism picture; the payoff
+appears once the same pipeline runs on a corpus of plays, where the union of
+co-appearance sets grows with the corpus while the register array stays
+fixed-size.
+
+The standard readout is
+\[
+\hat n=\frac{\alpha_m m^2}{\sum_j 2^{-r_j}},
+\qquad
+\alpha_m\approx 0.7213/(1+1.079/m),
+\]
+with small-range corrections. Its relative standard error is
+\(1.04/\sqrt{m}\) \citep{FlajoletEtAl2007}. With \(p=14\),
+\(m=16384\), so the estimator floor is about \(0.81\%\). A valid tree
+compression preserves the register state and the induced readout within
+that known noise floor; the floor itself is inherited from the sketch,
+not introduced by the tree.
+
+\begin{center}
+\centering
+\includegraphics[width=\linewidth]{hll_merge_learning_memory_median.pdf}
+\captionof{figure}{\textbf{A trainable merge recovers the classical HLL
+sketch at the estimator's own noise floor.} Relative RMSE against the
+oracle versus HLL precision $p$ (with $m=2^p$ registers), for three
+series: learned merge (median over five seeds, solid), exact HLL
+(dashed), and the theoretical $1.04/\sqrt{m}$ floor (dotted). All three
+curves sit within a fraction of the floor across $p\in\{6,\ldots,12\}$;
+the learned merge reproduces classical behavior without a separately
+tuned readout. Source:
+\texttt{paper/ctreepo/scripts/regen\_paper\_hll\_figure.py}.}
+\label{fig:min-hll-parity}
+\end{center}
+
+\subsection{Implementation Parity}
+
+A native register implementation is byte-identical under flat and tree
+reductions because pointwise maximum is an exact associative merge. Apache
+DataSketches exposes the same cardinality semantics but may serialize an
+equivalent sketch differently depending on the insertion and merge order.
+The claim is therefore narrow: exact register implementations match
+exactly; library sketches match at the readout level and stay inside the
+estimator floor. This is the classical analogue of the C-TreePO
+discipline: preserve the task state, then audit the readout.
+
+\subsection{Learned Variants and Sketch Family}
+
+Learned-\(g\) with a classical readout must produce register-like states
+readable by the HLL estimator. Learned-\(g{+}f\) can learn a hidden state
+and readout jointly. These variants are stress tests for whether a
+trainable state can recover the classical sketch's behavior on its own
+query; a task-specific oracle and audit is what makes a learned state
+valid for a task with an unknown state.
+
+Frequency sketches cover the remaining classical queries. Point-frequency
+questions like ``how many lines does this character speak?'' or ``how often
+is this theme mentioned?'' map to Count-Min
+\citep{CormodeMuthukrishnan2005}. Heavy-hitter questions like ``which
+characters or themes account for most of the mass?'' map to
+Misra--Gries/Frequent Items
+\citep{MisraGries1982,MetwallyAgrawalAbbadi2006}. These states merge by
+accumulating weighted evidence and are not idempotent: repeated evidence
+must count. The existing frequency benchmark serves as a parity and
+provenance check for that sketch family.
+
+\subsection{Query Taxonomy}
+
+The useful distinction is by query. ``How many distinct speakers or
+entities appear?'' is cardinality, so HLL is appropriate; so is the
+sharper Hamlet variant ``how many distinct character co-appearance pairs
+ever share a scene'', which is the cardinality of a union of per-scene
+pair-sets. ``How many lines does this character speak?'' is point
+frequency, so Count-Min is appropriate. ``Which characters account for
+most lines?'' is a heavy-hitter query, so Frequent Items is appropriate.
+Narrative or political importance is a task-specific oracle: the Manifesto
+case runs on a learned semantic state audited by the local laws of
+Section~\ref{sec:min-framework}.

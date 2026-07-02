@@ -1,0 +1,133 @@
+\section{Neural-Operator Realization}\label{app:min-neural}
+
+\subsection{Scope}
+
+This appendix explains what the neural-operator layer contributes to the
+$(f,g)$ interface. It is a representation family for the maps we want to
+learn: build a leaf state, merge child states, and expose a state that the
+readout can score at the root. The certificate still comes from the local laws
+and the audit. Neural-operator approximation says that the relevant maps can
+be represented on the realized calls of a fixed tree; it does not by itself
+make a trained checkpoint mergeable.
+
+\subsection{Realized-Call Approximation}
+
+For a fixed tree, collect the actual leaf inputs, merge inputs, and on-range
+summary inputs the run makes. If an ideal local-law-satisfying operator is
+uniformly approximated on compact neighborhoods of those call sets, transfer
+moduli convert approximation tolerance into
+$(\varepsilon_{\mathrm{leaf}},\varepsilon_{\mathrm{merge}},
+\varepsilon_{\mathrm{idemp}})$ budgets. These budgets feed the approximate
+version of the preservation and audit statements.
+
+\subsection{Projection View}
+
+The training objective can be written schematically as
+\[
+J_\lambda(g)
+=
+(1-\lambda)L_{\mathrm{oracle}}(g)
++\lambda P_{\mathrm{laws}}(g),
+\]
+where the projection penalty $P_{\mathrm{laws}}$ vanishes exactly on the
+realized local-law subspace. A faithful projection penalty is equivalent
+to membership in the exact local-law subspace.
+
+\subsection{Overlap with Classical Sketches}
+
+Classical sketches inhabit the exact local-law subspace when their state,
+merge, and readout witnesses are supplied. HLL is the running example: the
+ideal state map serializes registers, the merge is pointwise maximum, and the
+readout is the cardinality estimator. The scalar cardinality estimates do not
+merge; the register state does. Finite attention stacks and FNOs sit on the
+learned-operator side. The overlap is the target: learned operators that
+behave like valid task-relative state merges on the realized tree.
+
+\subsection{Agarwal Notation}
+
+For compatibility with \citet{Agarwal2013MergeableTODS}, fix
+$\varepsilon$ before the merge process. A summary method may output many valid
+states, so \(S(D,\varepsilon)\) denotes any valid $\varepsilon$-summary for
+the dataset or stream multiset $D$. The size profile is
+\[
+k(n,\varepsilon)
+  =
+  \max\{\, |S(D,\varepsilon)| : |D|=n,\ S(D,\varepsilon)\text{ valid}\,\}.
+\]
+Mergeability means that an algorithm $A$ takes two valid child summaries and
+returns a valid summary for the multiset addition of their represented data:
+\[
+A\big(S(D_1,\varepsilon),S(D_2,\varepsilon)\big)
+  \in S(D_1\uplus D_2,\varepsilon),
+\qquad
+|A(\cdot,\cdot)|\le k(|D_1|+|D_2|,\varepsilon).
+\]
+If the size bound is independent of $n$, we write it as $k(\varepsilon)$.
+The streaming update is the special case \(|D_2|=1\); full mergeability allows
+arbitrary child sizes and arbitrary merge trees. The important distinction for
+C-TreePO is that \(\uplus\) combines represented data or states, not scalar
+query answers. The readout is applied after state merging.
+
+For randomized summaries, validity is an event. After the whole merge tree has
+been evaluated, the root state is required to be a valid
+\(S(D,\varepsilon)\) with the paper's success probability. C-TreePO preserves
+that probability statement: on the root-validity event, the deterministic
+readout is correct.
+
+For range-space summaries, the paper's subset notation is literal: an
+$\varepsilon$-approximation of \((D,\mathcal{R})\) is a subset
+\(S\subseteq D\) such that
+\[
+\sup_{R\in\mathcal{R}}
+\left|
+  \frac{|S\cap R|}{|S|}
+  -
+  \frac{|D\cap R|}{|D|}
+\right|
+\le \varepsilon .
+\]
+This subset/readout notation is separate from multiset addition
+\(D_1\uplus D_2\), which is the operation represented by the merge tree.
+
+The conversion from C-TreePO to this interface is explicit. Choose the stream
+representation, fix $\varepsilon$, choose the state type, expose
+\(\mathrm{build}\), \(\mathrm{merge}\), validity \(V_\varepsilon(D,s)\),
+state size and \(k(n,\varepsilon)\), then prove build validity, merge closure,
+size-profile validity, and valid-state readout correctness. In Lean these are
+the fields of \texttt{CTreePOToAgarwalTransform}; its methods produce the
+Agarwal state-level summary, the C-TreePO
+\path|RelationalMergeablePreferenceShape|, the valid-sized leaf and merge
+states, the arbitrary-tree root state, the readout theorem, and the
+\(k(|D|,\varepsilon)\) size bound. The randomized version is represented by
+\path|RandomizedRelationalMergeablePreferenceShape|.
+
+\subsection{Universal Approximation and Learned Sketches}
+
+The statement that neural operators can capture mergeable sketches is a
+capacity statement plus a certification statement. Fix a classical
+state-level summary
+\[
+\mathrm{build}:D\to S,\qquad
+\mathrm{merge}:S\times S\to S,\qquad
+\mathrm{readout}:S\to Y,
+\]
+and encode the bounded state space $S$ inside the C-TreePO operator domain.
+On the compact set of leaf, merge, and on-range calls realized by a fixed
+tree, a neural-operator class with a universal approximation guarantee can
+approximate the builder, merger, and readout-facing state map. That is only
+the representation step.
+
+The C-TreePO local laws are the certification step. C1 checks that leaf calls
+build sufficient states; C3 checks that neural merges preserve the same state
+as raw union; C2 checks stability when an already-produced state is reused.
+If those losses vanish, the learned operator lies in the exact state-level
+mergeable-sketch subspace; in Lean this is the content of
+\path|mergeableSketchSummaryClass_subset_exactLocalLawSubspace| and the
+bundle theorem \path|local_laws_of_sketch|. If the losses are small, the
+root distortion is bounded by the corresponding local-law budget. With a
+calibrated readout
+$\widehat f$ satisfying
+\(\sup_x d(\widehat f(x),\fstar(x))\le \varepsilon_f\), the true-oracle
+statement adds the standard \(2\varepsilon_f\) slack. Universal approximation
+does not assert that optimization finds this point; the local-law-weighted
+objective is the practical projection toward it.

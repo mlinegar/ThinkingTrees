@@ -20,6 +20,10 @@ The operator side is already captured by:
 The new supervision-side abstraction is:
 
 - [compositional_learning.py](/home/mlinegar/ThinkingTrees/src/tree/compositional_learning.py)
+- [logged_supervision.py](/home/mlinegar/ThinkingTrees/src/core/logged_supervision.py)
+
+`compositional_learning.py` now carries the intended problem spec, while
+`logged_supervision.py` carries the realized sampled/query records.
 
 ## Two supervision channels
 
@@ -77,6 +81,17 @@ So the repo can grow toward a single online-learning interface instead of
 having one manifest shape for static labels and another for oracle-calling
 workflows.
 
+The shared helper layer now also fixes one application-neutral vocabulary for
+the common protocol:
+
+- `full_document_supervision`
+- `sampled_substructure_supervision`
+- `sampled_substructure_query_policy`
+
+Auditor runs, CTreePO training runs, and Markov/LDA local-law summaries should
+now read as different instantiations of that same protocol, not as separate API
+families.
+
 ## Why this matters
 
 This abstraction captures the common logic across:
@@ -111,6 +126,22 @@ concrete runs record:
 1. which supervision channels were active;
 2. whether sampled channels logged propensities;
 3. which theorem-backing assumptions were supplied for the operator.
+
+Realized sampled labels now also share one canonical record model:
+
+- `SamplingMetadata`
+- `LoggedLabelObservation`
+- `LoggedObservationArtifact`
+
+And the realized-observation helpers now normalize the common target slots:
+
+- `document_level_target`
+- `substructure_level_target`
+
+Application-specific distinctions such as `sufficiency`, `c1`, `c3`, or
+`node_oracle_score` now belong in logged observation context under
+`supervision_signal_name`, with `application_name` and optional `law_kind`
+alongside them.
 
 Today that includes:
 

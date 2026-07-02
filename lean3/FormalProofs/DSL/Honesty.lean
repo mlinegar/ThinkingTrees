@@ -1,4 +1,6 @@
 import Mathlib
+import Mathlib.Probability.IdentDistrib
+import Mathlib.Probability.Independence.Basic
 
 /-!
 # FormalProofs/DSL/Honesty.lean
@@ -19,7 +21,7 @@ evaluation bounds.
 set_option linter.mathlibStandardSet false
 
 open scoped Classical BigOperators NNReal ENNReal
-open MeasureTheory
+open MeasureTheory ProbabilityTheory
 
 set_option maxHeartbeats 400000
 set_option maxRecDepth 4000
@@ -63,6 +65,18 @@ def filterTrainFold {Doc α : Type*} (split : KFoldSplit Doc) (k : Fin split.K)
     (doc : α → Doc) (samples : List α) : List α :=
   samples.filter (fun s => split.fold (doc s) ≠ k)
 
+/-- A fold-specific training procedure is cross-fit honest if fold `k`'s
+artifact is a function only of samples outside fold `k`. -/
+def KFoldHonestTraining {Doc α β : Type*} (split : KFoldSplit Doc)
+    (doc : α → Doc) (train_fn : (k : Fin split.K) → List α → β) : Prop :=
+  ∀ k samples, train_fn k samples = train_fn k (filterTrainFold split k doc samples)
+
+/-- A fold-specific evaluation procedure is cross-fit honest if fold `k`'s
+evaluation statistic is a function only of samples inside fold `k`. -/
+def KFoldHonestEvaluation {Doc α γ : Type*} (split : KFoldSplit Doc)
+    (doc : α → Doc) (eval_fn : (k : Fin split.K) → List α → γ) : Prop :=
+  ∀ k samples, eval_fn k samples = eval_fn k (filterEvalFold split k doc samples)
+
 /-- An estimator is honest if it depends only on evaluation samples. -/
 def HonestEvaluation {Doc α β : Type*} (split : SampleSplit Doc)
     (doc : α → Doc) (eval_fn : List α → β) : Prop :=
@@ -104,7 +118,7 @@ lemma train_only_of_honesty_contract {Ω Doc α β γ : Type*} [MeasurableSpace 
   rcases h.1 with ⟨train_fn, h_train⟩
   calc
     train_stat ω = train_fn (filterTrain split doc (samples ω)) := h_train ω
-    _ = train_fn (filterTrain split doc (samples ω')) := by simpa [h_eq]
+    _ = train_fn (filterTrain split doc (samples ω')) := by simp [h_eq]
     _ = train_stat ω' := (h_train ω').symm
 
 lemma eval_only_of_honesty_contract {Ω Doc α β γ : Type*} [MeasurableSpace Ω]
@@ -120,7 +134,7 @@ lemma eval_only_of_honesty_contract {Ω Doc α β γ : Type*} [MeasurableSpace �
   rcases h.2 with ⟨eval_fn, h_eval⟩
   calc
     eval_stat ω = eval_fn (filterEval split doc (samples ω)) := h_eval ω
-    _ = eval_fn (filterEval split doc (samples ω')) := by simpa [h_eq]
+    _ = eval_fn (filterEval split doc (samples ω')) := by simp [h_eq]
     _ = eval_stat ω' := (h_eval ω').symm
 
 /-!
@@ -150,6 +164,193 @@ lemma honest_eval_bound {Ω Doc α γ : Type*} [MeasurableSpace Ω]
     honest_eval_event_eq (split := split) (doc := doc) (samples := samples)
       (eval_fn := eval_fn) (eval_stat := eval_stat) (h_def := h_def) (P := P)
   simpa [hset] using h
+
+/-!
+## Top-Level Units And Derived Rows
+
+TreePO pipelines distinguish the top-level statistical unit from sub-document
+objects generated inside that unit.  The top-level unit is what receives
+train/eval roles and what supports IID/exchangeability claims.  Leaves, nodes,
+spans, and local-law rows are dependent derived objects, so their honest split
+role is inherited through a parent map.
+-/
+
+/-- Paper-facing alias: the split is over top-level cases/units. -/
+abbrev TopLevelSplit (Case : Type*) := SampleSplit Case
+
+/-- The paired top-level observation used for IID/exchangeability claims:
+the case itself together with its truth target. -/
+def topLevelObservation {Ω Case Truth : Type*}
+    (X : ℕ → Ω → Case) (truth : Case → Truth) (i : ℕ) : Ω → Case × Truth :=
+  fun ω => (X i ω, truth (X i ω))
+
+/-- Top-level IID assumption: only the paired case/truth sequence is IID.
+Derived rows inside a case are intentionally not included here. -/
+def TopLevelIID {Ω Case Truth : Type*}
+    [MeasurableSpace Ω] [MeasurableSpace Case] [MeasurableSpace Truth]
+    (μ : Measure Ω) (X : ℕ → Ω → Case) (truth : Case → Truth) : Prop :=
+  iIndepFun (fun i => topLevelObservation X truth i) μ ∧
+    ∀ i, IdentDistrib (topLevelObservation X truth i)
+      (topLevelObservation X truth 0) μ μ
+
+/-- Finite-dimensional exchangeability of top-level paired observations. -/
+def TopLevelExchangeable {Ω Case Truth : Type*}
+    [MeasurableSpace Ω] [MeasurableSpace Case] [MeasurableSpace Truth]
+    (μ : Measure Ω) (X : ℕ → Ω → Case) (truth : Case → Truth) : Prop :=
+  ∀ n (σ : Equiv.Perm (Fin n)),
+    IdentDistrib
+      (fun ω k => topLevelObservation X truth k.val ω)
+      (fun ω k => topLevelObservation X truth (σ k).val ω)
+      μ μ
+
+/-- Parent map from a derived row/span/node back to its top-level unit. -/
+abbrev ParentOf (Case Row : Type*) := Row → Case
+
+/-- Two derived rows are siblings when they come from the same top-level unit. -/
+def SameTopLevelUnit {Case Row : Type*} (parent : ParentOf Case Row)
+    (r₁ r₂ : Row) : Prop :=
+  parent r₁ = parent r₂
+
+/-- A derived row inherits its train/eval role from its top-level unit. -/
+def inheritedSplitRole {Case Row : Type*} (split : TopLevelSplit Case)
+    (parent : ParentOf Case Row) (row : Row) : Bool :=
+  split.isTrain (parent row)
+
+/-- Filter derived rows to top-level training units. -/
+def filterDerivedTrain {Case Row : Type*} (split : TopLevelSplit Case)
+    (parent : ParentOf Case Row) (rows : List Row) : List Row :=
+  filterTrain split parent rows
+
+/-- Filter derived rows to top-level evaluation units. -/
+def filterDerivedEval {Case Row : Type*} (split : TopLevelSplit Case)
+    (parent : ParentOf Case Row) (rows : List Row) : List Row :=
+  filterEval split parent rows
+
+lemma filterDerivedTrain_eq_filterTrain {Case Row : Type*}
+    (split : TopLevelSplit Case) (parent : ParentOf Case Row)
+    (rows : List Row) :
+    filterDerivedTrain split parent rows = filterTrain split parent rows := rfl
+
+lemma filterDerivedEval_eq_filterEval {Case Row : Type*}
+    (split : TopLevelSplit Case) (parent : ParentOf Case Row)
+    (rows : List Row) :
+    filterDerivedEval split parent rows = filterEval split parent rows := rfl
+
+/-- Training honesty for derived rows: the training statistic may depend on
+rows, but only through rows whose parent top-level units are in train. -/
+def DerivedRowHonestTraining {Case Row β : Type*}
+    (split : TopLevelSplit Case) (parent : ParentOf Case Row)
+    (train_fn : List Row → β) : Prop :=
+  HonestTraining split parent train_fn
+
+/-- Evaluation honesty for derived rows: the estimator may depend on rows, but
+only through rows whose parent top-level units are in eval. -/
+def DerivedRowHonestEvaluation {Case Row γ : Type*}
+    (split : TopLevelSplit Case) (parent : ParentOf Case Row)
+    (eval_fn : List Row → γ) : Prop :=
+  HonestEvaluation split parent eval_fn
+
+/-- Constructive honesty contract for derived rows under a top-level split. -/
+abbrev DerivedRowHonestyContract {Ω Case Row β γ : Type*} [MeasurableSpace Ω]
+    (μ : Measure Ω) [IsProbabilityMeasure μ]
+    (split : TopLevelSplit Case) (parent : ParentOf Case Row)
+    (rows : Ω → List Row)
+    (train_stat : Ω → β) (eval_stat : Ω → γ) : Prop :=
+  HonestyContract μ split parent rows train_stat eval_stat
+
+/-!
+## Generic Chunker Objective
+
+The chunker is formalized as an instrumental policy over top-level units.  It
+chooses an admissible partition using frozen artifacts such as learned `g`,
+learned `f`, oracle views, proxies, and query policies.  The objective below is
+generic: concrete instantiations provide the loss, local-law mass, certificate
+radius, cost, and boundary regularizer.
+-/
+
+/-- A model-aware chunker maps a top-level unit and a frozen artifact bundle to
+an admissible partition candidate. -/
+abbrev ChunkerPolicy (Case Partition Artifact : Type*) :=
+  Case → Artifact → Partition
+
+/-- Weighted objective components for chunker selection. -/
+structure ChunkerObjectiveTerms (Case Partition Artifact : Type*) where
+  downstreamLoss : Case → Partition → Artifact → ℝ
+  localLawResidualMass : Case → Partition → Artifact → ℝ
+  certificateRadius : Case → Partition → Artifact → ℝ
+  computeOrQueryCost : Case → Partition → Artifact → ℝ
+  boundaryRegularization : Case → Partition → Artifact → ℝ
+  lambdaLaw : ℝ
+  lambdaRadius : ℝ
+  lambdaCost : ℝ
+  lambdaRegularization : ℝ
+
+namespace ChunkerObjectiveTerms
+
+/-- Total chunker objective value for one top-level unit and frozen artifacts. -/
+def value {Case Partition Artifact : Type*}
+    (terms : ChunkerObjectiveTerms Case Partition Artifact)
+    (x : Case) (partition : Partition) (artifact : Artifact) : ℝ :=
+    terms.downstreamLoss x partition artifact
+  + terms.lambdaLaw * terms.localLawResidualMass x partition artifact
+  + terms.lambdaRadius * terms.certificateRadius x partition artifact
+  + terms.lambdaCost * terms.computeOrQueryCost x partition artifact
+  + terms.lambdaRegularization * terms.boundaryRegularization x partition artifact
+
+end ChunkerObjectiveTerms
+
+/-- Nonnegativity assumptions for the generic chunker objective. -/
+structure ChunkerObjectiveNonnegative {Case Partition Artifact : Type*}
+    (terms : ChunkerObjectiveTerms Case Partition Artifact) : Prop where
+  downstream_nonneg :
+    ∀ x partition artifact, 0 ≤ terms.downstreamLoss x partition artifact
+  localLawResidualMass_nonneg :
+    ∀ x partition artifact, 0 ≤ terms.localLawResidualMass x partition artifact
+  certificateRadius_nonneg :
+    ∀ x partition artifact, 0 ≤ terms.certificateRadius x partition artifact
+  computeOrQueryCost_nonneg :
+    ∀ x partition artifact, 0 ≤ terms.computeOrQueryCost x partition artifact
+  boundaryRegularization_nonneg :
+    ∀ x partition artifact, 0 ≤ terms.boundaryRegularization x partition artifact
+  lambdaLaw_nonneg : 0 ≤ terms.lambdaLaw
+  lambdaRadius_nonneg : 0 ≤ terms.lambdaRadius
+  lambdaCost_nonneg : 0 ≤ terms.lambdaCost
+  lambdaRegularization_nonneg : 0 ≤ terms.lambdaRegularization
+
+theorem chunkerObjectiveValue_nonneg {Case Partition Artifact : Type*}
+    (terms : ChunkerObjectiveTerms Case Partition Artifact)
+    (h : ChunkerObjectiveNonnegative terms)
+    (x : Case) (partition : Partition) (artifact : Artifact) :
+    0 ≤ terms.value x partition artifact := by
+  have h_law :
+      0 ≤ terms.lambdaLaw * terms.localLawResidualMass x partition artifact :=
+    mul_nonneg h.lambdaLaw_nonneg (h.localLawResidualMass_nonneg x partition artifact)
+  have h_radius :
+      0 ≤ terms.lambdaRadius * terms.certificateRadius x partition artifact :=
+    mul_nonneg h.lambdaRadius_nonneg (h.certificateRadius_nonneg x partition artifact)
+  have h_cost :
+      0 ≤ terms.lambdaCost * terms.computeOrQueryCost x partition artifact :=
+    mul_nonneg h.lambdaCost_nonneg (h.computeOrQueryCost_nonneg x partition artifact)
+  have h_reg :
+      0 ≤ terms.lambdaRegularization *
+        terms.boundaryRegularization x partition artifact :=
+    mul_nonneg h.lambdaRegularization_nonneg
+      (h.boundaryRegularization_nonneg x partition artifact)
+  unfold ChunkerObjectiveTerms.value
+  linarith [h.downstream_nonneg x partition artifact, h_law, h_radius, h_cost, h_reg]
+
+/-- A chunker policy is an exact objective minimizer over the admissible
+partitions for every top-level unit and frozen artifact bundle. -/
+def IsChunkerObjectiveMinimizer {Case Partition Artifact : Type*}
+    (terms : ChunkerObjectiveTerms Case Partition Artifact)
+    (admissible : Case → Partition → Prop)
+    (policy : ChunkerPolicy Case Partition Artifact) : Prop :=
+  ∀ x artifact,
+    admissible x (policy x artifact) ∧
+      ∀ partition,
+        admissible x partition →
+          terms.value x (policy x artifact) artifact ≤
+            terms.value x partition artifact
 
 /-!
 ## K-Fold Cross-Fit Aggregation
@@ -405,6 +606,41 @@ def SingleOracleTwoViewHonesty {Doc α βo γo : Type*}
     (oracle_eval : List α → γo) : Prop :=
   HonestTraining splits.oracle doc oracle_online ∧
   HonestEvaluation splits.oracle doc oracle_eval
+
+/-- Chunker-training honesty specialized to the three-layer split. -/
+def ChunkerHonestTraining {Doc α βc : Type*}
+    (splits : ThreeLayerSplit Doc) (doc : α → Doc)
+    (train_chunker : List α → βc) : Prop :=
+  HonestTraining splits.chunk doc train_chunker
+
+/-- Unified `g`/summarizer-training honesty specialized to the three-layer
+split.  This is the same split component called `summarizer` in the generic
+three-layer structure. -/
+def UnifiedGHonestTraining {Doc α βg : Type*}
+    (splits : ThreeLayerSplit Doc) (doc : α → Doc)
+    (train_g : List α → βg) : Prop :=
+  HonestTraining splits.summarizer doc train_g
+
+/-- Frozen-artifact evaluation: once a learned artifact bundle is fixed,
+evaluation must depend only on the joint three-layer evaluation view. -/
+def FrozenArtifactThreeLayerEvaluation {Doc α Artifact γ : Type*}
+    (splits : ThreeLayerSplit Doc) (doc : α → Doc)
+    (artifact : Artifact) (eval_fn : Artifact → List α → γ) : Prop :=
+  ThreeLayerHonestEvaluation splits doc (eval_fn artifact)
+
+/-- Full unified learning honesty contract for chunker, learned `g`, and
+oracle/readout training, plus frozen-artifact evaluation. -/
+def UnifiedLearningHonesty {Doc α βc βg βo Artifact γ : Type*}
+    (splits : ThreeLayerSplit Doc) (doc : α → Doc)
+    (train_chunker : List α → βc)
+    (train_g : List α → βg)
+    (train_oracle : List α → βo)
+    (artifact : Artifact)
+    (eval_fn : Artifact → List α → γ) : Prop :=
+  ChunkerHonestTraining splits doc train_chunker ∧
+  UnifiedGHonestTraining splits doc train_g ∧
+  HonestTraining splits.oracle doc train_oracle ∧
+  FrozenArtifactThreeLayerEvaluation splits doc artifact eval_fn
 
 lemma dualOracleTraining_of_honest {Doc α βt βp : Type*}
     (splits : ThreeLayerSplit Doc) (doc : α → Doc)

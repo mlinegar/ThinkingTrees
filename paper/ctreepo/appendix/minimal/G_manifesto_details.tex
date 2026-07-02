@@ -1,0 +1,137 @@
+\section{Manifesto/Benoit Details}\label{app:min-manifesto}
+
+\subsection{Measurement Target}
+
+The Manifesto application uses party platforms and expert-survey means
+from the Manifesto Project and \citet{BenoitEtAl2025}. The benchmark
+contains $235$ party platforms matched to expert-survey estimates. Each
+manifesto--dimension observation is scored on a seven-point policy scale.
+Section~\ref{sec:min-manifesto-results} uses the economic dimension as the
+running example; the headline table also reports the six-dimension macro.
+The manifesto--dimension observation is the sampling unit: each item has
+an observed root target, and the tree root prediction is evaluated against
+that target.
+
+\subsection{Pipeline}
+
+The C-tree pipeline chunks each manifesto into contiguous character spans.
+For the per-dimension variant, every leaf and merge prompt is conditioned
+on one dimension's preservation rubric. The root summary is scored with
+the corresponding Benoit rubric. The joint variant uses one union-rubric
+summarizer and scores the resulting root summary six times. The headline
+reports the root-observed corpus comparison; the node-level local-law
+certificate is a separate, stronger claim tier (see \emph{Oracle-Grounded
+Path} below).
+
+\subsection{Main Reported Numbers}
+
+At $8\mathrm{K}$-character leaves, the per-dimension tree reaches macro
+Pearson $r=0.829$ against expert means, compared with $0.817$ for the
+proprietary ensemble and $0.793$ for the matched Gemma-3 open-weight
+replication. The economic row at the same leaf size is $r=0.939$. The
+$4\mathrm{K}$ tiny-leaf extension reaches macro $0.842$ and economic $0.932$.
+Across $4\mathrm{K}$--$64\mathrm{K}$ leaves, the macro spread is $0.027$.
+
+The economic prompt-ladder pilot uses a token leaf-size axis
+(Table~\ref{tab:min-manifesto-ladder}); the character-axis headline in
+Section~\ref{sec:min-manifesto-results} is a separate comparison. Its
+fully populated Benoit-init lane gives per-leaf best external Pearson
+$0.830$ at $256$ tokens, $0.861$ at $512$, $0.885$ at $1024$, $0.886$
+at $2048$, $0.886$ at $4096$, and $0.879$ at $8192$. The plateau from
+$1024$ to $8192$ tokens is the evidence for leaf-size robustness under
+prompt co-adaptation. Figure~\ref{fig:min-manifesto-ladder} shows the
+full grid as a heatmap.
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{manifesto_fg_ladder_benoit_init.png}
+    \caption{Benoit-init lane ($g^0 = g^{\mathrm{Benoit}}$). Populated
+    across leaves $256$--$8192$ tok.}
+    \label{fig:min-manifesto-ladder-benoit}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{manifesto_fg_ladder_raw_init.png}
+    \caption{Raw-init lane ($g^0$ = own-Gemma baseline). Leaves
+    $256$--$8096$ tok populated at the $f^1 g^0$ and $f^1 g^1$ stages,
+    plus deeper cells where a summarizer update changed the evaluation.}
+    \label{fig:min-manifesto-ladder-raw}
+\end{subfigure}
+\caption{\textbf{The Benoit-init lane plateaus at Pearson $r\approx 0.88$
+across an $8\times$ leaf-size range, straddling the split-expert reference
+$r=0.880$.} Per-cell best external-expert Pearson (left subpanel of each
+lane) and internal-external Pearson gap (right subpanel of each lane) over
+leaf-token size $\times$ $f/g$ stage on the economic dimension. Each cell
+is the median over $48$ held-out manifestos per $(\text{leaf-size},
+\text{stage})$ combination, produced by Gemma-4-31B-NVFP4 under
+DSPy-medium. The external-Pearson plateau (Benoit-init, columns
+$1024$--$8192$) and the narrow internal-external gap ($\approx 0.09$) are
+the main evidence for leaf-size robustness under prompt co-adaptation.
+The raw-init lane starts from an untuned scorer and the own-Gemma
+baseline summarizer. Above $1024$ tokens it tracks the Benoit-init
+plateau; at the $256$-token cell, the $f^1 g^1$ evaluation is
+$r = 0.909$ with internal-external gap $0.056$. Source:
+\texttt{bash paper/ctreepo/scripts/regen\_benoit\_manifesto.sh}.}
+\label{fig:min-manifesto-ladder}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\resizebox{\linewidth}{!}{\input{assets/benoit/tables/manifesto_fg_ladder.tex}}
+\caption{\textbf{Per-cell best external Pearson, MAE, internal-external gap
+for the $f/g$ ladder.} Benoit-init lane (top) fully populated across six
+leaf sizes and five stages. Raw-init lane (bottom) covers leaves
+$256$--$8096$ tokens at the $f^1 g^0$ and $f^1 g^1$ stages, plus deeper
+cells where a later summarizer update changed the evaluation; inherited
+(unchanged) stages are collapsed into the first stage at which each
+distinct number appeared. Ext. $r$ is the correlation against the
+held-out Benoit expert-survey mean; Int. $r$ is the correlation against
+the (scorer-only) internal target; the gap is their difference.}
+\label{tab:min-manifesto-ladder}
+\end{table}
+
+\subsection{Compute and Supervision Efficiency}\label{app:min-cost-comparison}
+
+The C-tree pipeline runs on a single local GPU node with no proprietary
+API access; the marginal compute cost is GPU electricity (a few cents
+per manifesto at standard rates), and the full-corpus run reported in
+Table~\ref{tab:min-benoit-headline} completed within a working day.
+
+\paragraph{Call counts.} The per-manifesto LM call-count gap with
+Benoit's published pipeline is roughly $6\times$. Benoit issues $18$
+LM calls per manifesto--dimension across three proprietary frontier
+models, totaling $108$ frontier-API calls per manifesto. The joint
+C-tree variant on Gemma-4-31B-NVFP4 issues $2\lceil n_{\text{chars}}/c
+\rceil - 1 + 6$ calls per manifesto (one summarize per leaf, one merge
+per internal node, one score per dimension), or roughly $17$ calls for
+$c = 8\mathrm{K}$.
+
+\paragraph{Why supervision substitutes.} The contribution that
+substitutes apples for apples is supervision efficiency. At a fixed
+total supervision budget, cheap leaf-level supervision can stand in
+for expensive root-level supervision without loss of performance. The
+controlled Markov benchmark gives the cleanest evidence:
+Figure~\ref{fig:min-markov-leaf-size} reports tree supervision (root
+plus sampled leaf labels) matching or improving on flat root-only
+supervision across the budget range, even down to $10\%$ root-label
+coverage, with the gain depending mostly on the total number of
+labeled units rather than on the root-vs-leaf split. The Manifesto
+pipeline reads the same trade in the deployed direction: cheap
+open-weight LM calls at every leaf and merge replace expensive
+frontier-API calls at the root, the audit certifies the substitution
+does not change the document-level estimand, and overall performance
+hits parity with a much more expensive proprietary ensemble.
+
+\subsection{Oracle-Grounded Path}
+
+Expert quasi-sentence codings are available for $2{,}157$ platforms,
+about $2.27$M coded spans. These annotations define a span oracle:
+aggregate the quasi-sentence codes inside any leaf or internal-node span
+and read out the corresponding economic score. This makes C1 and C3
+explicit supervision signals; C2 remains a re-summarization drift probe.
+These local-law training results are the stronger certificate path;
+Table~\ref{tab:min-benoit-headline} is the root-observed comparison. The
+two live on separate claim tiers.

@@ -1,0 +1,227 @@
+\section{Manifesto Results: Main Application}\label{sec:min-manifesto-results}
+
+The benchmark covers $235$ party platforms with expert-survey means on
+six seven-point policy dimensions. We run each platform through the
+C-tree pipeline of Section~\ref{sec:min-framework} and correlate the
+root score against the expert-survey mean for each dimension. The
+evaluation is root-observed: every sampled platform comes with a
+full-document target. The node-level audit path of
+Section~\ref{sec:min-audit} returns in
+Section~\ref{sec:min-node-supervision}.
+
+\subsection{The Headline}\label{sec:min-headline}
+
+\begin{table}[t]
+  \centering
+  \resizebox{\linewidth}{!}{\input{assets/benoit/tables/benoit_comparison_pearson.tex}}
+  \caption{\textbf{Pearson $r$ against Benoit expert-survey means.}
+  The first block reproduces published Benoit reference rows; the
+  remaining blocks report C-TreePO and controls using
+  Gemma-4-31B-NVFP4. The headline is the per-dimension tree at the
+  $\sim\!2\mathrm{K}$-token leaf row: macro $r=0.829$, above the
+  proprietary ensemble's $0.817$ and the matched Gemma-3 open-weight
+  replication's $0.793$.}
+  \label{tab:min-benoit-headline}
+\end{table}
+
+The per-dimension tree at $\sim\!2\mathrm{K}$-token leaves reaches macro
+$r=0.829$ against Benoit expert-survey means, above the $0.817$ of the
+proprietary 18-score ensemble and the $0.793$ of the matched
+Gemma-3-27B open-weight replication. The macro number is the floor:
+the economic dimension reaches $0.939$ in the same row, above the
+published economic split-expert agreement reference of $0.880$.
+
+Macro correlation stays in a $0.027$-wide band across the full
+populated per-dimension leaf sweep, $\sim\!256$ to $\sim\!16\mathrm{K}$
+tokens (a $64\times$ range): $0.815$ at $\sim\!16\mathrm{K}$ tokens,
+$0.829$ at $\sim\!2\mathrm{K}$, $0.842$ at $\sim\!1\mathrm{K}$. The
+economic dimension specifically gives $0.916$ at $\sim\!16\mathrm{K}$
+tokens, $0.939$ at $\sim\!2\mathrm{K}$, and $0.932$ at $\sim\!1\mathrm{K}$.
+Schedule invariance (Corollary~\ref{cor:schedule}) is the formal claim
+with leaves held fixed; the empirical numbers extend it across leaf
+sizes, so the choice of how finely to split the manifesto becomes an
+audit-budget question (smaller leaves give more sampling sites) without
+changing the document-level estimand.
+
+The headline runs the per-dimension pipeline (one summarizer and one
+scorer per dimension). The same table reports a combined pipeline,
+which uses one shared summarizer for all six dimensions and a joint
+scorer against the resulting summary, at macro $0.78$--$0.81$ across
+the matched leaf sweep ($\sim\!0.02$ below the per-dimension band).
+Section~\ref{sec:min-fg-ladder} takes both pipelines under prompt
+training and shows where the combined variant fails. Compute and
+supervision-efficiency accounting appears in
+Appendix~\ref{app:min-cost-comparison}.
+
+\subsection[Alternating f/g Optimization]{Alternating $f/g$ Optimization}\label{sec:min-fg-ladder}
+
+The alternating $f/g$ prompt ladder applies the framework's alternation
+principle to the prompts themselves. Hold the summarizer/merge prompt
+$g$ fixed, optimize the scorer prompt $f$ against the current
+summaries; swap roles and optimize $g$ against the current scorer;
+repeat. The compact label $f^a g^b$ marks the scorer after $a$
+scorer-side rounds and the summarizer after $b$ summarizer-side rounds.
+Each cell reports two correlations on the held-out split: external
+Pearson against expert-survey means (the gold target) and internal
+Pearson against the previous stage's scorer (a self-consistency check).
+The $f^*$-gap is the difference between the two. A small gap means the
+ladder converges to a scorer that agrees with the previous scorer and
+the gold labels at once. A large gap means the teacher-vs-gold
+disagreement caps what training-against-teacher alone can reach, and
+the ladder's external Pearson is bounded below the teacher's internal
+Pearson by the size of that disagreement.\footnote{The ladder accepts
+several initial conditions for $g^0$ and $f^1$ (Benoit's archived
+GPT-4o summaries with a scorer-only optimized prompt; an own-Gemma
+raw-init pair; identity initialization). The init scheme is an
+engineering detail; results below report whichever cell is available
+for each lane. Full grids appear in Appendix~\ref{app:min-manifesto}.}
+
+\subsubsection*{Per-dimension ladders}\label{sec:min-fg-perdim}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.72\linewidth]{manifesto_fg_ladder_headline.pdf}
+  \caption{\textbf{Economic prompt-ladder leaf-size robustness.}
+  Per-leaf best external Pearson against Benoit expert means for the
+  per-dimension Economics ladder. The dash-dot reference is the
+  economic split-expert agreement value $r=0.880$. Full grids appear
+  in Appendix~\ref{app:min-manifesto}.}
+  \label{fig:v4-manifesto-fg-headline}
+\end{figure}
+
+The Economics ladder gives the cleanest reading on a dimension where
+the teacher carries most of the signal. Per-leaf best external Pearson
+sits at $0.885$ (leaf $1024$), $0.886$ ($2048$), $0.886$ ($4096$), and
+$0.879$ ($8192$): a $0.007$-wide band straddling the economic
+split-expert agreement reference of $0.880$ across an $8\times$ leaf
+range. Below roughly $1024$ tokens the ladder degrades gracefully
+($0.861$ at leaf $512$, $0.830$ at $256$); leaves too small to carry
+the evidence a later merge needs. The $f^*$-gap stays in
+$[0.086, 0.161]$ across the populated grid, with internal Pearson in
+$[0.953, 0.990]$. The ladder co-adapts $f$ and $g$ without racing
+ahead of gold, and the teacher carries the dimension to within
+$0.10$--$0.16$ of the split-expert ceiling.
+
+The Decentralization ladder gives the same shape on a much harder
+axis. At leaf $256$ tokens, the trajectory is
+$0.534 \to 0.557 \to 0.557$ across $f^1g^0 \to f^1g^1 \to f^2g^1$. One
+$g$-update lifts the correlation by $0.023$; the next $f$-update lands
+on the same fixed point to four decimals; the ladder converges in one
+$g/f$ cycle. The Pearson sits above the proprietary 18-score ensemble
+of \citet{BenoitEtAl2025} on this dimension ($0.490$) and at parity
+with the per-dimension pipeline at the $\sim\!2\mathrm{K}$-token leaf
+row (Table~\ref{tab:min-benoit-headline}, $0.543$) at roughly $1/8$
+the leaf budget. The $f^*$-gap is bounded ($0.42 \to 0.40 \to 0.40$,
+internal Pearson in $[0.951, 0.960]$) and moves cleanly through the
+cycle the way it moves on Economics. Its absolute level is the
+load-bearing fact: $\sim\!0.40$, four times the Economics gap. The
+diagnostic flags decentralization as teacher-bounded; the scorer
+matches the teacher very well, and the teacher carries the remaining
+gap to gold.%
+% FIXME: leaf 512 and leaf 1024 rungs of the single-target Decentralization run
+% (decentralization_benoit_g0init_fresh_dspy_20260426_1815) are in flight; fold the
+% per-leaf trajectory in once they land to extend the convergence claim across leaf sizes.
+
+\subsubsection*{Centralized $g$}\label{sec:min-fg-centralized}
+
+% FIGURE TODO: render outputs/manifesto_fg_alternating/combined_benoit_joint_teacher_all6_dspy_fixed_20260425_000122/
+% plots_by_dimension/manifesto_fg_ladder_dimension_ext_pearson_heatmap.png as a paperplot-palette PDF
+% with the decentralization panel annotated, then drop in here as a six-panel facet figure
+% (one panel per dimension; x = stage, y = leaf size, cell = external Pearson).
+
+The centralized-$g$ configuration applies the same ladder under a
+shared summarizer. One $g$ produces a single summary for each
+manifesto, and one joint scorer (the
+\texttt{JointDimensionScorer} of \S\ref{sec:min-framework}) returns
+six per-dimension scores against that summary. The $g$-training metric
+is the unweighted mean of per-dimension $f$-rewards; the $f$-training
+step runs the same averaged metric on the scoring side. Six leaf
+rungs ($256$--$8096$ tokens) and six alternating stages ($f^1g^0$
+through $f^3g^3$) populate the grid.
+
+Five of six dimensions track each other across the centralized-$g$
+ladder. At $f^1g^0$ across the $32\times$ leaf sweep, the
+per-dimension external Pearson bands are $0.014$ (immigration), $0.017$
+(EU), $0.025$ (social), $0.030$ (economic), and $0.045$ (environment).
+All five sit in bands narrower than the $0.027$-wide macro band of
+\S\ref{sec:min-headline}, so the leaf-size invariance of the headline
+extends from per-dimension training into centralized-$g$ alternating
+optimization. The $f^*$-gap on these five sits in $[0.03, 0.16]$, the
+same regime the per-dimension Economics ladder reports. Decentralization
+sits in $0.30$--$0.39$ across all leaf sizes and its $f^*$-gap is
+$0.45$, three to five times higher than the other five. Bigger leaves
+do not help. The diagnostic that read cleanly on the per-dimension
+ladders flags decentralization as the failure mode under centralized
+$g$.
+
+\subsubsection*{Tension and escape}\label{sec:min-fg-tension}
+
+% FIGURE TODO: new figure manifesto_fg_decentralization_trajectory.pdf.
+% x = stage (f^1g^0 ... f^3g^3); y = external Pearson. Two lines:
+% centralized-g leaf 8096 (oscillating); single-target leaf 256 (converging at 0.557).
+% Reference lines: Benoit proprietary ensemble 0.490, per-dim baseline @ ~2K-token leaves 0.543,
+% split-expert ceiling 0.780. Use the paperplot palette.
+
+At leaf $8096$, the centralized-$g$ trajectory on decentralization
+oscillates: $0.361 \to 0.461 \to 0.343 \to 0.343 \to 0.359 \to 0.413$
+across $f^1g^0$ through $f^3g^3$. One $g$-step lifts decentralization
+by $0.10$, the largest single-step gain anywhere in the grid; the next
+$f$-step pulls it back below the $f^1g^0$ baseline; the trajectory
+oscillates without converging. The mechanism is multi-task interference
+on the $f$ side. The $f$-gradient runs on the averaged six-dimension
+metric, so a dimension whose latent direction is far from the consensus
+receives $1/6$ of the gradient signal, and every $g$-step that lifts
+it gets unwound on the next $f$-step. The compression diagnosis sits
+on the $f$ side. The $g$ output budget is $2\times$ leaf-size, and
+the $f^1g^1$ result shows $g$ can encode decentralization within that
+budget when the reward signal points there.
+
+The single-target ladder of \S\ref{sec:min-fg-perdim} removes the
+averaging, and the pullback goes with it. Its $f^2g^1$ rung lands at
+the $f^1g^1$ fixed point to four decimals, while the elevated
+$f^*$-gap inherited from the dimension's teacher-bounded character
+stays bounded through the cycle. What remains is the teacher ceiling.
+Per-dimension ladders are the right default. Centralized $g$ works
+whenever the $f^*$-gap on every dimension stays in the band the
+per-dimension ladders show, and falls back to per-dimension training
+when any single axis pushes the gap outside that band.
+
+\subsection{Toward Node-Level Supervision}\label{sec:min-node-supervision}
+
+The current results are root-observed. The leaf-size invariance is
+empirical evidence that the algebra's prediction holds on this corpus,
+but the audit machinery of Section~\ref{sec:min-audit} has not yet been
+exercised against node-level oracle labels. The Manifesto Project's
+expert quasi-sentence codings make node-level supervision available
+without any new annotation budget: $2{,}157$ platforms cover
+$\sim\!2.27$M coded spans, and aggregating those codings inside any leaf
+or merge span gives a ground-truth oracle value at that node. That is
+the same kind of design-based partial-document supervision the audit was
+built to consume, applied to training rather than to certification.
+
+The implementation that wires those codings into a node-oracle cache and
+into the C-TreePO trainer's local-law supervision channel is in place;
+oracle-grounded training results will be added on convergence and
+reported in Appendix~\ref{app:min-manifesto}. The forward-looking
+distillation chain of Section~\ref{sec:min-discussion} (gold human
+labels $\to$ strong-LLM proxy $\to$ small-LM student with node-level
+labels) is the next-tier extension of the same recipe.
+
+\subsection{Preference Optimization on Tree Summaries}\label{sec:min-preference-app}
+
+Theorem~\ref{thm:pref-equiv} makes the headline operationally useful
+beyond correlation. When downstream preference training targets the same
+oracle (\emph{which summary better captures the manifesto's position on
+dimension $d$?}), preferences can be collected on root summaries rather
+than on full documents. Under local preservation and the
+context-compatibility condition of Assumption~\ref{ass:context}, the
+summary-based and document-based DPO and GRPO population minimizers
+coincide; under approximate preservation,
+Theorem~\ref{thm:e2e} converts the realized-violation estimate
+$\hat{\Delta}_R$ into a quantitative drift envelope on the training
+objective. The application-level premise is that human preferences
+depend on the manifesto only through the preserved oracle value (and not
+on tone, register, or formatting). When that premise fails, the residual
+is carried through the same calibration term $B_{\mathrm{cal}}$ used in
+the certificate; the framework reports the failure rather than absorbing
+it.

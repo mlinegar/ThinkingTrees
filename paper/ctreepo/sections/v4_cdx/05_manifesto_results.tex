@@ -1,0 +1,81 @@
+\section{Manifesto Results: Main Application}\label{sec:min-manifesto-results}
+
+The empirical question is whether the tree preserves a real social-science
+measurement target. We reuse the Manifesto/Benoit benchmark: $235$ party
+platforms with expert-survey means on six seven-point policy dimensions. Each
+pipeline chunks a manifesto into contiguous spans, summarizes each span under
+a dimension-specific preservation rubric, recursively merges adjacent
+summaries, scores the root, and correlates the root score against the expert
+mean. The evaluation is root-observed: every sampled platform already has a
+full-document target.
+
+\begin{table}[t]
+  \centering
+  \resizebox{\linewidth}{!}{\input{assets/benoit/tables/benoit_comparison_pearson.tex}}
+  \caption{\textbf{Pearson $r$ against Benoit expert-survey means.}
+  The first block reproduces published Benoit reference rows; the remaining
+  blocks report C-TreePO and controls using Gemma-4-31B-NVFP4. The main
+  headline is the per-dimension tree at $8\mathrm{K}$-character leaves:
+  macro $r=0.829$, above the proprietary ensemble's $0.817$ and the matched
+  Gemma-3 open-weight replication's $0.793$.}
+  \label{tab:min-benoit-headline}
+\end{table}
+
+The six-dimension headline is that one open-weight tree pipeline matches the
+published frontier-ensemble benchmark. At $8\mathrm{K}$-character leaves, the
+per-dimension C-Tree row reaches macro $0.829$ against expert means, compared
+with $0.817$ for Benoit's 18-score proprietary ensemble and $0.793$ for their
+Gemma-3-27B open-weight replication. The economic dimension reaches $0.939$ in
+the same row, above the published economic split-expert agreement reference
+of $0.880$.
+
+The stronger methodological point is granularity. Across the character-leaf
+sweep from $4\mathrm{K}$ to $64\mathrm{K}$, the per-dimension tree's macro
+correlation varies by only $0.027$. Economic policy remains high across the
+same range: $0.916$ at $64\mathrm{K}$, $0.939$ at $8\mathrm{K}$, and
+$0.932$ at $4\mathrm{K}$. The pattern is root-observed evidence that the
+node/root supervision tradeoff is plausible and worth auditing. The
+document-level target remains visible as the unit of work shrinks from the
+whole manifesto toward leaves small enough to sample and audit. A completed
+node-level certificate would add randomized local-law labels over those
+partial-document units.
+
+The economic prompt ladder gives the same pattern on a token leaf-size axis.
+The label $f^a g^b$ means that the scorer prompt has gone through $a$
+scorer-side optimization rounds and the summarizer/merge prompt through $b$
+summarizer-side rounds. In the fully populated Benoit-init lane, the best
+external Pearson values are $0.885$ at $1024$ tokens, $0.886$ at $2048$,
+$0.886$ at $4096$, and $0.879$ at $8192$. The $0.007$-wide band straddles
+the economic split-expert reference across an $8\times$ leaf-size range.
+Below roughly $1024$ tokens, performance degrades: $0.861$ at $512$ and
+$0.830$ at $256$. The drop is the expected failure mode when leaves become
+too small to carry the evidence a later merge needs.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.72\linewidth]{manifesto_fg_ladder_headline.pdf}
+  \caption{\textbf{Economic prompt-ladder leaf-size robustness.}
+  Per-leaf best external Pearson against Benoit expert means for the
+  Benoit-init and raw-init lanes. The dash-dot reference is the economic
+  split-expert agreement value $r=0.880$. The raw-init lane includes a
+  populated pilot cell at leaf $256$, stage $f^1g^1$, with external
+  $r=0.909$ and internal-external gap $0.056$; the six-dimension table and
+  broader plateau carry the empirical claim. Full grids appear in
+  Appendix~\ref{app:min-manifesto}.}
+  \label{fig:v4-manifesto-fg-headline}
+\end{figure}
+
+The raw-init lane is useful as a pilot. Its leaf-256, $f^1g^1$ cell reaches
+$r=0.909$ with internal-external gap $0.056$, the best populated cell in the
+current grid. It shows that the method can find a high-agreement cell without
+inheriting Benoit's summaries. The more stable empirical claim comes from the
+six-dimension table and the broader leaf-size plateau.
+
+The current Manifesto result sits on the root-observed tier. The Manifesto
+Project's expert quasi-sentence codings cover $2{,}157$ platforms and about
+$2.27$M coded spans, so they provide a path to the next supervision design:
+root scores continue to calibrate the full-document target, while span-level
+codings can become leaf and merge oracles by aggregating coded quasi-sentences
+inside each sampled span. The quasi-sentence route is the planned local-law
+supervision and audit layer. Table~\ref{tab:min-benoit-headline} reports the
+root-observed correlations.

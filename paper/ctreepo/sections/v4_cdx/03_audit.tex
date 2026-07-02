@@ -1,0 +1,113 @@
+\section{Design-Based Partial-Document Supervision}\label{sec:min-audit}
+
+The local laws become useful when they are checked. C-TreePO treats each
+realized tree as a finite population of auditable partial-document units.
+Leaves test C1, stored summaries test C2, merge nodes test C3, and optional
+post-processing rounds test re-summary drift. A sampling design selects units
+with logged positive propensities; an accessible judge or gold oracle scores
+the sampled checks; inverse-propensity weighting transports those local
+observations back to the finite population of tree units.
+
+The LLM setting adds a form of evidence that classical sketches do not have:
+the state itself is readable. A HyperLogLog state is a register array, and a
+private mergeable sketch is a noisy bitmap. Here $g(x)$ is natural language.
+The audit can therefore combine scored node labels with direct inspection:
+does the summary contain the load-bearing claims, qualifications, and boundary
+facts? It can also sample counterfactual fibers--pairs of spans or summaries
+that look equivalent under $g$--and check whether the trusted oracle agrees.
+Those checks do not replace the design-based estimator, but they make the
+sufficiency failure mode visible before it reaches the root.
+
+The design-based half of the method starts from DSL's core warning:
+gold-standard labels matter because model predictions can look accurate while
+inducing biased downstream estimates. The same logic applies inside a
+compression tree. Convenient-node inspection measures an unidentified population
+of local failures. Randomly sampled tree units with logged inclusion
+probabilities give Horvitz--Thompson or H\'ajek-style estimates of the target
+finite-population signal. C-TreePO extends the sampled population from
+documents and final labels to the leaves and merges that determine whether
+the labeled object still represents the original document.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{01_base_sampled_grid.pdf}
+\caption{\textbf{Six node-sample sets on the same tree.} Each panel
+highlights one possible sampled set of tree units. Highlighted nodes
+contribute to the local-law distortion estimate, weighted by their logged
+propensities. The root is one eligible tree unit among leaves, stored
+summaries, and merge nodes.}
+\label{fig:min-audit-sample}
+\end{figure}
+
+The audit reports two different quantities. \emph{Violation rates} are
+diagnostic: which local law fails, and how often? \emph{Distortion means} are
+certificate inputs: how far, in oracle units, is the realized tree from the
+projection target where C1, C2, and C3 hold? A deployment should report both.
+A low violation rate can still be costly if the failing nodes have large
+distortion, and a high violation rate can be less damaging if each failure is
+small in the task metric.
+
+The natural design is nested. First sample documents from the target corpus.
+Then sample nodes within selected documents. If the audit compares candidate
+summaries or pairwise preferences, sample those actions within the selected
+node. The logged probability for a labeled unit is the product of the relevant
+design probabilities, for example
+$p_i=p_d\,p_{u\mid d}$ for a node audit or
+$p_i=p_d\,p_{u\mid d}\,p_{a\mid u}$ for an action-level label. Adaptive or
+bandit-style sampling is allowed when it has an exploration floor and logged
+propensities. Those two records keep the audit tied to the intended
+population.
+
+For a realized audit population $\mathcal U$ of size $N$, unit $i$ has
+inclusion indicator $Z_i$, logged propensity $\pi_i>0$, and distortion
+contribution $Y_i$. The basic Horvitz--Thompson mean is
+\[
+  \hat\mu_{\mathrm{HT}}
+  =
+  \frac{1}{N}\sum_{i\in\mathcal U}\frac{Z_i}{\pi_i}Y_i.
+\]
+The node-level object differs from a root-observed corpus evaluation. In a
+root-observed evaluation, every sampled document already has a full-document
+target, and the root prediction is scored directly against it.
+
+Local laws are checked relative to the oracle available for the audit. In
+root-observed benchmarks, the oracle is estimated from held-out or
+sample-split full-document labels. In online node audits, gold-standard labels
+can be randomly assigned to leaves and merges with logged propensities. Those
+labels play two roles at once: they supervise the tree operators and estimate
+the finite-population local-law residual. Calibration to the trusted
+social-science target remains a separate term in the certificate.
+
+The design choice is how to combine roots and nodes. Roots calibrate the
+target: they say what the full-document expert judgment is. Nodes identify
+where compression can lose information before that judgment is made. Under the
+oracle/state/local-law assumptions, node-level audits supply cheaper
+information about the same target and can be aggregated back to the realized
+tree population. When the assumptions fail, the audit reports distortion in
+the units of the target.
+
+The certificate has four pieces:
+\[
+  |G|
+  \le
+  C_{\mathrm{meth}}\hat{\Delta}_R
+  + B_{\mathrm{cal}} + B_{\mathrm{est}} + B_{\mathrm{clip}}.
+\]
+$\hat{\Delta}_R$ is observed local distortion after $R$ rounds.
+$C_{\mathrm{meth}}$ converts oracle distortion into the downstream objective
+unit. $B_{\mathrm{cal}}$ covers the gap between the accessible judge and the
+trusted target oracle. $B_{\mathrm{est}}$ is sampling error from querying only
+some nodes. $B_{\mathrm{clip}}$ records stabilization bias from clipped
+weights. More local labels shrink the design-based estimation term, while
+calibration error between the judge and the social-science target remains
+visible.
+
+Granularity is a methodological choice. If a paragraph, section, or merge span
+can be audited against the same oracle-preservation property as the full
+document, the researcher can shift expert attention from some roots to cheaper
+local units and aggregate them without changing the target. If local laws fail,
+the audit estimates the resulting distortion and shows which law failed.
+
+Appendix~\ref{app:v4-dsl-audit} gives the design map, logging schema,
+clustered uncertainty calculation, and Lean/proof anchors for the
+DSL/IPW certificate layer.

@@ -1,0 +1,146 @@
+\section{Full Algebraic Background}\label{app:min-algebra}
+
+\subsection{State-Level Mergeability}
+
+The classical mergeable-summary template has three moving parts: build a
+state for each shard, merge states up the tree, and read the answer only from
+the root state. It is the closed-form special case of the C-TreePO local-law
+setup: instead of auditing residuals, the sketch proof shows directly that the
+state still contains the information needed by the query. A
+mergeable-summary scheme for query family $\mathcal{Q}$ is a triple
+$(\mathrm{encode},\oplus,\mathrm{query})$ with
+\[
+\mathrm{encode}:\Strings\to\mathcal{S},\qquad
+\oplus:\mathcal{S}\times\mathcal{S}\to\mathcal{S},\qquad
+\mathrm{query}:\mathcal{S}\times\mathcal{Q}\to\mathcal{R}.
+\]
+Correctness asks that
+\[
+\mathrm{query}(\mathrm{encode}(u\concat v),q)
+\approx
+\mathrm{query}(\mathrm{encode}(u)\oplus\mathrm{encode}(v),q).
+\]
+The merge is on states, not on scalar child answers.
+This is the common shape behind database algebraic aggregates, MUD
+aggregation, and mergeable summaries
+\citep{GrayEtAl1997DataCube,FeldmanEtAl2008MUD,Agarwal2013MergeableTODS}.
+Associativity of $\oplus$ gives schedule invariance. Commutativity belongs to
+unordered or symmetric tasks. Idempotence belongs to semilattice-like states,
+not to mergeability in general.
+
+\subsection{Ordered Text}
+
+For ordered text the relevant algebra is a list, or free-monoid,
+homomorphism:
+\[
+h(u\concat v)=h(u)\odot h(v)
+\]
+with associative but not necessarily commutative $\odot$
+\citep{Gibbons1996ThirdHomomorphism}. The Markov boundary state is the
+smallest example: the state contains first and last symbols, so swapping child
+order changes the meaning. The Manifesto economic state is ordered for the
+same reason: later qualifications, contrasts, and policy tradeoffs can change
+how earlier commitments are read.
+
+\subsection{State Versus Value}
+
+The scalar task value need not merge. Distinct count is the canonical warning:
+$|A|$ and $|B|$ do not determine $|A\cup B|$. HLL is mergeable because the
+register state carries overlap-relevant information, and the readout is
+applied after merge \citep{FlajoletEtAl2007}. In the play analogy, the sets
+are character co-appearance pairs emitted by scenes; in the generic sketch
+setting they are any stream items whose distinct union is the query. For
+Manifesto economics, the seven-point score itself is not expected to merge
+from child scores. The candidate mergeable object is the task-relative
+evidence state.
+
+\subsection{Qualified Equivalence}
+
+The sketch-equivalence theorem is the state-level correspondence. Once the
+state representation and readout are fixed, an oracle-respecting tree operator
+$(g,f)$ satisfies C1/C2/C3 exactly when it factors through a mergeable scheme
+$(\mathrm{encode},\oplus,\mathrm{query})$ on a state space $\mathcal{S}$. This
+is not a claim that the scalar task values themselves merge; it is a claim
+that the state carries enough information for the final readout.
+
+\paragraph{Forward (mergeable $\Rightarrow$ local laws).}
+Take a mergeable scheme with encode, merge, and query, and a decoder
+$\mathrm{decode}:\mathcal{S}\to\Strings$. Define $g(x) =
+\mathrm{decode}(\mathrm{encode}(x))$ on leaves and
+$g(s_L\concat s_R) = \mathrm{decode}(\mathrm{encode}(s_L) \oplus \mathrm{encode}(s_R))$
+on merges; let $f = \mathrm{query}\circ\mathrm{encode}$.
+This is the whole nesting map. The summarizer $g$ is responsible for building
+and merging state; the readout $f$ is applied only after that state has reached
+the root. The assumptions needed are build validity, merge closure for the
+union represented by concatenation, and readout correctness for every valid
+state. C1 is the leaf case, C3 is the merge case, and C2 is needed only when
+already-produced summaries can be summarized again. In Lean, this direction is
+packaged as \path|local_laws_of_sketch|; the neural-operator subspace
+version is \path|mergeableSketchSummaryClass_subset_exactLocalLawSubspace|.
+
+\emph{C1 (sufficiency on leaves).} The hypothesis
+\texttt{SketchLeafPreserving}
+(\path|SketchSummaryOperators.lean|, line~190)
+states that the encode--decode round-trip preserves $\fstar$ pointwise.
+Applied to a leaf $b$, it gives
+$\fstar(g(b))=\fstar(\mathrm{decode}(\mathrm{encode}(b)))=\fstar(b)$,
+which is C1.
+
+\emph{C2 (idempotence on stored summaries).} The hypothesis
+\texttt{SketchSummaryCompatible} (line~203) gives
+$\mathrm{decode}(\mathrm{encode}(s_L)\oplus\mathrm{encode}(s_R))=
+g(\mathrm{decode}(s_L)\concat\mathrm{decode}(s_R))$, so re-encoding any
+$s\in\operatorname{range}(g)$ lands in the same fiber. Combined with
+the leaf hypothesis, $g(s)\sim_{\fstar}s$ holds on $\operatorname{range}(g)$,
+which is C2.
+
+\emph{C3 (merge consistency).} The hypothesis
+\texttt{SketchMergeCompatible} (line~196) states that decoded child
+sketches whose decoded values match $\fstar(x),\fstar(y)$ have a
+merged decoded value matching $\fstar(x\concat y)$. Applied to
+$s_L=\mathrm{encode}(u)$, $s_R=\mathrm{encode}(v)$, this gives
+$\fstar(g(g(u)\concat g(v)))=\fstar(u\concat v)$, which is C3.
+
+The packaging of these three checks into a \texttt{LocalLawsBundle}
+is the formal theorem \path|local_laws_of_sketch|
+(\texttt{SketchRecovery.lean}, line~40).
+
+\paragraph{Reverse (local laws $\Rightarrow$ mergeable).}
+Take $(g,f)$ satisfying C1, C2, C3. Set
+$\mathcal{S}=\operatorname{range}(g)$ with $\mathrm{encode}=g$,
+$\mathrm{decode}$ the identity inclusion $\mathcal{S}\hookrightarrow\Strings$,
+$\oplus(s,t)=g(s\concat t)$, and $\mathrm{query}=f$. Then C1 gives
+$\mathrm{query}\circ\mathrm{encode}=f\circ g\sim_{\fstar}\fstar$ on
+leaves; C3 gives the mergeable correctness identity
+$\mathrm{query}(\mathrm{encode}(u)\oplus\mathrm{encode}(v))=
+f(g(g(u)\concat g(v)))\sim_{\fstar}\fstar(u\concat v)$; C2 is
+automatic, since re-encoding an element of $\operatorname{range}(g)$
+fixes its fiber by hypothesis.
+
+For Agarwal-style summaries, the same state-level correspondence is relational
+rather than canonical: validity is a relation \(V_\varepsilon(D,s)\), not
+necessarily equality to one chosen state. The Lean names for that layer are
+\begin{center}
+\small
+\path|RelationalMergeablePreferenceShape|\\
+\path|RandomizedRelationalMergeablePreferenceShape|\\
+\path|CTreePOToAgarwalTransform|
+\end{center}
+
+\paragraph{Approximate version.}
+The exact equalities above relax to pointwise $\varepsilon$-budgets in
+both directions. \texttt{SketchLeafApproxPreserving}
+(\texttt{SketchRecovery.lean}, line~148) and
+\texttt{SketchMergeApproxCompatible} (line~155) bound the violation
+probabilities of the sketch-side hypotheses; these translate one-to-one
+into the nodewise predicates \texttt{L1$\varepsilon$Node},
+\texttt{L2$\varepsilon$Node} of \texttt{ApproximateLocalLaws.lean}, and
+the bundle assembly is \texttt{approx\_bundle\_of\_sketch}
+(\texttt{SketchRecovery.lean}, line~179). The audit reports the
+empirical right-hand side of these inequalities on the realized calls
+of the deployed tree, so the same equivalence carries the C-TreePO
+recovery theorems
+(\texttt{multi\_round\_proper\_of\_sketch},
+\texttt{dpo\_equivalence\_of\_sketch},
+\texttt{grpo\_equivalence\_via\_ZR\_of\_sketch})
+to any mergeable sketch and to any audited learned summarizer.

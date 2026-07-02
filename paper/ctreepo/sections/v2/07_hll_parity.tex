@@ -1,8 +1,8 @@
 \section{Classical Mergeable-Sketch Parity: HyperLogLog}\label{sec:hll-parity}
 
 The Markov walk-through showed that a tree of FNO leaves can handle an
-oracle that defeats any classical commutative sketch. This section
-closes the loop in the opposite direction: when the oracle \emph{is} a
+oracle that defeats unordered register-wise merges without boundary
+state. This section closes the loop in the opposite direction: when the oracle \emph{is} a
 classical sketch's query, does the C-TreePO framework recover the
 classical sketch exactly? The answer is yes --- up to byte-identity for
 a register-based implementation --- and the register-space constraint is
@@ -10,8 +10,9 @@ itself informative about what learned operators can and cannot do.
 
 We run the experiment on HyperLogLog \citep{FlajoletEtAl2007,HeuleEtAl2013}
 because it is the canonical sketch for distinct counting and because the
-merge operator (register-wise max) is associative, commutative, and
-idempotent --- exactly the ingredients of Proposition~\ref{prop:mergeable-reduction}.
+merge operator (register-wise max) is associative at the state level. It is
+also commutative and idempotent, but those are HLL-specific properties rather
+than generic requirements of Proposition~\ref{prop:mergeable-reduction}.
 HLL should be read as a representative member of the larger mergeable-sketch
 class, not as the whole classical baseline: theorem-backed witnesses for
 Count-Min, KLL/GK quantile, bigram, and Markov-count sketches are available
@@ -79,10 +80,10 @@ confirms this on every cell of the grid:
           build order, but the functional oracle answer agrees.
 \end{itemize}
 
-This is Proposition~\ref{prop:mergeable-reduction}'s collapse made
-concrete. Under A1--A3 the learned framework reduces to the classical
-sketch; for a register-based implementation the reduction is literally
-byte-for-byte.
+This is Proposition~\ref{prop:mergeable-reduction}'s state-level collapse
+made concrete. The native run instantiates $g$ as serialized HLL register
+state and the merge as register-wise max; for a register-based implementation
+the reduction is literally byte-for-byte.
 
 \subsection{Can a Learned Merge Recover the Classical Sketch?}
 
@@ -130,7 +131,7 @@ count, and the picture tells a clean story:
 Two structural findings follow from this experiment:
 
 \paragraph{The classical collapse is exact.}
-When the conditions of Proposition~\ref{prop:mergeable-reduction} hold,
+When the state-level conditions of Proposition~\ref{prop:mergeable-reduction} hold,
 C-TreePO reduces to the classical mergeable sketch not merely in
 distribution but byte-for-byte on the reference implementation. This is
 the tightest empirical version of the generalization claim the paper can

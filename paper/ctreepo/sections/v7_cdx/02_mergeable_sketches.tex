@@ -1,0 +1,1431 @@
+\section{Mergeable Sketches, Neural Operators, and C-TreePO}
+\label{sec:mergeable-sketches}
+
+A query system processes events split across many machines and asks a
+global question (how many distinct users? what is the median latency?)
+without holding the full data anywhere. The data-systems literature
+handles this with \emph{mergeable summaries}
+\citep{Agarwal2013MergeableTODS}: each shard (the classical analogue
+of a C-Tree leaf block) is replaced by a compact state, the states
+combine pairwise up a tree, and the query is answered once, at the
+root. Closely related strands include database algebraic
+aggregates \citep{GrayEtAl1997DataCube}, distributed-streaming work on
+the symmetric unordered case \citep{FeldmanEtAl2008MUD}, and free-monoid
+homomorphisms in functional programming
+\citep{Gibbons1996ThirdHomomorphism}. C-TreePO takes this lineage as its
+state-level algebraic target: learn a bounded state, merge it locally,
+and audit whether the task answer is preserved. The summarizer \(g\)
+plays the role of the encode function at leaves and the merge operator
+at internal nodes. The classical query at the root becomes a learned
+query \(f\) on the stored state. An oracle \(\fstar\) names the task
+value the researcher cares about (an expert label, a calibrated reward,
+a preference judgment), and the learned query is calibrated against it.
+Three local laws C1, C2, C3 check that the learned summarizer preserves
+enough information at each step for the root answer to track the
+oracle. The same residuals are used twice: training data push \(g\)
+toward local-law compatibility, and a runtime audit estimates the
+remaining error on the realized states a tree actually produces. A
+classical sketch gets correctness from algebra; a learned C-Tree gets
+an auditable error bound.
+
+Child answers alone can leave the parent answer ambiguous. State-level
+merging is what makes hierarchical aggregation possible, and the local
+laws are how a learned state earns the same privilege.
+
+Read the section as a ladder. Classical mergeable summaries provide
+the template: summarize leaves into compact states, merge states, and
+query only at the root. C-Trees keep that state-level shape but learn
+the summarizer and query for tasks where no hand-built sketch exists.
+Exact local laws recover the classical valid-summary guarantee; audited
+approximate laws recover expected or certified error bounds. Neural
+operators and Fourier neural operators enter only after that target is
+clear: they are representation routes for learning a state machine that
+passes the same checks.
+
+\paragraph{Notation used in this section.}
+A handful of symbols recur throughout. The data living at a tree node
+\(v\) is \(X_v\in\mathcal{X}\); at a leaf this is just the raw block
+\(b_v\). Leaf blocks live in a leaf-object class
+\(\mathcal{B}\subseteq\mathcal{X}\), and produced states live in a
+state class \(\mathcal{Z}\subseteq\mathcal{X}\), after rendering if
+necessary. The state stored at \(v\) is \(s_v\). A query \(f\) reads an
+answer off any queryable object in \(\mathcal{X}\), and two objects are
+\emph{query-equivalent}, written \(u\sim_f v\), when the query gives
+them the same answer. The summarizer \(g\) produces and combines
+states; \(\oplus\) is the interface \(g\) uses to combine them, and
+\(\uplus\) is multiset addition on the underlying data.
+Table~\ref{tab:v7-section2-notation} consolidates these.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}p{0.24\linewidth}p{0.68\linewidth}@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+\(D\), \(D_1\uplus D_2\) &
+Classical dataset or stream multiset; \(\uplus\) is multiset addition,
+so repeated records remain repeated. \\
+\(X_v\in\mathcal X\) &
+The queryable object represented by tree node \(v\). At a leaf,
+\(X_v=b_v\); internal nodes represent the fixed composition of their
+children. \\
+\(\mathcal B\subseteq\mathcal X\), \(\mathcal Z\subseteq\mathcal X\) &
+Leaf-block objects and produced summary states, viewed as queryable
+objects. In typed implementations a renderer
+\(\rho:\mathcal Z\to\mathcal X\) supplies the inclusion for states. \\
+\(s_v\), \(z\), \(\mathcal Z\) &
+The realized state at node \(v\), a generic state, and the state space. \\
+\(g\) &
+The summarizer, used to summarize leaves, merge child states, and
+re-summarize produced states for C2. \\
+\(f\), \(\fstar\) &
+The query applied to states or represented objects, and the oracle
+value the query is calibrated against. \\
+\(u\sim_f v\), \(u\sim_{f,\varepsilon}v\) &
+Exact and \(\varepsilon\)-approximate query equivalence. The shorthand
+\(u\approx v\) in figures denotes the same relation. \\
+\(\oplus\), \(\oplus_g\) &
+Classical state merge, or the fixed ordered interface passed to \(g\).
+In the simplest case \(\oplus\) is just concatenation of states (the
+\emph{identity merge}, where combining two states is left entirely to
+\(g\)); the induced learned merge is then
+\(z\oplus_g z'=g(z\oplus z')\). \\
+\bottomrule
+\end{tabular}
+\caption{Notation reminder for \S2. The prose above introduces each
+symbol in plain language; this table consolidates them.}
+\label{tab:v7-section2-notation}
+\end{table}
+
+\paragraph{Type convention.}
+Throughout this section, \(\mathcal X\) is the queryable object space.
+We view leaf blocks and produced states as queryable by writing
+\[
+  b_v\in\mathcal B\subseteq\mathcal X,\qquad
+  s_v,z\in\mathcal Z\subseteq\mathcal X,\qquad
+  f:\mathcal X\to\Y .
+\]
+Thus \(f(b_v)\), \(f(s_v)\), and \(f(X_v)\) are all meaningful. If an
+implementation keeps states in a separate type, the renderer
+\(\rho:\mathcal Z\to\mathcal X\) is applied before \(f\); below we
+suppress \(\rho\) and write \(f(z)\) directly.
+
+The two operators \(\uplus\) and \(\oplus\) sit on different layers of
+the same hierarchy. \(\uplus\) combines the underlying data: two
+shards, or equivalently the leaves under two subtrees, become one
+stream multiset. \(\oplus\) combines the objects produced from that
+data, whether two sketch states, two rendered summaries, or the
+ordered child package handed to \(g\). The two are linked by the
+mergeable-summary guarantee: if \(z_i\) summarizes \(D_i\), then
+\(z_1\oplus z_2\) summarizes \(D_1\uplus D_2\), so a state-level merge
+represents the data-level merge it stands in for. For ordered C-Trees
+the analogous object-level composition is \(X_L\oplus X_R\); it
+preserves order and is therefore distinct from multiset addition.
+This notation has one job: keep raw data, stored state, and query
+answer separate. The classical sketch supplies all three by design;
+the C-Tree will learn the stored-state layer and then audit whether the
+query answer survives.
+
+\subsection{Mergeable Summaries: Definition and Requirements}
+\label{sec:v7-mergeable-pattern}
+
+A \emph{mergeable summary} is a compact data structure equipped with a
+binary merge operation that behaves well under hierarchical aggregation.
+Following \citet{Agarwal2013MergeableTODS}, a summary scheme for a query
+family \(\mathcal{Q}\) (cardinality, frequency, quantile, membership,
+or any other aggregate the system needs to compute) has three
+components: an \emph{encode} function that turns a shard \(D\) (a
+C-Tree leaf block in our language) into a state, a \emph{merge}
+operator \(\oplus\) that combines two states, and a \emph{query}
+function that reads the answer off a state. The scheme is mergeable
+when, for any two shards or leaf blocks \(D_1,D_2\), both
+\(\mathrm{encode}(D_1\uplus D_2)\) and
+\(\mathrm{encode}(D_1)\oplus\mathrm{encode}(D_2)\) answer the query on
+the combined leaf set equally well, with state size bounded by some
+\(k\) after merging. Operationally, a MapReduce, Dataflow, or Spark job
+can encode each shard on a separate worker. In C-Tree language, those
+shards are leaf blocks. The system then merges leaf states pairwise up
+the tree and reads the answer off the root, without materializing the
+full data.
+
+\paragraph{Types and what the state carries.}
+Each component has a fixed type:
+\[
+  \mathrm{encode}:\Strings\to\mathcal{S},\qquad
+  \oplus:\mathcal{S}\times\mathcal{S}\to\mathcal{S},\qquad
+  \mathrm{query}:\mathcal{S}\times\mathcal{Q}\to\mathcal{R}.
+\]
+The encode function lives at leaves; the merge \(\oplus\) lives at
+internal nodes; the query is asked once, at the root. Each shard or
+leaf block's state has to carry whatever is needed to combine with
+another shard's state, or another leaf block's state, and still answer
+\(Q\) correctly. Distinct count makes this concrete. Knowing how many
+distinct items are in leaf block \(A\) and how many in leaf block \(B\)
+does not determine how many are in \(A\uplus B\), because the overlap
+is unknown. A distinct-count summary therefore stores enough per-leaf
+information (typically a hash-based fingerprint of the items seen) for
+the merge to detect overlap. Different schemes carry different per-leaf
+information, calibrated to what their query needs.
+
+\paragraph{Three properties of the merge operator.}
+Three algebraic properties of \(\oplus\) shape what the scheme buys.
+
+\emph{Associativity} means \((a\oplus b)\oplus c = a\oplus(b\oplus c)\).
+The schedule of merges does not matter; balanced trees, unbalanced
+trees, and streaming reductions all produce the same state. This is
+what makes parallel computation possible.
+
+\emph{Commutativity} means \(a\oplus b = b\oplus a\). The order of
+inputs does not matter. Appropriate when the data is genuinely
+unordered (a multiset of records); inappropriate when order carries
+meaning (text, time series, dialogue).
+
+\emph{Idempotence} means \(a\oplus a = a\). Re-merging a state with
+itself does not drift. Holds for set- or semilattice-like unions
+(HyperLogLog, Bloom filters); fails for additive counter sketches like
+Count-Min, where re-merging would double the counts.
+
+For ordered data such as text, the relevant algebraic structure is a
+free-monoid homomorphism\footnote{A \emph{free monoid} over an alphabet
+\(\Sigma\) is the set of finite sequences over \(\Sigma\) under
+concatenation, with the empty sequence as identity. A
+\emph{homomorphism} into another monoid \((M,\odot)\) is a map \(h\)
+that respects concatenation: for sequences \(u\) and \(v\),
+\(h(u\oplus v)=h(u)\odot h(v)\), and it sends the empty sequence to
+the identity of \(\odot\).}
+\citep{Gibbons1996ThirdHomomorphism}: the summarizer respects
+concatenation but not reordering, \(h(u\oplus v)=h(u)\odot h(v)\),
+with an associative \(\odot\) that need not be commutative.
+
+\paragraph{Validity, size profile, mergeability.}
+What counts as a valid state depends on two ingredients: the input being
+summarized and the target accuracy. The input \(D\) is a dataset or
+stream multiset, in which a record appearing twice contributes two
+copies, and the target accuracy is a number \(\varepsilon\) that bounds
+the allowable error of the final query. We write \(S(D,\varepsilon)\)
+for any state produced for \(D\) at accuracy \(\varepsilon\). The
+notation is one-to-many because different stream orders or random
+choices may give different valid states for the same input.
+
+\begin{definition}[Valid summary state]
+\label{def:v7-valid-state}
+A state \(z=S(D,\varepsilon)\) is \emph{valid} when:
+\begin{enumerate}[leftmargin=1.5em,nosep]
+\item the type of \(z\) matches the scheme's state interface
+(well-formedness);
+\item \(|z|\) is within the advertised size bound \(k\);
+\item the query answered from \(z\) has error at most \(\varepsilon\).
+\end{enumerate}
+\end{definition}
+
+A valid state is the kind of compact summary a distributed system is
+allowed to keep: it has the right format, fits the advertised memory
+budget, and answers the target query accurately enough. Each clause
+does distinct work, and each connects to a separate piece of the
+scheme. The size bound is what makes the state \emph{compact};
+tracking how the bound grows with input size yields the \emph{size
+profile}
+\[
+  k(n,\varepsilon)
+  :=
+  \max\{\,|S(D,\varepsilon)| : |D|=n,\ S(D,\varepsilon)
+    \text{ is valid}\,\},
+\]
+abbreviated \(k(\varepsilon)\) when independent of \(n\). Uniform
+bounds in \(n\) are the useful regime, since a system can reserve a
+fixed memory footprint per shard or leaf block regardless of how much
+data that block contains. The query-error bound is what makes the state
+\emph{useful}
+for the target query, and the defining law of a mergeable scheme is
+that \(\oplus\) preserves it: whenever \(z_1\) is a valid
+\(S(D_1,\varepsilon)\) and \(z_2\) is a valid \(S(D_2,\varepsilon)\),
+\[
+  z_1 \oplus z_2 \quad\text{is a valid}\quad
+  S(D_1\uplus D_2,\varepsilon),
+\]
+where \(D_1\uplus D_2\) is multiset addition (repeated records remain
+repeated). The well-formedness clause is what gives \(\oplus\) a typed
+object to act on. A tree of merges built from validly-summarized leaves
+therefore produces a valid root state, and the query is asked once, at
+that root.
+
+\paragraph{Mergeability for general object spaces.}
+Mergeable summaries lift from record multisets to whatever object
+space a tree actually carries. C-Trees may represent their inputs as
+one-hot tokens, supplied embeddings, JSON state, or rendered text;
+the mergeability requirement does not depend on which representation
+is chosen, only that \(g\) and \(f\) operate consistently on it. Let
+\(\mathcal{X}\) be the chosen object space and \(X\in\mathcal{X}\)
+the C-Tree representation of \(D\). Fix \(\varepsilon\) for the rest
+of the discussion, and let \(\mathcal{Z}\) be the state space and
+\(\mathrm{Valid}(\cdot,\cdot)\) the validity relation at that
+accuracy. A mergeable summary at this level is a state
+\(z\in\mathcal{Z}\) with \(\mathrm{Valid}(X,z)\): well formed, within
+the size bound, and preserving the root task value to accuracy
+\(\varepsilon\). Mergeability lifts in the natural way: if two states
+are valid summaries of two objects in \(\mathcal{X}\), their merge is
+a valid summary of the parent object the tree composes from them. Let
+\(X_{12}\) denote that parent object, obtained by the tree's fixed
+composition rule. Equivalently,
+\[
+  \mathrm{Valid}(X_1,z_1)
+  \wedge
+  \mathrm{Valid}(X_2,z_2)
+  \Longrightarrow
+  \mathrm{Valid}(X_{12},\,z_1\oplus z_2).
+\]
+The display is the same statement as ``\(z_1\oplus z_2\) is a valid
+\(S(D_1\uplus D_2,\varepsilon)\)'' above, with the dataset multiset
+\(D\) replaced by the represented parent object \(X_{12}\) and the
+one-to-many summary \(S(\cdot,\varepsilon)\) replaced by the relation
+\(\mathrm{Valid}(\cdot,\cdot)\). Table~\ref{tab:v7-agarwal-translation}
+records the column-by-column correspondence.
+
+The operational mapping to C-Trees is direct. A classical shard
+\(D_i\) is represented by a C-Tree leaf block \(b_i\) or by the
+queryable object \(X_i\) attached to that leaf. Classical
+\(\mathrm{encode}(D_i)\) becomes the leaf state \(s_i=g(b_i)\).
+Classical state merge \(z_L\oplus z_R\) becomes the internal C-Tree
+call \(g(s_L\oplus s_R)\). The classical final query becomes the
+query \(f(s_{\mathrm{root}})\), applied only after all leaf states
+have been merged to the root.
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}p{0.28\linewidth}p{0.34\linewidth}p{0.28\linewidth}@{}}
+\toprule
+Mergeable-summary notation & State-level notation & C-Tree role \\
+\midrule
+\(S()\) & summary method / state interface & choice of state space, validity, merge, and query \\
+\(S(D,\varepsilon)\) & a state \(z\) with
+\(\mathrm{Valid}(X,z)\) & a valid summary state for the leaf block or
+subtree object \(X\) corresponding to \(D\) \\
+\(z_1\oplus z_2\) at the merge step & \(z_1\oplus z_2\) & internal \(g\)-call on child states \\
+\(D_1\uplus D_2\) & represented parent object \(X_{12}\) & data represented by the parent subtree, obtained by joining the corresponding leaves \\
+\(k(n,\varepsilon)\) & maximum size of valid states for \(|D|=n\) & state-size profile preserved by the tree \\
+final query on \(S(D,\varepsilon)\) &
+\(\mathrm{query}(z,\cdot)\) & root answer \(f(s_{\mathrm{root}})\) after specializing the query family \\
+\bottomrule
+\end{tabular}
+\caption{Mapping between
+\citet{Agarwal2013MergeableTODS}'s summary notation and the state-level
+notation used in the C-Tree correspondence, after fixing
+\(\varepsilon\).}
+\label{tab:v7-agarwal-translation}
+\end{table}
+
+\paragraph{Variants.}
+\emph{One-way mergeability} is the streaming special case: one side of
+the merge is a fresh singleton or raw suffix, so merges are between an
+existing state and a new record. Equal-size or restricted-size variants
+constrain which pairs of states may be merged.
+
+\emph{Randomized validity.} For randomized summaries, validity is an
+event. A single random seed \(\omega\in\Omega\) may encode all random
+choices used by a merge-tree evaluation. The Agarwal-style success
+statement says that, for any merge tree whose leaves represent \(D\),
+the root state lies in \(S(D,\varepsilon)\) with probability at least
+\(p\). C-Trees inherit this probability shape; see
+\S\ref{sec:v7-ctreepo-correspondence} below.
+
+\emph{Range spaces.} For range spaces the subset notation is literal. A
+finite range space is \((D,\mathcal{R})\), and an
+\(\varepsilon\)-approximation is a subset \(A\subseteq D\) satisfying
+\[
+  \sup_{R\in\mathcal{R}}
+  \left|
+    \frac{|A\cap R|}{|A|}
+    -
+    \frac{|D\cap R|}{|D|}
+  \right|
+  \le \varepsilon.
+\]
+The selected subset \(A\) reproduces every range's share of the full
+data \(D\) up to error \(\varepsilon\). In the C-Tree translation,
+\(X_{12}\) is the represented parent object
+tracked by the tree, while \(A\) is the selected subset state.
+Keeping those roles separate prevents the mistaken inference that
+scalar child answers should themselves merge.
+
+\subsection{From Classical Sketches to Learned \(f\) and \(g\)}
+\label{sec:v7-from-classical-to-learned}
+
+The mergeable-summary picture above is classical: a hand-designed state
+class \(\mathcal{Z}\), a hand-designed merge, and a closed-form
+\(\mathrm{query}\) for one fixed query family. C-TreePO targets
+settings where this engineering is not feasible. The query a researcher
+actually cares about is a task value (an expert label, a calibrated
+reward, a preference judgment), and no hand-designed sketch exists for
+it. Even when one exists, it is specific to a single query: a different
+task means a different sketch, a different state class, a different
+merge.
+
+C-TreePO learns the summarizer and the query for the task at hand.
+The summarizer \(g\) plays the role of \(\mathrm{encode}\) at leaves
+and induces the learned merge \(\oplus_g\) at internal nodes, as a
+neural network or a prompted language model operating on tokens,
+embeddings, or rendered text. The query \(f\) plays the role of
+\(\mathrm{query}\) at the root, as a learned, calibrated estimate of an
+oracle \(\fstar:\mathcal{X}\to\Y\) (the task value the researcher
+would assign if they could afford to label every document). One
+assumption on the oracle matters from the start: it is taken to be
+\emph{locally context-compatible}, meaning that substituting one
+passage for another with the same task value, in the same
+surrounding text, leaves the task value of the whole unchanged.
+This is Assumption~\ref{ass:context} below, and it is a real restriction.
+Tasks whose oracle is sensitive to discourse (irony, rhetorical tone, anything
+where local substitution of equivalent content changes how the
+surrounding text is read) are out of scope.
+
+A classical sketch establishes correctness once, by the algebra of the
+sketch, and never has to re-check at runtime. C-TreePO replaces that
+algebraic guarantee with two complementary pressures on the same
+residuals: training penalizes them, and a runtime audit measures them
+on the realized states a deployed tree produces. Because \(g\) is
+learned, the local laws below are not identities of the operator; they
+are empirical obligations on the calls the tree actually makes. The audit samples
+realized residuals on a deployed run (the actual leaf summaries and
+merge calls produced for one document) and treats the run as
+\emph{realized-valid} (valid on the actual tree calls made in this run)
+when the samples support a chosen bound. The
+samples come from oracle access where available, or from randomly
+drawn root-level supervision otherwise.
+Section~\ref{sec:estimation} develops the audit, and
+Section~\ref{sec:theorems} turns the sampled residuals into a
+root-error bound. The laws also define the learnable target class:
+training favors summarizers whose realized calls are local-law
+compatible, and any remaining error is structural when no such
+summarizer in the chosen class can represent the target.
+
+\subsection{Learned Mergeable C-Trees}
+\label{sec:v7-ctreepo-state-machine}
+
+A C-Tree's job is to produce a root prediction that tracks the
+oracle. The rest of this subsection defines the tree, oracle,
+summarizer, query, equivalence relation, local context assumption,
+local laws, and audit error. With these in hand, the C-TreePO problem
+is fully specified, and \S\ref{sec:v7-ctreepo-correspondence}
+exhibits classical mergeable summaries as worked examples.
+
+\paragraph{The tree.}
+The document is split into an ordered sequence of contiguous raw
+blocks \(b_1,\dots,b_\ell\), and a binary tree \(T\) is built over
+those blocks with each block sitting at one leaf. The tree is fixed
+before any summarization begins; it is not itself a learned object.
+Internal nodes carry an ordered (left, right) child pair, so the
+composition \(s_L\oplus s_R\) at every merge is well-defined; the
+unordered multiset case is recovered only when \(g\) is additionally
+commutative. Balanced binary trees are the typical experimental
+choice and the shape drawn in Figure~\ref{fig:v7-plain-tree}, but
+the framework only requires that \(T\) be ordered binary.
+
+\begin{definition}[C-Tree]
+\label{def:v7-ctree}
+A \emph{C-Tree} is a tuple \((T,\{b_v\},g,f,\rho)\) consisting of an
+ordered binary tree \(T\), a raw block \(b_v\in\mathcal{B}\subseteq\mathcal{X}\) at every
+leaf \(v\), a summarizer \(g\) (Definition~\ref{def:v7-summarizer}),
+a query \(f\) (Definition~\ref{def:v7-query}), and a renderer
+\(\rho:\mathcal{Z}\to\mathcal{X}\) used when states are not already
+literal elements of \(\mathcal{X}\) and must be queried
+against raw objects. Every node \(v\) represents an object
+\(X_v\in\mathcal{X}\), with \(X_v=b_v\) at leaves and
+\(X_v=X_L\oplus X_R\) at internal nodes. The realized state at \(v\)
+is \(s_v=g(b_v)\) at leaves and \(s_v=g(s_L\oplus s_R)\) at internal
+nodes; the tree prediction is
+\(\widehat y_T = f(s_{\mathrm{root}})\).
+\end{definition}
+
+A run of the C-Tree has three stages. A leaf-encoding pass first
+applies \(g\) to each raw block to produce the leaf states
+\(s_v=g(b_v)\). A bottom-up merge pass then walks the internal nodes
+and applies \(g\) to the ordered composition of the two child states;
+\(\oplus\) here is whichever ordered two-child interface \(g\)
+actually consumes (text concatenation, paired JSON, stacked
+embeddings, or another fixed packaging chosen by \(g\)'s argument
+type). The query \(f\) is finally applied once to
+\(s_{\mathrm{root}}\) to produce \(\widehat y_T\), which is compared
+against the oracle value \(\fstar(X_T)\). When a law compares a state
+with a raw object, the answer is read through the same fixed
+interface: states either already live in the queryable object space,
+or are rendered through \(\rho\) before being queried. We suppress
+\(\rho\) in the displays below and write \(f(z)\) directly.
+
+The four objects in play next are the oracle the tree is trying to
+match, the summarizer that produces and merges states, the query that
+reads an answer off them, and the equivalence relation the local laws
+will check.
+
+\begin{definition}[Oracle]
+\label{def:v7-oracle}
+An \emph{oracle} is a function \(\fstar:\mathcal{X}\to\Y\) mapping
+input-space objects to the task-value space.
+\end{definition}
+
+The oracle is the trusted answer for the object being queried, what an
+expert rubric or gold-standard annotation workflow would produce on the
+full input. It may be an expert label, a rubric value, or another
+gold-standard value. Running it on every long input during training is
+too expensive, which is why a tree exists.
+
+The summarizer is the learned operator that produces leaf states from
+raw blocks and merges child states into parent states.
+
+\begin{definition}[Summarizer]
+\label{def:v7-summarizer}
+A \emph{summarizer} is a (possibly stochastic) map \(g\) that takes
+either a leaf object \(b\in\mathcal{B}\), an already-produced state
+\(z\in\mathcal{Z}\), or a fixed composition \(s_L\oplus s_R\) of two
+child states, and produces a state in \(\mathcal{Z}\).
+\end{definition}
+
+The same learned operation builds a leaf summary from raw content,
+builds a parent summary from two child summaries, and can re-summarize
+an existing state for the C2 stability check. Every call is local:
+\(g\) sees only the local input it is called on. Statements about
+\(g\) are interpreted in expectation over its randomness, which
+collapses to a point mass for deterministic operators.
+
+A summarizer alone produces states; reading a task answer off any of
+them is the job of the query.
+
+\begin{definition}[Query]
+\label{def:v7-query}
+A \emph{query} is a (possibly stochastic) map
+\(f:\mathcal{X}\to\Y\) from queryable objects to the task-value
+space. Produced states are queried either because
+\(\mathcal{Z}\subseteq\mathcal{X}\) by convention or because the
+renderer \(\rho:\mathcal{Z}\to\mathcal{X}\) is applied first.
+\end{definition}
+
+The query turns the stored root state into the final task answer and
+is applied once, at the root. Its output is what the local laws check
+and what the training objective tries to match. In settings with a
+closed-form oracle the query may be \(\fstar\) itself; in learned
+settings it is a separate, optionally learned, calibrated component.
+Once \(f\) and \(\fstar\) are in hand, a leaf law can be written
+directly as \(g(b_v)\sim_f b_v\): the query gives the leaf summary and
+the raw block the same task value. For internal nodes we write
+\(s_v\sim_f X_v\), where \(X_v\) is the larger object represented by
+the subtree. Figure~\ref{fig:v7-plain-tree} shows the resulting shape
+on an eight-leaf example.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{01_base_plain.pdf}
+\caption{A C-Tree for a document partitioned into eight contiguous
+blocks \(b_1,\dots,b_8\). Each block is encoded into a leaf state
+\(s_i=g(b_i)\); sibling states are then merged pairwise,
+\(s_{ij}=g(s_i\oplus s_j)\), up to the root. The tree shape is fixed
+before any summarization begins; only the stored states change as the
+run proceeds.}
+\label{fig:v7-plain-tree}
+\end{figure}
+
+\paragraph{Query equivalence.}
+The local laws below check \(g\)'s behavior modulo query equivalence,
+not byte-equality of states. The training objective uses a task distance
+\(d_Y:\Y\times\Y\to[0,\infty)\) on the same scale as the summary
+error guarantee, and two objects or states are \emph{query-equivalent}
+exactly when \(f\) gives them the same answer under that distance,
+\[
+  u\sim_f v
+  \Longleftrightarrow
+  d_Y\big(f(u),f(v)\big)=0,
+\]
+with \(\varepsilon\)-relaxation \(u\sim_{f,\varepsilon} v\) iff
+\(d_Y(f(u),f(v))\le\varepsilon\). When \(f=\fstar\), query equivalence
+coincides with oracle equivalence; when \(f\) uniformly recovers
+\(\fstar\) within \(\varepsilon_{\mathrm{orc}}\), the two relations
+agree up to a \(2\varepsilon_{\mathrm{orc}}\) slack. The audit checks
+\(\sim_f\) because that is what the query can measure, and the local
+laws below are stated in the \(\sim_f\) form the audit can actually
+verify. Two states are query-equivalent when the query returns the
+same answer on each, and the \(\varepsilon\)-relaxation allows a
+stated tolerance in the task's own units.
+
+\paragraph{Local context compatibility.}
+Query equivalence as defined above is a relation on isolated pairs
+\((u,v)\). The local laws below need it to compose: when one half of
+an equivalent pair sits inside a larger context the tree assembles,
+the equivalence must survive the surrounding material. The next
+assumption is the minimal closure property that lets pair-wise
+equivalences propagate up the tree, by asking the oracle to be blind
+to local substitutions of equal-answer content.
+
+\begin{assumption}[Locally context-compatible oracle]
+\label{ass:context}
+For every left context \(w_L\), every right context \(w_R\), and
+every \(u,v\in\mathcal{X}\), \(u\sim_f v\) implies
+\(w_L\oplus u\oplus w_R
+  \sim_f w_L\oplus v\oplus w_R\).
+\end{assumption}
+
+Read in plain language: if two passages have the same task answer,
+swapping one for the other inside the same surrounding material
+leaves the answer of the whole unchanged. This is the move the tree
+induction relies on, since replacing one child by an equivalent state
+in the same surrounding context must then leave the parent's answer
+unchanged. The assumption is local in shape (one passage is swapped)
+but strong in scope (it must hold for every left and right context
+the tree could place around the swap). Direct verification across all
+contexts is infeasible, which is why training and the runtime audit
+work as a pair: the loss pressures \(g\) toward local-law
+compatibility on observed contexts during training, and the audit
+gives an empirical certificate at the realized contexts a deployed
+tree produces. For
+content-driven tasks (distinct counting, rubric-driven coding,
+document-level extraction) the assumption is plausible. It rules
+out discourse-sensitive tasks where local substitution of
+equivalent content changes how the surrounding text is read.
+
+\paragraph{The three local laws.}
+Three checks cover the three moves a tree run makes: encoding a leaf,
+merging two child states, and re-summarizing a state that has already
+been produced. If \(g\) passes all three on the realized states, the
+local-to-root composition gives a certified bound on how far the
+tree's root answer can drift from the oracle.
+
+\emph{C1 (leaf sufficiency).} The leaf state preserves the answer its
+raw block would receive.
+
+\emph{C3 (merge consistency).} Merging two valid states preserves the
+answer for their union.
+
+\emph{C2 (re-summary stability).} A state can be passed through \(g\)
+again without changing its answer-relevant content.
+
+At leaves \(X_v=b_v\). At an internal node with children \(L,R\),
+\(X_v=X_L\oplus X_R\). The local laws compare the state produced by
+\(g\) with the object that state is supposed to represent, using query
+equivalence. Their exact versions are
+\begin{align}
+\tag{C1}
+&\forall\text{ realized leaves }v:\quad
+  g(b_v)\sim_f b_v,\\
+\tag{C2}
+&\forall\text{ produced states }s_v:\quad g(s_v)\sim_f s_v,\\
+\tag{C3}
+&\forall\text{ sibling nodes }L,R\text{ with parent }v:\quad
+  g(s_L\oplus s_R)\sim_f X_L\oplus X_R.
+\end{align}
+The leaf law uses \(b_v\) directly to avoid unnecessary notation,
+since \(X_v=b_v\) at a leaf. The symbol \(X_v\) is needed for internal
+nodes, where it denotes the object represented by a whole subtree. C1
+is the valid-leaf condition: a leaf summary kept the answer-relevant
+content of its raw block. C3 is the valid-merge condition: a parent
+summary kept the answer-relevant content of the two-child span. C2 is
+the reuse condition: re-applying \(g\) to a stored summary leaves its
+answer stable.
+
+Figure~\ref{fig:v7-local-laws} marks each check on the same tree from
+Figure~\ref{fig:v7-plain-tree}: the C1 callout sits on a leaf encoding
+(a raw block becoming a leaf state), the C3 callout sits on a sibling
+merge (two child states combining into a parent), and the C2 callout
+re-applies \(g\) to an already-produced state and compares the result
+with the original. Each check is local:
+it touches only a bounded number of nodes, and different checks can
+be sampled independently. The same locality is what will let the
+audit (described below) estimate the residuals from a small fraction
+of nodes per run. Table~\ref{tab:v7-local-laws-sketch-link} records
+the corresponding mergeable-summary obligations.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\linewidth]{07_local_laws_plain.pdf}
+\caption{The three local laws drawn on the same tree as
+Figure~\ref{fig:v7-plain-tree}. Bolded nodes are the states the audit
+samples and runs \(\fstar\) on; solid colored arrows are
+\(g\)-applications; dotted arrows fan from the two compared states up
+to each law's pill, which stands in for the \(\fstar\) comparator.
+\textbf{C1} checks block~\(\to\)~leaf-summary (\(b_3 \to s_3\)).
+\textbf{C3} checks sibling-pair~\(\to\)~parent
+(\(s_5,s_6 \to s_{56}\)), comparing \(s_{56}\) against the oracle
+on the raw composition \(b_5\oplus b_6\). \textbf{C2} checks re-summary by
+reapplying \(g\) to \(s_{1234}\) and comparing with the ghost
+\(g(s_{1234})\).
+Each check is local to a bounded context and can be sampled
+independently.}
+\label{fig:v7-local-laws}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.16\linewidth}p{0.24\linewidth}p{0.25\linewidth}p{0.25\linewidth}@{}}
+\toprule
+Local law & C-Tree wording & Mergeable-summary wording & Answer-sufficiency reading \\
+\midrule
+C1: Leaf sufficiency &
+The leaf state \(g(b)\) preserves the root answer that \(f\) would assign to the
+raw block \(b\). &
+A state produced for represented input \(X_i\) is valid for \(X_i\). &
+The leaf state is answer-sufficient for its shard or leaf block: querying the
+state recovers that block's task value, exactly or within the induced
+\(\varepsilon\)-tolerance. \\
+C3: Merge consistency &
+The parent state \(g(s_L\oplus s_R)\) preserves the root answer of the object
+represented by the two children. &
+Merging valid states for two child objects gives a valid state for the
+parent object. &
+Answer-sufficiency is closed under state merge, so a tree of local merges
+produces an answer-sufficient root state. \\
+C2: Re-summary stability &
+Re-entering an already-produced state into \(g\) does not change the root
+answer. &
+A valid produced summary may be reused as an input state without leaving the
+same validity/query-equivalence class. &
+The state remains answer-sufficient under reuse: resummarization stays in the
+same query-equivalence class. \\
+\bottomrule
+\end{tabular}
+\caption{C-Tree local laws as answer-sufficiency conditions. Read C1 as
+``the leaf summary kept the answer-relevant information,'' C3 as ``the merged
+summary kept the answer-relevant information for the parent,'' and C2 as
+``reusing an already-produced summary is stable.''}
+\label{tab:v7-local-laws-sketch-link}
+\end{table}
+
+\paragraph{Global laws and realized laws.}
+The displays above are \emph{global}: they range over all leaves,
+states, and sibling pairs. In deployment we only have access to the
+realized inputs of one run (the actual leaf blocks
+\(b_1,\dots,b_\ell\) and merge calls produced for one document). A run is
+\emph{realized-valid for accuracy \(\varepsilon\)} when every realized
+C1, C2, and C3 residual stays within bounds the audit can certify.
+This is the form of validity the audit can actually check, since
+\(\fstar\) is too expensive to run universally.
+
+\paragraph{The certified error.}
+Let \(E_{\mathrm{law}}(g,f;T)\) be the local-law error certified from
+the realized C1, C2, and C3 residuals along \(T\). The tree is
+\emph{certified at accuracy \(\varepsilon\)} when
+\[
+  E_{\mathrm{law}}(g,f;T)\le\varepsilon .
+\]
+When this inequality holds, the prediction
+\(\widehat y_T=f(s_{\mathrm{root}})\) tracks the oracle within
+\(\varepsilon\) on the realized run (with the appropriate probability
+for randomized \(g\)). The audit turns many local residual checks
+into one total certified error, and passing the target
+\(\varepsilon\) means the stored root state is accurate enough for
+this realized tree run. Section~\ref{sec:theorems} gives the
+composition from local residuals to this root-level error.
+
+\paragraph{Putting the pieces together.}
+The full C-TreePO problem now has all its ingredients. Given an oracle
+\(\fstar:\mathcal{X}\to\Y\) on the object space \(\mathcal{X}\),
+assumed locally context-compatible (Assumption~\ref{ass:context}), and a
+target accuracy \(\varepsilon\), C-TreePO seeks a pair \((g,f)\) with
+\begin{itemize}[leftmargin=1.5em,nosep]
+\item \(g\) a summarizer-merger from leaves \(b\) and child state pairs
+\(s_L\oplus s_R\) to states in \(\mathcal{Z}\),
+\item \(f:\mathcal X\to\Y\) a query from queryable objects to the task
+value space, calibrated
+against \(\fstar\),
+\end{itemize}
+such that on every realized tree run, the local laws C1, C2, C3 hold
+under \(\sim_f\). When they do, the certified local-law error is at
+most \(\varepsilon\), and the tree prediction
+\(\widehat y_T = f(s_{\mathrm{root}})\) tracks \(\fstar(X_T)\) within
+\(\varepsilon\). Classical mergeable summaries are the special case
+where \((g,f)\) is hand-designed and the local laws hold by algebra.
+Learned C-Trees establish the same obligations from training data and
+a runtime audit on the realized residuals. The rest of the section now
+follows the same order a reader should use. First,
+\S\ref{sec:v7-ctreepo-correspondence} shows that classical sketches
+are not merely analogies: on the same tree, their validity and
+mergeability obligations sit inside the C-Tree local laws. Next,
+\S\ref{sec:v7-sketch-inventory} and
+\S\ref{sec:v7-tree-comparisons} separate claim status from empirical
+evidence: which sketch families come with classical guarantees, and
+what the learned/tree reductions do in practice. Finally,
+\S\ref{sec:v7-neural-operator-route} asks how a learned model can
+approximate the local-law-compatible class when no hand-built sketch
+exists.
+
+\paragraph{Estimating \(g\) and \(f\) from data.}
+The classical mergeable-summary case supplies \((g,f)\) by hand: the
+encode, merge, and query are engineered, the local laws hold by
+algebra, and nothing has to be estimated. The C-Tree problem above
+becomes interesting when \((g,f)\) must be learned for the task.
+Estimating them needs access to the oracle on some manageable subset
+of inputs; the form of that access is what makes the audit's certified
+bound honest. A brief aside on \emph{design-based supervised learning}
+sets up the form of access the audit will use.
+
+\paragraph{An aside on design-based supervised learning.}
+Design-based supervised learning fixes the sampling probabilities for
+gold-standard labels in the research design. We use the standard
+survey-sampling machinery here rather than re-derive it: known
+inclusion probabilities give Horvitz--Thompson/H\'ajek IPW estimates,
+design-based standard errors, and effective-sample-size diagnostics
+\citep{HorvitzThompson1952,Kish1965SurveySampling,SarndalEtAl1992,EgamiEtAl2024}.
+In the tree audit, the finite population is the realized set of local-law
+checks: leaf sufficiency checks, merge checks, and re-summary checks. The
+sampled outcome is the corresponding local residual or violation indicator.
+DSL supplies the estimator and uncertainty accounting; C-TreePO supplies the
+local-law outcomes and interprets their aggregate error as a root-oracle
+certificate.
+
+\begin{assumption}[Design-based gold supervision]
+\label{ass:v7-dsl}
+For each realized node \(v\) of \(T\) (leaves and internal nodes
+alike), an audit policy assigns a known sampling probability
+\(\pi_v\in(0,1]\). On nodes drawn under that policy, the
+gold-standard oracle value \(\fstar(X_v)\) is available.
+\end{assumption}
+
+Every auditable node has a known chance of being checked, and
+checked nodes receive the trusted oracle label, so the audit can
+correct for which nodes were sampled. \(\pi_v\) can be a constant
+rate, can vary by depth or by node type, or can adapt to intermediate
+residuals; what matters is that it is set by the audit's design and
+not inferred from the data. Section~\ref{sec:estimation}
+discusses concrete sampling policies.
+
+\paragraph{Observed corpora and conditional prediction risk.}
+Assumption~\ref{ass:v7-dsl} only requires that sampling probabilities
+be known; it does not require an online oracle, so the same setup
+covers a fixed corpus the tree will be applied to, including
+documents whose oracle labels we will never observe. Conditional on that finite collection and on the fitted
+pipeline \((g,f)\), the realized tree nodes are the audit population.
+The audit randomizes which nodes receive gold labels, logs their
+inclusion probabilities \(\pi_v\), and uses inverse-probability
+weighting to estimate the average oracle residual or prediction risk
+for that fixed population. The unbiasedness claim is therefore
+design-based: it concerns the estimated average residual over the
+fixed auditable population, not the individual tree predictions
+themselves. Applying the certificate to future documents, or treating
+the fixed collection as representative of a broader target population,
+requires a separate corpus-selection assumption. If the collection can
+be treated as an i.i.d.\ or otherwise appropriate draw from the target
+population, the same estimate can be read as population prediction
+risk \citep{Wooldridge2010}; if the collection is nonrandomly selected,
+the remaining issue is sample selection rather than node-audit design
+\citep{Heckman1979,Manski1989Selection}.
+
+\paragraph{The audit.}
+With Assumption~\ref{ass:v7-dsl} in hand, the audit is the procedure
+that turns sampled gold-standard labels into estimates of the realized
+C1, C2, and C3 residuals. Each sampled node contributes an
+inverse-probability-weighted residual; the weighted residuals are
+combined into estimators of the global C1, C2, C3 quantities; those
+estimators feed into the local-law error \(E_{\mathrm{law}}(g,f;T)\).
+Concretely, the audit's output is a sample-based certificate that the
+run is realized-valid at accuracy \(\varepsilon\), with whatever
+confidence the sampling design supports.
+Section~\ref{sec:estimation} develops the audit in full;
+Section~\ref{sec:theorems} compiles the residuals into the root-level
+bound. Classical mergeable summaries have zero residuals by
+construction; learned C-Trees require the audit.
+
+\subsection{Correspondence with Classical Sketches}
+\label{sec:v7-ctreepo-correspondence}
+
+This subsection makes the nesting claim explicit in three steps. The
+forward step runs a classical sketch on the same leaf partition and the
+same binary tree, so its valid-leaf and valid-merge obligations become
+C1 and C3. The reverse step reads exact C-Tree local laws as a
+valid-summary guarantee at the root. The schedule step then explains
+what changes when the same leaves are merged under another allowed
+tree: C-TreePO gives query-level equivalence, while classical sketches
+may additionally give byte-identical state equality.
+
+The clean comparison is same-tree first. Fix a leaf partition and a
+binary tree \(T\). A full classical mergeable summary can be run on
+that same \(T\): encode at leaves, merge states at internal nodes, and
+query the root. Its original Agarwal-style validity and mergeability
+obligations give the C1/C3 part of the C-TreePO local laws. If the
+scheme also supplies stable re-entry for produced states, it supplies
+C2 as well. Conversely, exact C-TreePO local laws imply that the root
+summary distribution is supported on oracle-valid summaries for the
+represented input. Approximate local laws give the corresponding
+\(\varepsilon\)- or expected-validity statement, not exact state
+equality. What classical sketches earn by algebra, learned C-Trees
+must earn by audit.
+
+\paragraph{Forward direction.}
+A classical mergeable summary supplies a same-topology C-Tree by using
+its \(\mathrm{encode}\) at leaves, its \(\oplus\) at internal nodes,
+and its \(\mathrm{query}\) at the root. C1 and C3 then hold by the
+sketch's own validity and merge-closure obligations. C2 is the extra
+law C-TreePO requires beyond the baseline Agarwal obligations: the
+stable-reentry condition needed when produced states are fed back into
+the summarizer.
+
+\paragraph{Reverse direction.}
+If C1 and C3 hold exactly on \(T\), the one-pass root distribution is
+supported on states \(z\) with \(d_Y(\fstar(z),\fstar(S(T)))=0\). With
+C2 added, the same supportwise validity holds for multi-round \(Z_R\)
+reductions, since C2 ensures that re-entering a produced summary
+through \(g\) preserves its oracle value. Recovering a fully classical
+state-level summary additionally requires a validity relation, a
+query, and (for Agarwal's sized notation) an external size profile
+\(k(|D|,\varepsilon)\); without these the correspondence is
+behavioral at the level of task answers, with byte-level state equality
+only when the chosen serialization or codec is invertible. The
+following proposition states the resulting equivalence.
+
+\begin{proposition}[Exact query equivalence]
+\label{prop:exact-query-equivalence}
+Fix a C-Tree \(T\) with \(S(T)=x\) and a classical state-merge tree
+\(t\) whose stream data represents the same input, so that
+\(\mathrm{oracle}(\mathrm{data}(t))=\fstar(x)\). Suppose C1, C2, and
+C3 hold exactly for \(g,T,\fstar\), and suppose the classical summary
+satisfies build validity, merge validity, and valid-state query
+correctness. Then for every realized C-Tree output
+\(z\in\mathrm{supp}(Z_R(g,x,T))\), \(R\ge 1\),
+\[
+  \fstar(z)
+  =
+  \mathrm{query}\!\left(\mathrm{eval}_t(\mathrm{build},\mathrm{merge})\right)
+  =
+  \mathrm{oracle}(\mathrm{data}(t)).
+\]
+Write
+\[
+  \mathcal{S}_{\mathrm{Ag}}(D,\varepsilon)
+  =
+  \{s:\mathrm{Valid}_{\varepsilon}(D,s)\}.
+\]
+If \(D\) represents the same input \(x\), then every realized C-Tree
+output \(z\) and every
+\(s\in\mathcal{S}_{\mathrm{Ag}}(D,\varepsilon)\) satisfy
+\[
+  \fstar(z)=\mathrm{query}(s)=\mathrm{oracle}(D).
+\]
+If the C-Tree state space is identified with the Agarwal state space by
+an explicit validity bridge, then
+\(\mathrm{supp}(Z_R(g,x,T))\subseteq
+\mathcal{S}_{\mathrm{Ag}}(D,\varepsilon)\).
+\end{proposition}
+
+This is the state-level nesting claim in plain form: a C-Tree with
+exact local laws and a matching classical summary gives the same root
+answer as the classical merge tree. The equivalence is at the
+level of query values; literal state equality requires an additional
+invertible codec, and sized containment requires the external
+\(k(|D|,\varepsilon)\) profile.
+
+\begin{proposition}[Reduction to a classical sketch]
+\label{prop:mergeable-reduction}
+Under Assumption~\ref{ass:context}, suppose \(g\) is deterministic
+and satisfies the global preservation laws
+\[
+\text{(A1)}\ \forall s\in\mathcal{Z},\ g(s)\sim_f s,\qquad
+\text{(A2)}\ \forall u,v\in\mathcal{X},\
+  g(g(u)\oplus g(v))\sim_f u\oplus v.
+\]
+Let \((\mathrm{encode},\oplus_B,\mathrm{query})\) be a bounded
+mergeable-summary scheme \citep{Agarwal2013MergeableTODS}. If \(g\)
+serializes the sketch state, with \(g(x)=\mathrm{encode}(x)\) on
+raw shards/leaf blocks and \(g(z_1\oplus z_2)=z_1\oplus_B z_2\) on
+serialized states, and \(f(z,q)=\mathrm{query}(z,q)\), then the C-Tree
+and the classical summary produce the same state-level merge and the
+same root answer.
+\end{proposition}
+
+This proposition gives the forward construction: a bounded mergeable
+summary supplies a C-Tree instantiation by reusing its components.
+The classical encode and merge become the summarizer \(g\); the
+classical query becomes the C-Tree query \(f\). Bounded sketch states
+compose by \(\oplus_B\), \(f\) is applied only after the state has
+been merged, and A1, A2 give the C-Tree-side preservation.
+Appendix~\ref{app:proof-mergeable} gives the detailed derivation.
+
+\paragraph{Randomized sketches.}
+The same statement holds with the original sketch's success
+probability \(p\): if the classical root state is valid with
+probability at least \(p\), the C-Tree instantiation satisfies the
+query guarantee with probability at least \(p\) as well.
+
+\paragraph{Special case: strict oracle homomorphism.}
+Under the same A1 and A2, suppose additionally that the task value
+itself admits a merge: there exists
+\(m_{\Y}:\Y\times\Y\to\Y\) with
+\(m_{\Y}(\fstar(u),\fstar(v))=\fstar(u\oplus v)\) for all \(u,v\).
+Then \(\fstar\) is a homomorphic query of the induced state.
+Merging summaries and reading out gives the same oracle value as
+reading the raw concatenation, and \(\oplus_g\) is associative
+modulo \(\sim_f\). Most C-Tree tasks have no such scalar merge; the
+state-level reduction above is the operational route.
+
+\paragraph{Schedule invariance.}
+The same leaves admit many merge trees, and the local laws do not
+care which one is used once they hold on the realized calls. Whenever
+C1 and C3 hold exactly on two ordered trees with the same leaves, both
+root distributions have zero oracle distortion, so the two schedules
+are equivalent at the query level. With approximate laws, the
+corresponding statement is an expected or certified error bound for
+each certified schedule; it is not a claim of identical internal
+states.
+
+\paragraph{Scalar-query caveat.}
+The tree merges states, not scalar answers. Distinct count is the
+running example: knowing the distinct count in leaf block \(A\) and in
+leaf block \(B\) does not determine the count in \(A\uplus B\). A
+state-level summary that retains hash fingerprints can merge; two
+scalar counts cannot.
+
+\subsection{Sketch Families and Claim Status}
+\label{sec:v7-sketch-inventory}
+
+The correspondence above tells us when a classical sketch instantiates
+a C-Tree directly. The next move is classifying which concrete sketch
+families we use, and in what sense. Some come with classical
+mergeability guarantees that can support the local laws. Others are
+empirical references only. A few are adjacent geometric background and
+should not be attributed to the same source. Read
+Table~\ref{tab:v7-sketch-inventory} as an evidence ledger: it says what
+each family contributes to the C-Tree story before the experiments
+start. The distinction matters for citation honesty:
+\citet{Agarwal2013MergeableTODS} does not cover
+\(\varepsilon\)-kernel geometry, so that row is adjacent background
+unless supported by a separate source.
+
+\begin{table}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.16\linewidth}p{0.26\linewidth}p{0.18\linewidth}p{0.27\linewidth}@{}}
+\toprule
+Family & Description & Claim status & What the C-Tree uses \\
+\midrule
+HLL & Estimates the number of distinct items without storing the items
+themselves; the state is a vector of registers. & classical guarantee + empirical & Register-state summary, pointwise-max merge, and final estimator query value; the tree and flat reductions agree when they use the same state representation. \\
+Count-Min & Estimates item frequencies with hashed counter tables; the query
+asks for the approximate count of one item. & classical guarantee + empirical & Additive table summary and point-frequency query value; mergeable but not idempotent. \\
+Misra--Gries / SpaceSaving & Find heavy hitters: items whose frequencies are
+large enough that they should survive compression. & classical interfaces & Capacity, mass, and error-envelope arguments for Misra--Gries; SpaceSaving follows by the standard min-counter correspondence. \\
+GK quantiles & Maintains a compressed ordered summary so approximate ranks and
+quantiles can be answered from a stream. & classical one-way interface & Sequential/incremental quantile interface; not claimed as arbitrary full state-state mergeability. \\
+KLL quantiles & Randomized quantile sketch that compacts weighted samples and is
+designed for mergeable quantile states. & randomized classical interface & Randomized sized mergeable query-sketch interface with a weighted-mass invariant. \\
+Interval/range constructions & Keep small subsets or colored states that approximate many interval or range counts at once. & classical scaffolds + conditional size-reduction constructions & Same-weight interval concentration, finite VC/Sauer--Shelah trace layer, and low-discrepancy coloring route when supplied by a certificate. \\
+Markov and bigram sketches & Store the count information needed to answer simple sequence-model queries, such as transition or bigram statistics. & local-law examples & Task-specific answer-sufficient states showing the same summarize/merge/query pattern outside classical data-stream queries. \\
+CPC, Theta/KMV, Frequent Items, classic quantiles, REQ, t-digest, Tuple, VarOpt & Additional library sketch families used to compare tree reductions against familiar implementations. & empirical-only here & Empirical comparisons only; no classical guarantee is claimed for these additional variants. \\
+\(\varepsilon\)-kernel geometry & Geometric approximation family for preserving directional or shape information, separate from the mergeable-summary results of \citet{Agarwal2013MergeableTODS}. & adjacent/background here & Do not attribute to that paper without a separate source. \\
+\bottomrule
+\end{tabular}
+\caption{Mergeable-sketch claim status. Rows record the claims used
+here, not the full external literature on each sketch family.}
+\label{tab:v7-sketch-inventory}
+\end{table}
+
+\subsection{Tree Comparisons Against Classical and Learned Sketches}
+\label{sec:v7-tree-comparisons}
+
+The empirical comparisons now use the correspondence rather than
+restate it. HLL supplies the exact state-level parity check: when the
+tree uses the native register state and merge, it should collapse to
+the flat sketch. Learned HLL-like states test how hard it is to recover
+a supplied state/query pair. Broader sketch families then show the
+same pattern for frequency, quantile, set, and sampling-style tasks:
+some targets are recoverable by the learned class, while others leave a
+structural gap. The classical anchor is HyperLogLog
+\citep{FlajoletEtAl2007,HeuleEtAl2013}, the standard register-vector
+sketch for distinct counts.
+
+\paragraph{Classical state equality.}
+Classical HLL register vectors agree with the flat-sketch register
+vector on every tested tree shape; this is the tightest possible parity
+check, since the state is explicit. With a C-Tree instantiated using
+HLL's register state and pointwise-max merge, the tree-reduced register
+vector equals the flat register vector for every tree shape we tested.
+Alternative HLL variants can agree at the estimate level even when
+their internal representation changes along different construction
+paths.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{classical_sketches_hll_leaf_size.pdf}
+\caption{\textbf{Official HLL over leaf size.}
+The exact HLL anchor uses the native register state and the fixed HLL
+estimator \(f^\star\). Because the state merge is register-wise max, the
+tree reduction agrees with the corresponding flat sketch at the state level;
+the curve therefore measures the ordinary HLL estimation floor. Learned-merge
+error is outside this anchor. Learned HLL-register rows, when included, are
+interpreted as recovery of this supplied state/query pair.}
+\label{fig:v7-hll-parity-curves}
+\end{figure}
+
+\paragraph{Learned state with fixed versus learned query.}
+The learned HLL rows ask whether a neural \(g\) can recover a classical
+state-and-estimator target. With a fixed classical HLL estimator as
+\(f\), merge errors must land in the exact register geometry and can
+compound with tree depth. With learned \(g+f\), the system can choose a
+different latent state that preserves the same answer. The practical
+lesson for semantic C-Tree tasks: exact recovery of a reference
+sketch imposes a real query-shape constraint; task preservation alone
+may be better served by a jointly learned state and query.
+
+\paragraph{Broad sketch suite.}
+The same tree-reduction protocol applies to classical sketches and
+learned companions across distinct-counting, frequency, quantile, set,
+and sampling-style queries.
+Table~\ref{tab:v7-classical-sketches-compact} reports representative
+rows; Appendix~\ref{app:sketch-simulations} records the full generated
+grid, per-family panels, and run-artifact provenance.
+
+For sketches lacking an exact locally mergeable law in the state class
+we train, the learned rows are approximations. The optimizer searches the
+chosen mergeable-summary class for a state/query pair whose tree
+reduction best matches the empirical oracle under the training
+distribution, with no claim to recover the library's internal update
+rule. Exact recovery occurs only when the target law has a
+representative in that class; otherwise the residual gap is a
+structural error beyond optimization failure.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{classical_sketches_summary.pdf}
+\caption{\textbf{Broad mergeable-sketch approximation view.}
+The x-axis is leaf size in tokens, with the top axis showing the induced
+number of leaves per document. Official/oracle rows are the reference
+tree-reduction implementations. Learned non-HLL rows, when present, report
+the excess structural error relative to the reference oracle, with no claim
+that the exact library law has been recovered.}
+\label{fig:v7-classical-sketches-summary}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}p{0.22\linewidth}p{0.32\linewidth}p{0.34\linewidth}@{}}
+\toprule
+Task family & Classical comparison & Learned-tree comparison \\
+\midrule
+Distinct counting & HLL gives the canonical state-level parity check:
+state merge matches flat reduction when the same register representation is
+used. & Learned HLL-like states reveal the cost of requiring exact reference
+state recovery versus allowing a learned query. \\
+Frequency estimation & Count-Min has additive table states and point-query
+values. & Learned companions test whether the tree can preserve frequency
+information under repeated merges. \\
+Quantiles and ranks & GK and KLL represent the deterministic one-way and
+randomized mergeable quantile regimes. & Learned companions test whether a
+answer-sufficient semantic state can preserve rank information well enough for
+the root query. \\
+Set and sampling-style summaries & Additional classical sketches serve as
+empirical baselines across set, sampling, and weighted-summary tasks. &
+Learned rows are treated as empirical evidence only unless they satisfy the
+state-level local laws above. \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Broad-sketch comparison.} Classical rows are empirical
+references; claim status is the separate classification in
+Table~\ref{tab:v7-sketch-inventory}.}
+\label{tab:v7-classical-sketches-compact}
+\end{table}
+
+\paragraph{Learning an answer-sufficient state from oracle feedback.}
+When the state dimension \(m\) can carry the \(r\)-dimensional
+answer-sufficient count vector, the learned sketch approaches the
+hand-designed state; when \(m<r\), the error floor is structural. The
+controlled diagnostic asks the oracle for an \(r\)-vector of per-type
+counts, so a state with dimension \(m<r\) is structurally insufficient
+and the learned tree cannot close the gap by training alone. The
+learned tree converges when \(m\ge r\) and plateaus when \(m<r\),
+matching the hand-designed sketch boundary. The Manifesto setting uses
+the same logic with a semantic answer-sufficient state.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.88\linewidth]{learned_sketch_leaf_size_diagnostic.pdf}
+\caption{\textbf{Learning a local-law-compatible approximation from oracle feedback.} When
+the state dimension \(m\) can carry the answer-sufficient state, the learned
+tree approaches the hand-designed boundary. When the target behavior is
+outside the chosen mergeable class, the learned row estimates the closest
+local-law-compatible approximation under the empirical loss, and the
+remaining gap is structural.}
+\label{fig:v7-learned-sketch-curves}
+\end{figure}
+
+\paragraph{Non-commutative oracles.}
+Sketches with associative, commutative, idempotent merges are friendly
+first examples. Most interesting C-Tree oracles are not
+register-like. The Markov-changepoint example of
+Section~\ref{sec:markov-walkthrough} counts boundary transitions
+between adjacent colored regions, a cross-span interaction no
+commutative register-wise merge can recover from leaves alone. The
+merge has to carry boundary information forward, which is what
+motivates the Fourier neural operator described in
+Section~\ref{sec:fno-primer}. The audit-and-local-law picture is the
+same; the architecture of \(g\) has to be richer.
+
+The sketch experiments validate the bridge in two directions: exact
+state-level collapse when the classical state is supplied, and learned
+recovery or structural error when the state must be fit from oracle
+feedback. That leaves the representation question. When no hand-built
+sketch is available, neural operators are one candidate route because
+they can learn maps between structured states, including the leaf and
+merge maps a C-Tree needs.
+
+\subsection{Neural Operators as a Representation Route}
+\label{sec:v7-neural-operator-route}
+
+The local laws say what \(g\) must satisfy on realized states. The
+architecture of \(g\) determines which summarizers are reachable in the
+first place. A classical mergeable summary's \(g\) is hand-written: a
+fixed-arity encode and a fixed-arity merge, both engineered from the
+algebra of one query. A neural \(g\) is a parameterized family trained
+under local-law pressure and then audited on the realized calls. The
+question is what families to use.
+
+A \emph{neural operator} is a network designed to act on structured
+inputs (functions, fields, or high-dimensional states); a flat token
+sequence is only one possible representation
+\citep{Kovachki23NeuralOperator}. The Fourier neural operator used in
+the Markov example treats a leaf's hidden state as a function on a
+discrete spatial axis, applies layered Fourier-domain transforms, and
+produces another such state. Transformer-as-operator blocks fall in the
+same class. The key property is that the family is rich enough to
+represent ideal leaf-summary and state-merge maps on the finite
+collection of realized calls a tree generates, while small enough to
+train. If the state space is represented in the operator domain, an
+appropriate neural-operator class can approximate the ideal \(g\) on
+that realized call set.
+
+The guarantee below is the learned analogue of the classical nesting
+claim: if an exact local-law summarizer exists in the class, and the
+learned operator is close to it on the leaf, merge, and re-entry calls
+the tree actually makes, then the root error is bounded.
+
+\begin{proposition}[Fixed-\(\varepsilon\) learned recovery]
+\label{prop:fixed-epsilon-no-recovery}
+Fix a target accuracy \(\varepsilon\), a tree \(T\), and \(R\ge1\).
+Suppose an ideal summarizer \(g^\star\) in a neural-operator class
+\(\mathcal C\) satisfies the exact local laws on \(T\). Suppose a
+realized neural operator \(g_\theta\in\mathcal C\) approximates
+\(g^\star\) on the realized leaf, merge, and re-entry call sets, and
+that the approximation transfers to local-law budgets
+\(\varepsilon_{\mathrm{leaf}},\varepsilon_{\mathrm{merge}},
+\varepsilon_{\mathrm{idemp}}\). If
+\[
+  \varepsilon_{\mathrm{leaf}}
+  +\varepsilon_{\mathrm{merge}}
+  +(R-1)\varepsilon_{\mathrm{idemp}}
+  \le \varepsilon ,
+\]
+then the root distribution of the learned tree is expected-\(\varepsilon\)
+valid:
+\[
+  \mathbb E_{z\sim Z_R(g_\theta,x,T)}
+  d_Y(\fstar(z),\fstar(x))
+  \le \varepsilon .
+\]
+The same statement applies to the FNO route once the finite-mode/FNO
+approximation bound supplies the same realized-call guarantees. If the
+laws are checked through a calibrated learned query \(\widehat f\), the
+condition becomes
+\[
+  \varepsilon_{\mathrm{leaf}}
+  +\varepsilon_{\mathrm{merge}}
+  +(R-1)\varepsilon_{\mathrm{idemp}}
+  +2\varepsilon_{\mathrm{orc}}
+  \le \varepsilon ,
+\]
+where \(\varepsilon_{\mathrm{orc}}\) is the uniform oracle-recovery error of
+\(\widehat f\) against \(\fstar\).
+\end{proposition}
+
+This proposition is the fixed-target certification route:
+approximation theory supplies a representable \(g_\theta\) on the
+realized calls, optimization and audit supply the local-law budget, and
+the local-law accounting converts that budget into
+expected-\(\varepsilon\) validity.
+In existential form, any NO or FNO learning result that returns such a
+certified \(g_\theta\) gives an \(\varepsilon\)-good learned C-Tree
+summary for the fixed \(T,x,R\).
+
+A useful way to state the learned-oracle assumption is separate from the
+summarizer assumption. If the NO/FNO query \(\widehat f\) recovers the
+true oracle uniformly,
+\[
+  \sup_x d_Y(\widehat f(x),\fstar(x)) \le \varepsilon_{\mathrm{orc}},
+\]
+and the learned tree has local-law budget \(E_{\mathrm{law},R}\) measured
+through \(\widehat f\), then the same tree has true-oracle expected
+distortion
+\[
+  \mathbb E_{z\sim Z_R(g_\theta,x,T)}
+  d_Y(\fstar(z),\fstar(x))
+  \le E_{\mathrm{law},R}+2\varepsilon_{\mathrm{orc}}.
+\]
+Thus a fixed target \(\varepsilon\) is obtained whenever
+\(E_{\mathrm{law},R}+2\varepsilon_{\mathrm{orc}}\le\varepsilon\).
+
+Approximation and certification are separate steps. A flexible
+architecture may learn a useful summarizer; the local laws and audit
+tell us whether the learned state behaves like a mergeable summary for
+the task. In the differentiable neural-operator setting, the empirical
+objective has the form
+\[
+  \mathcal{L}
+  =
+  \alpha_{\mathrm{cal}}\mathrm{calibration\_loss}(\widehat f)
+  +\alpha_{\mathrm{gold}}\mathrm{gold\_loss}(\widehat f,g)
+  +\lambda\,E_{\mathrm{law},R}(\widehat f,g).
+\]
+The gold loss measures the distance from the tree's final prediction
+to the available gold label. The local-law term is the weighted
+empirical C1/C3/C2 residual. The summarizer \(g\) enters through the
+tree states it produces. The learned query \(\widehat f\) enters through
+calibration, gold-label prediction, and query-level local residuals.
+The coefficient \(\lambda\) is a training hyperparameter; it is not an
+error unit. Certification is the separate statement that the total
+certified error is at most the target \(\varepsilon\).
+
+When local oracle labels are not available, as in the LLM setting, we
+use a teacher-first version of the same objective. The first pass uses
+raw documents or raw concatenations to train a learned query
+\(\widehat f\) from global labels. The next pass fixes or selects this
+teacher and uses it to define local residuals: C1 compares
+\(\widehat f(g(b))\) with \(\widehat f(b)\), C3 compares
+\(\widehat f(g(z_L\oplus z_R))\) with
+\(\widehat f(X_L\oplus X_R)\), and C2 compares
+  \(\widehat f(g(z))\) with \(\widehat f(z)\). The final claim then
+  adds the teacher oracle-recovery slack to the audited local-law error.
+
+The slack comes from a simple residual transfer. For any local
+comparison \(a,b\),
+\[
+  d_Y(f^\star(a),f^\star(b))
+  \le
+  d_Y(\widehat f(a),\widehat f(b))
+  +d_Y(\widehat f(a),f^\star(a))
+  +d_Y(\widehat f(b),f^\star(b)).
+\]
+If the teacher has uniform oracle-recovery error at most
+\(\varepsilon_{\mathrm{orc}}\), each
+local residual measured through \(\widehat f\) transfers to the
+corresponding true-oracle residual with at most
+\(2\varepsilon_{\mathrm{orc}}\)
+additive slack. Thus the componentwise true local-law error is bounded by
+\[
+  E_{\mathrm{law}}(g,f^\star;T)
+  \le
+  E_{\mathrm{law}}(g,\widehat f;T)+2(R+1)\varepsilon_{\mathrm{orc}}
+\]
+for the unweighted C1/C3/C2 composition with \(R-1\) re-summary
+terms. For the final root prediction we use the sharper end-to-end
+bound below, which transfers the root comparison once and therefore
+pays only \(2\varepsilon_{\mathrm{orc}}\).
+
+This is also where sample size enters the paper. More labels do not
+automatically make the learned residual smaller; they make the audit
+estimate sharper under the usual design-based conditions. The next box
+therefore reads the local-law certificate as a standard finite-population
+estimand, IPW estimate, standard error, calibration margin, and
+oracle-transfer slack.
+
+\begin{center}
+\fbox{\parbox{\dimexpr0.96\linewidth-2\fboxsep-2\fboxrule\relax}{
+\textbf{Econometric reading.}
+Condition on the realized corpus, fitted tree pipeline, and logged audit
+design. The finite population is the set of local-law checks on the realized
+trees. The outcome is the C1/C3/C2 residual or violation indicator. The
+estimand is the aggregate local-law error \(E_{\mathrm{law},R}\). The audit
+reports its HT/H\'ajek/IPW estimate
+\(\widehat E_{\mathrm{law},R}^{\mathrm{IPW}}\) and design-based uncertainty
+\(c_\alpha\widehat{\mathrm{SE}}_{\mathrm{IPW}}\). Calibration contributes
+\(B_{\mathrm{cal}}\), and transferring from \(\widehat f\) to \(\fstar\)
+contributes \(2\varepsilon_{\mathrm{orc}}\). Thus the econometric certificate
+is the audited local-law estimate plus sampling uncertainty, calibration
+margin, and oracle-transfer slack.
+}}
+\end{center}
+
+A compact way to state the learned guarantee is to instantiate this standard
+DSL/IPW certificate on the local-law outcomes rather than introduce a new
+residual term. Write
+\(\widehat E_{\mathrm{law},R}^{\mathrm{IPW}}\) for the HT/H\'ajek
+C1/C3/C2 estimate and \(\widehat{\mathrm{SE}}_{\mathrm{IPW}}\) for its
+design-based standard error, both computed from the logged node sample.
+\(B_{\mathrm{cal}}\) is the separate held-out query/oracle calibration margin,
+and \(c_\alpha\) is the confidence multiplier. If \(\widehat f\)
+uniformly recovers \(\fstar\) within \(\varepsilon_{\mathrm{orc}}\), the
+practical certificate is
+\[
+\begin{aligned}
+  \mathbb E_{s\sim Z_R(g_\theta,x,T)}
+  d_Y(\fstar(s),\fstar(x))
+  &\le
+  \underbrace{\widehat E_{\mathrm{law},R}^{\mathrm{IPW}}}
+    _{\text{sampled local-law estimate}}
+  +
+  \underbrace{B_{\mathrm{cal}}}
+    _{\text{calibration margin}}
+  +
+  \underbrace{c_\alpha\,\widehat{\mathrm{SE}}_{\mathrm{IPW}}}
+    _{\text{DSL/IPW uncertainty}} \\
+  &\quad+
+  \underbrace{2\varepsilon_{\mathrm{orc}}}
+    _{\text{oracle recovery}} .
+\end{aligned}
+\]
+Thus the learned tree is certified for \(\fstar\) at tolerance
+\(\varepsilon\) whenever the right-hand side is at most \(\varepsilon\).
+The factor \(2\varepsilon_{\mathrm{orc}}\) is the two-sided cost of comparing
+through the calibrated query \(\widehat f\). The law-of-large-numbers and
+effective-sample-size behavior belongs to the cited DSL/survey-sampling layer:
+larger design information shrinks the standard-error term under the usual
+conditions, while the learned local-law residual remains an empirical model
+quantity. The sample-size shorthand is therefore the envelope condition:
+if \(c_\alpha\widehat{\mathrm{SE}}_{\mathrm{IPW}}\le
+C/\sqrt{n_{\mathrm{eff}}+1}\), then the certified error is bounded by the same
+display with that envelope replacing the standard-error term. A
+neural-operator architecture is covered when the realized state machine lies
+in, or is certified near, the local-law-compatible class.
+
+The learned query has its own oracle-recovery error, and the
+certificate for the learned tree must cover both the audited tree
+residuals and that recovery slack. This gives three readings of
+the same error formula. With only root labels, the local laws are
+measured through a calibrated teacher \(\widehat f\), so the
+certificate pays the teacher slack. With online oracle calls and a
+genuinely mergeable oracle, the local laws can be checked directly
+against \(f^\star\), and the exact mergeable witness has zero law
+error. With online oracle calls but a non-mergeable target, the
+procedure is no longer recovering \(f^\star\) exactly; it is fitting
+\(g_\theta\) to the best available tradeoff between root accuracy and
+local-law error in the learned class. The remaining root error
+\(E_{\mathrm{root}}(g_\theta,f^\star;T)\), meaning the true-oracle
+error at the tree root, and
+\(E_{\mathrm{law}}(g_\theta,f^\star;R)\) are structural when no exact
+mergeable representative exists.
+
+\subsection{Consequences}
+\label{sec:v7-what-established}
+
+The preceding discussion leaves a simple picture:
+\begin{enumerate}[leftmargin=1.5em]
+\item Classical mergeable summaries and C-Trees have the same operational
+shape: summarize leaves into states, merge states, and query the root.
+\item The correspondence is state-level. Scalar child answers do not have
+to merge; the state must carry whatever the root query will need.
+\item Exact local laws make the realized root state query-equivalent to
+the represented input. Randomized summaries keep their original success
+probability, and approximate laws give expected or certified error bounds.
+\item Neural operators supply candidate leaf and merge maps when no
+hand-designed sketch is available. The audit checks whether the learned
+maps behave like a mergeable summary on the deployed run.
+\item The empirical suite checks both sides: exact collapse to classical
+HLL when the state is fixed, and learned recovery or structural failure
+when the state is trained from oracle feedback.
+\end{enumerate}
+
+The local-law-compatible class described by C-Trees captures the
+classical mergeable-summary setting and extends it to learned semantic
+states such as the Manifesto application in
+Section~\ref{sec:min-manifesto-results}. The empirical sequence follows
+the same division. The sketch simulations in this section are compact
+validation anchors for the framework. The Manifesto results are the
+full semantic LLM application, where the root score is externally
+validated and the available local diagnostics show where future
+node-level audit labels would enter.

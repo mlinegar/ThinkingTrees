@@ -2,11 +2,14 @@
 
 Section~\ref{sec:fno-primer} introduced neural operators as reusable
 function-space maps, and Section~\ref{sec:mergeable-sketches} introduced
-mergeable sketches as encode/merge/decode summaries. This appendix
-records the exact overlap. The point is not that every neural operator
-is a mergeable sketch, or that every classical sketch is implemented by
-a transformer. The point is that the paper uses named subspaces and
-named intersections.
+mergeable sketches as encode/merge/decode summaries. This appendix explains
+the overlap in the least mysterious terms: a mergeable summary builds a state
+on each shard, merges states up the tree, and reads the answer from the root
+state. C-TreePO uses the same state-level shape when $g$ builds and merges the
+state and $f$ reads it out. The point is not that every neural operator is a
+mergeable sketch, or that every classical sketch is implemented by a
+transformer. The point is that there is a named state-level intersection, and
+the local laws certify membership in it.
 Appendix~\ref{app:kovachki-finite-dimensionalization} records the
 separate Kovachki Lemma~21/22 finite-dimensionalization route; this
 appendix uses that route only through the resulting approximation and
@@ -97,6 +100,98 @@ label is the certified overlap:
   \mathcal{N}\cap\mathrm{MS},
 \]
 where $\mathcal{N}$ is the chosen neural-operator class.
+Read this as a set-membership statement, not as an automatic guarantee about
+trained models. Neural-operator architecture gives a representation family.
+Mergeable-summary structure gives build/merge/readout witnesses. C1/C3/C2
+are the checks that a realized operator is actually using the state in the
+required way.
+
+\subsection{Agarwal Notation and the \texorpdfstring{$\varepsilon$}{epsilon}-Fixed Interface}
+
+For the comparison to \citet{Agarwal2013MergeableTODS}, fix
+$\varepsilon$ before the merge process begins. A summary method is allowed to
+be one-to-many: for a dataset or stream multiset $D$, the expression
+\[
+S(D,\varepsilon)
+\]
+denotes any valid $\varepsilon$-summary that the method may output for $D$.
+The size profile is
+\[
+k(n,\varepsilon)
+  :=
+  \max\{\, |S(D,\varepsilon)| : |D|=n,\ S(D,\varepsilon)\text{ valid}\,\}.
+\]
+The operation \(D_1\uplus D_2\) is multiset addition of represented inputs.
+It is not addition, averaging, or merging of scalar query answers. Full
+mergeability at the fixed $\varepsilon$ means that there is an algorithm $A$
+such that, for every pair of valid child summaries,
+\[
+A\big(S(D_1,\varepsilon),S(D_2,\varepsilon)\big)
+  \in S(D_1\uplus D_2,\varepsilon),
+\]
+and the resulting representation has size at most
+\[
+k(|D_1|+|D_2|,\varepsilon).
+\]
+If this profile is independent of $n$, we write it as $k(\varepsilon)$, so
+both child summaries and the merged parent summary have size at most
+$k(\varepsilon)$. The streaming case is the special case
+\(|D_2|=1\), where each new item is merged into the current summary. Full
+mergeability is stronger because the merge tree and the child dataset sizes are
+arbitrary.
+
+For randomized methods, the same notation is interpreted as a validity event:
+after any finite merge tree, the root state must be a valid
+$S(D,\varepsilon)$ for the represented multiset $D$ with the stated success
+probability. C-TreePO's randomized nesting theorem preserves exactly this
+event-level probability: on the event that the root state is a valid
+$S(D,\varepsilon)$, the root readout is correct. The corresponding Lean
+interface is \texttt{RandomizedRelationalMergeablePreferenceShape}; the
+deterministic relational interface is \texttt{RelationalMergeablePreferenceShape}.
+
+For the range-space examples, Agarwal's subset notation is also explicit. A
+finite range space is \((D,\mathcal{R})\), and an
+$\varepsilon$-approximation is a subset \(S\subseteq D\) satisfying
+\[
+\sup_{R\in\mathcal{R}}
+\left|
+  \frac{|S\cap R|}{|S|}
+  -
+  \frac{|D\cap R|}{|D|}
+\right|
+\le \varepsilon .
+\]
+In the C-TreePO nesting statement this subset \(S\) is the state/readout
+object at the root, while \(D_1\uplus D_2\) is the represented-data operation
+tracked by the tree. Keeping these two symbols separate prevents the common
+mistake of treating set/subset readout notation as a law for merging scalar
+child answers.
+
+\paragraph{Conversion checklist.}
+To convert a C-TreePO construction into Agarwal's interface, one must supply
+the following objects, in this order:
+\begin{enumerate}
+\item a stream representation \(D\mapsto \mathrm{Stream}\,\alpha\) for the
+represented data;
+\item a fixed error parameter \(\varepsilon\);
+\item a state type \(S\), a leaf builder
+\(\mathrm{build}:\mathrm{Stream}\,\alpha\to S\), and a state merge
+\(\mathrm{merge}:S\times S\to S\);
+\item a validity relation \(V_\varepsilon(D,s)\), read as
+``\(s\in S(D,\varepsilon)\)'';
+\item a state-size function \(\mathrm{size}:S\to\mathbb{N}\) and a size profile
+\(k(n,\varepsilon)\);
+\item a root readout \(\mathrm{readout}:S\to Y\) and target oracle
+\(F:\mathrm{Stream}\,\alpha\to Y\);
+\item proofs that build produces valid states, merge preserves validity for
+\(D_1\uplus D_2\), valid states respect the size profile, and valid states read
+out to \(F(D)\).
+\end{enumerate}
+These are exactly the fields of the Lean adapter
+\texttt{CTreePOToAgarwalTransform}. Its methods then produce the Agarwal
+state-level summary interface, the C-TreePO relational nesting shape, the
+leaf and merge valid-sized states, the arbitrary-tree valid-sized root state,
+the root readout theorem, and the \(k(|D|,\varepsilon)\) size bound.
 
 \subsection{Transformer Inclusion}
 
@@ -109,25 +204,78 @@ use are therefore: (i) single-head attention equals a discretized kernel
 layer, (ii) a transformer block is a neural-operator layer, (iii) a
 finite transformer encoder stack is an equation-(6) neural operator,
 and (iv) the encoder stack belongs to the equation-(6) class. These
-membership claims operate at the architecture level only; they do not
-certify tokenizers, runtime serving details, or a specific model
-checkpoint.
+membership claims are what let transformer-style summarizers use the
+same external approximation-and-transfer route as the FNO examples:
+equation-(6) approximation first, local-law budgets second, sampled
+audit and method transport last. They operate at the architecture level
+only; they do not certify tokenizers, runtime serving details, or a
+specific model checkpoint.
 
 \subsection{Mergeable-Sketch Inclusion}
 
-The classical lane is broader than HLL. A sketch is a triple
-(encode, merge, decode); the sketch-local-law status is established
-separately for HLL, Count-Min, KLL quantiles, GK's sequential quantile
-surface, bigram sketches, and Markov-count sketches. HLL is the
-empirical parity anchor because it gives a clean byte-identity test,
-but the theorem surface is the general mergeable-sketch class.
+The classical lane is broader than HLL. A sketch supplies an encoder, a state
+merge, and a decoder/readout. HLL is the empirical parity anchor because it
+gives a clean byte-identity test, but the theorem surface is the general
+mergeable-sketch class, including the Lean-backed Count-Min,
+Misra--Gries/GK-style, interval/range, bigram, and Markov-count interfaces.
 
-The key class is $\mathrm{MS}$: a realized operator $g$ belongs to it
-when $g$ is the decode-after-encode action of a sketch whose encoder
-preserves oracle value at leaves, whose merge preserves it across
-siblings, and whose decoder is compatible with the oracle. Any such
-sketch-induced operator lies in the exact local-law subspace on every
-tree.
+The key class is $\mathrm{MS}(\fstar)$. A realized operator $g$ belongs to it
+when it is induced by a sketch whose leaf state preserves the oracle value,
+whose merge state preserves the oracle value across siblings, and whose
+decoder/readout is compatible with the oracle. In that situation the local
+laws are not an extra mystery: C1 is leaf validity, C3 is merge validity, and
+C2 is stability when a stored summary is reused. The Lean theorem
+\texttt{local\_laws\_of\_sketch} packages this direction, and
+\texttt{mergeableSketchSummaryClass\_subset\_exactLocalLawSubspace} states the
+corresponding neural-operator subspace membership.
+
+This is a membership condition, not an automatic consequence of being a neural
+operator. The covered class is exactly
+$\mathcal{N}\cap \mathrm{MS}(\fstar)$, or an explicitly certified approximate
+neighborhood of that class. In the calibrated-readout route below, the same
+statement is read with $\widehat f$ in place of $\fstar$, and the separate
+calibration theorem supplies the true-oracle slack.
+
+\subsection{Universal Approximation Versus Certification}
+
+The informal slogan ``neural operators can capture mergeable sketches'' should
+be read as a two-step statement. First, neural-operator approximation gives
+representational capacity. Fix a mergeable-summary interface
+\[
+\mathrm{build}:D\to S,\qquad
+\mathrm{merge}:S\times S\to S,\qquad
+\mathrm{readout}:S\to Y,
+\]
+and fix an encoding of the bounded state space $S$ into the operator's
+input/output domain. On any compact realized-call set generated by a fixed
+tree, a neural-operator class with the relevant approximation property can
+approximate the leaf builder, the state merge, and the readout-facing state
+map. This is the representation claim: the learned family can carry the same
+kind of global state that the classical sketch carries on those calls.
+
+Second, C-TreePO supplies the certification layer. Approximation alone does
+not imply mergeability, and it does not certify a trained checkpoint. The
+realized operator must satisfy the local laws on the state interface: C1 checks
+that leaf calls build a state sufficient for the readout, C3 checks that
+merging child states matches the raw-union state, and C2 checks that
+already-produced states are stable under re-use. When these law budgets are
+zero, the realized neural operator is in the exact state-level
+mergeable-sketch subspace. When they are nonzero, the C-TreePO preservation
+theorem gives a root distortion bound with the same local-law budget. With a
+calibrated readout $\widehat f$ satisfying
+\(\sup_x d(\widehat f(x),\fstar(x))\le\varepsilon_f\), the Lean bridge
+adds only the two-sided calibration slack \(2\varepsilon_f\).
+
+Thus the precise claim is:
+\[
+\text{NO capacity} + \text{state encoding} + \text{C1/C3/C2 certification}
+\Longrightarrow
+\text{learned mergeable-sketch behavior}.
+\]
+Optimizer convergence is a separate question. The local-law-weighted training
+objective is best understood as a projection target: it tries to move the
+realized neural operator into, or near, the mergeable-sketch subspace that the
+theorem already certifies.
 
 \subsection{Certified Overlap}
 
@@ -138,23 +286,56 @@ For a chosen neural-operator class $\mathcal{N}$, the certified overlap is
   \mathcal{N} \cap \mathrm{MS}(\fstar),
 \]
 and this overlap sits inside the exact local-law neural-operator subspace
-$\mathrm{ExactLL}_{\mathcal{N}}(T,\fstar)$. Separately, the older
-Proposition~\ref{prop:mergeable-reduction} route yields the same overlap
-through a different argument: any deterministic operator carrying
-A1/A2/A3 witnesses becomes a classical mergeable summary, and can then be
-represented by a sketch adapter whose encoder is the operator itself,
-whose merge is the operator applied to the concatenation of child
-summaries, and whose decoder is the identity.
+$\mathrm{ExactLL}_{\mathcal{N}}(T,\fstar)$. Separately,
+Proposition~\ref{prop:mergeable-reduction}'s state-level route gives the
+reverse direction of the qualified equivalence: an exact C-TreePO operator can
+be read as a mergeable state scheme on the range of \(g\), with
+\(\oplus_g(s,t)=g(s\concat t)\) and readout \(f\). This reverse direction is
+state-level. It still does not assert that scalar child answers merge.
 
 \subsection{Oracle \texorpdfstring{$+$}{+} Projection Decomposition}\label{app:oracle-plus-projection}
 
 The operational learned setting usually lands in the approximate, not
 exact, subspace. The formal objective therefore separates two roles:
-oracle fit and projection toward local-law validity. The main-text
-equation~\eqref{eq:oracle-projection-objective} writes the objective
-with a single scalar $\lambda\in[0,1]$, weighting the three audited
-budgets uniformly. A more general per-law-weighted form with
-non-negative shares $\rho_1,\rho_2,\rho_3$ reads
+calibrated readout fit and projection toward local-law validity. We write
+$\widehat f$ for the learned readout calibrated against the true oracle
+$\fstar$, and $g$ for the learned operator that builds leaf states and
+merges child states. The local-law losses are evaluated relative to
+$\widehat f$: C1 trains leaf-state sufficiency, C3 trains merge
+consistency, and C2 trains stability on already-produced states. The
+theorem-backed route is then:
+\[
+  \text{calibrate }\widehat f\approx \fstar,\qquad
+  \text{project }g\text{ toward the C1/C3/C2 subspace for }\widehat f,
+\]
+and the Lean theorem
+\begin{center}
+\small
+\path|trueOracle_delta_R_ZR_le_of_calibrated_neuralOperatorBridge|
+\end{center}
+transfers the resulting root distortion to $\fstar$ with additive
+$2\varepsilon_f$ calibration slack.
+
+A training objective matching that decomposition is
+\begin{equation}\label{eq:calibrated-oracle-projection-objective}
+\begin{aligned}
+J(\widehat f,g)
+  ={}& L_{\mathrm{cal}}(\widehat f,\fstar)
+      + L_{\mathrm{root}}(\widehat f,g) \\
+     &+ \lambda_{\mathrm{leaf}} C1_{\widehat f}(g)
+      + \lambda_{\mathrm{merge}} C3_{\widehat f}(g)
+      + \lambda_{\mathrm{idemp}} C2_{\widehat f}(g),
+\end{aligned}
+\end{equation}
+with optional state-imitation terms in simulations where exact sketch
+states are observed. This objective is a certification target, not an
+optimizer theorem: it does not assert that SGD finds the projection point
+without a separate optimization argument.
+
+The main-text equation~\eqref{eq:oracle-projection-objective} writes the
+projection part with a single scalar $\lambda\in[0,1]$, weighting the
+three audited budgets uniformly. A more general per-law-weighted form
+with non-negative shares $\rho_1,\rho_2,\rho_3$ reads
 \begin{equation}\label{eq:oracle-projection-objective-generalized}
 J_\lambda^{\boldsymbol{\rho}}(g)
   =

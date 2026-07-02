@@ -1,0 +1,21 @@
+\section{Conclusion}\label{sec:v8-conclusion}
+
+C-TreePO treats manifesto measurement as a state-composition problem. The
+expert score is global, but the evidence that determines it is local and
+relational. A C-Tree stores policy-evidence states at leaves and internal
+merges, and the local laws state when those states can replace the raw spans
+they represent.
+
+The objective separates the two channels a deployed LLM pipeline needs. Root
+loss fits the document-level expert target. Local-law loss trains and audits
+the state map inside the realized tree. Because direct local oracle calls are
+sparse, the dense proxy \(\widehat f\) supplies local geometry and sampled
+\(f^\ast\) nodes correct proxy bias with logged propensities.
+
+The Manifesto/Benoit results demonstrate the root-observed tier: C-Tree roots
+match strong expert-survey benchmarks while producing readable local units.
+The decentralization failure mode shows why the local units matter. A root
+score alone identifies the aggregate error; the local diagnostic gap points to
+the state-sharing channel that failed. The next measurement tier is to sample
+those realized nodes, attach application-aligned local oracle labels, and
+report the finite-sample certificate alongside the root score.

@@ -1,0 +1,57 @@
+\section{Walk-Through: Local Labels Carry the Load}\label{sec:markov-walkthrough}
+
+Section~\ref{sec:markov-interlude} described the scene-register
+changepoint task and explained why a leaf summary that drops boundary
+registers cannot recover the count of register shifts. We now ask the
+empirical question: when local supervision is available (a leaf-level
+label of the count, or of the boundary registers, on a sub-span), can
+it stand in for some of the root labels? The models are a flat Fourier neural operator applied to
+the full document and a tree of FNO leaves merged by a small learned
+MLP, both trained against the same closed-form oracle on the synthetic
+DGP of Section~\ref{sec:scene-register-example}; full architecture,
+training, and DGP detail are in Appendix~\ref{app:mechanism-checks}.
+
+The answer is yes, and Figure~\ref{fig:leaf-size-structural} carries
+the headline. Each row fixes a root-label budget ($100\%$ down to
+$10\%$); each column fixes a leaf size ($128$ tokens, where the tree
+is a single leaf and degenerates to the flat baseline, down to $8$
+tokens). Cell color is the tree-oracle root MAE on the held-out test
+set, with darker cells meaning lower MAE. Reading right to left
+across any row tells the central story: the single-leaf flat baseline
+sits at root MAE $0.30$--$0.66$ across root shares, while the same
+network applied as a tree of $32$- or $64$-token leaves drops below
+$0.05$ MAE. The tree wins by an order of magnitude in the harder of
+the two regimes we ran (twelve hidden registers, ten-to-twelve
+segments per document). Reading down the figure traces what happens
+when root labels become scarce: keeping the leaf size in the safe
+band (32 to 64 tokens), the tree's MAE stays under $0.05$ all the way
+down to a $20\%$ root-label budget, with most of the substituted
+budget going to local labels at internal nodes. The failure regime
+sits at the bottom-left of the same panel: at root share $10\%$ with
+$8$-token leaves, MAE blows up to $0.66$, because the leaves are now
+too small to carry the boundary information the audit requires. The
+figure is both the positive result (label budget can move down the
+tree) and its limit (leaves cannot get arbitrarily small).
+
+The mechanism is the same boundary-state argument from
+Section~\ref{sec:markov-interlude}: a leaf summary that knows its
+first and last register can carry that information through a merge
+that sums internal counts plus an indicator of register mismatch.
+Local labels supply exactly the supervision the merge needs to learn
+that boundary correction. Section~\ref{sec:hll-parity} verifies the
+deterministic limit of the same construction (HyperLogLog recovered
+byte-for-byte under the local laws), and Section~\ref{sec:manifesto-llm}
+shows that the same down-the-tree label-budget logic survives when the
+leaves are high-dimensional LLM summaries and the oracle is a
+political-science rubric. Appendix~\ref{app:mechanism-checks} has the
+DGP specification, the three supervision-allocation policies
+(leaf-only, depth-equal, balanced-node), the recoverable-regime
+companion plot, the per-cell budget-split heatmap, and the
+architecture and training-stage details.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{markov_leaf_size_fixed_structural.pdf}
+    \caption{\textbf{Local labels carry the load: tree-oracle root MAE on the structural-regime synthetic DGP (twelve hidden registers, ten-to-twelve segments per document).} Each cell fixes a root-label budget (rows, $100\%$ to $10\%$) and a leaf size (columns, $128$ tokens down to $8$). The leaf-$128$ column is the single-leaf case where the tree degenerates to the flat FNO baseline; smaller leaves are the tree with local supervision at internal nodes. The safe band (leaves of $32$--$64$ tokens) holds MAE below $0.05$ across most root-label budgets. The failure regime at very small leaves and very low root share is visible in the bottom-left and is honest about where the framework stops working. The recoverable-regime companion is in Appendix~\ref{app:mechanism-checks}.}
+    \label{fig:leaf-size-structural}
+\end{figure}

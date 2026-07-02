@@ -122,7 +122,7 @@ we obtain
 \[
 |G^\ast-G^C| \le \underbrace{|G^\ast-G^J|}_{B_{\mathrm{cal}}} + \underbrace{|G^J-G^E|}_{B_{\mathrm{est}}} + \underbrace{|G^E-G^C|}_{B_{\mathrm{clip}}}.
 \]
-Plainly: $B_{\mathrm{cal}}$ is judge mismatch, $B_{\mathrm{est}}$ is sampling error, and $B_{\mathrm{clip}}$ is clipping-induced bias.
+Plainly: $B_{\mathrm{cal}}$ is judge mismatch, $B_{\mathrm{est}}$ is sampling error, and $B_{\mathrm{clip}}$ is clipping-induced bias. The formal certificate keeps this exact four-piece shape: a local-law term $C_{\mathrm{meth}}\Delta_R$ plus calibration, estimation, and clipping addends. Its high-probability version uses the corresponding event budgets $\delta_{\mathrm{cal}}$, $\delta_{\mathrm{est}}$, and $\delta_{\mathrm{clip}}$ and combines them by a union bound.
 
 \paragraph{Recommended reporting template.}
 \begin{table}[t]
@@ -141,7 +141,7 @@ Confidence composition & $\delta=\delta_{\mathrm{cal}}+\delta_{\mathrm{est}}+\de
 \label{tab:reporting-template}
 \end{table}
 
-A robustness-to-adversarial-sampling analysis --- a constrained-design variance bound that shows why $\pi_{\min}$ is the primary robustness lever and why certificates should be reported over a stress-test grid of $(\pi_{\min}, w_{\max})$ values --- is in Appendix~\ref{app:proofs} (Appendix~\ref{app:audit-robustness}).
+A robustness-to-adversarial-sampling analysis --- a constrained-design variance bound that shows why $\pi_{\min}$ is the primary robustness lever and why certificates should be reported over a stress-test grid of $(\pi_{\min}, w_{\max})$ values --- is in Appendix~\ref{app:audit-robustness}. The same layer also gives deterministic clipped-vs-unclipped H\'ajek envelopes, so $B_{\mathrm{clip}}$ can be reported as an explicit sensitivity term rather than folded into the sampling radius.
 
 \subsection{From Audit to Optimization}
 

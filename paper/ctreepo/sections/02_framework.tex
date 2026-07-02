@@ -24,7 +24,7 @@ Figure~\ref{fig:plain-tree} shows the structure. The partition into leaves is fi
 
 \begin{figure}[t]
     \centering
-    \includegraphics[width=0.95\linewidth]{01_base.pdf}
+    \includegraphics[width=0.95\linewidth]{01_base_plain.pdf}
     \caption{A compression tree for a document partitioned into eight contiguous blocks $b_1, \ldots, b_8$. Each block is summarized to produce a leaf summary $s_i = g(b_i)$; sibling summaries are then merged pairwise ($s_{ij} = g(s_i \concat s_j)$) up to the root. The tree is fixed before summarization begins; only the summaries change as the pipeline runs.}
     \label{fig:plain-tree}
 \end{figure}

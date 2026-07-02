@@ -39,6 +39,71 @@ What this does:
 - backfills older pre-unification JSONs into that schema in memory
 - lets the shared report and expectation code consume both legacy and new outputs through one interface
 
+Current orchestration for the paper-facing learnability sweeps is now also centralized:
+
+- `src/ctreepo/sim/suite/identifiable_zero_policy.py`
+- `src/ctreepo/sim/suite/identifiable_zero.py`
+- `src/ctreepo/sim/suite/identifiable_zero_publication_policy.py`
+- `src/ctreepo/sim/suite/identifiable_zero_publication.py`
+- `src/ctreepo/sim/suite/publication_policy.py`
+- `src/ctreepo/sim/suite/publication_lanes.py`
+- `src/ctreepo/sim/suite/publication_ctreepo.py`
+- `src/ctreepo/sim/suite/learnability_policy.py`
+- `src/ctreepo/sim/suite/identifiable_zero_learnability.py`
+- `venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-learnability ...`
+- `venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero ...`
+- `venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-publication --profile publication_clean ...`
+- `venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-publication --profile longrun_equiv_v1 ...`
+
+That suite layer is now the canonical way to build and run the paper-facing identifiable-zero families.
+It keeps the Markov and C-TreePO train-doc grids, label-rate grids, held-out counts, lane definitions,
+and seed sets synchronized, and it carries the matched no-tree baselines through the canonical APIs:
+
+- Markov doc-level baseline (`--include-doc-level-baseline`)
+- C-TreePO full-document theta baseline (`--include-full-doc-theta-baseline`)
+
+The same suite layer now also owns the remaining publication-facing identifiable-zero packs:
+
+- `venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-publication --profile publication_clean ...`
+- `venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-publication --profile longrun_equiv_v1 ...`
+
+Those two profiles replace duplicated builder logic for:
+
+- publication-clean CPU/GPU packs
+- longrun oracle-equivalence / scale packs
+- bounded pilot-manifest derivation for scheduler calibration
+
+The legacy publication-clean and longrun builder scripts are now retired migration stubs; the shared suite is the only canonical entrypoint.
+
+Recommended entrypoint:
+
+```bash
+venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-learnability build \
+  --output-root outputs/identifiable_zero_learnability_v1_<stamp>
+
+venv/bin/python -m src.ctreepo.cli sim suite identifiable-zero-learnability run \
+  --output-root outputs/identifiable_zero_learnability_v1_<stamp> \
+  --jobs 64 \
+  --gpu-tokens auto
+```
+
+The same `ctreepo sim suite ...` layer now also has a unified law-stress entrypoint:
+
+```bash
+venv/bin/python -m src.ctreepo.cli sim suite law-stress build \
+  --output-root outputs/law_stress_suite_<stamp> \
+  --groups "markov_sanity_suite lda_sanity_suite"
+
+venv/bin/python -m src.ctreepo.cli sim suite law-stress run \
+  --output-root outputs/law_stress_suite_<stamp> \
+  --jobs 32 \
+  --gpu-tokens auto
+```
+
+The Markov and LDA law-stress script builders are now thin wrappers over:
+
+- `src/ctreepo/sim/suite/law_stress_builders.py`
+
 ### 2. Shared law-stress classification
 
 Key files:
@@ -358,4 +423,3 @@ The repo is still dirty.
 - Do not assume untracked/modified files are safe to clean.
 - The worktree contains many unrelated changes.
 - Avoid destructive cleanup.
-

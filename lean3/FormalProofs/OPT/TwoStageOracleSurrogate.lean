@@ -42,6 +42,22 @@ def UniformOracleApproximation
     (fstar fhat : Strings → Y) (ε : ℝ≥0) : Prop :=
   ∀ x : Strings, dist (fhat x) (fstar x) ≤ (ε : ℝ)
 
+/-- Paper-facing alias for uniform oracle recovery: the learned oracle/readout
+`fhat` approximates the true oracle `fstar` within `ε_orc`. -/
+def OracleRecoveredWithin
+    (fstar fhat : Strings → Y) (ε_orc : ℝ≥0) : Prop :=
+  UniformOracleApproximation fstar fhat ε_orc
+
+/-- The two-sided slack paid when transferring a pairwise comparison from a
+learned oracle/readout back to the true oracle. -/
+def OracleRecoverySlack (ε_orc : ℝ≥0) : ℝ :=
+  2 * (ε_orc : ℝ)
+
+/-- Total true-oracle budget obtained from a local-law budget measured through a
+learned oracle/readout and a uniform oracle-recovery error. -/
+def TotalOracleRecoveryBudget (E : ℝ) (ε_orc : ℝ≥0) : ℝ :=
+  E + OracleRecoverySlack ε_orc
+
 /-- Expectation of a constant under a PMF is the constant itself. -/
 lemma Exp_const
     {α : Type*}

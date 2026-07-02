@@ -1,0 +1,104 @@
+\section{Lean Crosswalk}
+\label{app:v8-lean-crosswalk}
+
+This appendix is the paper-facing index of results formalized in Lean for the
+v8 manuscript. The main text uses the mathematical statements directly; this
+section records the corresponding theorem surfaces and files.
+
+\begin{table}[t]
+\centering
+\begingroup
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.38\linewidth}p{0.56\linewidth}@{}}
+\toprule
+Paper result & Lean surface \\
+\midrule
+Exact C1/C2/C3 local laws give zero expected root distortion after repeated
+summary reuse &
+\path|multi_round_proper|\\
+\texttt{ExpectationTheory.lean} \\
+\addlinespace
+The main theorem aliases expose the multi-round preservation result and fixed
+partition instantiation &
+\path|multi_round_preservation|;
+\path|fixed_partition_extension_instantiation|\\
+\texttt{MainTheorems.lean} \\
+\addlinespace
+Exact local laws preserve a valid root summary on the realized tree &
+\path|exactLocalLaws_root_validSummaryPMF|\\
+\texttt{LocalLawNesting.lean} \\
+\addlinespace
+Exact theorem-backed root summaries preserve oracle-compatible readouts and
+pairwise preferences &
+\path|oracleCompatibleReadout_eq_on_ZR_support_of_exactTheoremBacked|;
+\path|pairwiseOracleCompatiblePreference_eq_on_ZR_support_of_exactTheoremBacked|\\
+\texttt{PreferenceScope.lean} \\
+\addlinespace
+Exact theorem-backed node summaries preserve oracle-compatible readouts &
+\path|node_support_sameOracleFiber_of_exactTheoremBacked|;
+\path|oracleCompatibleReadout_eq_on_node_support_of_exactTheoremBacked|\\
+\texttt{PreferenceScope.lean} \\
+\addlinespace
+Exact local laws preserve valid summaries through multi-round reuse &
+\path|exactLocalLaws_multiround_validSummaryPMF|\\
+\texttt{LocalLawNesting.lean} \\
+\addlinespace
+Root coverage changes variance, not the population root/local target &
+\path|coverageNormalized_expectedObjective_same_paramArgmin|\\
+\texttt{CoverageNormalizedObjective.lean} \\
+\addlinespace
+Fixed channel and depth weights preserve IPW unbiasedness &
+\path|expectedIPWWeightedDocumentObjective_eq_fullWeightedDocumentObjective|\\
+\texttt{DiscountedIPWObjective.lean} \\
+\addlinespace
+Root/C1/C2/C3 weights instantiate the generic weighted objective &
+\path|fullWeightedDocumentObjective_eq_fullSupervisionTreeObjectiveFn|\\
+\texttt{DiscountedIPWObjective.lean} \\
+\addlinespace
+The corrected node-law residual vanishes with matched propensities or exact
+proxy losses &
+\path|nodeAIPWAdjustedLawLoss_expectation_eq_zero_of_matched_propensity_or_exact_proxy|\\
+\texttt{DoublyRobustLocalLawAdjustment.lean} \\
+\addlinespace
+Sketch-level build/merge/readout assumptions imply the local-law bundle &
+\path|local_laws_bundle_of_sketch|\\
+\texttt{SketchSummaryOperators.lean} \\
+\addlinespace
+Classical sketches sit inside the exact local-law subspace &
+\path|mergeableSketchSummaryClass_subset_exactLocalLawSubspace|\\
+\texttt{NeuralOperatorSpaces.lean} \\
+\addlinespace
+The mergeable-sketch/neural-operator overlap lies inside the exact local-law
+operator subspace &
+\path|mergeableSketch_overlap_subset_exactLocalLawNeuralOperators|\\
+\texttt{NeuralOperatorSpaces.lean} \\
+\addlinespace
+The oracle-plus-projection objective has a balanced root/law form &
+\path|OraclePlusProjection.balancedObjective|\\
+\texttt{NeuralOperatorSpaces.lean} \\
+\addlinespace
+Teacher-first local-law certificates transfer to true-oracle distortion with
+the stated slack &
+\path|TeacherFirstLocalLawRoute.trueOracle_delta_R_ZR_le_totalCertifiedError|\\
+\texttt{NeuralOperatorPreferenceBridge.lean} \\
+\bottomrule
+\end{tabular}
+\endgroup
+\caption{\textbf{Lean crosswalk for v8.} The v8 main objective is the
+root/local objective with proxy-corrected local-law estimation. Older
+additive gap-penalty objective surfaces are provenance for prior drafts; they
+are not the v8 main objective unless reintroduced explicitly.}
+\label{tab:v8-lean-crosswalk}
+\end{table}
+
+The detailed repository theorem map remains in
+\texttt{lean3/docs/PAPER\_TO\_LEAN\_MAP.md}; Table~\ref{tab:v8-lean-crosswalk}
+is the compact paper-facing subset.
+
+The node-level entry is the formal counterpart of
+Corollary~\ref{cor:v8-preferences-pass-to-root}. Let \(u\) be any realized
+subtree with raw span \(S(u)\), and let \(z\) be a realized state in the support
+of the reduction at \(u\). Under exact local laws, \(z\) and \(S(u)\) are in the
+same oracle fiber. Therefore every oracle-compatible readout has the same value
+on the state and on the raw span.

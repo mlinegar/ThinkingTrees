@@ -1,0 +1,551 @@
+\section{Mergeable Sketches, Neural Operators, and C-TreePO}
+\label{app:v6-mergeable-sketches}
+
+Mergeable summaries are a standard abstraction for answering queries about
+large data without keeping the full data in memory.  The data are split into
+shards.  Each shard is replaced by a compact state.  The states are then
+combined up a tree, and the final query is asked only at the root.  A distinct
+count sketch, for example, does not store every item it has seen; it stores a
+small state from which the number of distinct items can be estimated.
+
+C-TreePO uses the same state-level pattern for learned compression trees.  The
+summarizer/merger \(g\) builds leaf states and merges internal states; the
+scorer \(f\) is applied only to the root state.  The central question is
+whether the state is a \emph{score-sufficient summary}: after a raw subtree is
+replaced by its state, the task score remains recoverable at the root.  In a
+classical sketch, the final query plays this role.  In C-TreePO, the root
+score plays it: a task score, preference judgment, calibrated reward, or other
+task-level value.  This is not a scalar-output claim.  In general, child
+answers do not determine the answer at their parent.
+
+\subsection{Mergeable Summaries as Score-Sufficient States}
+\label{app:v6-mergeable-pattern}
+
+\citet{Agarwal2013MergeableTODS} write \(S()\) for a summary method.  The
+input \(D\) is a dataset or stream multiset: if the same record appears twice,
+both appearances count.  The parameter \(\varepsilon\) is the target error
+level.  Given \(D\) and \(\varepsilon\),
+\[
+  S(D,\varepsilon)
+\]
+denotes a summary state produced for \(D\) at that accuracy.  A state is
+\emph{valid} when it makes the three promises required by the sketching
+problem:
+\begin{enumerate}[leftmargin=1.5em]
+\item it is a well-formed state for the summary method;
+\item its size is within the advertised bound;
+\item the final query answered from the state has error at most
+\(\varepsilon\).
+\end{enumerate}
+The notation is deliberately one-to-many.  Different stream orders or random
+choices may produce different valid summaries for the same \(D\).  The size
+profile records the largest valid state that can arise on inputs of a given
+size:
+\[
+  k(n,\varepsilon)
+  :=
+  \max\{\, |S(D,\varepsilon)| : |D|=n,\ S(D,\varepsilon)
+    \text{ is valid}\,\},
+\]
+with \(k(\varepsilon)\) used when the bound is independent of \(n\).
+
+Full mergeability is a state statement.  There is a merge algorithm \(A\) that
+takes two already-valid states and returns a valid state for the combined
+data:
+\[
+  A\big(S(D_1,\varepsilon),S(D_2,\varepsilon)\big)
+  \quad\text{is a valid}\quad
+  S(D_1\uplus D_2,\varepsilon).
+\]
+Here \(D_1\uplus D_2\) is multiset addition: repeated records remain repeated.
+It is the data operation represented by joining two shards or subtrees.  The
+final sketch query is applied after the state merge, not at the children.
+
+The distinct-count case gives the basic intuition.  If \(D_1\) and \(D_2\)
+are two shards, the two scalar answers ``how many distinct items are in
+\(D_1\)?'' and ``how many distinct items are in \(D_2\)?'' do not determine
+how many distinct items are in \(D_1\uplus D_2\), because the overlap is
+unknown.  A mergeable state keeps enough information about the shard to merge
+states first and ask the distinct-count query afterward.  This is why the
+state, rather than the child scalar answer, is the object being merged.
+
+To compare this with C-TreePO, unpack the overloaded
+\(S(D,\varepsilon)\) notation.  The expression \(S(D,\varepsilon)\) should be
+read as ``some valid state produced for \(D\) at accuracy
+\(\varepsilon\),'' not as a single canonical object.  Classical sketches
+often choose their state format from the target accuracy:
+\[
+  \mathcal{Z}_\varepsilon,\qquad
+  \mathrm{Valid}_\varepsilon,\qquad
+  \mathrm{merge}_\varepsilon.
+\]
+For the rest of the state-level derivation, fix \(\varepsilon\) and suppress
+this subscript:
+\[
+  \mathcal{Z}:=\mathcal{Z}_\varepsilon,\qquad
+  \mathrm{Valid}:=\mathrm{Valid}_\varepsilon,\qquad
+  \mathrm{merge}:=\mathrm{merge}_\varepsilon.
+\]
+C-TreePO trees use the same convention.  The value \(\varepsilon\) is the
+target root-score error, and \(\mathcal{Z}\) is fixed for the run.
+
+Let \(\mathcal{X}\) be the space of objects that can be scored, such as
+strings, token sequences, record multisets, embeddings, or rendered summary
+states.  The object \(X\in\mathcal{X}\) is the C-TreePO representation
+corresponding to \(D\).  With \(\varepsilon\) fixed, a mergeable summary becomes
+\[
+  S(D,\varepsilon)
+  \quad\leadsto\quad
+  z\in\mathcal{Z}
+  \ \text{and}\quad
+  \mathrm{Valid}(X,z).
+\]
+The relation \(\mathrm{Valid}(X,z)\) says that \(z\) is an acceptable state
+for the represented object \(X\): it is well formed, has the required size,
+and preserves the relevant root task value to accuracy \(\varepsilon\).
+The mergeability law becomes
+\[
+  \mathrm{Valid}(X_1,z_1)
+  \wedge
+  \mathrm{Valid}(X_2,z_2)
+  \Longrightarrow
+  \mathrm{Valid}
+  \big(X_1\uplus X_2,\mathrm{merge}(z_1,z_2)\big).
+\]
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}p{0.28\linewidth}p{0.34\linewidth}p{0.28\linewidth}@{}}
+\toprule
+Mergeable-summary notation & State-level notation & C-TreePO role \\
+\midrule
+\(S()\) & summary method / state interface & choice of state space, validity, merge, and query \\
+\(S(D,\varepsilon)\) & a state \(z\) with
+\(\mathrm{Valid}(X,z)\) & a valid summary state for the represented input \(X\) corresponding to \(D\) \\
+\(A(S(D_1,\varepsilon),S(D_2,\varepsilon))\) &
+\(\mathrm{merge}(z_1,z_2)\) & internal \(g\)-call on child states \\
+\(D_1\uplus D_2\) & represented multiset union \(X_1\uplus X_2\) & data represented by the parent subtree \\
+\(k(n,\varepsilon)\) & maximum size of valid states for \(|D|=n\) & state-size profile preserved by the tree \\
+final query on \(S(D,\varepsilon)\) &
+\(\mathrm{query}(z,\cdot)\) & root score \(f(z_{\mathrm{root}})\) after specializing the query family \\
+\bottomrule
+\end{tabular}
+\caption{Translation from the paper's overloaded summary notation to the
+state-level notation used for the C-TreePO correspondence, after fixing
+\(\varepsilon\).}
+\label{tab:v6-agarwal-translation}
+\end{table}
+
+One-way mergeability is the streaming special case: one side of the merge is a
+fresh singleton or raw suffix.  Equal-size or restricted variants constrain
+which pairs of states may be merged.
+
+For randomized summaries, validity is an event.  A single random seed
+\(\omega\in\Omega\) may encode all random choices used by a merge-tree
+evaluation.  The paper-level success statement says that, for any merge tree
+whose leaves represent \(D\), the root state lies in \(S(D,\varepsilon)\) with
+probability at least \(p\).  C-TreePO preserves that probability shape: on the
+root-validity event, the valid-state guarantee becomes the desired root score.
+
+For range spaces, the subset notation is literal.  A finite range
+space is \((D,\mathcal{R})\), and an \(\varepsilon\)-approximation is a
+subset \(S\subseteq D\) satisfying
+\[
+  \sup_{R\in\mathcal{R}}
+  \left|
+    \frac{|S\cap R|}{|S|}
+    -
+    \frac{|D\cap R|}{|D|}
+  \right|
+  \le \varepsilon.
+\]
+In the C-TreePO translation, \(X_1\uplus X_2\) is the represented-input union
+tracked by the tree, while \(S\) is the selected subset state.  Keeping those
+roles separate prevents the mistaken inference that scalar child answers
+should themselves merge.
+
+\subsection{C-TreePO Trees as Learned State Machines}
+\label{app:v6-ctreepo-state-machine}
+
+A C-TreePO run fixes a tree \(T\), a state space \(\mathcal{Z}\), a state map
+\(g\), and a scorer \(f:\mathcal{X}\to Y\).  The state map \(g\) is used in
+two places: it summarizes raw leaves, and it merges states that have already
+been produced.  Each node \(v\) represents an object
+\(X_v\in\mathcal{X}\).  At a leaf, the represented object is the raw block
+\(b\), and the tree stores the state
+\[
+  z_b = g(b).
+\]
+At an internal node, the represented object is the union of the two child
+objects.  The tree does not rescore the children and combine their scalar
+answers.  It combines the child states:
+\[
+  z_v = g(z_L\concat z_R).
+\]
+Here \(\concat\) denotes the representation supplied to the merger, for
+example concatenated text summaries, paired JSON states, stacked embeddings,
+or any other fixed representation of the two child states.  After all merges,
+the tree prediction is the root score
+\[
+  \widehat y_T = f(z_{\mathrm{root}}),
+\]
+and the oracle comparison is against \(f(X_T)\), where \(X_T\) is the object
+represented by the full tree.  For learned or LLM-style trees, prompts,
+schemas, embeddings, or hidden-state formats are usually fixed before the
+audit; \(\varepsilon\) is the certification threshold.  To score a state,
+either regard rendered states as lying in \(\mathcal{X}\), so
+\(\mathcal{Z}\subseteq\mathcal{X}\), or use a renderer
+\(\rho:\mathcal{Z}\to\mathcal{X}\) and interpret \(f(z)\) as \(f(\rho(z))\).
+
+Fix a task distance \(d_Y:Y\times Y\to[0,\infty)\).  Throughout this appendix
+\(d_Y\) is taken on the same scale as the summary error guarantee, so a valid
+state is score-sufficient when
+\[
+  \mathrm{Valid}(X,z)
+  \Longrightarrow
+  d_Y\big(f(z),f(X)\big)\le\varepsilon.
+\]
+The state need not reconstruct \(X\).  It only has to preserve the score to
+which the root scorer is sensitive.  HyperLogLog illustrates the distinction:
+the scalar counts \(|A|\) and \(|B|\) do not determine \(|A\cup B|\), but HLL
+register states merge by coordinatewise maximum and retain the overlap
+information needed for the final distinct-count query
+\citep{FlajoletEtAl2007,HeuleEtAl2013}.
+
+Define exact score equivalence by
+\[
+  u\sim_f v
+  \Longleftrightarrow
+  d_Y\big(f(u),f(v)\big)=0,
+\]
+and the \(\varepsilon\)-version by
+\[
+  u\sim_{f,\varepsilon} v
+  \Longleftrightarrow
+  d_Y\big(f(u),f(v)\big)\le\varepsilon.
+\]
+The local laws are the checks that make the tree computation credible.  C1
+asks whether a leaf state preserved what matters about its raw block.  C3
+asks whether a merged state preserved what matters about the union of the two
+children.  C2 asks whether a state that has already been produced can safely
+be supplied to \(g\) again without changing its score-relevant content.  Let
+\(B_T\) be the composed root score-error bound obtained from the checked
+C1/C2/C3 residuals along \(T\).  The tree is certified at accuracy
+\(\varepsilon\) when \(B_T\le\varepsilon\).  The exact versions of the laws
+are
+\begin{align}
+\tag{C1}
+&\forall\text{ realized leaves }b:\quad g(b)\sim_f b,\\
+\tag{C2}
+&\forall\text{ produced states }z:\quad g(z)\sim_f z,\\
+\tag{C3}
+&\forall\text{ sibling nodes }L,R:\quad
+  g(z_L\concat z_R)\sim_f X_L\uplus X_R.
+\end{align}
+In C3, \(z_L\) and \(z_R\) are the produced states for sibling nodes whose
+represented objects are \(X_L\) and \(X_R\).  C1 is the valid-leaf condition.
+C3 is the valid-merge condition.  C2 is the reuse condition: when an
+already-produced state is supplied again to \(g\), it remains in the same
+score-relevant validity class.
+
+Table~\ref{tab:v6-local-laws-sketch-link} records the corresponding
+mergeable-summary obligations.
+
+\begin{table}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.16\linewidth}p{0.24\linewidth}p{0.25\linewidth}p{0.25\linewidth}@{}}
+\toprule
+Local law & C-TreePO wording & Mergeable-summary wording & Score-sufficiency reading \\
+\midrule
+C1: Leaf sufficiency &
+The leaf state \(g(b)\) preserves the root score that \(f\) would assign to the
+raw block \(b\). &
+A state produced for represented input \(X_i\) is valid for \(X_i\). &
+The leaf state is score-sufficient for its shard: scoring the state recovers
+the shard's task value, exactly or within the induced score tolerance. \\
+C3: Merge consistency &
+The parent state \(g(z_L\concat z_R)\) preserves the root score of the union
+represented by the two children. &
+Merging valid states for \(X_1\) and \(X_2\) gives a valid state for
+\(X_1\uplus X_2\). &
+Score sufficiency is closed under state merge, so a tree of local merges
+produces a score-sufficient root state. \\
+C2: Re-summary stability &
+Re-entering an already-produced state into \(g\) does not change the root
+score. &
+A valid produced summary may be reused as an input state without leaving the
+same validity/score class. &
+The state remains score-sufficient under reuse: resummarization stays in the
+same score-equivalence class. \\
+\bottomrule
+\end{tabular}
+\caption{C-TreePO local laws as score-sufficiency conditions.  Read C1 as
+``the leaf summary kept the score-relevant information,'' C3 as ``the merged
+summary kept the score-relevant information for the parent,'' and C2 as
+``reusing an already-produced summary is stable.''}
+\label{tab:v6-local-laws-sketch-link}
+\end{table}
+
+\subsection{The C-TreePO Correspondence}
+\label{app:v6-ctreepo-correspondence}
+
+With the state-machine notation in place, the correspondence is direct.  A
+classical mergeable summary supplies \(g\): use the summary method at leaves,
+use the sketch merge at internal nodes, and score the root state with \(f\).
+Conversely, if an exact C-TreePO operator satisfies C1--C3 on its realized
+states, then its range carries an induced merge
+\[
+  \mathcal{Z}_g:=\operatorname{range}(g),\qquad
+  z\oplus_g z' := g(z\concat z').
+\]
+C1 supplies valid leaves, C3 supplies valid parent states under \(\oplus_g\),
+and C2 says produced states may be reused without leaving the same
+score-relevant class.
+
+\begin{proposition}[State-level nesting]
+\label{prop:v6-state-level-correspondence}
+After fixing a state representation and score map, state-level mergeable
+summaries nest in C-TreePO.  Valid leaves and valid state merges give a valid
+root state for every merge tree, and root validity gives the promised
+\(\varepsilon\)-score guarantee.
+\end{proposition}
+
+\begin{corollary}[Randomized root guarantee]
+\label{thm:v6-randomized-root-success}
+If a randomized mergeable-summary tree has root-validity probability at
+least \(p\), and every valid root state satisfies the promised score
+guarantee, then the C-TreePO root score satisfies that guarantee with
+probability at least \(p\).  The statement is event-level: no seedwise
+validity assumption is required.
+\end{corollary}
+
+\begin{remark}[Scalar-query caveat]
+\label{thm:v6-scalar-query-caveat}
+A scalar child-query merge law is a separate stronger assumption.  Classical
+mergeability of states does not imply that child scalar answers determine the
+parent scalar answer.  Distinct count is the running example: child scalar
+counts omit overlap information, while HLL states retain enough information to
+merge.
+\end{remark}
+
+This is the precise nesting claim: classical mergeable summaries enter
+C-TreePO through relational state-level trees, not through scalar child
+answers.
+
+\subsection{Neural Operators as a Representation Route}
+\label{app:v6-neural-operator-route}
+
+The neural-operator role is representational.  In the state-machine view, a
+neural operator supplies a learned family for \(g\).  Informally, this means
+that the summarizer and merger are not hand-written sketch algorithms; they
+are parameterized maps trained from examples, oracle feedback, or local-law
+losses.  Neural operators are designed to act on structured inputs such as
+functions, fields, or high-dimensional states \citep{Kovachki23NeuralOperator}.
+If the state space is represented in the operator domain, and if the realized
+tree generates a finite collection of leaf, merge, and on-range re-summary
+calls, then an appropriate neural-operator class can approximate the ideal
+state-building and state-merge maps on that realized call set.
+
+Approximation is not certification.  A flexible architecture may learn a useful
+state map, but it is the local-law or projection layer that tells us whether
+the learned state behaves like a mergeable summary for the task.  A typical
+training objective has the form
+\[
+  \mathcal{L}
+  =
+  \mathrm{calibration\_loss}(\widehat f,\fstar)
+  +\mathrm{root\_loss}(\widehat f,g)
+  +\lambda_1 C1+\lambda_3 C3+\lambda_2 C2.
+\]
+The coefficients \(\lambda=(\lambda_1,\lambda_2,\lambda_3)\) are fixed
+training hyperparameters.  They set how strongly training penalizes local-law
+violations; they are not error units.  Certification is the separate statement
+that the measured root error is at most the target \(\varepsilon\).
+In simulations where exact sketch states are known, one may also add state
+imitation losses.  In semantic applications such as the Manifesto task, the
+state is not a hand-written register vector, so the local laws and sampled
+audit are the observable certification route.
+
+A compact way to state the learned guarantee is this.  Let \(B_T(g,\widehat f)\)
+be the root error certified by the checked local laws for the learned scorer
+\(\widehat f\), and suppose \(\widehat f\) is uniformly calibrated to the true
+oracle \(\fstar\) within \(\varepsilon_f\).  Then
+\[
+  B_T(g,\widehat f)+2\varepsilon_f\le\varepsilon
+  \quad\Longrightarrow\quad
+  \text{the learned tree is certified for }\fstar\text{ at }\varepsilon.
+\]
+The factor \(2\varepsilon_f\) is the two-sided cost of comparing through the
+calibrated scorer \(\widehat f\).  A neural-operator architecture therefore
+does not by itself define a mergeable summary.  It is covered only when the
+realized state machine lies in, or is certified near, the mergeable-state
+local-law subspace.
+
+\subsection{Sketch Families and Claim Status}
+\label{app:v6-sketch-inventory}
+
+Table~\ref{tab:v6-sketch-inventory} separates theorem-backed claims from
+conditional theorem bundles and empirical reference rows.  The distinction is
+important for the citation above.  \citet{Agarwal2013MergeableTODS} do not
+state an \(\varepsilon\)-kernel theorem, so \(\varepsilon\)-kernel geometry is
+adjacent background here unless cited to a separate source.
+
+\begin{table}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.16\linewidth}p{0.26\linewidth}p{0.18\linewidth}p{0.27\linewidth}@{}}
+\toprule
+Family & Description & Status in this paper & What C-TreePO uses \\
+\midrule
+HLL & Estimates the number of distinct items without storing the items
+themselves; the state is a vector of registers. & theorem-backed + empirical & Register-state summary, pointwise-max merge, and final estimator score; the tree and flat reductions agree when they use the same state representation. \\
+Count-Min & Estimates item frequencies with hashed counter tables; the query
+asks for the approximate count of one item. & theorem-backed + empirical & Additive table summary and point-frequency score; mergeable but not idempotent. \\
+Misra--Gries / SpaceSaving & Find heavy hitters: items whose frequencies are
+large enough that they should survive compression. & theorem-backed interfaces & Capacity, mass, and error-envelope arguments for Misra--Gries; SpaceSaving follows by the standard min-counter correspondence. \\
+GK quantiles & Maintains a compressed ordered summary so approximate ranks and
+quantiles can be answered from a stream. & theorem-backed one-way & Sequential/incremental quantile interface; not claimed as arbitrary full state-state mergeability. \\
+KLL quantiles & Randomized quantile sketch that compacts weighted samples and is
+designed for mergeable quantile states. & randomized theorem-backed interface & Randomized sized mergeable query-sketch interface with a weighted-mass invariant. \\
+Interval/range constructions & Keep small subsets or colored states that approximate many interval or range counts at once. & theorem-backed scaffolds + conditional size-reduction constructions & Same-weight interval concentration, finite VC/Sauer--Shelah trace layer, and low-discrepancy coloring route when supplied by a certificate. \\
+Markov and bigram sketches & Store the count information needed to score simple sequence models, such as transition or bigram statistics. & theorem-backed local-law examples & Task-specific score-sufficient states showing the same summarize/merge/score pattern outside classical data-stream queries. \\
+CPC, Theta/KMV, Frequent Items, classic quantiles, REQ, t-digest, Tuple, VarOpt & Additional library sketch families used to compare tree reductions against familiar implementations. & empirical-only here & Empirical comparisons only; no theorem is claimed for these additional variants. \\
+\(\varepsilon\)-kernel geometry & Geometric approximation family for preserving directional or shape information, separate from the mergeable-summary results of \citet{Agarwal2013MergeableTODS}. & adjacent/background here & Do not attribute to that paper without a separate source. \\
+\bottomrule
+\end{tabular}
+\caption{Mergeable-sketch claim status.  The table records the claims used
+here, not the full external literature on each sketch family.}
+\label{tab:v6-sketch-inventory}
+\end{table}
+
+\subsection{Tree Comparisons Against Classical and Learned Sketches}
+\label{app:v6-tree-comparisons}
+
+The empirical comparisons use the correspondence in three ways.
+
+\paragraph{Classical state equality.}
+HLL is the tightest check because its state is explicit: a register vector with
+pointwise-max merge.  When C-TreePO is instantiated with that state and merge,
+the tree-reduced register vector agrees with the flat register vector for every
+tested tree shape.  Alternative HLL variants can agree at the estimate level
+even when their internal representation changes along different construction
+paths.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{classical_sketches_hll_leaf_size.pdf}
+\caption{\textbf{Tree reduction, classical HLL, and learned HLL-like states.}
+The bottom axis gives leaves per document and the top axis gives the
+corresponding token budget per leaf.  \emph{Official/oracle} uses the known HLL
+state, merge, and scoring map.  \emph{Learned \(g\) + oracle \(f\)} trains only
+the state/merge map while keeping the HLL scoring map fixed.  \emph{Learned
+\(f+g\)} jointly learns the latent state, merge, and scoring map.}
+\label{fig:v6-hll-parity-curves}
+\end{figure}
+
+\paragraph{Learned state with fixed versus learned scoring map.}
+The learned HLL rows ask whether a neural \(g\) can recover a classical
+state-and-estimator target.  With a fixed classical HLL estimator as \(f\),
+merge errors must land in the exact register geometry and can compound with
+tree depth.  With learned \(g+f\), the system can choose a different latent
+state that preserves the same score.  This is the practical lesson for
+semantic C-TreePO tasks.  Exact recovery of a reference sketch imposes a real
+scoring constraint; task preservation alone may be better served by a jointly
+learned state and scoring map.
+
+\paragraph{Broad sketch suite.}
+The broader comparison applies the same tree-reduction protocol to classical
+sketches and learned companions across distinct-counting, frequency, quantile,
+set, and sampling-style queries.  The table reports representative rows;
+larger grids are omitted here to keep the appendix focused.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{classical_sketches_summary.pdf}
+\caption{\textbf{Broad sketch leaf-size summary.}
+Large-capacity rows are shown by sketch family, with leaves per document and
+tokens per leaf shown as paired axes.  The three curves separate the known
+classical state and oracle scoring map, a learned state/merge map with known
+oracle \(f\), and a jointly learned \(f+g\) model.}
+\label{fig:v6-classical-sketches-summary}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}p{0.22\linewidth}p{0.32\linewidth}p{0.34\linewidth}@{}}
+\toprule
+Task family & Classical comparison & Learned-tree comparison \\
+\midrule
+Distinct counting & HLL gives the canonical state-level parity check:
+state merge matches flat reduction when the same register representation is
+used. & Learned HLL-like states reveal the cost of requiring exact reference
+state recovery versus allowing a learned score. \\
+Frequency estimation & Count-Min has additive table states and point-query
+scores. & Learned companions test whether the tree can preserve frequency
+information under repeated merges. \\
+Quantiles and ranks & GK and KLL represent the deterministic one-way and
+randomized mergeable quantile regimes. & Learned companions test whether a
+score-sufficient semantic state can preserve rank information well enough for
+root scoring. \\
+Set and sampling-style summaries & Additional classical sketches serve as
+empirical baselines across set, sampling, and weighted-summary tasks. &
+Learned rows are treated as empirical evidence only unless they satisfy the
+state-level local laws above. \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Broad-sketch comparison.}  Classical rows are empirical
+references; theorem status is the separate classification in
+Table~\ref{tab:v6-sketch-inventory}.}
+\label{tab:v6-classical-sketches-compact}
+\end{table}
+
+\paragraph{Learning a score-sufficient state from oracle feedback.}
+The controlled learned-sketch diagnostic removes semantic ambiguity.  The
+oracle asks for a \(k\)-vector of per-type counts, so a state with dimension
+\(m<k\) is structurally insufficient.  The learned tree converges when
+\(m\ge k\) and plateaus when \(m<k\), matching the hand-designed sketch
+boundary.  The Manifesto setting uses the same logic, but the
+score-sufficient state is semantic rather than a known count vector.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.88\linewidth]{learned_sketch_leaf_size_diagnostic.pdf}
+\caption{\textbf{Learning a mergeable state from oracle feedback.}
+Tree granularity is shown with leaves per document and tokens per leaf.  The
+diagnostic compares learned \(g\) with fixed oracle \(f\) and jointly learned \(f+g\) against the
+empirical and theoretical HLL floors.}
+\label{fig:v6-learned-sketch-curves}
+\end{figure}
+
+\subsection{Consequences}
+\label{app:v6-what-established}
+
+The preceding discussion establishes the following chain:
+\begin{enumerate}[leftmargin=1.5em]
+\item Classical mergeable summaries are state-level objects: summarize into
+state, merge state, and apply the final query at the root.
+\item C-TreePO nests those objects through relational state-level trees, not
+through scalar child-answer merging.
+\item Randomized mergeable summaries nest with the same probability as their
+root-validity event.
+\item Exact local laws induce a mergeable state scheme on the realized range
+of \(g\), and known sketches supply witnesses for those laws directly.
+\item Neural operators provide a representation family for the state-building
+and state-merge maps; the C-TreePO local laws and audit are the
+certification layer.
+\item The empirical suite checks both sides: exact collapse to classical HLL
+when the state is fixed, and learned recovery/structural failure when the
+state is trained from oracle feedback.
+\end{enumerate}
+
+This is the sense in which the mergeable-sketch subspace described by
+C-TreePO captures the classical mergeable-summary setting while extending it to
+learned semantic states such as the Manifesto application in
+Section~\ref{sec:min-manifesto-results}.

@@ -1,0 +1,32 @@
+\section{Conclusion}\label{sec:min-conclusion}
+
+C-TreePO pairs a small algebra with a design-based audit. The algebra
+states three local laws on a recursive summarization tree: each leaf
+preserves the task evidence its span carries, re-summarizing a stored
+summary does not drift, and split-then-merge preserves the same cross-span
+interactions as summarize-together. The audit samples realized leaves,
+stored summaries, and merge nodes with logged propensities, runs an oracle
+check on each, and returns IPW estimates of violation rates and oracle
+distortion. Together they make a long-document measurement claim
+auditable: a fixed calibration set sets the judge-versus-oracle residual
+once, and any combination of full-document or sampled-node labels
+tightens the remaining estimation envelope along a $C/\sqrt{n+1}$ curve.
+
+On the Manifesto Project benchmark, a single open-weight C-tree
+pipeline equals or outperforms a frontier-ensemble baseline on six
+policy dimensions, with leaf-size invariance as the headline
+structural result: the macro correlation against expert means stays
+stable across a $16\times$ range of leaf sizes. The same invariance pattern reappears in
+controlled simulations (Markov changepoints, HyperLogLog parity,
+mergeable-sketch sims), confirming that the algebra is tracking a real
+structural phenomenon rather than a stylized property of one DGP.
+
+The framework's scope is locally-decomposable oracles. It does not claim
+to certify generic long-context LLM use, and the audit reports honest
+violations when the oracle does not localize. Inside that scope the
+practical contribution is to make the preservation claim observable.
+Root accuracy, local-law distortion, judge calibration, and sampling
+uncertainty are separate objects rather than one hidden engineering step,
+and the same audit certifies the gold-to-strong-to-small distillation
+chain when published results land. The Semantic Forests companion takes
+these ideas to orchestration and deployment at system scale.

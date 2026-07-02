@@ -1,0 +1,61 @@
+\documentclass[11pt]{article}
+
+\input{preamble_minimal}
+\usepackage{array}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\title{C-TreePO: Compression Trees for Oracle-Preserving Long-Document Learning}
+\author{Mitchell Linegar}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+C-TreePO treats political-manifesto measurement as a representation,
+objective, and audit problem on a realized compression tree. A manifesto score
+is global, but the evidence is dispersed across paragraphs, sections, and
+qualifications. A C-Tree stores task-relative policy-evidence states at leaves
+and internal merges; C-TreePO trains and audits the state map so that the root
+score preserves the expert policy oracle. The target oracle \(f^\ast\) defines
+root and local-law losses, a learned proxy \(\widehat f\) supplies dense
+local losses in large-language-model (LLM) settings, and sampled node-level
+\(f^\ast\) calls correct proxy bias with logged propensities. The main
+application is Manifesto Project measurement against the Benoit et al.
+expert-survey benchmark: root-observed C-Tree scores match frontier LLM
+baselines while leaving readable local units for design-based node audit.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+
+\etocdepthtag.toc{minimalmain}
+\input{sections/v8/01_introduction}
+\input{sections/v8/02_manifesto_mechanism}
+\input{sections/v8/03_ctree_math}
+\input{sections/v8/04_objective_theorem_ladder}
+\input{sections/v8/05_audit_certificate}
+\input{sections/v8/06_manifesto_results}
+\input{sections/v8/07_related_scope}
+\input{sections/v8/08_discussion}
+\input{sections/v8/08_conclusion}
+
+\appendix
+\etocdepthtag.toc{minimalappendixfront}
+\appendixcontents
+\etocdepthtag.toc{minimalappendix}
+
+\input{appendix/v8/A_objective_ipw_adjustment}
+\input{appendix/v8/B_mergeable_nesting}
+\input{appendix/v8/C_sketch_comparisons}
+\input{appendix/v8/D_neural_operator_route}
+\input{appendix/v8/E_claim_tiers_manifesto_details}
+\input{appendix/v8/F_theorem_certificate_details}
+\input{appendix/v8/G_manifesto_audit_design}
+\input{appendix/v8/E_machine_checked_crosswalk}
+
+\clearpage
+\bibliographystyle{plainnat}
+\bibliography{../refs}
+
+\end{document}

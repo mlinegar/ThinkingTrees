@@ -1,0 +1,97 @@
+# Benoit-vs-ours comparison — Mean absolute error on 1-7 scale (lower better)
+
+Columns: 6 policy dimensions + Macro (unweighted mean of available cells).
+
+## Benoit (2026 AJPS) reference
+
+|Method|Economic|Social|Immigration|EU|Environment|Decentral.|Macro|coverage|
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+|Proprietary ensemble, 18 scores (Fig 1)|—|—|—|—|—|—|—|0/6|
+|Expert upper bound (Table 3)|—|—|—|—|—|—|—|0/6|
+|LLaMA-3.3-70B (Table 6)|—|—|—|—|—|—|—|0/6|
+|DeepSeek-V3 (Table 6)|—|—|—|—|—|—|—|0/6|
+|Gemma-3-27B-IT (Table 6)|—|—|—|—|—|—|—|0/6|
+
+## Ours: per-dim pipeline × leaf size (Gemma-4-31B-NVFP4, 1 summarizer + 1 scorer per dim)
+
+|Method|Economic|Social|Immigration|EU|Environment|Decentral.|Macro|coverage|
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+|leaf = 64 K chars (≈16K tokens)|1.184|1.291|1.462|0.736|1.354|2.283|1.385|6/6|
+|leaf = 32 K chars (≈8K tokens)|1.128|1.231|1.510|0.760|1.331|2.246|1.368|6/6|
+|leaf = 24 K chars (≈6K tokens) — full test n≈215|1.437|1.443|1.513|0.800|1.605|2.330|1.521|6/6|
+|leaf = 16 K chars (≈4K tokens)|1.234|1.206|1.535|0.720|1.392|2.120|1.368|6/6|
+|leaf =  8 K chars (≈2K tokens)|1.228|1.166|1.586|0.708|1.296|1.923|1.318|6/6|
+
+## Ours: combined pipeline × leaf size (one shared summarizer w/ JOINT_RUBRIC → 6 scores)
+
+|Method|Economic|Social|Immigration|EU|Environment|Decentral.|Macro|coverage|
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+|leaf = 64 K chars|—|—|—|—|—|—|—|0/6|
+|leaf = 32 K chars|—|—|—|—|—|—|—|0/6|
+|leaf = 24 K chars (full test n=229)|—|—|—|—|—|—|—|0/6|
+|leaf = 16 K chars|—|—|—|—|—|—|—|0/6|
+|leaf =  8 K chars|—|—|—|—|—|—|—|0/6|
+
+## Ours: tiny-leaf extensions of the chunk sweep (Gemma-4)
+
+|Method|Economic|Social|Immigration|EU|Environment|Decentral.|Macro|coverage|
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+|tree, leaf = 4 K chars|1.278|1.114|1.620|0.565|1.287|2.014|1.313|6/6|
+|tree, leaf = 2 K chars|1.328|1.175|1.579|0.660|1.465|2.023|1.372|6/6|
+|tree, leaf = 1 K chars (stress test, depth ≥6)|1.253|1.214|1.430|0.580|1.317|2.198|1.332|6/6|
+
+## Ours: concat-no-merge (chunks summarized independently, joined, scored — tests whether the merge step carries signal)
+
+|Method|Economic|Social|Immigration|EU|Environment|Decentral.|Macro|coverage|
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+|concat, leaf = 32 K chars|1.228|1.098|1.493|0.784|1.392|2.212|1.368|6/6|
+|concat, leaf = 16 K chars (default)|1.143|1.255|1.415|0.678|1.341|2.155|1.331|6/6|
+|concat, leaf =  8 K chars|1.253|1.118|1.614|0.669|1.425|1.997|1.346|6/6|
+
+## Ours: flat baseline (no chunk, no summary; truncate text and score) — tests whether tree is needed at all
+
+|Method|Economic|Social|Immigration|EU|Environment|Decentral.|Macro|coverage|
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+|flat, truncation = 48 K chars|1.128|1.347|1.410|0.687|1.493|2.033|1.350|6/6|
+|flat, truncation = 24 K chars (default)|1.203|1.357|1.493|0.658|1.528|1.993|1.372|6/6|
+|flat, truncation = 12 K chars|1.178|1.279|1.698|0.689|1.431|2.134|1.401|6/6|
+|flat, truncation =  6 K chars|1.278|1.255|1.222|0.703|1.178|2.302|1.323|6/6|
+
+## Ours: full-pipeline GEPA per-dim (both g and f optimized on pooled train set)
+
+|Method|Economic|Social|Immigration|EU|Environment|Decentral.|Macro|coverage|
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+|GEPA per-dim, leaf = 24 K (baseline before optimization)|—|—|—|—|—|—|—|0/6|
+|GEPA per-dim, leaf = 24 K (optimized)|—|—|—|—|—|—|—|0/6|
+|GEPA per-dim, leaf = 16 K (optimized)|—|—|—|—|—|—|—|0/6|
+|GEPA per-dim, leaf =  8 K (optimized)|—|—|—|—|—|—|—|0/6|
+
+## Ours: full-pipeline GEPA combined (one shared g+f across 6 dims, JOINT_RUBRIC)
+
+|Method|Economic|Social|Immigration|EU|Environment|Decentral.|Macro|coverage|
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+|Combined GEPA, leaf = 24 K (baseline)|—|—|—|—|—|—|—|0/6|
+|Combined GEPA, leaf = 24 K (optimized)|—|—|—|—|—|—|—|0/6|
+|Combined GEPA, leaf = 16 K (optimized)|—|—|—|—|—|—|—|0/6|
+|Combined GEPA, leaf =  8 K (optimized)|—|—|—|—|—|—|—|0/6|
+
+## Ours: scorer ablations (Gemma-4, Benoit's GPT-4o summaries held fixed)
+
+|Method|Economic|Social|Immigration|EU|Environment|Decentral.|Macro|coverage|
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+|1. zero-shot scorer (phase0 baseline)|—|—|—|—|—|—|—|0/6|
+|2. BootstrapFewShot-optimized scorer (phase0 optimized)|—|—|—|—|—|—|—|0/6|
+|3. Joint scorer baseline (shared Predict, 6 dims) — phase2|—|—|—|—|—|—|—|0/6|
+|4. Joint scorer BFS-optimized — phase2|—|—|—|—|—|—|—|0/6|
+|5. Joint scorer GEPA-optimized — phase2|—|—|—|—|—|—|—|0/6|
+
+## Ours: exact-model replication (Benoit's Gemma-3-27B-IT BF16)
+
+|Method|Economic|Social|Immigration|EU|Environment|Decentral.|Macro|coverage|
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+|Gemma-3-27B scorer-only, OUR scoring rubric|—|—|—|—|—|—|—|0/6|
+|Gemma-3-27B scorer-only, BENOIT's exact rubric (from data_masked.csv)|—|—|—|—|—|—|—|0/6|
+|Gemma-3-27B, raw-prompt Benoit format (no DSPy, bare-integer response)|—|—|—|—|—|—|—|0/6|
+|Gemma-3-27B, per-dim pipeline (chunk=24K)|—|—|—|—|—|—|—|0/6|
+|Gemma-3-27B, per-dim pipeline (chunk= 8K)|—|—|—|—|—|—|—|0/6|
+

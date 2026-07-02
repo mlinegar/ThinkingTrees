@@ -1,0 +1,112 @@
+\section{Manifesto Node-Audit Design}
+\label{app:v8-manifesto-audit-design}
+
+This appendix gives a concrete audit design for the stronger Manifesto claim
+tier. It is not needed to read the root-observed results in
+Section~\ref{sec:v8-manifesto-results}; it specifies how those results become
+a node-level local-law certificate.
+
+\subsection{Audit Population}
+
+For each held-out manifesto and policy dimension, materialize the same C-Tree
+used for the root score. The finite population contains three unit types:
+\[
+  \mathcal U
+  =
+  \mathcal U_{\mathrm{leaf}}
+  \cup
+  \mathcal U_{\mathrm{state}}
+  \cup
+  \mathcal U_{\mathrm{merge}} .
+\]
+Leaf units test C1, state units test C2, and merge units test C3. Each unit
+stores the document identifier, policy dimension, tree topology, leaf size,
+node depth, represented raw span, produced state, active law channel, and
+logged inclusion probability.
+
+The represented raw span is part of the audit record. For leaves it is the
+original manifesto text. For internal nodes it is the concatenation of the
+descendant leaves. For state units it is the span represented by the state that
+is being re-entered into the state map. This bookkeeping prevents local
+diagnostics from drifting away from the finite-population target.
+
+\subsection{Manifesto Local Oracle}
+
+The local oracle must measure the same policy dimension as the root target.
+For expert-survey dimensions, the practical candidates are:
+\begin{enumerate}[leftmargin=1.5em]
+  \item expert or high-quality teacher judgments over sampled spans,
+  \item quasi-sentence codings aggregated into dimension-specific evidence
+        targets, and
+  \item hybrid labels where a teacher proposes the local policy evidence and a
+        human verifies the dimension-specific content.
+\end{enumerate}
+The aggregation rule must be declared before the audit. For example, an
+economic-policy leaf target can aggregate quasi-sentences related to taxation,
+public services, welfare, privatization, labor-market policy, and fiscal
+constraints. A decentralization target needs a different rule, separating
+administrative devolution, fiscal autonomy, federal reform, and regional
+authority.
+
+The local oracle can be categorical, scalar, or structured. C-TreePO only
+requires a declared discrepancy \(d_Y\) for comparing the state-side readout
+with the span-side target. A structured local target is often preferable for
+manifestos because it preserves why a span matters, not just where it falls on
+a scale.
+
+\subsection{Sampling Design}
+
+A simple design samples within strata defined by policy dimension, law channel,
+node depth, and diagnostic-risk bucket. Diagnostic risk can be based on the
+teacher-trace gap from the current pipeline, with a positive floor in every
+stratum. The positive floor is important: every audit unit needs
+\(\pi_i>0\) for HT estimation.
+
+The design should log marginal propensities rather than only sample counts.
+For a unit \(i\), the audit record stores \(\pi_i\), any clipping cap applied
+to \(1/\pi_i\), and the stratum that generated it. If sampling is adaptive, the
+logged propensity is conditional on the information available before the draw.
+The HT estimator remains targeted at the realized finite population when those
+logged propensities are correct.
+
+For reporting, include the raw sampled count, weighted effective sample size,
+minimum inclusion probability, maximum unclipped weight, and any clipping cap
+for each law channel. These quantities make the variance side of the
+certificate interpretable.
+
+\subsection{Law-Specific Checks}
+
+C1 checks compare a leaf state with the raw leaf span. In the Manifesto
+setting, this asks whether the produced policy-evidence state contains the
+dimension-relevant claims in the span. A C1 failure occurs when the state drops
+or changes an evidence item that can move the expert score.
+
+C2 checks compare a produced state with its re-summarized version. This asks
+whether an already compressed policy state is stable under reuse. A C2 failure
+occurs when a conditional claim becomes unconditional, a country-specific
+institutional claim is generalized away, or a state becomes more extreme or
+more moderate without new evidence.
+
+C3 checks compare a merged state with the raw parent span represented by the
+two children. This is the key cross-section check. A C3 failure occurs when
+the merge preserves each child in isolation but loses the relation between
+them, such as a tax pledge qualified by a later fiscal rule, a green investment
+pledge limited by energy-security exceptions, or a decentralization claim that
+separates administrative authority from fiscal authority.
+
+\subsection{Report}
+
+A node-level Manifesto audit should report:
+\begin{enumerate}[leftmargin=1.5em]
+  \item root-observed performance against expert-survey means,
+  \item per-law violation rates for C1, C2, and C3,
+  \item HT distortion estimates by law channel and overall,
+  \item calibration, estimation, and clipping envelopes,
+  \item diagnostic slices by dimension, especially decentralization, and
+  \item examples of sampled failures with raw span, produced state, and
+        local-oracle target.
+\end{enumerate}
+The examples are not part of the statistical estimator, but they make the
+failure modes auditable by domain experts. In manifesto measurement, that
+interpretability is a practical advantage of text states over opaque scalar
+or vector-only compression.

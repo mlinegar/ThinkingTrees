@@ -44,6 +44,19 @@ The key insight is that **local testable conditions** (L1, L2, L3) on a summariz
 | `exactTheoremBacked_of_globalPreservation` | TheoremBackingAssumptions | The stronger global `A1/A2/A3` route compiles to exact theorem-backedness on any tree |
 | `approxLocalLawsBundle_of_uniformApproxExactTheoremBacked` | NeuralOperatorTheoremBridge | Uniform neural-operator approximation plus explicit transfer assumptions compiles to an `ApproxLocalLawsBundle` |
 | `approxTheoremBacked_of_uniformApproxExactTheoremBacked` | NeuralOperatorTheoremBridge | Exact theorem-backedness for an ideal summarizer plus uniform neural-operator approximation yields approximate theorem-backedness for the realized operator |
+| `NeuralOperatorTransferModuli.localLawBudget` | NeuralOperatorPreferenceBridge | Paper formula `ω_leaf(ε) + ω_merge(ε) + (R-1)ω_idemp(ε)` |
+| `NeuralOperatorTransferModuli.methodGapBudget` | NeuralOperatorPreferenceBridge | Method-transport version `C_meth * (ω_leaf(ε) + ω_merge(ε) + (R-1)ω_idemp(ε))` |
+| `ApproxNeuralOperatorPreferenceBridge.matchesTransferModuli` | NeuralOperatorPreferenceBridge | The realized bridge budgets are the paper's aggregate transfer-modulus budgets |
+| `ApproxNeuralOperatorPreferenceBridge.localLawBudget` | NeuralOperatorPreferenceBridge | Paper-facing budget `ε_leaf + ε_merge + (R-1)ε_idemp` produced by the uniform neural-operator bridge |
+| `ApproxNeuralOperatorPreferenceBridge.localLawBudget_eq_transferModuliBudget` | NeuralOperatorPreferenceBridge | The realized uniform-bridge budget equals the transfer-modulus paper formula |
+| `ApproxNeuralOperatorPreferenceBridge.delta_R_ZR_le_localLawBudget` | NeuralOperatorPreferenceBridge | The uniform neural-operator realization budget bounds document-level `Δ_R_ZR` before method transport |
+| `ApproxNeuralOperatorPreferenceBridge.delta_R_ZR_le_transferModuliBudget` | NeuralOperatorPreferenceBridge | Paper-form uniform `Δ_R` bound using the transfer-modulus formula |
+| `expectedObjectiveGap_via_neuralOperatorTransferModuli` | NeuralOperatorPreferenceBridge | Generic method-gap theorem using `C_meth` times the transfer-modulus budget |
+| `FDNeuralOperatorPreferenceBridge.localLawBudget` | NeuralOperatorPreferenceBridge | Finite-dimensionalization version of the paper-facing neural-operator local-law budget |
+| `FDNeuralOperatorPreferenceBridge.localLawBudget_eq_transferModuliBudget` | NeuralOperatorPreferenceBridge | Finite-dimensionalization bridge budget equals the transfer-modulus paper formula |
+| `FDNeuralOperatorPreferenceBridge.delta_R_ZR_le_localLawBudget` | NeuralOperatorPreferenceBridge | Finite-dimensionalization version of the neural-operator realization-budget `Δ_R_ZR` bound |
+| `FDNeuralOperatorPreferenceBridge.delta_R_ZR_le_transferModuliBudget` | NeuralOperatorPreferenceBridge | Paper-form finite-dimensionalization `Δ_R` bound using the transfer-modulus formula |
+| `expectedObjectiveGap_via_neuralOperatorFDTransferModuli` | NeuralOperatorPreferenceBridge | Finite-dimensionalization generic method-gap theorem using transfer moduli |
 | `Equation6NeuralOperator` | ML.NeuralOperatorArchitecture | Finite equation-(6)-style neural-operator architecture surface |
 | `Equation6UniversalApproxUniform` | ML.NeuralOperatorArchitecture | Uniform compact-set approximation interface for equation-(6) neural operators |
 | `Equation6UniversalApproxL2` | ML.NeuralOperatorArchitecture | Expected-`L²` approximation interface for equation-(6) neural operators |
@@ -182,11 +195,29 @@ is still available to summary and auxiliary heads. This is the formal target
 for the `factorized_score_fiber` implementation route.
 
 | `same_route_two_targets_force_oracle_equiv` | SketchFlipMergeBridge | Requiring one merge route to preserve two targets forces oracle-equivalence |
+| `UniformG` | UniformG | Canonical shared-`g : Carrier -> Carrier` interface for theorem-facing C-TreePO/Thinking Trees statements |
 | `local_laws_bundle_of_sketch` | SketchSummaryOperators | Sketch-level assumptions imply `L1/L2/L3` for the induced deterministic summary operator |
 | `multi_round_typeclass_of_sketch` | SketchRecovery | Sketch assumptions recover multi-round zero-distortion theorem |
 | `sketchReduce_countSketch_eq_bagOfWords` | BagOfWordsLDARecovery | Exact tree reduction with count sketches recovers the full bag-of-words histogram |
+| `bagOfWordsExactG_treeEval_eq_bagOfWordsTree` | BagOfWordsLDARecovery | One shared `g : Multiset α -> Multiset α` folds bag-of-words leaves by histogram addition |
+| `ldaHistogramLikelihood_exact_uniformG` | BagOfWordsLDARecovery | Ordinary bag-of-words LDA likelihood is exactly recovered by the shared histogram `g` and likelihood readout |
+| `ldaHistogramLikelihood_bagOfWordsTree_eq_leaf_prod` | BagOfWordsLDARecovery | Ordinary bag-of-words LDA document likelihood factors as the product of leaf likelihoods |
+| `ldaHistogramLikelihood_uniformG_eq_leaf_prod` | BagOfWordsLDARecovery | The exact shared bag-of-words `g` recovers the product-of-leaf likelihood factorization |
+| `ldaHistogramLogLikelihood_bagOfWordsTree_eq_leaf_sum` | BagOfWordsLDARecovery | Ordinary bag-of-words LDA document log-likelihood is the sum of leaf log-likelihoods |
+| `ldaHistogramLogLikelihood_uniformG_eq_leaf_sum` | BagOfWordsLDARecovery | The exact shared bag-of-words `g` recovers the sum-of-leaf log-likelihood |
+| `ldaAverageLogLikelihood_bagOfWordsTree_eq_tokenWeightedLeafAverage` | BagOfWordsLDARecovery | Per-token average LDA log-likelihood is the token-weighted average of leaf average log-likelihoods |
+| `ldaAverageLogLikelihood_uniformG_eq_tokenWeightedLeafAverage` | BagOfWordsLDARecovery | The exact shared bag-of-words `g` recovers the weighted-average log-likelihood decomposition |
+| `lda_topicProportion_eq_tokenWeightedLeafAverage` | LDAAggregateStatistics | Document topic proportions are token-weighted averages of leaf topic proportions |
+| `lda_wordProportion_eq_tokenWeightedLeafAverage` | LDAAggregateStatistics | Document word proportions are token-weighted averages of leaf word proportions |
+| `lda_wordTopicJointProportion_eq_tokenWeightedLeafAverage` | LDAAggregateStatistics | Document word-topic joint proportions are token-weighted averages of leaf word-topic joint proportions |
+| `lda_wordGivenTopicProportion_eq_topicMassWeightedLeafAverage` | LDAAggregateStatistics | Topic-conditional word proportions are topic-mass weighted averages of leaf topic-conditional word proportions |
 | `histogramUtility_exact_on_tree` | BagOfWordsLDARecovery | Any histogram-based document utility is exactly preserved by count-sketch tree reduction |
 | `ldaDocumentLikelihood_exact_on_tree` | BagOfWordsLDARecovery | Ordinary bag-of-words LDA document likelihood is exactly preserved by count-sketch tree reduction |
+| `ldaAggregateTreeStats_eq_full` | LDAAggregateStatistics | Leaf-level word counts, soft topic counts, word-topic counts, and outer-product word co-occurrences aggregate to the exact full-document statistic |
+| `wordBigramTreeSketch_eq_full` | LDAAggregateStatistics | Boundary-carrying adjacent-word co-occurrence sketches aggregate to the full-document word-bigram sketch |
+| `ldaGTreeEval_exact_eq_full` | LDAAggregateStatistics | One exact LDA carrier endomap `g` folds bag-level LDA observations exactly after the carrier readout |
+| `lda_exact_summary_recovers_fstar_of_factorization` | LDAAggregateStatistics | Any LDA target `fstar` on aggregate bag state has an exact node summarizer `g` plus oracle/readout `f` recovery route |
+| `lda_exact_summary_zero_doc_supervision_of_factorization` | LDAAggregateStatistics | The exact summary/oracle route has zero doc-level root supervision error on any supported training predicate |
 | `linearUtility_weightedMean_eq_sum` | LeafLocalMixtureUtilityGap | The linear local-mixture utility commutes exactly with leaf averaging |
 | `affineQuadratic_gap_eq_quadratic_gap` | LeafLocalMixtureUtilityGap | For `h(π)=θᵀπ+λπᵀWπ`, the pooled-vs-leaf gap is exactly the quadratic gap scaled by `λ` |
 | `featureIndexedObjective_eq_of_zero_dist` | ExactUtilityTransport | Any oracle-indexed feature/state objective transports under zero distortion |
@@ -280,6 +311,7 @@ OPT/
 ├── TheoremBackingAssumptions.lean # Broadest exact/approx theorem-backed interfaces + direct/sketch/global routes
 ├── TheoremBackingStructure.lean # Support-level characterization + exact all-tree collapse to A1/A2/A3 + sketch special-case structure
 ├── TheoremBackingConsequences.lean # Exact theorem-backedness ⇒ multi-round zero distortion + DPO/GRPO/preference-program equivalence
+├── UniformG.lean             # Canonical one-shared-g interface for theorem-facing C-TreePO statements
 ├── TheoremBackingMeasurementError.lean # Oracle-identified latent states + exact theorem-backed transport + noisy-state measurement-error bridge
 ├── TheoremBackingApproxMeasurementError.lean # Approximate theorem-backedness + oracle-to-feature Lipschitz map + latent-state measurement-error bound
 ├── ApproxOracleRecovery.lean   # ε-relaxation of oracle feature recovery on same-oracle-fiber pairs
@@ -301,6 +333,7 @@ OPT/
 ├── RUMSufficientConditions.lean # Pointwise sufficient conditions for expected-group Lipschitz
 ├── BigramSketch.lean         # Concrete mergeable sketch example (bigrams + boundary tokens)
 ├── BagOfWordsLDARecovery.lean # Exact bag-of-words LDA recovery via mergeable count sketches
+├── LDAAggregateStatistics.lean # Leaf-to-document LDA aggregate statistics and co-occurrence sketches
 ├── LeafLocalMixtureUtilityGap.lean # Linear cancellation + quadratic gap identity for local-mixture utilities
 ├── TopicBigramOracle.lean    # Topic unigram+bigram oracle (Segment‑LDA sim alignment)
 ├── ExactUtilityTransport.lean # Oracle-indexed supervised/objective transport + exact mergeable-state utilities

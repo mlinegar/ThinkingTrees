@@ -1,0 +1,236 @@
+\section{Audit and Proxy-Corrected Estimation}
+\label{sec:v8-audit-certificate}
+
+\subsection{Audit Units}
+
+The audit treats the realized tree as a finite population. Every
+node in \(T\) whose C1/C2/C3 losses define the local-law channel is
+a unit in the population, and the audit samples some of them under
+a known design. We index audit units by \(i\) (the
+survey-statistics convention; each \(i\) is a node \(v\) from
+Section~\ref{sec:v8-ctree-math}). Unit \(i\) carries a represented
+raw span \(S(i)=x_v\), a produced state \(s_i=z_v\), a law channel
+(C1, C2, or C3), and a logged marginal inclusion probability
+\(\pi_i>0\) recording how often the audit design samples this node.
+
+Two diagnostics come out of the audit. The first is the violation
+rate per law channel: how often C1 fails, how often C2 fails, how
+often C3 fails. This tells the analyst which kind of failure is
+driving the residual: leaves dropping evidence, states changing
+when summarized again, or merges losing the interaction between
+siblings. The second is the mean distortion across nodes, which is
+what feeds the certificate. A run can have many small violations
+whose root impact is limited, or a few large ones that move the
+score a lot. Reporting both quantities lets the analyst tell the
+two cases apart.
+
+\subsection{Dense Proxy, Sparse Oracle}
+
+We cannot compute \(L_{\mathrm{law}}^\ast\) in
+Equation~\eqref{eq:v8-local-law-estimand} directly, because it
+requires an \(f^\ast\) call at every node and oracle calls are
+scarce. Long-document settings typically expose oracle labels at
+the root (e.g., expert-survey means on the whole document) and
+leave internal nodes without a direct oracle. What is available at
+internal nodes is some accessible substitute: a cached teacher
+trace, an aggregated label from a span-grounded coding scheme, or
+the proxy \(\widehat f\). The fix is to use the proxy densely and
+correct it with sampled oracle calls.
+
+The dense local quantity is the same C1/C2/C3 comparison measured
+through the proxy:
+\[
+  \widehat\ell_v
+  =
+  \ell_{\mathrm{law}}(v;\widehat f,g).
+\]
+\(\widehat\ell_v\) gives a training signal at every node, but the
+proxy is not the oracle. The gap between them at node \(v\) is the
+node bias:
+\[
+  b_v=\widehat\ell_v-\ell_v^\ast .
+\]
+Sampled \(f^\ast\) calls estimate \(b_v\) on the nodes they cover, and
+inverse-propensity weighting carries that estimate to the population.
+
+Let \(R_v\in\{0,1\}\) indicate whether node \(v\) is sampled and
+evaluated with \(f^\ast\), and let \(\pi_v>0\) be the logged marginal
+probability that the audit design samples \(v\). The corrected node
+loss is
+\begin{equation}
+\label{eq:v8-corrected-node-loss}
+  \ell_v^{\mathrm{corr}}
+  =
+  \widehat\ell_v
+  +
+  \frac{R_v}{\pi_v}
+  \left(\ell_v^\ast-\widehat\ell_v\right).
+\end{equation}
+Unsampled nodes contribute proxy loss. Sampled nodes add back the
+observed oracle--proxy difference, scaled up by \(1/\pi_v\) so the
+correction stands in for the population mean. This is the standard
+inverse-propensity correction: rare nodes are sampled less, so the
+few times they are sampled they count more.
+
+\begin{proposition}[Corrected Node Loss Is Unbiased for the Oracle
+Loss]\label{prop:v10-corrected-loss-unbiased}
+For each node \(v\) with logged inclusion probability \(\pi_v>0\),
+\[
+  \mathbb E\!\left[\ell_v^{\mathrm{corr}}\mid T\right]
+  =\ell_v^\ast .
+\]
+\end{proposition}
+
+\begin{proof}[Proof sketch]
+Take expectations of equation~\eqref{eq:v8-corrected-node-loss}
+conditional on \(T\). Since
+\(\mathbb E[R_v\mid T]=\pi_v\), the
+correction term has expectation \(\ell_v^\ast-\widehat\ell_v\), and
+the proxy term cancels. Full proof in
+Appendix~\ref{app:v8-objective-ipw}. The design-based identity is
+\texttt{treepo\_objective\_unbiased} in
+\texttt{FormalProofs/DSL/TreePOEndToEnd.lean}.
+\end{proof}
+
+The corrected local-law channel sums the corrected node losses with
+the same depth weights as the oracle channel:
+\[
+  L_{\mathrm{law}}^{\mathrm{corr}}(g,T)
+  =
+  \sum_{v\in V(T)}\gamma^{d(v)}\ell_v^{\mathrm{corr}} .
+\]
+Plugging \(L_{\mathrm{law}}^{\mathrm{corr}}\) into the
+theorem-facing objective from Section~\ref{sec:v8-objective} gives
+the trainable version of the C-TreePO objective:
+\begin{equation}
+\label{eq:v8-corrected-objective}
+  J_\lambda^{\mathrm{corr}}(g;T)
+  =
+  (1-\lambda)L_{\mathrm{root}}(g)
+  +
+  \lambda L_{\mathrm{law}}^{\mathrm{corr}}(g,T).
+\end{equation}
+\(J_\lambda^{\mathrm{corr}}\) estimates the oracle objective
+\(J_\lambda^\ast\) from
+Equation~\eqref{eq:v8-main-objective}. With no audit calls
+(\(R_v=0\) at every node), the corrected channel reduces to the
+dense-proxy channel; sampled \(f^\ast\) calls add the correction.
+
+\subsection{HT Distortion Certificate}
+
+The corrected loss gives a trainable objective. We also need a
+finite-sample bound on the downstream drift \(G_{\mathrm{meth}}\),
+built from the same audit. Let \(\mathcal U\) be the finite
+population of sample-eligible tree units, \(N=|\mathcal U|\),
+and let
+\[
+  D_i^J
+  =
+  d_Y\!\left(J(s_i),J(S(i))\right)
+\]
+be the distortion measured by an accessible scorer \(J\). \(J\) is
+whichever scorer the audit instantiates: in the corrected-loss form
+above it is the proxy \(\widehat f\), and on a sampled subset of nodes
+\(J\) can be the oracle \(f^\ast\) itself. If \(Z_i\) is the audit
+inclusion indicator and \(\pi_i\) is the logged inclusion probability,
+the Horvitz--Thompson estimator is
+\begin{equation}
+\label{eq:v8-ht-distortion}
+  \widehat{\Delta}_{\mathrm{HT}}^{J}
+  =
+  \frac{1}{N}
+  \sum_{i\in\mathcal U}
+  \frac{Z_i}{\pi_i}D_i^J .
+\end{equation}
+
+\begin{proposition}[HT Distortion Estimator Is Unbiased]
+\label{prop:v10-ht-unbiased}
+Assume strict positivity (\(\pi_i>0\) for every \(i\in\mathcal U\)) and
+that \(\pi_i\) is the correct logged marginal inclusion probability
+for unit \(i\). Then
+\[
+  \mathbb E\!\left[\widehat{\Delta}_{\mathrm{HT}}^{J}\mid T\right]
+  =
+  \frac{1}{N}\sum_{i\in\mathcal U}D_i^J ,
+\]
+the finite-population mean of the per-unit distortions. Unequal
+propensities affect variance and effective sample size, not the
+target being estimated.
+\end{proposition}
+
+\begin{proof}[Proof sketch]
+Linearity of expectation reduces the claim to
+\(\mathbb E[Z_i/\pi_i\mid T]=1\), which holds for each unit by
+construction. Full proof and the corresponding variance bounds are in
+Appendix~\ref{app:v8-objective-ipw}. Machine-checked as
+\texttt{ht\_unbiased\_of\_logged\_marginals} (and the uniform-mean
+specialization \texttt{ht\_uniform\_mean\_unbiased\_of\_logged\_marginals})
+in \texttt{FormalProofs/DSL/IPWTheory.lean}; the tree-audit
+distortion specialization is
+\texttt{tree\_audit\_uniform\_distortion\_unbiased\_logged} in
+\texttt{FormalProofs/DSL/TreeIPW.lean}.
+\end{proof}
+
+The certificate has four terms. The first is the audit's estimate of
+the representation distortion, transported through the downstream
+method. The other three are correction terms for calibration,
+sampling error, and clipping.
+
+\begin{proposition}[Finite-Sample Certificate]
+\label{prop:v10-finite-sample-certificate}
+Under strict positivity and correct logged propensities for the
+audit design, oracle-compatibility of the downstream method with
+transport constant \(C_{\mathrm{meth}}\), and bounded clipping
+radius, the downstream drift admits the four-term decomposition
+\begin{equation}
+\label{eq:v8-finite-sample-certificate}
+  |G_{\mathrm{meth}}|
+  \le
+  C_{\mathrm{meth}}\widehat{\Delta}_{\mathrm{HT}}
+  +
+  B_{\mathrm{cal}}
+  +
+  B_{\mathrm{est}}
+  +
+  B_{\mathrm{clip}} .
+\end{equation}
+\end{proposition}
+
+\begin{proof}[Proof sketch]
+Decompose \(G_{\mathrm{meth}}\) by inserting the proxy scorer
+\(\widehat f\) and the population mean: the first term is the
+method-transported HT estimate of representation distortion, and the
+remaining three are the proxy-vs-oracle calibration gap, the
+sampling deviation of \(\widehat\Delta_{\mathrm{HT}}\) from its
+mean, and the clipping correction. Bound each term by its declared
+envelope. A high-probability version attaches the corresponding
+failure budgets via a union bound. Full proof in
+Appendix~\ref{app:v8-full-proofs}. Machine-checked as
+\texttt{paper\_error\_certificate\_formula},
+\texttt{paper\_error\_certificate\_high\_prob}, and
+\texttt{paper\_error\_stack\_high\_prob} in
+\texttt{FormalProofs/DSL/TreePOEndToEnd.lean} and
+\texttt{FormalProofs/OPT/MainTheorems.lean}; the clipping envelopes
+are \texttt{clipped\_ipw\_total\_bias\_bound} and
+\texttt{clipped\_hajek\_gap\_bound} in
+\texttt{FormalProofs/DSL/TreeIPW.lean}.
+\end{proof}
+
+\(C_{\mathrm{meth}}\widehat{\Delta}_{\mathrm{HT}}\) is the sampled
+distortion times the method transport constant from
+Section~\ref{sec:v8-objective}. \(B_{\mathrm{cal}}\) is the gap
+between the accessible scorer and \(f^\ast\): the part of error that
+more sampled labels cannot remove. \(B_{\mathrm{est}}\) is sampling
+uncertainty after method transport. \(B_{\mathrm{clip}}\) is bias
+introduced by clipping inverse-propensity weights or residuals.
+
+\subsection{Worked Example: Markov Document}
+
+Section~\ref{sec:v10-markov-results} reports per-document
+\(\widehat\Delta_{\mathrm{HT}}\) on the Markov DGP under a uniform
+inclusion design (\(\pi_i\) constant across nodes), with
+\(C_{\mathrm{meth}}\) the readout Lipschitz constant under
+\(L^1\) on the oracle metric. The IPW stress experiment in
+Appendix~\ref{app:v8-manifesto-audit-design} reports the empirical coverage
+of the HT estimator under the same design, validating
+Proposition~\ref{prop:v10-ht-unbiased} on a finite tree population.

@@ -1,0 +1,60 @@
+\section{Full Proofs and Formalization Map}\label{app:min-proofs}
+
+\subsection{Inductive Preservation}
+
+The proof of Theorem~\ref{thm:one-pass} is structural induction on the tree.
+At a leaf, C1 gives $g(b)\sim b$. At an internal node, the induction
+hypothesis gives oracle equivalence for the two child summaries. Context
+compatibility lets those child summaries replace the raw child spans inside
+the parent context. C3 then says the stored parent summary preserves the raw
+parent span. Repeating to the root gives zero root distortion.
+
+For multiple rounds, C2 applies to stored summaries in the range of $g$. Once a
+root summary is oracle-equivalent to the document, applying $g$ again leaves
+the oracle value unchanged. Iteration gives preservation for every $R\ge 1$.
+
+\subsection{Schedule Invariance}
+
+For a fixed partition, any admissible binary schedule reduces contiguous
+spans. If each realized leaf and merge call satisfies the local laws, each
+schedule's root is oracle-equivalent to the same raw document. The
+equivalence is modulo the oracle: two schedules can produce different
+intermediate strings or byte layouts and still share a root readout.
+
+\subsection{Preference Equivalence and Gap Bound}
+
+Preference equivalence uses the application assumption bundles. For DPO these
+bundle oracle-measurable current/reference policies with an oracle-indexed pair
+generator; for GRPO they bundle the corresponding policy, ranker or reward, and
+group-generator premises. Once those premises instantiate the generic theorem
+surface, exact preservation makes the full-document and summary objectives
+pointwise equal on the admissible class, so the full and summary argmin sets
+coincide in the residual-zero case. For a noisy or approximate preference
+object, the same equivalence records a uniform residual $\epsilon$, and exact
+summary minimizers become $2\epsilon$-optimal for the full objective.
+
+For approximate preservation, method transport gives
+\[
+|E_\pi(x)-E_\pi(z)|
+\le C_{\mathrm{meth}}\,\metric(\fstar(x),\fstar(z)).
+\]
+Taking expectations over $(X,Z^{(R)}(X))$ yields
+$|G_{\mathrm{meth}}|\le C_{\mathrm{meth}}\Delta_R$. The audited certificate
+decomposes the unknown $\Delta_R$ into the deployed estimate plus calibration,
+estimation, and clipping envelopes, giving the high-probability event
+\[
+\Pr\!\left(|G_{\mathrm{oracle}}|\ge
+C_{\mathrm{meth}}\hat{\Delta}_R+B_{\mathrm{cal}}+B_{\mathrm{est}}+
+B_{\mathrm{clip}}\right)\le\delta_{\mathrm{total}}.
+\]
+The economic-state language in the main text is the paper-level
+sufficient-state reading of the oracle-factorization assumptions used
+here; it is not a proof that such a state exists for political text.
+
+\subsection{C2 Independence}
+
+C2 is independent of C1 and C3. A one-pass tree can preserve every fresh leaf
+and merge call while a later call on an already stored summary maps it to a
+different oracle class. This is why re-summarization is its own audit unit
+rather than a consequence of leaf and merge consistency.
+

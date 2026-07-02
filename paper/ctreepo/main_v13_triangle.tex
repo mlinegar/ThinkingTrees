@@ -1,0 +1,69 @@
+\documentclass[11pt]{article}
+
+% Preamble
+\input{preamble}
+
+% v13_triangle: external-audience editorial pass on the dissertation
+% baseline (main_new.tex, sections/v2). Adds the treepo implementation
+% vignette, manifesto data provenance (doc-level labels + gold
+% quasi-sentence labels), leaf-size and gold-seeding appendices.
+% Sections live in sections/v13_triangle/, appendices in
+% appendix/v13_triangle/. Do not edit sections/v2 from this file.
+
+\title{C-TreePO: Compression Tree Preference Optimization}
+\author{Mitchell Linegar}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Preference optimization on long documents is hard because hierarchical summarization can destroy the task signal before the optimizer ever sees the document.
+We introduce \emph{Compression Tree Preference Optimization} (C-TreePO), which treats recursive summarization as a learned mergeable sketch: split a document into contiguous blocks, summarize locally, and audit whether each merge preserves the task oracle.
+The framework is organized around three local laws: each leaf summary must preserve the evidence the task depends on, re-summarizing a stored summary must not change that evidence, and split-then-merge must preserve the same cross-span interactions as summarize-together.
+Our main results form a ladder: local validity yields root-level oracle preservation and schedule invariance, adding downstream factorization yields the same population target as full-document DPO/GRPO training, and adding calibration and sampling assumptions turns sampled audits into an empirical preference-gap certificate. The training and audit paths read as two sides of one formal equivalence: supervising with local-law weights projects the learned summarizer onto the subspace where the laws hold, and auditing with node samples is the finite-sample estimator of the structural assumption that the approximation error is zero exactly on that subspace.
+We demonstrate the mechanism on a Markov changepoint color-transition counting task, where decomposing the document into a tree of smaller subproblems matches or improves on a flat Fourier Neural Operator baseline across the full range of supervision budgets, including when only $10\%$ of documents receive root-level labels.
+The sufficient statistic for this task is simple---a triple of integers at each node---but the same structural mechanism extends to settings where the local summaries are high-dimensional learned representations.
+We instantiate that extension on political-text measurement at two levels of supervision. A prompt-only C-Tree over a single open-weight model matches a three-frontier-LLM ensemble on the Manifesto Project benchmark of expert-survey party positions (macro Pearson $0.829$ vs.\ $0.817$) at two orders of magnitude lower compute. And because the Manifesto corpus carries expert category codes on every quasi-sentence, the same trees admit gold oracle values at every node: trained on that supervision, a small neural-operator summarizer composes lawfully on every signal-dense policy dimension, and seeding it with sampled leaf states recovers the full document rollup at Pearson $0.95$.
+\end{abstract}
+
+% ---- Main Text ----
+
+\input{sections/v13_triangle/01_introduction}
+\input{sections/v13_triangle/02_mergeable_sketches}
+\input{sections/v13_triangle/03_framework}
+\input{sections/v13_triangle/04_markov_interlude}
+\input{sections/v13_triangle/05_fno_primer}
+\input{sections/v13_triangle/06_markov_walkthrough}
+\input{sections/v13_triangle/07_hll_parity}
+\input{sections/v13_triangle/08_theory}
+\input{sections/v13_triangle/09a_social_science_measurement}
+\input{sections/v13_triangle/09_manifesto_llm}
+\input{sections/v13_triangle/09b_manifesto_qsentence}
+\input{sections/v13_triangle/10_estimation}
+\input{sections/v13_triangle/11_verification}
+\input{sections/v13_triangle/12_related}
+\input{sections/v13_triangle/13_discussion}
+\input{sections/v13_triangle/14_conclusion}
+
+% ---- Appendix ----
+
+\appendix
+
+\input{appendix/v13_triangle/A_notation}
+\input{appendix/v13_triangle/B_proofs}
+\input{appendix/v13_triangle/C_fixed_partition}
+\input{appendix/v13_triangle/D_counterexample}
+\input{appendix/v13_triangle/E_proof_artifacts}
+\input{appendix/v13_triangle/F_classical_parity}
+\input{appendix/v13_triangle/G_mechanism_checks}
+\input{appendix/v13_triangle/H_benoit_replication}
+\input{appendix/v13_triangle/I_operator_overlap}
+\input{appendix/v13_triangle/J_lda_replication}
+\input{appendix/v13_triangle/K_qsentence_leaf_ladder}
+\input{appendix/v13_triangle/L_gold_seeding}
+
+\bibliographystyle{plainnat}
+\bibliography{../refs}
+
+\end{document}

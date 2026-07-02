@@ -1,0 +1,56 @@
+% Generated table; do not edit by hand.
+% Metric: Pearson r (higher better)
+\begin{tabular}{lrrrrrrrr}
+\toprule
+Method & Econ. & Social & Immig. & EU & Env. & Decent. & Macro & \#/6 \\
+\midrule
+\multicolumn{9}{l}{\textit{Benoit et al. (2025) reference}} \\
+Proprietary ensemble, 18 scores (Fig 1) & $+0.870$ & $+0.920$ & $+0.890$ & $+0.910$ & $+0.820$ & $+0.490$ & $+0.817$ & 6/6 \\
+Split-expert reference (Table 3) & $+0.880$ & $+0.910$ & $+0.880$ & $+0.950$ & $+0.840$ & $+0.780$ & $+0.873$ & 6/6 \\
+LLaMA-3.3-70B (Table 6) & $+0.840$ & $+0.870$ & $+0.860$ & $+0.860$ & $+0.680$ & $+0.400$ & $+0.752$ & 6/6 \\
+DeepSeek-V3 (Table 6) & $+0.840$ & $+0.870$ & $+0.890$ & $+0.860$ & $+0.790$ & $+0.450$ & $+0.783$ & 6/6 \\
+Gemma-3-27B-IT (Table 6) & $+0.860$ & $+0.860$ & $+0.890$ & $+0.840$ & $+0.860$ & $+0.450$ & $+0.793$ & 6/6 \\
+\midrule
+\multicolumn{9}{l}{\textit{Ours: per-dim pipeline $\times$ leaf size (Gemma-4-31B-NVFP4, 1 summarizer + 1 scorer per dim)}} \\
+leaf = 64 K chars ($\approx$16K tokens) & $+0.916$ & $+0.817$ & $+0.888$ & $+0.924$ & $+0.854$ & $+0.489$ & $+0.815$ & 6/6 \\
+leaf = 32 K chars ($\approx$8K tokens) & $+0.929$ & $+0.857$ & $+0.886$ & $+0.916$ & $+0.877$ & $+0.480$ & $+0.824$ & 6/6 \\
+leaf = 24 K chars ($\approx$6K tokens) --- full test n$\approx$215 & $+0.892$ & $+0.840$ & $+0.867$ & $+0.896$ & $+0.814$ & $+0.464$ & $+0.796$ & 6/6 \\
+leaf = 16 K chars ($\approx$4K tokens) & $+0.925$ & $+0.847$ & $+0.898$ & $+0.909$ & $+0.831$ & $+0.537$ & $+0.824$ & 6/6 \\
+leaf =  8 K chars ($\approx$2K tokens) & $+0.939$ & $+0.869$ & $+0.884$ & $+0.901$ & $+0.839$ & $+0.543$ & $+0.829$ & 6/6 \\
+\midrule
+\multicolumn{9}{l}{\textit{Ours: combined pipeline $\times$ leaf size (one shared summarizer with union rubric, 6 scores)}} \\
+leaf = 64 K chars & $+0.910$ & $+0.867$ & $+0.897$ & $+0.910$ & $+0.795$ & $+0.458$ & $+0.806$ & 6/6 \\
+leaf = 32 K chars & $+0.917$ & $+0.849$ & $+0.908$ & $+0.889$ & $+0.749$ & $+0.438$ & $+0.792$ & 6/6 \\
+leaf = 24 K chars (full test n=229) & $+0.868$ & $+0.850$ & $+0.880$ & $+0.902$ & $+0.809$ & $+0.396$ & $+0.784$ & 6/6 \\
+leaf = 16 K chars & $+0.919$ & $+0.851$ & $+0.916$ & $+0.889$ & $+0.808$ & $+0.441$ & $+0.804$ & 6/6 \\
+leaf =  8 K chars & $+0.927$ & $+0.874$ & $+0.911$ & $+0.917$ & $+0.801$ & $+0.413$ & $+0.807$ & 6/6 \\
+\midrule
+\multicolumn{9}{l}{\textit{Ours: tiny-leaf extensions of the chunk sweep (Gemma-4)}} \\
+tree, leaf = 4 K chars & $+0.932$ & $+0.886$ & $+0.885$ & $+0.931$ & $+0.838$ & $+0.580$ & $+0.842$ & 6/6 \\
+tree, leaf = 2 K chars & $+0.924$ & $+0.867$ & $+0.887$ & $+0.906$ & $+0.793$ & $+0.584$ & $+0.827$ & 6/6 \\
+tree, leaf = 1 K chars (stress test, depth $\geq$6) & $+0.933$ & $+0.859$ & $+0.914$ & $+0.925$ & $+0.838$ & $+0.493$ & $+0.827$ & 6/6 \\
+\midrule
+\multicolumn{9}{l}{\textit{Ours: concat-no-merge (chunks summarized independently, joined, scored --- tests whether the merge step carries signal)}} \\
+concat, leaf = 32 K chars & $+0.929$ & $+0.856$ & $+0.897$ & $+0.920$ & $+0.848$ & $+0.571$ & $+0.837$ & 6/6 \\
+concat, leaf = 16 K chars (default) & $+0.931$ & $+0.823$ & $+0.909$ & $+0.912$ & $+0.866$ & $+0.523$ & $+0.827$ & 6/6 \\
+concat, leaf =  8 K chars & $+0.932$ & $+0.849$ & $+0.882$ & $+0.915$ & $+0.850$ & $+0.594$ & $+0.837$ & 6/6 \\
+\midrule
+\multicolumn{9}{l}{\textit{Ours: flat baseline (no chunk, no summary; truncate text and score) --- tests whether tree is needed at all}} \\
+flat, truncation = 48 K chars & $+0.936$ & $+0.821$ & $+0.926$ & $+0.889$ & $+0.806$ & $+0.587$ & $+0.827$ & 6/6 \\
+flat, truncation = 24 K chars (default) & $+0.929$ & $+0.847$ & $+0.889$ & $+0.882$ & $+0.829$ & $+0.542$ & $+0.820$ & 6/6 \\
+flat, truncation = 12 K chars & $+0.929$ & $+0.844$ & $+0.938$ & $+0.880$ & $+0.779$ & $+0.564$ & $+0.822$ & 6/6 \\
+flat, truncation =  6 K chars & $+0.926$ & $+0.811$ & $+0.967$ & $+0.881$ & $+0.886$ & $+0.243$ & $+0.786$ & 6/6 \\
+\midrule
+\multicolumn{9}{l}{\textit{Ours: scorer ablations (Gemma-4, Benoit's GPT-4o summaries held fixed)}} \\
+1. Zero-shot scorer & $+0.832$ & $+0.886$ & $+0.858$ & $+0.905$ & $+0.668$ & $+0.311$ & $+0.743$ & 6/6 \\
+2. Few-shot optimized scorer & $+0.822$ & $+0.892$ & $+0.853$ & $+0.912$ & $+0.627$ & $+0.297$ & $+0.734$ & 6/6 \\
+3. Joint scorer baseline (shared across 6 dims) & $+0.837$ & $+0.881$ & $+0.852$ & $+0.904$ & $+0.658$ & $+0.314$ & $+0.741$ & 6/6 \\
+4. Joint scorer, few-shot optimized & $+0.817$ & $+0.891$ & $+0.848$ & $+0.908$ & $+0.700$ & $+0.313$ & $+0.746$ & 6/6 \\
+5. Joint scorer, reflective prompt-optimized & $+0.832$ & $+0.882$ & $+0.848$ & $+0.879$ & $+0.688$ & $+0.344$ & $+0.746$ & 6/6 \\
+\midrule
+\multicolumn{9}{l}{\textit{Ours: exact-model replication (Benoit's Gemma-3-27B-IT BF16)}} \\
+Gemma-3-27B scorer-only, OUR scoring rubric & $+0.826$ & $+0.864$ & $+0.846$ & $+0.902$ & $+0.573$ & $+0.329$ & $+0.723$ & 6/6 \\
+Gemma-3-27B scorer-only, exact Benoit rubric & $+0.814$ & $+0.895$ & $+0.852$ & $+0.852$ & $+0.616$ & $+0.359$ & $+0.731$ & 6/6 \\
+Gemma-3-27B, raw-prompt Benoit format (bare-integer response) & $+0.782$ & $+0.901$ & $+0.854$ & $+0.874$ & $+0.590$ & $+0.368$ & $+0.728$ & 6/6 \\
+\bottomrule
+\end{tabular}

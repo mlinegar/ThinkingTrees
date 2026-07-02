@@ -4,6 +4,26 @@ This simulation tests whether a learned tree sketch can approach a classical mer
 
 The canonical package surface for this work is now the standalone `treepo` package inside this repo. The legacy root-level scripts still work, but they are compatibility entrypoints over the `treepo` implementation.
 
+## Canonical repo-facing smoke workflow
+
+Inside the main repo, the canonical end-to-end smoke path is now the suite API:
+
+```bash
+cd /home/mlinegar/ThinkingTrees
+
+venv/bin/python -m src.ctreepo.cli sim suite learned-sketch-smoke build \
+  --output-root outputs/learned_sketch_smoke_<stamp>
+venv/bin/python -m src.ctreepo.cli sim suite learned-sketch-smoke run \
+  --output-root outputs/learned_sketch_smoke_<stamp> \
+  --jobs 1 \
+  --gpu-tokens none
+venv/bin/python -m src.ctreepo.cli sim suite learned-sketch-smoke report \
+  --output-root outputs/learned_sketch_smoke_<stamp> \
+  --no-emit-pdf
+```
+
+That flow emits the standard suite artifacts (`suite_meta.json`, `suite_manifest.jsonl`) plus a smoke markdown report, diagnostics JSON, and one summary PNG. The direct script remains the lower-level building block when you want to override every runner knob manually.
+
 ## Preferred `treepo` workflow
 
 ```bash

@@ -1,0 +1,396 @@
+\section{Task State, Trees, and Local Laws}\label{sec:min-framework}
+\label{sec:min-manifesto-state}
+
+This section defines the object C-TreePO learns and audits. The central pair
+is a readout $f$ and a state map $g$. The readout $f$ is the task-facing
+function: it returns the quantity the researcher wants to measure. The state
+map $g$ is the compression operator: it maps a raw object, or an already
+compressed state, into a smaller object that should be sufficient for $f$.
+The goal is not lossless compression. The goal is oracle-preserving
+compression:
+\[
+  f(g(x)) \approx f(x).
+\]
+When the input is split into parts, the stronger requirement is that the same
+task value is preserved along the merge route:
+\[
+  f\!\left(g(g(u)\concat g(v))\right)
+  \approx
+  f(u\concat v).
+\]
+
+\subsection{Classical Warm-Up: Count-Min as a Mergeable Sketch}
+
+Count-Min is the most compact example of the interface
+\citep{CormodeMuthukrishnan2005}. Let $A$ be a multiset or stream segment of
+items from an item universe $\mathcal I$. Fix $d$ hash functions
+$h_j:\mathcal I\to\{1,\ldots,w\}$. The state map
+$g$ sends $A$ to a counter matrix $C_A\in\mathbb N^{d\times w}$:
+\[
+  C_A[j,\ell]
+  =
+  \sum_{a\in A}\One\{h_j(a)=\ell\}.
+\]
+Equivalently, each observed item increments one counter in every row.
+
+The merge rule is ordinary matrix addition. For disjoint stream segments
+$A$ and $B$,
+\[
+  g(A\uplus B)=C_A+C_B.
+\]
+This equality is exact. No item order, document boundary, or original stream
+record is needed once the counter state has been formed. The state is a
+homomorphic image of the multiset under addition.
+
+For a query item $q$, the readout is
+\[
+  f_q(g(A))
+  =
+  \widehat n_q(A)
+  =
+  \min_{j\le d} C_A[j,h_j(q)].
+\]
+If no other item collides with $q$ in a row, that row's counter equals the
+true frequency $n_q(A)$. Collisions can only increase the counter, so the row
+minimum controls the overestimate. Count-Min therefore separates two facts:
+the state merge is exact, while the readout is approximate because the state
+is compressed.
+
+This is the pattern C-TreePO generalizes. Count-Min fixes a query family
+$\{f_q:q\in\mathcal I\}$ and hand-designs a sufficient state $g$ for that
+family. The designer knows before deployment that a counter matrix is the
+right state. The correctness argument is not that $g(A)$ preserves the stream;
+it plainly does not. The correctness argument is that $g(A)$ preserves enough
+information for the frequency readouts after arbitrary parallel merges.
+
+\subsection{From Analytic State to Learned State}
+
+C-TreePO uses the same three slots but fills them differently.
+\[
+  \text{raw object}
+  \xrightarrow{\;g\;}
+  \text{state}
+  \xrightarrow{\;\text{merge by }g\;}
+  \text{root state}
+  \xrightarrow{\;f\;}
+  \text{task value}.
+\]
+In a classical sketch, the state is an engineered tuple, bitmap, register
+array, counter matrix, or quantile list. In C-TreePO, the state can be a text
+summary, an embedding sequence, a tensor field, or any object in the function
+class chosen for the application. What makes it a sketch is not its type. What
+makes it a sketch is the sufficiency contract with the readout and the fact
+that states, not scalar answers alone, are merged.
+
+This distinction is important. Scalar task values usually do not merge. The
+frequency of $q$ happens to merge by addition, but many useful readouts do
+not. Cardinality does not follow from $|A|$ and $|B|$ without knowing overlap.
+A manifesto's economic-policy score does not follow from separately scoring
+two halves and averaging them, because a fiscal qualification in one half can
+change how a public-services pledge in the other half should be read. A
+mergeable sketch preserves a richer state precisely because the scalar answer
+is often underdetermined by child answers.
+
+The hand-crafted-to-learned transition can be summarized as follows:
+\[
+  \begin{array}{lll}
+  \text{Classical sketch:}
+    & f \text{ fixed from a small query catalog,}
+    & g \text{ analytically engineered for } f,\\[2pt]
+  \text{C-TreePO:}
+    & f \text{ supplied by an oracle or learned readout,}
+    & g \text{ learned to be sufficient for } f.
+  \end{array}
+\]
+The local laws are the replacement for the algebraic proof that a classical
+sketch designer would normally write down.
+
+\subsection{Learning $f$ and $g$}
+
+Let $f^\star$ denote the trusted target available through expert labels,
+rubric coders, a high-grade judge, or another costly oracle. In the ideal
+case, the readout $f$ is fixed to this oracle. In practice, $f$ is often an
+approximator trained or calibrated toward $f^\star$, while $g$ is trained to
+produce states that are sufficient for $f$. A useful training objective has
+two parts:
+\[
+  L(f,g)
+  =
+  L_{\mathrm{oracle}}(f,f^\star)
+  +
+  \lambda L_{\mathrm{local}}(f,g).
+\]
+The first term keeps the readout aligned with the target. The second term
+penalizes violations of the local laws below. The tuning parameter $\lambda$
+therefore controls the tradeoff between oracle fidelity and sufficiency of
+the learned state. When $\lambda$ is too small, the readout may fit root labels
+while the compression path remains unstable. When $\lambda$ is too large, the
+system may prefer an easier-to-preserve surrogate target. The audit estimates
+where the deployed pair landed.
+
+For LLM-shaped states, learning can mean prompt search, DSPy/GEPA-style
+program optimization, instruction tuning, supervised fine-tuning,
+preference-based tuning, or other weight optimization against oracle and
+local-law labels. The output $g(x)$ is usually text: a compact description of
+the evidence the readout should need. This makes the state observable. The
+researcher can inspect whether a leaf summary contains the load-bearing claim,
+whether a merge summary preserved the interaction between two child summaries,
+and whether two spans mapped to the same apparent state really are equivalent
+for $f$.
+
+For non-language domains, the same mathematical interface may be implemented
+by a learned operator. If inputs are functions, fields, long trajectories, or
+other structured objects, $g$ can be a neural operator mapping one function
+space to another, and $f$ can be a learned readout on the compressed state
+\citep{Kovachki23NeuralOperator,Li21FNO}. In that case the state may not be
+human-readable text, but the local-law contract is unchanged: the learned
+operator is useful only insofar as it preserves the oracle along the realized
+merge route.
+
+\begin{table}[t]
+\centering
+\small
+\renewcommand{\arraystretch}{1.13}
+\begin{tabular}{L{0.18\linewidth}L{0.24\linewidth}L{0.24\linewidth}L{0.23\linewidth}}
+\hline
+Regime & Readout $f$ & State map $g$ & Certificate \\
+\hline
+Count-Min & Fixed item-frequency query $f_q$ & Hand-designed counter matrix & Algebraic merge proof plus collision bound \\
+Classical mergeable sketches & Fixed catalog query: cardinality, quantile, membership, moments & Engineered registers, tuples, bitmaps, or counters & Associative state merge and query-specific proof \\
+LLM C-TreePO & Rubric scorer, calibrated judge, or learned readout toward an oracle & Prompted or weight-tuned readable text state & C1/C2/C3 audit, direct inspection, and design-based distortion estimate \\
+General learned operator & Learned or calibrated task readout & Neural/functional operator between state spaces & Local-law residual on sampled realized calls \\
+\hline
+\end{tabular}
+\caption{\textbf{C-TreePO generalizes mergeable sketches by learning the
+state.} Classical sketches hand-design $g$ for a fixed $f$. C-TreePO learns
+$g$ in a task-appropriate function class and audits whether the learned state
+is sufficient for the readout.}
+\label{tab:v5-learned-sketch-lineage}
+\end{table}
+
+\subsection{Running Example: Manifesto Policy State}
+
+The running example is a manifesto's economic-policy position on the
+public-services versus taxation scale used in the Manifesto/Benoit benchmark
+\citep{BenoitEtAl2025,ManifestoProject2025a}. In this application, $f$ is the
+target readout for that policy dimension. Given a span $x$, $f(x)$ is the
+economic-policy score a trusted coder or calibrated rubric scorer would assign
+after reading the relevant commitments to public services, taxation, welfare
+expansion or retrenchment, market intervention, privatization, fiscal
+restraint, and the qualifications that determine how those statements should
+be interpreted.
+
+The state map $g$ produces an observable policy-evidence state. A useful
+$g(x)$ may discard slogans, duplicate rhetoric, document furniture, and
+stylistic variation. It may not discard facts that can move $f$: whether a
+tax cut is targeted or broad, whether a welfare commitment is universal or
+means-tested, whether fiscal restraint is framed as temporary or permanent,
+or whether market intervention is endorsed as a principle or only as an
+emergency exception. Two spans can be different strings and still share a
+task-relevant state if they support the same economic readout. Conversely,
+two spans can look similar and fall in different fibers if one contains a
+qualification the other omits.
+
+The analogy to Count-Min is exact at the interface level. Count-Min stores a
+counter matrix because counters are sufficient for frequency readouts.
+C-TreePO stores a policy-evidence summary because that summary is intended to
+be sufficient for the policy readout. Count-Min merges by adding matrices.
+C-TreePO merges by applying $g$ to concatenated child states. Count-Min's
+failure mode is collision error. C-TreePO's failure modes are missing
+evidence, summary drift, and lost cross-span interaction.
+
+\subsection{Compression Trees}
+
+Let $\Strings$ be finite token sequences with concatenation
+$u\concat v$. A summarizer is a possibly stochastic map
+$g:\Strings\rightsquigarrow\Strings$; a readout
+$f:\Strings\rightsquigarrow\Y$ scores the root state. In the Manifesto
+application, $g$ is an LLM summarizer used at both leaves and merges, and $f$
+is a rubric-facing scorer returning a policy score. In controlled examples,
+$g$ may be a hand-designed sketch state, a learned tensor operator, or another
+state map. The local laws attach to the pair $(f,g)$ and not to a particular
+architecture.
+
+A document $x$ is partitioned into contiguous leaves
+$(b_1,\ldots,b_k)$ attached to a binary tree. Each leaf stores
+$s_i=g(b_i)$. Each internal node $u$ stores
+\[
+  s_u=g(s_{u_L}\concat s_{u_R}),
+\]
+where $u_L$ and $u_R$ are its left and right children. At deployment, only
+stored summaries need to move upward. For audit and validation, the raw span
+beneath a node, written conceptually as $S(u)$, is retained or recoverable
+from the original document.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.92\linewidth]{01_base_plain.pdf}
+    \caption{\textbf{A compression tree reduces a document to one root
+    summary by recursively merging adjacent child summaries.} The v5 framing
+    treats each stored summary as a learned sketch state. The root readout is
+    valid only if the states preserve the information needed by $f$.}
+    \label{fig:min-plain-tree}
+\end{figure}
+
+Write $u\sim_f v$ when the task readout cannot distinguish the two strings:
+\[
+  \metric\big(f(u),f(v)\big)=0.
+\]
+For approximate implementations, $\sim_f$ is replaced by a tolerance in the
+task metric. Preservation is always relative to this task relation. A valid
+summary keeps whatever evidence can move $f$ and may discard everything else.
+
+\begin{assumption}[Context-compatible readout]\label{ass:context}
+For every context $w\in\Strings$, $u\sim_f v$ implies both
+$w\concat u\sim_f w\concat v$ and
+$u\concat w\sim_f v\concat w$.
+\end{assumption}
+
+Context compatibility is an application assumption. It is plausible for
+content rubrics whose evidence can be localized and substituted. It can fail
+for targets such as tone, irony, or persuasion, where a locally equivalent
+span may change how neighboring text is read.
+
+\subsection{The Three Local Laws}
+
+\paragraph{C1: Leaf sufficiency.}
+\begin{equation*}\tag{C1}
+  \forall\text{ realized leaf }b:\qquad g(b)\sim_f b.
+\end{equation*}
+A leaf summary must be sufficient for $f$ on its source span. In the manifesto
+example, a leaf summary can compress prose aggressively, but it must preserve
+the commitments and qualifications a policy coder would use if scoring that
+span directly. In Count-Min, C1 is the fact that the item updates in a stream
+segment are represented in the counter state used by the frequency readout.
+
+\paragraph{C2: Re-summary stability.}
+\begin{equation*}\tag{C2}
+  \forall\text{ stored summary }s\in\operatorname{range}(g):\qquad
+  g(s)\sim_f s.
+\end{equation*}
+Re-summarization of an already reduced state preserves the task value. This
+is idempotence relative to the readout, not equality of strings. A second
+summary may be shorter, cleaner, or differently worded, but it should not
+change the policy evidence available to $f$. In a deterministic classical
+sketch, the analogous operation is usually trivial because the state is
+already in canonical form. In an LLM pipeline, it must be checked because
+models can drift when asked to summarize their own summaries.
+
+\paragraph{C3: Merge consistency.}
+\begin{equation*}\tag{C3}
+  \forall u,v\in\Strings:\qquad
+  u\concat v
+  \sim_f g(u\concat v)
+  \sim_f g\!\left(g(u)\concat g(v)\right).
+\end{equation*}
+The disjoint route--summarize children, concatenate child states, and
+summarize again--must preserve the same task value as summarizing the raw
+union. This is the local mergeable-sketch law. In Count-Min, the corresponding
+statement is $g(A\uplus B)=g(A)+g(B)$ before the frequency readout. In the
+manifesto case, C3 asks whether the merge summary preserved interactions
+between child spans: for example, whether a tax promise in one child and a
+public-spending qualification in the other still appear together in the state
+that reaches the parent.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.94\linewidth]{05_full.pdf}
+    \caption{\textbf{The local laws audit whether the learned state is
+    sufficient along the realized tree.} C1 checks leaf encoding, C2 checks
+    stability under re-summary, and C3 checks whether the split-then-merge
+    route preserves the same readout as the raw union.}
+    \label{fig:v5-local-laws}
+\end{figure}
+
+The laws are deliberately local. They do not require the researcher to prove
+that the learned summarizer is an associative monoid homomorphism on all
+possible inputs. They require evidence that the realized calls made by the
+deployed tree preserved the task value. This is weaker than the classical
+streaming setting, where arbitrary merge schedules and adversarial stream
+orders force global associativity. It is also the right target for empirical
+long-document measurement, where the tree is observed and auditable.
+
+\subsection{What the Laws Certify}
+
+The exact-law picture is simple. If every leaf state is sufficient for its raw
+span, stored states do not drift under re-summary, and every merge state is
+sufficient for the raw union of its children, then induction up the tree gives
+root preservation: the root state has the same readout as the full document.
+Approximate laws replace equality with a residual in the task metric. The
+audit estimates that residual on the realized population of leaves and
+internal nodes.
+
+This is why C-TreePO is a learned mergeable sketch rather than a generic
+summarization heuristic. The model is not merely asked to write good
+summaries. It is asked to produce states that behave like sufficient
+statistics for a specified readout under repeated merge operations. The
+readout, the compression map, and the audit are therefore tied together.
+Changing the target $f$ changes what information $g$ must keep. A state that
+is sufficient for economic policy may be insufficient for immigration policy;
+a state that preserves sentiment may be insufficient for fiscal-program
+details. The sketch is task-relative.
+
+\begin{proposition}[Strict and state-level mergeable limits]\label{prop:mergeable-reduction}
+If the task value itself admits an associative merge, then oracle-preserving
+compression reduces to a strict homomorphic readout. More generally, if a
+bounded state carries the information needed by the readout and that state has
+an associative merge, C-TreePO reduces to a classical mergeable summary on the
+state even when the scalar answer lacks its own merge rule.
+\end{proposition}
+
+The exact nesting statement has four ingredients. First, there is a state
+space $\mathcal{S}$ and a validity relation
+$V(D,s)$ saying that state $s$ is a valid summary of dataset or span $D$.
+Second, the C-Tree summarizer $g$ must implement the two state operations:
+on raw leaves it behaves like the classical builder, $g(D)=\mathrm{build}(D)$,
+and on child states it behaves like state merge,
+$g(s_L\concat s_R)=\mathrm{merge}(s_L,s_R)$, up to the chosen serialization
+of states as text. Third, validity must be closed under union:
+if $V(D_L,s_L)$ and $V(D_R,s_R)$, then
+$V(D_L\concat D_R,\mathrm{merge}(s_L,s_R))$. Fourth, the root readout $f$
+must factor through valid states:
+\[
+  V(D,s) \quad\Longrightarrow\quad f(s)=F(D),
+\]
+or, in the approximate version,
+$\metric(f(s),F(D))\le \varepsilon$. These are the precise roles of $g$ and
+$f$: $g$ builds and merges state, while $f$ is only applied after the root
+state has been produced.
+
+Under those conditions, C1 is the leaf instance of build validity and readout
+correctness, and C3 is the merge instance of validity/readout correctness for
+the raw union of the two child spans. C2 is not part of Agarwal's state-merge
+definition itself; it is the additional C-TreePO stability condition needed
+when the system may re-summarize an already produced state, as LLM pipelines
+often do. Classical canonical states usually satisfy this by construction.
+The strict scalar route is a separate special case in which $F(D_L)$ and
+$F(D_R)$ themselves determine $F(D_L\concat D_R)$; most sketches, including
+distinct count and many quantile summaries, need the state-level route instead.
+
+The proposition locates the classical case inside the learned one. Count-Min,
+HyperLogLog, Bloom filters, and quantile sketches are not metaphors for
+C-TreePO; they are exact special cases where the sufficient state and merge
+law were designed analytically. C-TreePO keeps the same target--state--readout
+shape but permits $g$ to be learned in a richer space and audited after
+deployment. Classical full mergeable summaries nest through this relational
+state-level shape; randomized mergeable summaries nest in probability, because
+root readout is correct on the event that the merged root state is valid for
+the union stream. The approximation parameter $\varepsilon$ and any
+training-data/sample-size requirement remain separate profile or concentration
+conditions, not scalar answer-merge laws. For LLMs, the learned state is also
+inspectable text. That
+observability turns a black-box compression problem into a measurable one:
+node labels, direct reading, and counterfactual fiber tests can all ask
+whether $g(x)$ really kept what $f$ needs.
+
+In the neural-operator route, $f$ is usually a calibrated readout
+$\widehat f$ rather than the true oracle itself. The theorem then separates
+readout calibration from state learning: learn $\widehat f$ so that it is
+uniformly within $\varepsilon_f$ of $\fstar$, and learn $g$ by projecting leaf
+and merge calls toward the state-level C1/C3/C2 laws measured by
+$\widehat f$. If the realized $g$ is exact or approximately theorem-backed
+for $\widehat f$, the true-oracle distortion for $\fstar$ is the local-law
+budget plus the additive calibration slack $2\varepsilon_f$. Neural
+operators, including transformer/LLM-style operators at the architecture
+level, supply the ambient function class; they do not by themselves certify
+mergeability or scalar child-answer merging.

@@ -1,0 +1,72 @@
+\section{Mergeable Summaries as C-Tree Local-Law Instances}
+\label{app:v8-mergeable-nesting}
+
+Classical mergeable summaries supply the exact state-machine case of the
+C-Tree local laws. This appendix records the containment without repeating the
+full sketch-family inventory.
+
+\subsection{Same-Tree Embedding}
+
+Fix a leaf partition \(D_1,\ldots,D_n\) and a binary tree \(T\). Here
+\(D_i\) is the data block assigned to leaf \(i\), \(D_v\) is the block or
+subtree data represented by node \(v\), and \(n\) is the number of leaves. A
+classical state-level summary over item type \(\alpha\), state space \(S\),
+and answer space \(Y\) has
+\[
+  \mathrm{build}:\mathrm{Stream}(\alpha)\to S,\qquad
+  \mathrm{merge}:S\times S\to S,\qquad
+  \mathrm{query}:S\to Y.
+\]
+The map \(\mathrm{build}\) turns a stream of \(\alpha\)-items into a state
+\(s\in S\), \(\mathrm{merge}\) combines two states, and
+\(\mathrm{query}\) reads an answer from a state. It also has a validity
+relation \(\mathrm{Valid}(D,s)\), meaning that state \(s\) is a valid summary
+of data block \(D\). The obligations are leaf validity, merge closure,
+\[
+  \mathrm{Valid}(D_1,s_1)\wedge \mathrm{Valid}(D_2,s_2)
+  \Rightarrow
+  \mathrm{Valid}(D_1\uplus D_2,\mathrm{merge}(s_1,s_2)),
+\]
+and root readout correctness for valid states. In this display, \(s_1,s_2\in S\)
+are child states and \(D_1\uplus D_2\) is the concatenated or unioned data
+represented by their parent.
+
+Run the classical scheme on the same tree. Leaves store
+\(\mathrm{build}(D_v)\), internal nodes store
+\(\mathrm{merge}(s_u,s_w)\), and the root query is read once. The states
+\(s_u,s_w\in S\) are the states stored at the left and right child nodes. C1 is
+leaf validity/readout preservation. C2 is the extra re-entry law needed when a
+produced state is passed back through the C-Tree summarizer interface. C3 is
+merge closure plus readout correctness at the parent.
+
+\subsection{State-Level Claim}
+
+The important containment is state-level. Scalar child answers need not merge;
+states merge. HyperLogLog (HLL) registers, Count-Min tables, and quantile
+summary states are the objects that compose. The C-Tree analogue is the
+learned state \(z_v\), not the scalar \(\widehat f(z_v)\).
+
+For a fixed tree \(T\), let \(\mathrm{MS}(f^\ast)\) be the mergeable-sketch
+class for oracle \(f^\ast\): the operators induced by sketch/codec systems
+with exact leaf, merge, and compatibility witnesses. Let
+\(\mathrm{ExactLL}(T,f^\ast)\) be the exact local-law class: the operators
+satisfying C1, C2, and C3 on tree \(T\) for oracle \(f^\ast\). The containment
+is
+\[
+  \mathrm{MS}(f^\ast)\subseteq \mathrm{ExactLL}(T,f^\ast).
+\]
+Inside a neural-operator class \(\mathcal C\), meaning a chosen candidate
+function class for learned state maps, the overlap
+\(\mathcal C\cap\mathrm{MS}(f^\ast)\) is contained in the exact local-law
+neural-operator subspace. This is a membership claim; optimization still has
+to find or approximate such an operator.
+
+\subsection{Schedule Invariance}
+
+Classical sketches often prove more than same-tree validity. Associativity
+gives rebracketing invariance, commutativity gives permutation invariance when
+the data are unordered, and ordered homomorphisms give schedule invariance
+among order-preserving rebracketings. C-TreePO records the corresponding
+oracle-level claim: if the local laws hold on two admissible schedules with the
+same represented document, both roots preserve \(f^\ast(x)\). State equality is
+stronger than C-TreePO needs; oracle equality is the task-facing invariant.

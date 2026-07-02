@@ -1,0 +1,479 @@
+\section{Benoit Replication: Reproduction Details}\label{app:benoit-replication}
+
+Section~\ref{sec:benoit-headline} summarizes the Benoit replication on
+C-TreePO. This appendix specifies the corpus, scoring protocol, empirical
+comparisons, and full per-cell grid behind the main-text summary.
+
+\subsection{Corpus, Targets, and Expert Benchmarks}
+
+The main comparison uses the same Manifesto Project platform benchmark
+as \citet{BenoitEtAl2025}: $235$ party election platforms from
+parliamentary democracies, filtered to election years for which the
+Benoit--Laver and CHES expert surveys provide party-position estimates.
+Benoit et al.'s broader paper also reports $23$ Kl\"uver coalition
+agreements where applicable, but the headline C-TreePO comparison is
+organized around the Manifesto Project platform rows. Raw text is taken
+from the Manifesto Corpus 2025a release \citep{ManifestoProject2025a};
+where the release text contained promotional footer truncation, we used
+the full official Manifesto Project text.
+
+The prediction target is an expert-survey mean. Benoit et al.'s
+replication archive provides one harmonized mean party-position estimate
+for each (manifesto, dimension) pair. Using that archive rather than
+recomputing from raw CHES plus Benoit--Laver avoids rescaling,
+party-year-join, and missing-value discrepancies. As a check, we
+recompute Benoit's published Figure~1 correlations from their released
+LLM-score and expert-mean tables and reproduce their numbers to within
+$0.005$ on every dimension.
+
+Benoit et al.'s Table~3 reference is a split-expert agreement
+benchmark, not a sample-specific limit for our held-out split. In the
+Benoit--Laver replication data, experts within each country are randomly
+divided into two groups. Each group produces a mean party-position
+estimate on the same issue-position scale, and the two vectors of mean
+estimates are correlated. The economic value used below is
+$r = 0.880$; the macro value across the six policy dimensions is
+$0.873$.
+
+\subsection{Pipeline Protocol}
+
+Every row in Table~\ref{tab:benoit-headline} corresponds to a single
+pipeline configuration. Each configuration has three components:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Leaf summarizer.} Each text span is summarized under
+          a dimension-specific preservation rubric. The prompt targets
+          Benoit's $300$--$400$ word summary length but allows longer
+          outputs when aggressive compression would drop policy-relevant
+          evidence.
+    \item \textbf{Merge summarizer.} Adjacent child summaries are merged
+          under the same rubric. The merge prompt has the same
+          information-preservation target as the leaf prompt and is
+          allowed to carry both child summaries forward when that is the
+          least lossy state.
+    \item \textbf{Scorer.} The root summary is scored with the Benoit
+          rubric for dimension $d$ and mapped to the seven-point policy
+          scale, with a missing response recorded only when the model
+          cannot produce a valid score.
+\end{itemize}
+
+The six scoring contexts are the exact prompts released in Benoit's
+replication materials, so the scorer sees the same rubric text as the
+GPT-4o scorer in their pipeline. This matters: an earlier paraphrased
+rubric shifted macro correlation by $+0.008$ on held-out summaries when
+we swapped back to the exact released text.
+
+\paragraph{Chunking.} Chunks are produced by
+paragraph-boundary splitting inside a character budget. Typical MP
+manifestos are $20$--$60$K characters; at $c = 8\mathrm{K}$ this yields
+$3$--$8$ leaves, and at $c = 24\mathrm{K}$ it yields $1$--$3$ leaves.
+
+\paragraph{Model.} All runs use
+\textsc{Gemma-4-31B-IT-NVFP4} served from a local GPU node with a
+$12\mathrm{K}$-token context cap. The context cap is more than
+sufficient for the summaries used here ($\sim\!3\mathrm{K}$ tokens)
+and keeps the inference budget fixed across settings.
+
+\paragraph{Scoring schedule.} The joint variant of
+Section~\ref{sec:benoit-headline} makes $235$ summaries $\times$ $6$
+dimensions $= 1{,}410$ scoring calls. Each call's SYSTEM prompt is
+one of six Benoit rubrics ($\sim\!1.1$K tokens each). Iterating the
+pipeline in manifesto-then-dimension order
+interleaves all six rubrics across consecutive calls. The joint variant
+therefore uses a two-pass evaluation schedule: first generate all root
+summaries, then score all manifestos for one dimension before moving to
+the next. The $\sim\!235$ scoring calls for each dimension then share
+the same rubric prefix. Saved prompt-prefix work is
+$\sim\!1.1\text{K tokens} \times (N-1) \times 6
+\approx 1.5$M tokens per full-corpus run.
+
+\subsection{Full Per-Cell Results}
+
+Table~\ref{tab:benoit-headline} in the main text reports the macro
+summary. The complete per-dimension $\times$ chunk-size $\times$
+configuration grid includes:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item Per-dimension C-Tree at $c\in\{2,4,8,16,24,32,64\}\text{K}$.
+    \item Joint C-Tree at $c\in\{8,16,24,32,64\}\text{K}$.
+    \item \textbf{Flat baseline} (no chunking, no summarization, raw
+          text truncated to $c$ characters and scored directly): macro
+          $0.786$--$0.827$ across truncation sizes. This is the direct
+          long-context measurement control: it tells us how much of the
+          expert-survey signal is visible before the text is distributed
+          over leaves.
+    \item \textbf{Concat baseline} (chunking and leaf summaries but no
+          merges --- leaf summaries are concatenated and scored):
+          distributes the measurement across leaves and then recombines
+          them by simple concatenation. Macro $0.827$--$0.837$ at
+          $c\in\{8\mathrm{K},16\mathrm{K}\}$ shows that the expert-survey
+          signal survives the first local compression step.
+    \item \textbf{Decoding sensitivity.} Additional low-temperature and
+          medium-temperature runs, with and without three-sample
+          aggregation, leave the ranking of the main configurations
+          essentially unchanged. At $c = 8\mathrm{K}$ the per-dimension
+          C-Tree macro lies in $[0.832,0.841]$ across these variants,
+          while the joint C-Tree lies in $[0.800,0.808]$.
+    \item \textbf{Gemma-3 exact-model replication}. Running the
+          scorer on Benoit's own anonymized summaries with the
+          Gemma-3-27B BF16 model used in their Table~6 produces macro
+          $0.723$--$0.731$ across rubric and prompt-format
+          variations. The gap to their reported $0.793$ is not
+          explained by rubric wording ($+0.008$ delta) or output-format
+          wrapping ($-0.003$ delta); the residual is attributed
+          elsewhere to model-weight revision drift between the
+          Benoit vintage and our local checkpoint.
+    \item \textbf{Scorer-only baselines}. Running only the scorer
+          stage of our pipeline on Benoit's anonymized summaries
+          (i.e.\ no tree) gives a macro $r$ in the $0.73$--$0.75$
+          band. The jump to $0.82$--$0.84$ in
+          Table~\ref{tab:benoit-headline} is attributable to the
+          summarization step, not to the scorer alone.
+\end{itemize}
+
+\subsection{Ablations on the Mergeability Story}
+
+Two ablations load directly onto Proposition~\ref{prop:mergeable-reduction}'s
+empirical prediction.
+
+\paragraph{Chunk-invariance across a $16\times$ chunk sweep.} We ran
+the per-dimension C-Tree at $c\in\{4,8,16,24,32,64\}\mathrm{K}$ on the
+same manifestos; the macro spread across chunk sizes is $0.027$, with
+the five non-decentralization dimensions staying in the same
+high-correlation regime while decentralization is the visible exception
+discussed next. This is the empirical
+analog of \textbf{Prop.~\ref{prop:mergeable-reduction}}: under local
+validity the root-level score should be chunk-schedule-invariant, and
+we observe the predicted behavior to within sampling noise on five
+dimensions.
+
+\paragraph{The dimension where chunk-invariance breaks is the
+dimension the published literature flags.} Decentralization's
+Pearson $r$ monotonically \emph{improves} as leaves shrink: $0.489$
+at $c = 64\mathrm{K}$, $0.543$ at $c = 8\mathrm{K}$, $0.584$ at
+$c = 2\mathrm{K}$. \citet{BenoitEtAl2025} flag decentralization as a
+boundary case in their Figures~2--3, where manifesto quasi-sentence
+coders and expert-survey respondents disagree about what
+          resolves a party's position; their own Table~3 split-expert
+          reference on decentralization is $0.78$, well below the
+          $\ge 0.88$ references for the other five dimensions. The smaller-leaf regime in
+C-TreePO forces the tree to carry the disambiguating evidence across
+merges rather than summarizing it away at the leaf, and the
+correlation improves as a result. This is the Markov counter of
+Section~\ref{sec:markov-walkthrough} manifesting in real data: when
+the oracle cares about between-leaf interactions, finer leaves help.
+
+\paragraph{Flat and concat controls.} The flat baseline ($c$-character
+truncation, no tree) reports macro $0.786$--$0.827$ depending on
+truncation, with the strongest row at a $48\mathrm{K}$-character
+truncation. The concat baseline (leaf summaries, no recursive merges)
+reports $0.827$--$0.837$, including $0.837$ at both $32\mathrm{K}$ and
+$8\mathrm{K}$ leaves. These rows are measurement-distribution controls.
+The flat row measures the signal available to a direct read; the concat
+row measures the signal after the text has already been spread across
+leaf summaries. Their strength is useful because it shows that the
+Benoit benchmark has a strong recoverable signal. The C-Tree rows then
+show that the same expert-survey signal survives the fully local architecture: macro
+$0.829$ at $8\mathrm{K}$ and $0.842$ at $4\mathrm{K}$, with stable
+correlations across the chunk sweep. The target fact is invariance as
+the measurement grid moves from direct reads to many local leaves. Once
+that invariance holds, the researcher can sample, supervise, and audit a
+larger set of smaller measurement points while preserving the
+root-level target.
+
+\subsection{Additional Robustness Diagnostics}
+
+\paragraph{Manifesto length.} Binning platforms by raw manifesto length
+shows that the headline correlations are not driven only by short
+documents. Among manifestos longer than $100\mathrm{K}$ characters, the
+per-dimension C-Tree reports Pearson $r=0.89$ on economic policy,
+$0.85$ on social policy, $0.87$ on immigration, $0.88$ on European
+integration, and $0.83$ on environment. Decentralization remains the
+weak dimension at $0.47$, matching the broader pattern in
+Table~\ref{tab:benoit-headline} rather than creating a new long-document
+failure mode. The joint C-Tree shows the same qualitative pattern in the
+longest bucket: the five non-decentralization dimensions remain in the
+$0.85$--$0.91$ range.
+
+\paragraph{Election era.} Splitting the full per-dimension pipeline by
+election year gives the same picture. At $c = 24\mathrm{K}$, economic
+correlations are $0.899$ for 1989--1999, $0.859$ for 2000--2009, and
+$0.905$ for 2010--2019; social correlations are $0.847$, $0.791$, and
+$0.865$; environment correlations are $0.802$, $0.759$, and $0.830$.
+Immigration and European integration have no 1989--1999 cells in this
+benchmark split, but remain high in the 2000s and 2010s
+($0.801$--$0.889$ for immigration and $0.862$--$0.912$ for European
+integration). Decentralization again stays lower, from $0.393$ to
+$0.497$. Thus the main result is not concentrated in one recent era of
+manifesto rhetoric.
+
+\paragraph{Secondary Manifesto Project coded-score target.} Benoit et
+al. also discuss Manifesto Project quasi-sentence counts transformed
+into coded logit scores. We treat those as a construct-validity check,
+not as the target benchmark for this section, because they measure a
+different object from expert-survey party-position means. Against the
+coded-score target, the tree, flat, concat, and joint variants produce
+macro correlations in the $0.337$--$0.397$ range, and the European
+integration correlations are strongly negative. This confirms that the
+expert-survey target and the coded-count target should not be treated as
+interchangeable validation labels.
+
+\subsection{Compute Cost Accounting}
+
+The compute cost decomposes cleanly by pipeline variant and LLM call
+type.
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Benoit proprietary ensemble.} Per manifesto--dimension:
+          $3 \text{ LLMs} \times 2 \text{ shot-settings} \times 3 \text{ summaries} = 18$
+          calls (nine summarization calls, nine scoring calls). Corpus
+          total: $235\times 6\times 18 = 25{,}380$ calls, routed
+          through GPT-4o, Claude 3.5 Sonnet, and Gemini 1.5 Pro
+          frontier APIs.
+    \item \textbf{Joint C-Tree} (our default for the full sweep).
+          Per manifesto: $2\lceil n_{\text{chars}}/c\rceil - 1$
+          summarize/merge calls plus $6$ scoring calls. At
+          $c = 8\mathrm{K}$ and a typical $40$K--$48$K-character
+          manifesto, that is $15$--$17$ calls. Corpus total is on the
+          order of $2{,}500$ LLM calls on one local model.
+    \item \textbf{Per-dimension C-Tree.} Six trees per manifesto;
+          $\approx 60$--$70$ LLM calls per manifesto at
+          $c = 8\mathrm{K}$; corpus total $\approx 15{,}000$ calls on
+          one local model.
+\end{itemize}
+
+At frontier API list prices ($\sim\!\$0.01$--$\$0.05$ per $1$K
+tokens) the Benoit ensemble is on the order of a few hundred dollars
+per corpus run; the same run on a local GPU node for $\sim\!8$ hours
+of wall-clock is a rental cost roughly two orders of magnitude smaller
+on a dollar-to-dollar basis, and rate-limited vs.\ bursty for
+iteration. No claim is made that this is a head-to-head cost
+comparison --- it depends on hardware ownership, amortization,
+and the cost of calling frontier APIs at scale --- but the
+qualitative story (one local open-weight model vs.\ three frontier
+APIs $\times$ six passes each) is clean.
+
+\subsection{Reproduction}
+
+The full sweep regenerates the tables in Section~\ref{sec:benoit-headline}
+from per-manifesto predictions in four protocol steps: evaluate the
+open-weight model; run the per-dimension pipeline over the six Benoit
+dimensions and chunk sizes
+$c \in \{4, 8, 16, 24, 32, 64\}\mathrm{K}$; run the joint two-pass
+pipeline over $c \in \{8, 16, 24, 32, 64\}\mathrm{K}$; and aggregate the
+resulting manifesto-level scores against Benoit's expert means. The
+aggregation unit is always the manifesto--dimension prediction, so the
+reported correlations do not depend on the order in which predictions
+are produced.
+
+\subsection{Oracle-Grounded Training Path}
+
+The headline Benoit replication uses a prompt-only summarizer and
+scorer with no training against internal-node oracles. Expert
+quasi-sentence codings are available for $2{,}157$ platforms
+($\sim\!2.27$M coded spans). These annotations define a span oracle:
+for any leaf or internal-node span, aggregate the quasi-sentence codes
+that fall inside that span and return the corresponding rubric-indexed
+score. This gives ground-truth oracle values at every leaf (whatever
+span the leaf covers) and at every internal node (the union-span of its
+two children), so each of the three local laws becomes an explicit
+training signal:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{C1 (leaf sufficiency):} the head applied to each
+          leaf state must predict the leaf-span score to within the
+          coder's resolution.
+    \item \textbf{C3 (per-merge consistency):} the head applied to each
+          internal-node state must predict the ordered union-span score.
+          An optional order-swap probe on the root merge can be reported
+          when the scoring rubric treats quasi-sentence evidence as
+          permutation-invariant, but this is a stress test rather than
+          the definition of C3.
+    \item \textbf{C2 (idempotence):} re-summarizing an already-produced
+          summary must not shift the predicted score.
+\end{itemize}
+
+This supervision path mirrors the operator-learning setup used in the
+Markov and HLL experiments in
+Sections~\ref{sec:markov-walkthrough}--\ref{sec:hll-parity}; it uses
+an embedding-space FNO operator as $g$ and a shared neural head as
+$f$, with strict C1/C3 supervision at every node and a C2 probe on
+the root merge. Section~\ref{sec:manifesto-qsentence} reports the
+realized experiments on this path, with full grids in
+Appendices~\ref{app:qsentence-leaf-ladder}
+and~\ref{app:gold-seeding}.
+
+\subsection[Alternating f/g Optimization on the Economic Policy Dimension]{Alternating $f/g$ Optimization on the Economic Policy
+Dimension}\label{app:rile-fg-ladder}
+
+This subsection provides the full details behind
+Section~\ref{sec:rile-fg-ladder}'s main-body summary of the alternating
+$f/g$ ladder.
+
+\paragraph{Methodology.} Each ladder step runs medium-budget
+prompt-program search on one side of $(f, g)$ with the other side's
+prompt held fixed at the previous iteration's output. Weights of the
+underlying Gemma-4-31B-NVFP4 checkpoint are never updated; the optimized
+object is the prompt program. Stage names use the compact label
+$f^a g^b$: $a$ indexes the number of scorer-side prompt optimizations,
+and $b$ indexes the number of summarizer-side prompt optimizations. The
+notation is a stage label, not multiplication. Leaf size is reported in
+\emph{tokens}; the character-based leaf column in
+Table~\ref{tab:benoit-headline} is a distinct axis and should not be
+compared at face value.
+
+\paragraph{Two initialization lanes.} The pilot uses two starting
+lanes:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Benoit-init lane:} $g^0 = g^{\mathrm{Benoit}}$, meaning the
+          archived GPT-4o summary from Benoit's replication materials.
+          The plotted anchor is $f^1 g^0$ because the scorer has already
+          gone through the scorer-only optimization reported in the
+          previous subsections. The lane then asks what happens when the
+          summarizer is updated against that scorer.
+    \item \textbf{Raw-init lane:} $g^0$ is the
+          own-Gemma-4 baseline summary generated under the scoring
+          rubric; $f^0$ is the untuned scorer. Both sides of the
+          pair come from the same model, so the first ladder
+          step $(f^0 g^0 \to f^1 g^0)$ is the cleanest possible
+          co-adaptation vignette.
+\end{itemize}
+When a later ladder stage reused the same evaluation as the preceding
+stage, Table~\ref{tab:manifesto-fg-ladder} reports only the first stage
+at which the distinct number appeared.
+
+\paragraph{Heatmap figures.} Figure~\ref{fig:manifesto-fg-ladder-heatmaps}
+shows external-Pearson heatmaps for both lanes, with rows indexing the
+ladder stage and columns indexing leaf size in tokens.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{manifesto_fg_ladder_benoit_init.png}
+        \caption{Benoit-init lane ($g^0 = g^{\mathrm{Benoit}}$). Populated
+        across leaves $256$--$8192$ tok.}
+        \label{fig:manifesto-fg-ladder-benoit}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{manifesto_fg_ladder_raw_init.png}
+        \caption{Raw-init lane ($g^0$ = own-Gemma baseline). Leaves
+        $256$--$8096$ tok populated at the $f^1 g^0$ and $f^1 g^1$
+        stages; deeper stages fill when a summarizer update changed
+        the evaluation, and are shown with a $=$ glyph where an
+        evaluation was inherited from the preceding stage.}
+        \label{fig:manifesto-fg-ladder-raw}
+    \end{subfigure}
+    \caption{Paired heatmaps for the two initialization lanes of the
+    alternating $f/g$ ladder on the economic policy dimension
+    (seven-point \citet{BenoitEtAl2025} scale, $n = 48$ held-out
+    manifestos per cell). Both lanes use \textsc{Gemma-4-31B-IT-NVFP4}
+    with medium-budget prompt-program search applied to one side of
+    $(f, g)$ per step while the other is held fixed. Rows are ladder
+    stages. In the label $f^a g^b$, $a$ counts scorer-side prompt
+    optimizations and $b$ counts summarizer-side prompt optimizations;
+    this is a stage label, not multiplication. Bottom to top, the full
+    raw-init ladder is
+    $f^0 g^0 \to f^1 g^0 \to f^1 g^1 \to f^2 g^1 \to f^2 g^2 \to
+    f^3 g^2 \to f^3 g^3$; the Benoit-init lane omits $f^0 g^0$ because
+    it starts from the scorer-optimized anchor $f^1 g^0$. Columns: leaf
+    size in tokens.
+    \textbf{Left panel of each lane:} external Pearson $r$ against the
+    Benoit expert-survey mean. The bolded tick at $r = 0.880$ on the
+    colorbar marks the economic split-expert reference from
+    \citet{BenoitEtAl2025}'s Table~3: the correlation between mean
+    party-position estimates from two random expert subsamples. Cells
+    above the tick exceed that empirical reference on this held-out split;
+    cells below the tick sit beneath it. The tick is not a theoretical
+    limit. \textbf{Right panel of each lane:} internal-external
+    Pearson gap (lower = better), defined as Pearson agreement with the
+    teacher trace minus Pearson agreement with Benoit's expert means.
+    The dotted line at $0$ marks parity between the internal and
+    external correlations. Repeated values across stages in the
+    raw-init panel ($f^1 g^1$ through $f^3 g^3$ at leaf $256$) show
+    evaluations inherited from the most recent post-update
+    stage, not separate re-runs.}\label{fig:manifesto-fg-ladder-heatmaps}
+\end{figure}
+
+\paragraph{Per-cell grid.} Table~\ref{tab:manifesto-fg-ladder} reports
+the full ladder grid for both lanes. Columns cover external Pearson
+against the expert mean, external MAE on the $1$--$7$ scale, the
+internal $f$ Pearson (scorer applied to the realized summary vs. the
+teacher trace for that same summary), and the internal-external Pearson gap.
+
+\begin{table}[htbp]
+    \centering
+    \resizebox*{!}{0.88\textheight}{\resizebox{\linewidth}{!}{\input{assets/benoit/tables/manifesto_fg_ladder.tex}}}
+    \caption{Per-cell ladder grid on the economic policy dimension
+    (seven-point scale).
+    Stage labels use the notation defined in
+    Figure~\ref{fig:manifesto-fg-ladder-heatmaps}.
+    Both lanes collapse inherited stages (where a later stage reused
+    the preceding evaluation) into the first stage at which each
+    distinct evaluation appeared. Bold external-$r$ values are the
+    best cell within each lane; bold internal-external gap values are
+    the tightest (closest to parity) within each
+    lane.}\label{tab:manifesto-fg-ladder}
+\end{table}
+
+\paragraph{Leaf-size robustness.} Collapsing
+Table~\ref{tab:manifesto-fg-ladder} to the per-leaf best cell in the
+Benoit-init lane gives $r = 0.830$ (leaf $256$), $0.861$ ($512$),
+$0.885$ ($1024$), $0.886$ ($2048$), $0.886$ ($4096$), $0.879$ ($8192$).
+From leaf $1024$ onward the realized correlation sits in a $0.007$-wide
+band ($[0.879, 0.886]$) straddling the \citet{BenoitEtAl2025} Table~3
+split-expert reference of $r = 0.880$ across an $8\times$ leaf-size
+range; below $1024$ tok the fall-off is sharp ($-0.025$ at leaf $512$
+and $-0.056$ at leaf $256$, measured relative to the plateau peak of
+$0.886$). This is the same chunk-invariance
+pattern Table~\ref{tab:benoit-headline} reports for the fixed-prompt
+pipeline ($\pm 0.027$ macro across $16\times$ leaf variation), now
+replicated under iterative training rather than fixed prompts, which
+is the non-obvious result: medium-budget alternating prompt updates do not
+introduce chunk-size sensitivity that the fixed-prompt version did
+not already have, and they leave the realized operator near the
+economic split-expert reference rather than clearly below it.
+
+\paragraph{Internal-consistency panel.} The internal-external Pearson
+gap reference is $0$: a gap of zero means the scorer's agreement with
+the teacher trace is no larger than its agreement with Benoit's expert
+means. Across every populated Benoit-init cell, the internal-$f$ Pearson
+sits in $[0.953, 0.990]$ and the internal-external Pearson gap sits in
+$[0.086, 0.161]$, with the minimum gap at leaf $8192$, $f^2 g^2$
+($0.086$). Across the leaves where the Benoit-init Pearson plateau holds
+($\geq 1024$ tok) the gap is $\leq 0.124$. The internal agreement
+probe therefore stays tight across the ladder: alternating prompt
+updates preserve high agreement with the teacher trace while the
+external correlation tracks the expert benchmark. The raw-init lane
+reaches the grid's tightest gap ($0.056$) at leaf $256$, $f^1 g^1$,
+where the same cell also posts the grid's best external Pearson
+($r = 0.909$); across the six leaves, the raw-init gap stays in
+$[0.056, 0.125]$, matching the Benoit-init range on the leaves where
+both lanes are populated.
+
+\paragraph{Apples-to-apples comparison.} The relevant baseline for the
+Benoit-init ladder is the scorer-only ablations block of
+Table~\ref{tab:benoit-headline} (Benoit summaries held fixed, various
+prompt optimizers on $f$ alone, economic $r$ in $[0.817, 0.837]$). The
+best Benoit-init ladder cell reaches $r = 0.886$, a $+0.049$
+improvement over the strongest scorer-only ablation ($0.837$) and
+$+0.064$ over the few-shot optimized scorer ($0.822$). The
+    ladder's gain is therefore localized to the summarizer-update half of
+    the loop: re-optimizing $g$ against the current $f$ is what moves the
+    system above the fixed-$g$ ablation range. We do not compare the ladder's numbers
+to the per-dimension headline row of Table~\ref{tab:benoit-headline}
+($0.939$ on economic at $c = 8\mathrm{K}$ chars) because the leaf axis
+units differ and because the matched-leaf fixed-prompt baseline at the
+same prompt-search budget has not been run; see the main-body caveats in
+Section~\ref{sec:rile-fg-ladder}.
+
+\paragraph{What remains.} Two pieces are flagged for follow-up: the
+extension of the ladder to all six Benoit policy dimensions is scoped
+but not yet launched; and a fixed-prompt baseline at matched token-leaf
+sizes and the same prompt-search budget would let the ladder numbers
+be compared directly against the chunk-invariance figures of
+Table~\ref{tab:benoit-headline} rather than against the scorer-only
+ablations block. Both are tracked as pending updates rather than as
+claims in the present submission.

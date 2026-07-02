@@ -1,0 +1,60 @@
+\section{Neural-Operator Route}
+\label{app:v8-neural-operator-route}
+
+Neural operators are candidate function classes for the single learned state
+map \(g\). They supply one state-update program that is called on realized
+leaf blocks, on-range states, and merge pairs; the local laws decide whether
+the trained map behaves like a valid task-relative state machine.
+
+\subsection{Realized-Call Approximation}
+
+For a fixed tree, collect the realized leaf inputs, merge inputs, and on-range
+state inputs. A realized call is one actual input seen by \(g\) in a leaf,
+re-entry, or merge context while building that tree. If an ideal local-law-satisfying
+operator is uniformly approximated on compact neighborhoods of those call
+sets, transfer moduli, meaning continuity bounds from operator error to
+query-space error, turn operator approximation error into three local-law
+budgets:
+\[
+  \varepsilon_{\mathrm{leaf}},\qquad
+  \varepsilon_{\mathrm{idemp}},\qquad
+  \varepsilon_{\mathrm{merge}} .
+\]
+These are the allowed errors for leaf preservation, idempotent re-entry
+preservation, and merge preservation, respectively.
+Those budgets feed the approximate preservation theorem and the audit
+certificate.
+
+\subsection{Projection View}
+
+For a tradeoff weight \(\lambda\in[0,1]\), the training surface can be written
+as
+\[
+  (1-\lambda)L_{\mathrm{root}}(g)
+  +
+  \lambda P_{\mathrm{laws}}(g),
+\]
+where \(g\) is the candidate state map, \(L_{\mathrm{root}}(g)\) is the
+root-level loss for that map, and \(P_{\mathrm{laws}}(g)\) is a projection or
+penalty term for local-law violations. The projection penalty vanishes exactly
+on the local-law subspace inside the chosen function class. A faithful
+projection penalty identifies the same zero set as the exact C1/C2/C3
+conditions.
+
+\subsection{Overlap with Classical Sketches}
+
+Classical sketches inhabit the exact local-law subspace when their build,
+merge, readout, and re-entry witnesses are supplied. A neural operator class
+may contain a realization of the same state update, or may approximate it on
+the realized calls of a fixed tree. The overlap is the useful target: learned
+operators that behave like valid mergeable states for the task.
+
+\subsection{Teacher-First Route}
+
+In LLM applications, \(\widehat f\) is learned or selected from global labels
+and then used to define local residuals. A uniform proxy-oracle gap bound
+transfers teacher-space local-law guarantees to \(f^\ast\)-space root
+distortion with the standard two-sided slack, i.e., one proxy-oracle gap term
+on the input side and one on the output side. The proxy-corrected objective in
+Appendix~\ref{app:v8-objective-ipw} is the node-level route when some direct
+\(f^\ast\) local labels are available.

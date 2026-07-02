@@ -1,0 +1,25 @@
+\section{Assumption Check for Gap Bounds}\label{sec:verification}
+
+Table~\ref{tab:assumption-bundles} already separates the structural bundles from the downstream bundles. Quantitative transport and finite-sample certification use extra ingredients beyond both, recorded here.
+
+The Preservation Stack and Recompression Stack are structural: they ask whether local validity composes to the root and whether extra clean-up passes are safe. The gap theorems add a different kind of ingredient: they need a way to turn oracle distortion into objective drift, and they need empirical envelopes that connect a sampled audit to the unobserved target quantity.
+
+The quantitative preference-gap bounds (Theorem~\ref{thm:unified-gap} and Theorem~\ref{thm:e2e}) therefore require three extra classes of assumptions:
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Realization-to-local-law assumptions.} In the neural-operator route, external equation-(6) approximation bounds provide an upstream tolerance on compact realized calls, and Proposition~\ref{prop:neural-operator-bridge} requires explicit transfer moduli converting that tolerance into C1/C2/C3 budgets. When no such analytic route is asserted, the sampled audit estimates the realized budgets directly.
+    \item \textbf{Transport assumptions.} A method-level Lipschitz/integrability condition linking expected loss drift to oracle distance after the local-law budget has been obtained. For DPO this reduces to a policy-Lipschitz condition. For GRPO-PL the formal sufficient route uses a finite Plackett--Luce fixed-ranker condition; for GRPO-RL it uses a finite pointwise Lipschitz condition for the clipped-surrogate loss. Random-utility modeling \citep{Schervish1995} is one way to motivate those assumptions, not an extra theorem by itself.
+    \item \textbf{Calibration and sampling assumptions.} The accessible judge must be well enough calibrated to the target oracle on a representative held-out set, and the sampling design must satisfy the logged-propensity and positivity conditions used by Horvitz--Thompson estimation.
+\end{enumerate}
+
+Each of these premises has a direct falsification route: approximation/transfer residual checks for the operator layer, surface-form perturbation tests for factorization/measurability, context-swap checks for context compatibility, calibration-set audits for judge mismatch, and logged-propensity diagnostics for the sampling layer.
+
+For preferences, the application contributes a bundle of premises rather
+than a new theorem. DPO supplies oracle-measurable current/reference
+policies and an oracle-indexed pair generator; GRPO-PL supplies the
+policy/ranker/group-generator bundle; GRPO-RL supplies current/old/reference
+policy measurability, reward measurability, and an oracle-indexed group
+generator. If preferences are noisy or only approximately oracle-indexed,
+the theorem stack routes the residual through the same oracle-measurement
+term used in the two-stage and TreePO certificates.
+
+A practitioner wary of these extra ingredients can still use the structural theorems directly, or treat the transport and calibration constants as explicit sensitivity parameters rather than as fixed truths.

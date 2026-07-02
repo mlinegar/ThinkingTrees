@@ -1,0 +1,141 @@
+\section{Compression Trees and Local Laws}\label{sec:min-framework}
+
+Let $\Strings$ denote the set of finite token sequences with concatenation
+written $u \concat v$. The task target is an oracle
+$\fstar_{\mathrm{econ}} : \Strings \to \Y$ with discrepancy metric
+$\metric$. A summarizer is a (possibly stochastic) map
+$g : \Strings \rightsquigarrow \Strings$---a prompted language model in the
+Manifesto application, a learned neural operator in the Markov anchor, a
+serialized hand-designed register array in the HLL anchor. A readout
+$f : \Strings \rightsquigarrow \Y$ scores the root summary: in closed-form
+examples $f$ may be taken to be $\fstar_{\mathrm{econ}}$ itself, and in the
+Manifesto results $f$ is a rubric scorer that approximates
+$r_{\mathrm{econ}}$---the rubric scorer named in
+\S\ref{sec:min-manifesto-state}. Every call to $g$ is \emph{local}: its
+input is either a leaf block or the concatenation of two child summaries.
+That locality is what makes each check small enough to audit, and what
+keeps the guarantees conditional on claims one node at a time rather than
+on the whole document at once.
+
+A document $x$ is partitioned into contiguous leaves $(b_1, \ldots, b_k)$
+attached to the leaves of a full binary tree $T$. Each leaf stores
+$s_i = g(b_i)$, and each internal node $u$ stores
+$s_u = g(s_{u_L} \concat s_{u_R})$. Only these stored summaries move
+through the pipeline at deployment; the raw span underneath a node is
+retained conceptually, so that a later audit can compare the stored state
+to the evidence it is supposed to preserve.
+Figure~\ref{fig:min-plain-tree} shows the object. Observation itself can
+happen at two tiers: the root-observed view already introduced in
+\S\ref{sec:min-manifesto-state}, where the tree root is compared directly
+to a full-document expert target; and a node-level local-law audit that
+observes or judges selected leaves, stored summaries, and merge nodes
+inside the realized tree. The theorems below do not mix the two. They
+make preservation claims about the tree that either view can cash in on
+its own terms.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.92\linewidth]{01_base_plain.pdf}
+    \caption{\textbf{A compression tree reduces a document to one root
+    summary by recursively merging adjacent child summaries.} Leaves
+    summarize raw spans; internal nodes merge adjacent child summaries;
+    only summaries are retained on each node. In the Manifesto running
+    example, every stored string is treated as a surrogate for the
+    economic-policy state of the span beneath it.}
+    \label{fig:min-plain-tree}
+\end{figure}
+
+Two strings are \emph{oracle-equivalent}, written
+$u \sim_{\mathrm{econ}} v$, when
+$\metric(\fstar_{\mathrm{econ}}(u), \fstar_{\mathrm{econ}}(v)) = 0$. All
+local laws are stated modulo this relation, which is worth underlining:
+``preserving'' a span does not mean producing a string that resembles it
+under some generic semantic metric, but producing a string that the
+economic oracle cannot tell apart from it. Two paragraphs with very
+different surface form can be $\sim_{\mathrm{econ}}$, and two paragraphs
+with very similar surface form can fail to be equivalent if one tucks in
+a fiscal qualifier the other drops. For the induction to carry a local
+equivalence up the tree, one more property is needed: equivalence has to
+survive insertion into the same surrounding context.
+
+\begin{assumption}[Context-compatible oracle]\label{ass:context}
+For every context $w \in \Strings$, $u \sim_{\mathrm{econ}} v$ implies
+both $w \concat u \sim_{\mathrm{econ}} w \concat v$ and
+$u \concat w \sim_{\mathrm{econ}} v \concat w$.
+\end{assumption}
+
+This is a task assumption, not a universal property of text. It is
+plausible for rubrics that read evidence locally---the economic dimension,
+a clinical adverse-event count, a citation-extraction pipeline. It is less
+plausible, and should be treated as a source of auditable distortion, for
+discourse-sensitive targets like irony or rhetorical framing, where
+substituting an oracle-equivalent span can change how neighboring
+paragraphs are read.
+
+The three local laws are the auditable conditions under which a summary at
+any node actually preserves the oracle-visible state of the span below it.
+
+\paragraph{Condition 1: Sufficiency (C1).}
+\begin{equation}\tag{C1}\label{eq:leaf_sufficiency}
+    \forall\text{ realized leaf } b : \qquad
+    g(b) \sim_{\mathrm{econ}} b.
+\end{equation}
+A leaf summary must keep the evidence the economic oracle would read in
+its span. C1 fails when a paragraph summary drops a decisive policy
+commitment, a fiscal qualifier, or an entity whose presence the rubric
+would score.
+
+\paragraph{Condition 2: Idempotence (C2).}
+\begin{equation}\tag{C2}\label{eq:leaf_idempotence}
+    \forall\text{ stored summary } s \in \operatorname{range}(g) : \qquad
+    g(s) \sim_{\mathrm{econ}} s.
+\end{equation}
+A second summarization pass over an already-stored summary must not shift
+the economic readout. C2 fails when a clean-up pass smooths away a
+decisive qualifier---an already-reduced summary can be reduced further
+into text so generic that it no longer places the platform on the rubric.
+When $g$ is stochastic, take $\operatorname{range}(g)$ to be the
+support of its output PMF and read $\sim_{\mathrm{econ}}$ in
+expectation over the draws; Appendix~\ref{app:min-proofs} carries the
+PMF formulation used in the proofs.
+
+\paragraph{Condition 3: Merge Consistency (C3).}
+\begin{equation}\tag{C3}\label{eq:leaf_compatibility}
+    \forall\, u, v \in \Strings : \qquad
+    u \concat v
+    \sim_{\mathrm{econ}} g(u \concat v)
+    \sim_{\mathrm{econ}} g\!\left(g(u) \concat g(v)\right).
+\end{equation}
+The first equivalence says a joint summary of two spans preserves the
+economic reading of their union. The second says that summarizing two
+children separately and merging the summaries preserves the same
+cross-span interaction as summarizing the raw concatenation at once---a
+platform that is environmentally interventionist in one section but
+fiscally restrained in another has its economic reading at the boundary
+between those sections, and that reading must survive the merge. C3 is
+the law the merge has to satisfy for the tree induction to run.
+
+A \emph{global} law is the universal statement above, quantified over all
+$b$, $s$, $u$, $v$. A \emph{realized} law is the corresponding check
+instantiated on the specific strings produced in one execution of the
+tree. The audit never proves the global form; it estimates whether the
+deployed run is realized-valid often enough to support the guarantee the
+method is claiming.
+
+\paragraph{Assumption bundles.}
+Four named bundles are cited in the theorems of
+Section~\ref{sec:min-guarantees}.
+\emph{Preservation} = C1 + C3 + Assumption~\ref{ass:context}; it delivers
+one-pass root preservation. \emph{Recompression} = Preservation + C2; it
+extends preservation through any number of additional re-summarization
+rounds. \emph{Optimization} = Recompression + a factorization /
+measurability premise on the downstream objective; it makes training on
+root summaries and training on full documents share a population target.
+\emph{Certificate} = Optimization + transport, calibration, and sampling
+assumptions; it converts sampled audit statistics into a finite-sample
+objective-gap certificate. The first two are structural assumptions about
+the compression object; the last two add downstream modelling ingredients.
+Appendix~\ref{app:min-notation} gives the explicit table with the exact
+theorem each bundle backs, and Appendix~\ref{app:min-proofs} records the
+C1 / C3 / C2 $\leftrightarrow$ L1 / L3 / L2 crosswalk to the Lean
+formalization.

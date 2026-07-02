@@ -1,0 +1,87 @@
+\section{Node/Root Supervision Allocation Simulations}\label{app:v4-supervision-allocation}
+
+The Markov benchmark makes the supervision tradeoff observable with a known
+oracle. Each synthetic document has a root transition-count label. Each leaf
+or merge span can also receive the same oracle readout on its own span. Those
+node labels are sampled with known propensities, matching the audit design in
+Section~\ref{sec:min-audit}.
+
+\subsection{Budget Accounting}
+
+The controlled runs compare root-only supervision with reallocated
+supervision at a fixed token-observation budget. A full-document label on a
+$128$-token sequence costs $128$ token observations. A label on a $16$-token
+leaf costs $16$ token observations, so eight such leaf labels have the same
+budget mass as one root label. The root-label share ranges from $100\%$ to
+$10\%$. Reallocation spends the remaining budget on local labels.
+
+Three local-label policies appear in the figures. \emph{Leaf-only} spends the
+local budget on leaf count labels. \emph{Depth-equal} splits local labels
+across non-root depths. \emph{Balanced-node} spreads labels across non-root
+nodes. Each policy produces randomly assigned node supervision under a known
+sampling rule. In a real audit, the same records become logged propensities
+for IPW/Horvitz--Thompson estimation.
+
+\subsection{Allocation Patterns}
+
+Figure~\ref{fig:min-markov-leaf-size} reports the compact heatmap view:
+tree supervision matches or improves on the flat root-only baseline across
+the budget range and remains competitive with only $10\%$ root-label
+coverage. Figures~\ref{fig:v4-simple-leaf-mass} and
+\ref{fig:v4-hard-leaf-mass} show the same result as per-policy curves. The
+recoverable case has a broad safe band of leaf sizes. The structural case is
+harder, but the tree still dominates the flat baseline across the shown
+budgets.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{markov_simple_leaf_mass.png}
+    \caption{\textbf{Recoverable Markov supervision allocation.}
+    Each panel fixes a root-label share. The green curve uses root labels
+    only. The blue, purple, and rose curves keep the $100\%$ token budget and
+    reallocate missing root-label mass to local labels under the three
+    policies. The amber curve is the flat FNO baseline. Lower MAE is better.}
+    \label{fig:v4-simple-leaf-mass}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{markov_hard_leaf_mass.png}
+    \caption{\textbf{Structural Markov supervision allocation.}
+    The structural regime repeats the same protocol with more registers and
+    more expected shifts. Local supervision remains effective, while very
+    small leaves expose the boundary-state failure mode.}
+    \label{fig:v4-hard-leaf-mass}
+\end{figure}
+
+The budget-split view in Figure~\ref{fig:v4-budget-split} isolates the
+supervision object shift. The total token budget is held fixed; the horizontal
+axis changes the fraction spent on root labels versus local labels. The
+reallocation curves stay nearly flat from full root supervision down to about
+$40\%$ root supervision before degrading. In this controlled setting,
+randomly assigned node labels can replace a large share of root labels because
+they measure the same oracle-preservation property.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{markov_budget_split.png}
+    \caption{\textbf{Splitting a fixed token budget between root and local
+    labels.} The green star is the all-root reference. The green line spends
+    only the reduced root-label budget. The blue, purple, and rose curves keep
+    the total budget fixed by assigning the remaining mass to local labels.
+    The flat region shows the range where node supervision preserves root
+    accuracy at the same total budget.}
+    \label{fig:v4-budget-split}
+\end{figure}
+
+\subsection{Interpretation}
+
+The simulations support a narrow methodological claim. Local labels become
+substitutes for root labels when they are randomized over the relevant tree
+population and measure the same oracle-preservation property. Their value is
+statistical as well as operational: they provide training signal for the
+compression operators and design-based estimates of local-law distortion. The
+Manifesto/Benoit results use the root-observed tier today. Quasi-sentence
+codings supply the natural node-level oracle path for the same design.
+
+\clearpage

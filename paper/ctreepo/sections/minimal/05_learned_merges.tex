@@ -1,0 +1,65 @@
+\section{Manifesto Results: Granularity in Practice}\label{sec:min-manifesto-results}
+
+The empirical question is whether the economic-state story survives on a
+real long-document measurement benchmark. The pipeline used in the
+experiments reported below chunks each manifesto into contiguous
+character spans, summarizes each span under a dimension-specific
+preservation rubric, recursively merges adjacent sibling summaries, and
+scores the root on the seven-point Benoit economic scale. The root
+score is then correlated against Benoit's expert-survey means across
+the platform corpus---the root-observed evaluation introduced in
+Section~\ref{sec:min-manifesto-state}: every sampled platform already
+carries a full-document expert target, and the tree root is compared
+directly to it.
+
+On the headline six-dimension benchmark, the tree at an
+$8\mathrm{K}$-character leaf size reaches a macro Pearson $r$ of
+$0.829$ against expert means---above $0.817$ for the proprietary
+Benoit ensemble and $0.793$ for the matched open-weight replication.
+On the economic dimension specifically, the same $8\mathrm{K}$-leaf
+row reaches $0.939$, above the published split-expert economic
+reference of $0.880$. A tiny-leaf extension at $4\mathrm{K}$ keeps the
+macro result at $0.842$ and the economic result at $0.932$.
+
+\begin{table}[t]
+    \centering
+    \resizebox{\linewidth}{!}{\input{assets/benoit/tables/benoit_comparison_pearson.tex}}
+    \caption{Pearson $r$ against Benoit expert-survey means. The minimal
+    main text uses this table for the headline comparison and the
+    economic running example; protocol details, coverage, controls, and
+    ablations are in Appendix~\ref{app:min-manifesto}.}
+    \label{tab:min-benoit-headline}
+\end{table}
+
+The result that matters for the granularity claim is leaf-size
+robustness. Across the character-leaf sweep from $4\mathrm{K}$ to
+$64\mathrm{K}$, the macro correlation varies by only $0.027$. The
+economic dimension holds up across the same range---$0.916$ at
+$64\mathrm{K}$, $0.939$ at $8\mathrm{K}$, $0.932$ at $4\mathrm{K}$.
+That is the empirical granularity claim: the measurement target
+remains visible as the work unit shrinks from full manifestos to
+local spans small enough to sample and audit.
+
+The companion prompt-ladder pilot makes the same point on a token
+leaf-size axis for the economic dimension. In the fully populated
+Benoit-init lane, the best external Pearson by leaf size is $0.885$
+at $1024$ tokens, $0.886$ at $2048$, $0.886$ at $4096$, and $0.879$
+at $8192$---a $0.007$-wide band straddling the economic split-expert
+reference of $0.880$ across an $8\times$ leaf-size range. Below
+roughly $1024$ tokens, performance falls: $0.861$ at $512$, $0.830$
+at $256$. That is the expected failure mode---leaves too small to
+carry the economic evidence a later merge needs.
+
+These Manifesto results are a root-observed claim, complete on their
+own tier: every sampled platform carries a full-document expert target
+and the tree root is scored directly against it. They are not a
+node-level local-law certificate. A stronger tier---C1, C2, C3
+distortion estimated on sampled leaves, merges, and re-summarizations
+---would additionally certify that a realized tree preserved the
+economic state at every call. The planned route uses the Manifesto
+Project's quasi-sentence codings to instantiate span-level economic
+targets, trains or tunes C1 and C3 directly on leaves and internal
+nodes, and audits the realized tree
+(Section~\ref{sec:min-audit} describes the audit design;
+Appendix~\ref{app:min-manifesto} keeps the two-tier distinction
+explicit).

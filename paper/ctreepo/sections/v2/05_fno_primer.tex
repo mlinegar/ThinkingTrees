@@ -121,6 +121,12 @@ convert approximation tolerance $\varepsilon$ into leaf, merge, and
 idempotence budgets. This is the precise sense in which the
 neural-operator layer is the \emph{realizability layer}, while C1--C3
 remain the \emph{audit and certification layer}.
+Because this route certifies deterministic operators, it enters the
+general C-TreePO semantics through the point-mass specialization of the
+stochastic summarizer interface. A randomized LLM summarizer is therefore
+not certified by the neural-operator approximation theorem itself; it is
+covered by the PMF-valued local-law theorem stack, or by an additional
+randomized-operator approximation result if one is supplied.
 
 The Markov experiments instantiate this interface with a 1D FNO: token
 embeddings are mixed globally in Fourier space, pooled at leaves, and
@@ -139,11 +145,14 @@ attention, residual/local maps, and pointwise feed-forward maps ---
 instantiates the equation-(6) architecture: single-head attention
 agrees with a discretized kernel layer on the block's active
 coordinates, transformer blocks are neural-operator layers, and a
-finite encoder stack is an equation-(6) neural operator. This
-justifies the function-space inclusion used in
-Appendix~\ref{app:operator-overlap}. It does not certify tokenizers,
-runtime serving details, or a particular checkpoint; those remain
-deployment details outside the theorem surface. The manifesto
-section therefore uses the transformer inclusion as an
-architecture-level membership statement, and still uses the audited
-realized-call bridge as the load-bearing correctness step.
+finite encoder stack is an equation-(6) neural operator. This means a
+transformer summarizer can be placed in the same operator-learning
+pipeline as the FNO: external equation-(6) approximation bounds supply
+the upstream realized-call tolerance, Proposition~\ref{prop:neural-operator-bridge}
+translates that tolerance into local-law budgets, and the audit checks
+the budgets actually realized by the deployed system. The inclusion
+does not certify tokenizers, runtime serving details, or a particular
+checkpoint; those remain deployment details outside the theorem
+surface. The manifesto section therefore uses the transformer
+inclusion as an architecture-level membership statement, and still uses
+the audited realized-call bridge as the load-bearing correctness step.

@@ -1,0 +1,99 @@
+\section{Introduction}\label{sec:v8-introduction}
+
+Researchers increasingly use large language models to measure long
+texts. Once a document exceeds the practical context limit, the
+analyst no longer observes the original object: the input to the
+final coding step is a compressed surrogate produced by chunking,
+retrieval, or recursive summarization. The problem that follows is
+one of measurement design as well as prediction. If the compressed
+representation drops evidence that depends on combinations across
+the document (for example, a tax cut promised in one section paired
+with a deficit rule four sections later, where the meaning turns on
+the link between the two), the surrogate acts on the wrong object,
+and the downstream label inherits that distortion no matter how
+accurate the labeler is on its own.
+
+Design-based supervised learning has formalized the analogous
+problem one step downstream. \citet{EgamiEtAl2024} show that even
+highly accurate surrogate labels can bias downstream estimates when
+they substitute for gold-standard labels without appropriate
+sampling and overlap conditions. Their fix is to log a sampling
+design over the trusted labels and use it to make the downstream
+inference valid. Long-document measurement adds an earlier failure
+mode: the surrogate is both a compressed representation of the
+original document and a predicted label. A retrieval or
+long-context score may be accurate on average and still tell the
+analyst nothing about which cross-document interactions survived
+compression.
+
+C-TreePO addresses the representation-level problem. A compression
+tree partitions a document into contiguous leaves, summarizes each
+leaf into an evidence state, merges sibling states up the tree, and
+scores the root. The state map \(g\) is valid for an oracle
+\(f^\ast\) when three local laws hold on the realized tree.
+Sufficiency: leaf summaries preserve the evidence relevant to the
+task. Idempotence: a state stays invariant when passed through the
+summarizer again. Merge consistency: a merged state preserves the
+parent span it represents. The laws are local in scope and global
+in consequence: a valid root state can replace the original document
+for any oracle-compatible readout.
+
+The C-TreePO objective has the same two-level shape. The root
+channel fits the observed document-level expert target. The
+local-law channel trains and audits the state map inside the
+realized tree. Direct \(f^\ast\) calls are expensive, so we use a
+fitted proxy \(\widehat f\) for the dense local supervision and
+sample \(f^\ast\) at a small set of nodes to correct the
+proxy/oracle gap.
+
+Audit happens at tree nodes, so the analyst picks the unit: a leaf,
+a paragraph, a section, or the full document. Design-based
+machinery aggregates the sampled node labels into a document-level
+guarantee, and the same design trades one expensive full-document
+expert read for several cheaper reads of shorter units at
+comparable accuracy. The same supervision design also trains the
+compression operators under a fixed audit budget; that is the
+optimization side of the framework, the ``PO'' in C-TreePO.
+
+The certificate makes the resulting measurement error reportable.
+Section~\ref{sec:v8-audit-certificate} decomposes the bound on
+downstream estimate drift into four interpretable terms. A sampled
+local-distortion term records how far the produced states moved
+from the raw spans they represent on the realized tree. A
+calibration term tracks the gap between the accessible local judge
+and the target oracle: the part of error that more sampled labels
+cannot remove. A sampling term carries Horvitz--Thompson uncertainty
+from the audit design. A clipping term prices any variance control
+applied to inverse-propensity weights. Each term points at a
+specific lever: train the state map harder, change the local judge,
+sample more nodes, or report the clipping bias explicitly.
+
+We instantiate the framework on the Manifesto LLM benchmark of
+\citet{BenoitEtAl2025}. The Comparative Manifestos Project (CMP)
+has collected and hand-coded party election platforms for decades;
+its expert-survey arm produces mean placements of each platform on
+seven-point policy scales. \citet{BenoitEtAl2025} introduce an LLM
+scoring pipeline for that target: it summarizes each
+manifesto--dimension pair, then scores the summary against the
+expert mean on six policy dimensions, from economic policy to
+decentralization. We rerun the same task with C-TreePO on the same
+\(235\) party platforms (hereafter, the \emph{Manifesto LLM
+replication}).
+Per-dimension trees reach macro \(r=0.829\); the universal-summary
+tree reaches \(0.807\). Both clear the matched open-weight baseline
+at \(0.793\), and the per-dimension tree clears the proprietary
+18-score ensemble at \(0.817\).
+
+Two controlled checks build intuition for the mechanism behind the
+application. The Markov check uses a known oracle and a known
+sufficient state to show when local labels can substitute for some
+root labels under a fixed token budget. The IPW check uses hard
+synthetic audit designs to show how logged-propensity correction
+keeps the node-level estimand centered while variance grows in the
+expected places.
+
+The framework, the application, and the controlled checks share one
+object: a learned state map whose nodes satisfy three local laws on
+the realized tree. We define that object and the laws next, write
+the training objective and the audit, run the controlled checks,
+and turn to the manifesto application.

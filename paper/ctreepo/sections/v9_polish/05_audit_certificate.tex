@@ -1,0 +1,158 @@
+\section{Audit and Proxy-Corrected Estimation}
+\label{sec:v8-audit-certificate}
+
+\subsection{Audit Units}
+
+The audit treats the realized tree as a finite population. Every
+node in \(T\) whose C1/C2/C3 losses define the local-law channel is
+a unit in the population, and the audit samples some of them under
+a known design. We index audit units by \(i\) (the
+survey-statistics convention; each \(i\) is a node \(v\) from
+Section~\ref{sec:v8-ctree-math}). Unit \(i\) carries a represented
+raw span \(S(i)=x_v\), a produced state \(s_i=z_v\), a law channel
+(C1, C2, or C3), and a logged marginal inclusion probability
+\(\pi_i>0\) recording how often the audit design samples this node.
+
+Two diagnostics come out of the audit. The first is the violation
+rate per law channel: how often C1 fails, how often C2 fails, how
+often C3 fails. This tells the analyst which kind of failure is
+driving the residual: leaves dropping evidence, states changing
+when summarized again, or merges losing the interaction between
+siblings. The second is the mean distortion across nodes, which is
+what feeds the certificate. A run can have many small violations
+whose root impact is limited, or a few large ones that move the
+score a lot. Reporting both quantities lets the analyst tell the
+two cases apart.
+
+\subsection{Dense Proxy, Sparse Oracle}
+
+We cannot compute \(L_{\mathrm{law}}^\ast\) in
+Equation~\eqref{eq:v8-local-law-estimand} directly, because it
+requires an \(f^\ast\) call at every node and oracle calls are
+scarce. Long-document settings typically expose oracle labels at
+the root (e.g., expert-survey means on the whole document) and
+leave internal nodes without a direct oracle. What is available at
+internal nodes is some accessible substitute: a cached teacher
+trace, an aggregated label from a span-grounded coding scheme, or
+the proxy \(\widehat f\). The fix is to use the proxy densely and
+correct it with sampled oracle calls.
+
+The dense local quantity is the same C1/C2/C3 comparison measured
+through the proxy:
+\[
+  \widehat\ell_v
+  =
+  \ell_{\mathrm{law}}(v;\widehat f,g).
+\]
+\(\widehat\ell_v\) gives a training signal at every node, but the
+proxy is not the oracle. The gap between them at node \(v\) is the
+node bias:
+\[
+  b_v=\widehat\ell_v-\ell_v^\ast .
+\]
+Sampled \(f^\ast\) calls estimate \(b_v\) on the nodes they cover, and
+inverse-propensity weighting carries that estimate to the population.
+
+Let \(R_v\in\{0,1\}\) indicate whether node \(v\) is sampled and
+evaluated with \(f^\ast\), and let \(\pi_v>0\) be the logged marginal
+probability that the audit design samples \(v\). The corrected node
+loss is
+\begin{equation}
+\label{eq:v8-corrected-node-loss}
+  \ell_v^{\mathrm{corr}}
+  =
+  \widehat\ell_v
+  +
+  \frac{R_v}{\pi_v}
+  \left(\ell_v^\ast-\widehat\ell_v\right).
+\end{equation}
+Unsampled nodes contribute proxy loss. Sampled nodes add back the
+observed oracle--proxy difference, scaled up by \(1/\pi_v\) so the
+correction stands in for the population mean. This is the standard
+inverse-propensity correction: rare nodes are sampled less, so the few
+times they are sampled they count more. With correct logged
+propensities, \(\mathbb E[\ell_v^{\mathrm{corr}}\mid T]=\ell_v^\ast\).
+
+The corrected local-law channel sums the corrected node losses with
+the same depth weights as the oracle channel:
+\[
+  L_{\mathrm{law}}^{\mathrm{corr}}(g,T)
+  =
+  \sum_{v\in V(T)}\gamma^{d(v)}\ell_v^{\mathrm{corr}} .
+\]
+Plugging \(L_{\mathrm{law}}^{\mathrm{corr}}\) into the
+theorem-facing objective from Section~\ref{sec:v8-objective} gives
+the trainable version of the C-TreePO objective:
+\begin{equation}
+\label{eq:v8-corrected-objective}
+  J_\lambda^{\mathrm{corr}}(g;T)
+  =
+  (1-\lambda)L_{\mathrm{root}}(g)
+  +
+  \lambda L_{\mathrm{law}}^{\mathrm{corr}}(g,T).
+\end{equation}
+\(J_\lambda^{\mathrm{corr}}\) estimates the oracle objective
+\(J_\lambda^\ast\) from
+Equation~\eqref{eq:v8-main-objective}. With no audit calls
+(\(R_v=0\) at every node), the corrected channel reduces to the
+dense-proxy channel; sampled \(f^\ast\) calls add the correction.
+
+\subsection{HT Distortion Certificate}
+
+The corrected loss gives a trainable objective. We also need a
+finite-sample bound on the downstream drift \(G_{\mathrm{meth}}\),
+built from the same audit. Let \(\mathcal U\) be the finite
+population of sample-eligible tree units, \(N=|\mathcal U|\),
+and let
+\[
+  D_i^J
+  =
+  d_Y\!\left(J(s_i),J(S(i))\right)
+\]
+be the distortion measured by an accessible scorer \(J\). \(J\) is
+whichever scorer the audit instantiates: in the corrected-loss form
+above it is the proxy \(\widehat f\), and on a sampled subset of nodes
+\(J\) can be the oracle \(f^\ast\) itself. If \(Z_i\) is the audit
+inclusion indicator and \(\pi_i\) is the logged inclusion probability,
+the Horvitz--Thompson estimator is
+\begin{equation}
+\label{eq:v8-ht-distortion}
+  \widehat{\Delta}_{\mathrm{HT}}^{J}
+  =
+  \frac{1}{N}
+  \sum_{i\in\mathcal U}
+  \frac{Z_i}{\pi_i}D_i^J .
+\end{equation}
+With strict positivity and correct logged propensities, this is
+unbiased for the corresponding finite-population mean. Unequal
+propensities affect variance and effective sample size; they do not
+change the target being estimated.
+
+The certificate has four terms. The first is the audit's estimate of
+the representation distortion, transported through the downstream
+method. The other three are correction terms for calibration, sampling
+error, and clipping. In the compact reporting form,
+\begin{equation}
+\label{eq:v8-finite-sample-certificate}
+  |G_{\mathrm{meth}}|
+  \le
+  C_{\mathrm{meth}}\widehat{\Delta}_{\mathrm{HT}}
+  +
+  B_{\mathrm{cal}}
+  +
+  B_{\mathrm{est}}
+  +
+  B_{\mathrm{clip}} .
+\end{equation}
+\(C_{\mathrm{meth}}\widehat{\Delta}_{\mathrm{HT}}\) is the sampled
+distortion times the method transport constant from
+Section~\ref{sec:v8-objective}. \(B_{\mathrm{cal}}\) is the gap
+between the accessible scorer and \(f^\ast\): the part of error that
+more sampled labels cannot remove. \(B_{\mathrm{est}}\) is sampling
+uncertainty after method transport. \(B_{\mathrm{clip}}\) is bias
+introduced by clipping inverse-propensity weights or residuals. A
+high-probability version attaches the corresponding failure budgets
+and combines them by a union bound.
+
+\fixme{Empirical application of the certificate end-to-end against
+a worked example: insert when the node-audit data lands.}

@@ -1,0 +1,48 @@
+\section{Notation and Assumption Bundles}\label{app:min-notation}
+
+\subsection{Manifesto Running Example}
+
+The main text fixes one policy dimension, $d=\mathrm{econ}$. For a manifesto
+span $x$, $f(x)$ denotes the economic-policy readout that a trusted coder or
+calibrated rubric scorer would assign for the public-services versus taxation
+rubric. The evidence sufficient for that readout is not directly observed.
+Observed or learned objects are surrogates for it: prompted summaries, neural
+states, quasi-sentence aggregates, or root scores. In the reported Manifesto
+benchmark, the observed labels are root-level expert targets for sampled
+manifestos; node-level observations enter only in the local-law audit or
+quasi-sentence supervision setting. The discrepancy metric is $\metric$.
+
+\subsection{Tree Objects}
+
+$\Strings$ is the set of finite token sequences. Concatenation is
+$u\concat v$. A document $x$ is partitioned into contiguous leaves
+$(b_1,\ldots,b_k)$. A local summarizer $g:\Strings\rightsquigarrow\Strings$
+stores $s_i=g(b_i)$ at leaves and
+$s_u=g(s_{u_L}\concat s_{u_R})$ at internal nodes. The raw span under node $u$
+is denoted $S(u)$ and is used for audits, not for deployed bottom-up
+execution. The readout $f:\Strings\rightsquigarrow\Y$ scores the root summary.
+
+Two strings are oracle-equivalent, $u\sim v$, when
+$\metric(f(u),f(v))=0$. Context compatibility says $u\sim v$
+continues to hold after inserting either string into the same left or right
+context. The Manifesto reading is that substituting an economically equivalent
+span should not change the economic score of the surrounding platform.
+
+\subsection{Assumption Bundles}
+
+The Preservation Stack is C1, C3, and context compatibility. C1 is leaf
+sufficiency: $g(b)\sim b$. C3 is merge consistency: split-then-merge preserves
+the raw union span's oracle value. The Recompression Stack adds C2:
+$g(s)\sim s$ for stored summaries in the range of $g$. The Optimization Stack
+adds oracle-measurability of downstream DPO/GRPO-style losses. The Certificate
+Stack adds sampling, calibration, transport, and clipping assumptions for the
+finite-sample audit.
+
+\subsection{Granularity Vocabulary}
+
+The paper uses paragraphs, sections, chapters, and books as reader-facing
+granularity levels. Formally these are choices of leaf size and tree
+partition. The guarantee is not tied to a linguistic unit; it is tied to
+whether the chosen unit supports C1/C2/C3 for the target oracle. Root-level
+corpus evaluation and node-level local-law auditing are therefore different
+observation designs over the same task oracle.

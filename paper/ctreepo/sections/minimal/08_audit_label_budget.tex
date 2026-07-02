@@ -1,0 +1,62 @@
+\section{Audit and Label Budget}\label{sec:min-audit}
+
+The audit treats a realized compression tree as a finite population of local
+checks. Leaves check C1, stored summaries check C2, and merge nodes check C3.
+A sampling design selects units with logged positive propensities; each sampled
+unit is scored by an accessible judge or oracle; and a Horvitz--Thompson style
+estimator recovers population-level distortion from those local observations.
+Figure~\ref{fig:min-audit-sample} shows six example node-sample sets on
+the same tree: different panels cover different parts of the tree, so the
+distortion estimate is a weighted sum over whichever nodes the design
+happens to draw.
+This is distinct from ordinary root-level corpus evaluation. In the
+Manifesto/Benoit benchmark, the sampled document is the unit and the
+full-document expert target is observed at the root for every benchmark item.
+That supports the external root-score correlations in
+Section~\ref{sec:min-manifesto-results}. The local-law audit instead samples
+tree units inside realized documents to certify preservation and label-budget
+substitution.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{01_base_sampled_grid.pdf}
+\caption{\textbf{Six node-sample sets on the same tree.} Each panel
+highlights the summary nodes a sampling design selected for local-law
+checks on one realized tree: sparse coverage, right-heavy with the root,
+a full subtree without the root, root only, dense coverage, and a
+mid-band interior. Highlighted nodes contribute to the
+Horvitz--Thompson distortion estimate, weighted by their logged
+propensities; unhighlighted nodes do not. Any one design supports the
+same certificate as long as every node has positive propensity.}
+\label{fig:min-audit-sample}
+\end{figure}
+
+For the Manifesto economic example, this is the formal version of using
+paragraphs or sections instead of whole manifestos. A local label can ask
+whether a span summary preserved the economic-policy evidence, whether a merge
+preserved the economic score of the union span, or whether re-summarization
+shifted the economic readout. These labels are cheaper and more numerous than
+full-document expert labels. They tighten the same certificate only if they
+measure the same oracle-preservation property the theorem needs.
+
+The reported certificate decomposes the remaining risk as
+\[
+|G|
+\le
+C_{\mathrm{meth}}\hat{\Delta}_R+B_{\mathrm{cal}}+B_{\mathrm{est}}+B_{\mathrm{clip}}.
+\]
+$\hat{\Delta}_R$ is the observed local distortion. $B_{\mathrm{cal}}$ covers
+the gap between the accessible judge and the trusted expert oracle.
+$B_{\mathrm{est}}$ is sampling error. $B_{\mathrm{clip}}$ records any
+stabilization bias from clipped inverse-propensity weights.
+$C_{\mathrm{meth}}$ is the method transport constant that converts oracle
+distortion into objective units. The reporting object bundles this
+formula with the calibration, estimation, clipping, and failure-budget
+events. The certificate is therefore honest about
+surrogate-label risk: more local labels shrink the design-based uncertainty,
+but they do not remove calibration error between the judge and the
+social-science target. HLL is the clean limiting example of the same
+accounting: a tree can preserve the register state exactly and still inherit
+the estimator's known readout noise. In Manifesto measurement, the analogous
+uncertainty is not a closed-form \(1.04/\sqrt{m}\) term but the calibration
+gap between accessible local judgments and the expert economic oracle.

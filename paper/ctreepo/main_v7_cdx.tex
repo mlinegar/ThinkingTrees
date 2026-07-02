@@ -1,0 +1,38 @@
+\documentclass[11pt]{article}
+
+\input{preamble_minimal}
+\usepackage{array}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+\begin{document}
+
+% Phantom anchors for cross-references the mergeable section makes to
+% downstream sections that the v7 build does not include in this focused
+% build (full manuscript build resolves them naturally).
+\setcounter{section}{1}
+\input{sections/v7_cdx/02_mergeable_sketches}
+
+% After the mergeable section, define phantom anchors for forward-references
+% to sec:framework, sec:estimation, sec:theorems, sec:markov-walkthrough,
+% sec:fno-primer.
+\refstepcounter{section}\label{sec:framework}
+\refstepcounter{section}\label{sec:markov-walkthrough}
+\refstepcounter{section}\label{sec:fno-primer}
+\refstepcounter{section}\label{sec:estimation}
+\refstepcounter{section}\label{sec:theorems}
+
+\setcounter{section}{4}
+\input{sections/v6_cdx/05_manifesto_results}
+
+\appendix
+\setcounter{section}{0}
+\input{appendix/v7_cdx/A_optimization_projection}
+\input{appendix/v7_cdx/B_mergeable_local_law_nesting}
+\input{appendix/v7_cdx/C_sketch_simulation_details}
+\input{appendix/v7_cdx/D_doubly_robust_local_law_adjustment}
+
+\clearpage
+\bibliographystyle{plainnat}
+\bibliography{../refs}
+
+\end{document}

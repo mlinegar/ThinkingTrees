@@ -13,9 +13,11 @@ This file packages three key points.
    exact theorem-backedness means every realized leaf summary, internal-node
    reduction, and in-range resummary is oracle-exact on support.
 2. For deterministic theorem-domain summaries, exact theorem-backedness on
-   **all trees** plus `A3` collapses to the global `A1/A2/A3` regime.
+   **all trees** plus strict oracle-output `A3` collapses to the global
+   `A1/A2/A3` regime.
 3. Sketch / codec assumptions are explicit special cases of the broadest direct
-   interfaces, and under `A3` they induce the classical mergeable-summary view.
+   interfaces; with strict `A3` they induce the oracle-level mergeable view,
+   while the state-level sketch route is handled in `MergeableReduction`.
 -/
 
 set_option linter.mathlibStandardSet false
@@ -218,8 +220,8 @@ theorem exactTheoremBackedAllTrees_iff_globalAssumptions
       hA3
     ⟩
 
-/-- Under `A3`, exact theorem-backed deterministic summaries are classical
-mergeable summaries. -/
+/-- Under strict oracle-output `A3`, exact theorem-backed deterministic
+summaries are oracle-level mergeable. -/
 theorem exactTheoremBackedAllTrees_implies_classical_mergeable
     (g_det : Strings → Strings) (fstar : Strings → Y)
     (hA3 : A3_global g_det fstar)
@@ -245,8 +247,8 @@ theorem sketchCodecExactAssumptions_imply_global_A1_A2
     (exactTheoremBackedAllTrees_iff_A1_A2_of_A3
       (g_det := summaryFromSketch op) (fstar := fstar) hA3).1 hExact
 
-/-- Under `A3`, exact sketch / codec assumptions induce the classical mergeable
-summary interface on the induced deterministic summarizer. -/
+/-- Under strict oracle-output `A3`, exact sketch / codec assumptions induce
+the oracle-level mergeable interface on the induced deterministic summarizer. -/
 theorem sketchCodecExactAssumptions_imply_classical_mergeable
     {op : SketchOperator Strings Sketch} {fstar : Strings → Y}
     (assumptions : SketchCodecExactAssumptions op fstar)

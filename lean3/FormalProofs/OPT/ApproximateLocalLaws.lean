@@ -121,6 +121,52 @@ structure ApproxLocalLawsBundle (g : Summarizer Strings) (T : BinTree Strings)
   law2 : L2ε g T fstar epsMerge
   law3 : L3ε g T fstar epsIdemp
 
+namespace ApproxLocalLawsBundle
+
+/-- Paper-facing local-law error from checked C1/C2/C3 residuals.
+The three stored fields remain the measured residual components; this is the
+single local-law quantity compared against a target `ε`, or combined with
+calibration slack for teacher-first certification. -/
+def localLawError
+    {g : Summarizer Strings} {T : BinTree Strings} {fstar : Strings → Y}
+    (laws : ApproxLocalLawsBundle g T fstar) (R : ℕ) : ℝ :=
+  laws.epsLeaf + laws.epsMerge + ((R : ℝ) - 1) * laws.epsIdemp
+
+/-- Backward-compatible name for `localLawError`. Older theorem statements used
+``rootErrorBudget'' for the same composed local-law quantity. -/
+def rootErrorBudget
+    {g : Summarizer Strings} {T : BinTree Strings} {fstar : Strings → Y}
+    (laws : ApproxLocalLawsBundle g T fstar) (R : ℕ) : ℝ :=
+  laws.localLawError R
+
+/-- The legacy and paper-facing names denote the same quantity. -/
+theorem localLawError_eq_rootErrorBudget
+    {g : Summarizer Strings} {T : BinTree Strings} {fstar : Strings → Y}
+    (laws : ApproxLocalLawsBundle g T fstar) (R : ℕ) :
+    laws.localLawError R = laws.rootErrorBudget R := rfl
+
+/-- The bundle certifies a tree at target task error `ε` when the composed
+local-law error is at most `ε`. -/
+def CertifiedAtEpsilon
+    {g : Summarizer Strings} {T : BinTree Strings} {fstar : Strings → Y}
+    (laws : ApproxLocalLawsBundle g T fstar) (R : ℕ) (ε : ℝ) : Prop :=
+  laws.localLawError R ≤ ε
+
+/-- Total certified error after adding a two-sided scorer-calibration slack. -/
+def totalCertifiedError
+    {g : Summarizer Strings} {T : BinTree Strings} {fhat : Strings → Y}
+    (laws : ApproxLocalLawsBundle g T fhat) (R : ℕ) (εf : ℝ) : ℝ :=
+  laws.localLawError R + 2 * εf
+
+/-- Teacher-first certification predicate: local-law error plus calibration
+slack is at most the final target `ε`. -/
+def CertifiedWithCalibration
+    {g : Summarizer Strings} {T : BinTree Strings} {fhat : Strings → Y}
+    (laws : ApproxLocalLawsBundle g T fhat) (R : ℕ) (εf ε : ℝ) : Prop :=
+  laws.totalCertifiedError R εf ≤ ε
+
+end ApproxLocalLawsBundle
+
 /-- Build an aggregate approximate-local-law bundle from nodewise leaf/merge budgets
 and a global idempotence budget. -/
 def approx_bundle_of_nodewise
@@ -295,6 +341,37 @@ theorem Δ_R_ZR_le_of_approx_bundle
       laws.epsLeaf + laws.epsMerge + ((R : ℝ) - 1) * laws.epsIdemp := by
   exact Δ_R_ZR_le_of_approx_local_laws g T fstar x R hp hR hbound hbound_global h_mono
     laws.epsLeaf laws.epsMerge laws.epsIdemp laws.law1 laws.law2 laws.law3
+
+/-- Bundle-driven local-law-error variant of the `Δ_R_ZR` bound. -/
+theorem Δ_R_ZR_le_localLawError_of_approx_bundle
+    (g : Summarizer Strings) (T : BinTree Strings) (fstar : Strings → Y)
+    (x : Strings) (R : ℕ) (hp : S T = x) (hR : R ≥ 1)
+    (hbound : ∀ z, D fstar z x ≤ 1)
+    (hbound_global : ∀ w z, D fstar w z ≤ 1)
+    (h_mono : ∀ p, pIdemp g fstar (p.bind g) ≤ pIdemp g fstar p)
+    (laws : ApproxLocalLawsBundle g T fstar) :
+    Δ_R_ZR g x R T fstar ≤ laws.localLawError R := by
+  simpa [ApproxLocalLawsBundle.localLawError] using
+    Δ_R_ZR_le_of_approx_bundle
+      g T fstar x R hp hR hbound hbound_global h_mono laws
+
+/-- Epsilon-certificate variant: if the composed local-law error from the
+approximate local-law bundle is at most `ε`, then the realized tree distortion
+is at most `ε`. -/
+theorem Δ_R_ZR_le_of_approx_bundle_certifiedAtEpsilon
+    (g : Summarizer Strings) (T : BinTree Strings) (fstar : Strings → Y)
+    (x : Strings) (R : ℕ) (ε : ℝ) (hp : S T = x) (hR : R ≥ 1)
+    (hbound : ∀ z, D fstar z x ≤ 1)
+    (hbound_global : ∀ w z, D fstar w z ≤ 1)
+    (h_mono : ∀ p, pIdemp g fstar (p.bind g) ≤ pIdemp g fstar p)
+    (laws : ApproxLocalLawsBundle g T fstar)
+    (hcert : laws.CertifiedAtEpsilon R ε) :
+    Δ_R_ZR g x R T fstar ≤ ε := by
+  calc
+    Δ_R_ZR g x R T fstar ≤ laws.localLawError R :=
+      Δ_R_ZR_le_localLawError_of_approx_bundle
+        g T fstar x R hp hR hbound hbound_global h_mono laws
+    _ ≤ ε := hcert
 
 section Objectives
 

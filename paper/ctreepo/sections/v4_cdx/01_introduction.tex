@@ -1,0 +1,97 @@
+\section{Introduction: Learned Sketches Before Measurement}\label{sec:min-introduction}
+
+Political methodologists increasingly want language models to process long
+texts and recover the information underneath them: where a party manifesto
+sits on economic policy, social liberalism, immigration, European integration,
+environmental policy, or decentralization. The target is usually a structured
+document-level judgment, while the evidence is distributed across the text.
+Fiscal pledges, welfare promises, tax qualifications, and market-intervention
+claims can appear in different sections. Their combination determines the
+final expert score.
+
+The technical problem is older than language models. A long object is replaced
+by a smaller state, the smaller state is merged with other states, and a
+readout is applied after merging. Classical mergeable summaries solve this
+problem for fixed query families such as cardinality, frequency, and quantiles:
+the sketch state is engineered so the query can be recovered after associative
+state merges \citep{Agarwal2013MergeableTODS}. In statistical language, the
+state is a query-relative sufficient statistic \citep{Fisher1922,Blackwell1953}.
+
+LLM pipelines create the same structure without the same guarantee. In
+practice, a model often scores a compressed object produced by chunking,
+retrieval, or recursive summarization. Compression risk enters when that
+object drops a fiscal qualification, overstates a section's salience, or loses
+an interaction between welfare and taxation claims. A well-calibrated labeler
+then answers a different question. Long-context models can still use
+information in long inputs unevenly, including the familiar
+``lost-in-the-middle'' pattern \citep{LiuEtAl2024LostMiddle}.
+
+C-TreePO starts from that black-box representation problem. It treats each
+summary as a learned, task-relative sketch state and asks whether the tree of
+local summaries preserves the oracle a trusted coder would have applied to the
+full document. The local identity is the mergeable-sketch identity in semantic
+form: the root readout after summarizing and merging should match the oracle
+readout on the raw span. The new opportunity is observability. Classical
+sketch states are registers; private sketches are noisy bitmaps; an LLM
+summary is text. The proposed sufficient statistic can be read, compared, and
+audited directly.
+
+Expert reading is slow and expensive; model summaries and scores are cheap.
+Design-Based Supervised Learning (DSL) gives the measurement caution: small
+errors in surrogate labels can become large biases in downstream estimates
+when those errors align with the estimand. Gold-standard anchors, overlap, and
+a logged sampling design define the population represented by model labels
+\citep{EgamiEtAl2024}. C-TreePO extends that design-based logic from final
+labels to the representation being labeled.
+
+The method therefore has two linked halves. The first is algebraic and local:
+split the document into contiguous leaves, summarize each leaf, merge adjacent
+child summaries up a tree, and score the root. If every leaf summary is
+oracle-sufficient, every merge preserves the interaction visible in the union
+of its children, and re-summarization is stable, then the root preserves the
+oracle. The second half is DSL on a tree: leaves and internal nodes form a
+finite population of partial-document units, sampled with logged positive
+propensities, so realized compression distortion can be estimated with
+design-based logic.
+
+The payoff is expert-attention allocation. C-TreePO changes the object of
+supervision from full documents alone to a designed mix of roots and partial
+documents. Root labels anchor the full-document target. Node labels audit and
+train the learned sketch. When local laws make node supervision transportable
+to the root objective, logged node sampling and IPW/Horvitz--Thompson
+estimation let researchers spend expert attention on cheaper
+partial-document units while preserving the target.
+
+The node/root supervision tradeoff is central to the empirical claims below.
+Pre-existing root-level gold labels support root-observed validation through
+held-out evaluation or sample splitting: each sampled platform has a
+full-document expert-survey target, and we score the tree root directly
+against that target. Online or local labeling supports a stronger
+\emph{node-level local-law audit}: leaves, stored summaries, merge nodes, and
+optional re-summary nodes receive randomly assigned gold-standard labels with
+logged propensities. The same node labels supervise the compression path and
+estimate tree-wide preservation distortion. Root validation measures final
+agreement with external expert labels. Node validation measures where
+compression loses information and whether partial-document supervision can be
+aggregated back to the same target.
+
+The Manifesto/Benoit application is the empirical spine. On the six-dimension
+benchmark, a per-dimension C-Tree pipeline using a single open-weight model
+reaches macro Pearson $r=0.829$ against expert-survey means at
+$8\mathrm{K}$-character leaves. The number exceeds Benoit's proprietary 18-score
+ensemble ($0.817$) and their matched Gemma-3 open-weight replication
+($0.793$). The economic dimension is the detailed granularity case: the
+$8\mathrm{K}$-character tree reaches $r=0.939$ against expert means, above the
+published economic split-expert agreement reference of $0.880$. The
+prompt-ladder pilot shows a narrow plateau across $1024$--$8192$ token leaves.
+
+Section~\ref{sec:min-framework} defines the task state, compression tree, and
+local laws. Section~\ref{sec:min-audit} turns the local algebra into an audit
+design for reallocating expert attention across roots, leaves, and merges.
+Section~\ref{sec:min-guarantees} states the conditional theorem stack.
+Section~\ref{sec:min-manifesto-results} reports the Manifesto results.
+Section~\ref{sec:min-validation} gives a short bridge to HyperLogLog,
+private mergeable sketches, Markov boundary states, and neural-operator
+validation anchors, with details deferred to the appendices.
+Section~\ref{sec:min-applications} closes with preference training,
+distillation, and scope.

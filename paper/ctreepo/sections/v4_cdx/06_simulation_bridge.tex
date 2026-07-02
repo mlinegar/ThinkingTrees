@@ -1,0 +1,53 @@
+\section{Simulation Bridge}\label{sec:min-validation}
+
+The main application is semantic. The appendices keep controlled anchors where
+the state is known in advance. These anchors show the patterns the audit is
+designed to detect.
+
+\paragraph{State, not scalar answers.}
+HyperLogLog supplies the classical mergeable-sketch anchor. Cardinality itself
+is underdetermined by $|A|$ and $|B|$ alone. The bounded register state
+merges, and the noisy cardinality readout is applied after the state has been
+composed. The appendix-side template carries over to the manifesto case. The
+scalar economic score can remain nondecomposable across leaves; the richer
+task state must be preserved so the root score stays readable.
+
+\paragraph{Sufficiency under a channel.}
+Sketch-Flip-Merge adds a privacy channel between local sketch construction and
+the final merge \citep{HehirTingCormode2023SFM}. The lesson for C-TreePO is
+not privacy itself but compatibility: a useful pipeline must preserve enough
+state for the readout after every transformation it applies. If the local
+randomizer, merge rule, and estimator are mismatched, the merged object no
+longer lies in the family the readout expects. C-TreePO treats LLM
+summarization as the semantic analogue and checks the compatibility condition
+through C1/C2/C3 audits rather than a closed-form channel proof.
+
+\paragraph{Ordered boundary state.}
+The Markov/changepoint anchor is the clean version of a cross-span interaction
+problem. A span state carries an internal count, a first register, and a last
+register; merging two spans adds the two internal counts plus a boundary
+indicator when the left last register differs from the right first register:
+\[
+  c=c_L+c_R+\One\{L.\mathrm{last}\ne R.\mathrm{first}\}.
+\]
+Smaller units can help when the merge state carries the right boundary
+evidence. Lost boundary fields create the failure case. In the controlled
+runs, local supervision can substitute for root labels because the local
+labels measure the same oracle-preservation property. Appendix~\ref{app:v4-supervision-allocation}
+expands the root/node supervision-budget evidence.
+
+\paragraph{Learned realizations.}
+Neural operators, transformers, embeddings, and prompted LLMs are different
+ways to realize a local state map. The theorem stack is architecture-agnostic.
+The implementation question is whether the realized family can approximate a
+state function on the calls the tree actually makes, and whether the audit
+shows that the approximation stayed inside an acceptable local-law residual.
+Appendix~\ref{app:min-neural} keeps the formal neural-operator route;
+Appendix~\ref{app:min-related} keeps broader representation and related-work
+context.
+
+The anchors support the same general pattern. If the state is rich enough for
+the target and the local laws hold, the root is stable across merge schedules
+and leaf sizes. If the state is too narrow, failures localize: leaves drop
+evidence, merges lose boundary interactions, or re-summary drifts. The audit
+serves the same diagnostic role in the Manifesto setting.

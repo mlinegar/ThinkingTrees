@@ -1,0 +1,110 @@
+\section{Running Example: Economic-Policy State}\label{sec:min-manifesto-state}
+
+The Benoit/Manifesto rubric scores six policy dimensions; we keep one, the
+economic left--right score. For a manifesto span $x$, let
+$S_{\mathrm{econ}}(x)$ denote the task-relative state containing the
+evidence a trusted coder would use to place the span on that scale:
+commitments to public services, taxation, welfare
+expansion or retrenchment, market intervention, privatization, fiscal
+restraint, and the qualifications that determine how those statements should
+be read. It is the economic analogue of a sufficient statistic for the
+rubric: it may discard slogans and style, but it must keep anything that can
+move the economic score. The paper proceeds as if this state exists---that
+is a modelling assumption about the measurement problem, not a result---and
+the audit returns an estimate of how badly the assumption is violated on
+the realized tree.
+
+The corresponding oracle is a readout of that state:
+\[
+  \fstar_{\mathrm{econ}}(x)
+  = r_{\mathrm{econ}}\!\left( S_{\mathrm{econ}}(x) \right)
+  \in \{1, \ldots, 7\},
+\]
+where the seven-point scale is the Benoit/Manifesto expert-survey scale
+\citep{BenoitEtAl2025}. The Manifesto/Benoit benchmark itself is a
+\emph{root-observed} corpus evaluation: a sample of party platforms, each
+already carrying a full-document expert target for the economic dimension;
+the tree root is the predicted score for that platform, scored directly
+against the expert target. In the results reported below,
+$r_{\mathrm{econ}}$ is approximated in practice by a rubric scorer applied
+to the root summary---a language model acting under a fixed scoring prompt
+that returns a seven-point integer, not a free-form judgment. The target,
+however, is always the same: the expert score for the full document.
+
+The Manifesto Project also ships a span-level oracle: expert
+quasi-sentence codings for $2{,}157$ platforms, about $2.27$M coded spans
+in total. Aggregating coded quasi-sentences inside a leaf or merge span,
+and reading out the corresponding economic score, instantiates oracle
+values at paragraph and section granularity---the ingredients the
+node-level audit in Section~\ref{sec:min-audit} needs. These labels
+are the planned node-level route for this setting; they are not the
+evidence behind the root-observed headline of
+Section~\ref{sec:min-manifesto-results}, which stands on its own as a
+full-document evaluation.
+
+A produced summary is useful only insofar as it acts like a compact
+economic state. A leaf summary is faithful if $\fstar_{\mathrm{econ}}$
+gives the same reading on it as it does on the raw span---the summary
+can drop slogans, but it must keep the evidence the rubric would score.
+A merge of two sibling summaries is faithful if it preserves the economic
+state of their union, including cross-section tensions that neither
+child can resolve alone: a platform that is environmentally
+interventionist in one section but fiscally restrained in another has
+its economic reading at the boundary between those sections, not in
+either one. And a second summarization pass---feeding a stored summary
+back through the summarizer---should not shift the economic readout.
+Section~\ref{sec:min-framework} writes these three requirements as local
+laws on strings, keeping $\fstar_{\mathrm{econ}}$ in place as the task
+oracle throughout.
+
+The economic state is \emph{latent}: no dataset labels $S_{\mathrm{econ}}(x)$
+itself, and no isolated unit test can certify that a given summary preserved
+it under $\fstar_{\mathrm{econ}}$. To separate ``the framework is sound''
+from ``the summarizer did its job on a latent target,'' the paper validates
+the mechanism on two tasks whose states are already known and whose merge
+rules can be written by hand. Markov changepoint counting anchors the
+ordered-state case: the summary must carry boundary information or the count
+is systematically off. HyperLogLog anchors the unordered mergeable-sketch
+case: the scalar distinct-count answer is not mergeable, but a bounded register
+state is. In both anchors, a known oracle sits on the other side of the learned
+mechanism, so a failure has to be the framework's, not the summarizer's.
+
+The formal artifact follows the same boundary. It mechanizes the state-level
+merge laws used by the anchors, including ordered list-homomorphism schedule
+invariance, HLL's max-register merge, Count-Min's non-idempotent additive merge,
+Misra--Gries/SpaceSaving bookkeeping, finite VC trace union bounds, and the
+classical sketch/readout interface. The heavier literature facts---HLL
+asymptotic constants, the compact randomized range/quantile constructions,
+geometric $\varepsilon$-kernel size proofs, and MUD communication lower
+bounds---are recorded as typed theorem obligations, not as informal
+assumptions. The standalone Lean
+entry point for this layer is
+\texttt{FormalProbability.ML.MergeableSummaries.Literature}; the C-TreePO
+formalization imports that surface and re-exports the paper-facing bridge
+names. For the HLL running example, the bridge also checks the corrected
+precision arithmetic $1.04/\sqrt{2^{14}}=13/1600<1\%$.
+
+A reader who prefers plays to platforms can follow the same contrast
+through \emph{Hamlet}. \emph{How many shifts of emotional register occur
+across the play} is the Markov analogue. Each scene sits in one of a small
+set of registers---Mourning, Foreboding, Political, Intrigue, Madness,
+Action, Comic---and a shift at a scene or act boundary is invisible to either
+act alone unless each act-summary records its first and last register, so the
+merge rule can add a boundary indicator when they disagree. \emph{How many
+distinct character co-appearance pairs ever share a scene} is the HLL
+analogue: each scene emits the set of unordered speaker pairs on stage, each
+pair is one item in the stream, each act merges by the union of those
+pair-sets, and HLL's register array with
+pointwise-max merge approximates union cardinality without storing the
+union-set. (The simpler ``how many distinct speaking roles appear''---about
+twenty-four---is the enumerable warm-up; HLL earns its place on a corpus of
+plays, where the union grows while the register array stays fixed-size.)
+These examples are deliberately narrower than literary or political
+interpretation; they are useful because a competent student can write the
+merge rule down. The manifesto question is harder precisely because the
+\emph{state itself}---what an economic-policy coder would keep, and at what
+granularity---has to be learned from examples and then audited.
+Section~\ref{sec:min-validation} returns to these tractable cases to show
+the mechanism preserves the oracle value the hand-written merge would
+preserve; Section~\ref{sec:min-manifesto-results} reports the learned case on
+the Manifesto/Benoit benchmark.

@@ -1,0 +1,136 @@
+\section{Lean Crosswalk}
+\label{app:v8-lean-crosswalk}
+
+This appendix is the paper-facing index of results formalized in Lean.
+Every formal claim in the body section of the paper appears as a row,
+keyed by its paper label, with the load-bearing Lean surface and its
+file. The detailed repository map remains in
+\texttt{lean3/docs/PAPER\_TO\_LEAN\_MAP.md}; the rows below are the
+compact paper-facing subset.
+
+\begin{table}[t]
+\centering
+\begingroup
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}p{0.30\linewidth}p{0.36\linewidth}p{0.28\linewidth}@{}}
+\toprule
+Paper claim (label) & Lean surface & File \\
+\midrule
+Local-law preservation
+(Thm.~\ref{thm:v8-root-preservation}) &
+\path|one_pass|;
+\path|multi_round_proper| &
+\texttt{OPT/PreservationTheorems.lean};
+\texttt{OPT/ExpectationTheory.lean} \\
+\addlinespace
+Oracle-compatible readout pass-through
+(Cor.~\ref{cor:v8-preferences-pass-to-root}) &
+\path|oracleCompatibleReadout_eq_on_node_support_of_exactTheoremBacked|;
+\path|pairwiseOracleCompatiblePreference_eq_on_ZR_support_of_exactTheoremBacked| &
+\texttt{OPT/PreferenceScope.lean} \\
+\addlinespace
+Manifesto preference objective equivalence
+(Prop.~\ref{prop:v8-manifesto-preference-equivalence}) &
+\path|paper_preference_stack_same_argmin|;
+\path|dpo_exact_metric|;
+\path|grpo_pl_exact_metric|;
+\path|grpo_rl_exact_metric| &
+\texttt{OPT/MainTheorems.lean};
+\texttt{OPT/PreferenceLearning.lean} \\
+\addlinespace
+Population gap bound
+(Prop.~\ref{prop:v10-population-gap}) &
+\path|unified_preference_gap_bounded|;
+\path|dpo_loss_pointwise_lipschitz| &
+\texttt{OPT/PreferenceBounds.lean};
+\texttt{OPT/MainTheorems.lean} \\
+\addlinespace
+Corrected node loss is unbiased
+(Prop.~\ref{prop:v10-corrected-loss-unbiased}) &
+\path|treepo_objective_unbiased|;
+\path|treepo_distortion_unbiased| &
+\texttt{DSL/TreePOEndToEnd.lean} \\
+\addlinespace
+HT distortion estimator is unbiased
+(Prop.~\ref{prop:v10-ht-unbiased}) &
+\path|ht_unbiased_of_logged_marginals|;
+\path|ht_uniform_mean_unbiased_of_logged_marginals|;
+\path|tree_audit_uniform_distortion_unbiased_logged| &
+\texttt{DSL/IPWTheory.lean};
+\texttt{DSL/TreeIPW.lean} \\
+\addlinespace
+Finite-sample certificate
+(Prop.~\ref{prop:v10-finite-sample-certificate}) &
+\path|paper_error_certificate_formula|;
+\path|paper_error_certificate_high_prob|;
+\path|paper_error_stack_high_prob| &
+\texttt{DSL/TreePOEndToEnd.lean};
+\texttt{OPT/MainTheorems.lean} \\
+\addlinespace
+Clipping envelopes for the certificate
+(component of Prop.~\ref{prop:v10-finite-sample-certificate}) &
+\path|clipped_ipw_total_bias_bound|;
+\path|clipped_hajek_gap_bound| &
+\texttt{DSL/TreeIPW.lean};
+\texttt{OPT/MainTheorems.lean} \\
+\addlinespace
+HT variance bounds under constrained designs &
+\path|ht_uniform_mean_variance_bound_constrained|;
+\path|ht_uniform_mean_variance_bound_independent_bernoulli|;
+\path|tree_audit_uniform_distortion_variance_bound_constrained| &
+\texttt{DSL/IPWTheory.lean};
+\texttt{DSL/TreeIPW.lean} \\
+\addlinespace
+C2 independence (counterexample to deriving C2 from C1+C3)
+(Ex.~\ref{ex:v8-c2-independent}) &
+\path|ex_c2_independent_formalized|;
+\path|thm10_1_L3_not_derivable| &
+\texttt{OPT/CounterexampleExistence.lean} \\
+\addlinespace
+Mergeable-preference characterization
+(scope discussion, Section~\ref{sec:v8-scope-related}) &
+\path|MergeablePreference|;
+\path|mergeablePreference_iff_axioms|;
+\path|paper_scalar_layer_completeness| &
+\texttt{OPT/MergeablePreference.lean} \\
+\addlinespace
+Non-expressibility (DGP-1 threshold AND, DGP-2 cross-boundary bigram,
+rank statistics) &
+\path|paper_dgp1_threshold_and_not_expressible|;
+\path|paper_dgp2_cross_boundary_bigram_not_expressible|;
+\path|paper_rank_statistic_distinct_count_not_expressible| &
+\texttt{OPT/MergeablePreference.lean} \\
+\addlinespace
+Mergeable-summary reduction (classical sketches sit inside the local-law
+class) &
+\path|ops_reduction_to_classical_mergeable|;
+\path|sketch_state_level_reduction_to_classical_mergeable|;
+\path|mergeableSketchSummaryClass_subset_exactLocalLawSubspace| &
+\texttt{OPT/MergeableReduction.lean};
+\texttt{OPT/NeuralOperatorSpaces.lean} \\
+\addlinespace
+Neural-operator realization bridge
+(Appendix~\ref{app:v8-neural-operator-route}) &
+\path|approxLocalLawsBundle_of_uniformApproxExactTheoremBacked|;
+\path|expectedObjectiveGap_via_neuralOperatorTransferModuli| &
+\texttt{OPT/NeuralOperatorTheoremBridge.lean};
+\texttt{OPT/NeuralOperatorPreferenceBridge.lean} \\
+\bottomrule
+\end{tabular}
+\endgroup
+\caption{\textbf{Lean crosswalk.} Each row maps a paper-side claim
+(by label) to its Lean surface and module. All listed surfaces compile
+in the C-TreePO Lean repository under \texttt{lean3/FormalProofs/} and
+\texttt{lean3/FormalProbability/}.}
+\label{tab:v8-lean-crosswalk}
+\end{table}
+
+The node-level entry for
+Corollary~\ref{cor:v8-preferences-pass-to-root} is the formal
+counterpart in Lean: for any realized subtree with raw span
+\(S(u)\), every realized state \(z\) at \(u\) sits in the same
+oracle fiber as \(S(u)\) under exact local laws, so every
+oracle-compatible readout takes the same value on the state and on
+the raw span.

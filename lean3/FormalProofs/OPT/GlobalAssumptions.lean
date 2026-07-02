@@ -12,7 +12,8 @@ imply the local laws (L1, L2, L3) for any tree.
 
 - **Proposition 1** (`prop1_A1_implies_L1`): A1 (global sufficiency) implies L1
 - **Proposition 2** (`prop2_A1_A2_A3_implies_L2`): A1 + A2 + A3 implies L2
-- **Proposition 3** (`prop3_mergeable_classical`): A1 + A2 + A3 implies mergeable
+- **Strict mergeable limit** (`prop3_mergeable_classical`): A1 + A2 + strict
+  oracle-output A3 imply an oracle-level mergeable summary
 
 ### Global Assumptions (Lean) vs Conditions (Paper)
 
@@ -23,7 +24,7 @@ the paper's local conditions:
 |-----------------------------------|------------------------------|-----------------|
 | A1_global: `∀ z, D(g z, z) = 0`   | C1: sufficiency on leaves    | A1_global → C1  |
 | A2_global: two-route identity     | C3: merge consistency (local)| A2_global → C3  |
-| A3_global: merge function exists  | (structural)                 | -               |
+| A3_global: oracle-output merge exists | strict homomorphism special case | -          |
 
 **Naming correspondence** (see LocalLaws.lean for details):
 | Lean Name | Paper Name | Description          |
@@ -42,8 +43,10 @@ the paper's local conditions:
 
 The paper's conditions (C1, C2, C3) are the minimal LOCAL assumptions needed
 for the main preservation theorems. The Lean formalization uses GLOBAL
-assumptions (A1, A2, A3) which are easier to verify in practice and
-immediately imply the local laws for any tree structure.
+assumptions (A1, A2, A3) which are easier to verify in strict deterministic
+settings and immediately imply the local laws for any tree structure.  The A3
+used here is stronger than the classical state-level sketch condition: it
+requires oracle values, not just hidden sketch states, to admit a merge.
 -/
 
 set_option linter.mathlibStandardSet false
@@ -76,7 +79,12 @@ def A1_global (g : Strings → Strings) (fstar : Strings → Y) : Prop :=
 def A2_global (g : Strings → Strings) (fstar : Strings → Y) : Prop :=
   ∀ u v : Strings, D fstar (u * v) (g (g u * g v)) = 0
 
-/-- A3: Merge Depends on Oracle - exists merge function with properties -/
+/-- A3: strict oracle-output merge.
+
+There exists a merge operation on oracle values that agrees with the summary
+merge route and respects zero-distance equality.  This is intentionally stronger
+than classical mergeable summaries, where bounded sketch states can carry
+information unavailable in the final scalar/task readout. -/
 def A3_global (g : Strings → Strings) (fstar : Strings → Y) : Prop :=
   ∃ M : Y → Y → Y,
     (∀ u v : Strings, dist (fstar (g (g u * g v))) (M (fstar (g u)) (fstar (g v))) = 0) ∧
@@ -106,7 +114,7 @@ class GlobalPreservation (g : Strings → Strings) (fstar : Strings → Y) where
   a1 : A1_global g fstar
   /-- A2: Global compatibility - two-route identity -/
   a2 : A2_global g fstar
-  /-- A3: Merge depends on oracle - exists merge function with properties -/
+  /-- A3: strict oracle-output merge function exists. -/
   a3 : A3_global g fstar
 
 namespace GlobalPreservation
@@ -541,11 +549,15 @@ def OracleCommutative (fstar : Strings → Y) : Prop :=
     This is the natural merge on summary strings: concatenate then re-summarize. -/
 def summaryMerge (g : Strings → Strings) (s t : Strings) : Strings := g (s * t)
 
-/-- Classical Mergeable Summary Property
+/-- Strict oracle-level mergeable summary property.
 
     A summarizer g is mergeable if:
     1. Merge-oracle equivalence: f*(g(u·v)) = f*(⊕(g(u), g(v)))
-    2. Associativity: ⊕(⊕(a,b), c) ≈ ⊕(a, ⊕(b,c)) at the oracle level -/
+    2. Associativity: ⊕(⊕(a,b), c) ≈ ⊕(a, ⊕(b,c)) at the oracle level
+
+This captures the strict homomorphism case where the task value is itself a
+valid readout state.  Classical mergeable sketches are more general: their
+bounded state can compose even when final query answers cannot. -/
 def IsMergeableSummary (g : Strings → Strings) (fstar : Strings → Y) : Prop :=
   -- Merge-oracle equivalence: summarizing u·v equals merging summaries
   (∀ u v, D fstar (g (u * v)) (summaryMerge g (g u) (g v)) = 0) ∧
@@ -553,11 +565,11 @@ def IsMergeableSummary (g : Strings → Strings) (fstar : Strings → Y) : Prop 
   (∀ a b c, D fstar (summaryMerge g (summaryMerge g a b) c)
                     (summaryMerge g a (summaryMerge g b c)) = 0)
 
-/-- Proposition 3: Deterministic summarizer with A1+A2+A3 is a mergeable summary.
+/-- Strict deterministic summarizer with A1+A2+A3 is oracle-level mergeable.
 
-    This is the formalization of Proposition 3 from the paper:
-    "Let g be deterministic. If g satisfies exact Parentwise Compatibility
-    on every realized merge, then g is a mergeable summary for f* in the classical sense."
+    This is the strict oracle-homomorphism component of the paper's
+    mergeable-reduction proposition.  It should not be read as the full
+    classical state-level sketch condition.
 
     We prove this from the global axioms A1, A2, A3. -/
 theorem prop3_mergeable_classical (g : Strings → Strings) (fstar : Strings → Y)
@@ -933,7 +945,7 @@ theorem merge_assoc_global {Strings : Type*} [Monoid Strings]
          (oracleMerge inst.a3 y₁ (oracleMerge inst.a3 y₂ y₃)) = 0 :=
   merge_assoc g fstar inst.a1 inst.a2 inst.a3 y₁ y₂ y₃ hy₁ hy₂ hy₃
 
-/-- Proposition 3 (mergeable summary) using GlobalPreservation typeclass. -/
+/-- Strict oracle-level mergeability using the `GlobalPreservation` typeclass. -/
 theorem prop3_mergeable_global {Strings : Type*} [Monoid Strings]
     {Y : Type*} [PseudoMetricSpace Y]
     {g : Strings → Strings} {fstar : Strings → Y}

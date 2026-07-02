@@ -1,3 +1,4 @@
+-- OLD_ ARCHIVED (2026-07-02): renaming shim over DSL/TreeIPW HT theorems; nothing consumed it. Not imported, not built. Do not edit or import.
 import FormalProofs.DSL.TreeIPW
 import Mathlib.Tactic
 

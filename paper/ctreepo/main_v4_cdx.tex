@@ -1,0 +1,75 @@
+\documentclass[11pt]{article}
+
+\input{preamble_minimal}
+
+\title{C-TreePO: Learned Mergeable Sketches for Design-Based Long-Document Measurement}
+\author{Mitchell Linegar}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Large language models make it cheap to score long political documents, but the
+object being scored is often a black-box compression: a chunked, retrieved, or
+recursively summarized representation rather than the document itself. The
+statistical question is whether that representation is a sufficient statistic
+for the target oracle. C-TreePO frames long-document compression as a learned
+mergeable sketch. A summarizer $g$ maps spans into observable text states, a
+readout $f$ scores the root, and local laws ask whether leaf summaries,
+re-summary steps, and merges preserve the oracle along the realized tree. This
+keeps the state-merge-readout discipline of classical sketches while replacing
+hand-designed registers with task-relative LLM summaries that can be read and
+audited. Design-Based Supervised Learning (DSL) supplies the measurement
+design: root labels anchor the full-document target; randomly sampled leaf and
+merge labels audit and train the compression path; logged propensities let
+IPW/Horvitz--Thompson estimators recover tree-wide distortion. Under exact
+local laws, the root preserves the full-document oracle; under approximate
+laws, node audits yield a certificate for compression-induced distortion. The
+main application is Manifesto/Benoit political-text measurement. On six policy
+dimensions, a single open-weight C-Tree pipeline reaches macro Pearson
+$r=0.829$ against expert-survey means, above Benoit's proprietary 18-score
+ensemble ($0.817$) and matched open-weight replication ($0.793$). Economic
+policy shows the supervision tradeoff most clearly: root accuracy is stable
+across character leaf sizes, and an alternating prompt ladder gives a
+$0.007$-wide plateau across $1024$--$8192$ token leaves. Controlled
+HyperLogLog, private mergeable-sketch, Markov, and neural-operator results
+provide appendix-backed validation anchors. The contribution is a
+political-methods account of when LLM compression is an interpretable learned
+sketch that can be audited, certified, and used for downstream measurement.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+
+\etocdepthtag.toc{minimalmain}
+\input{sections/v4_cdx/01_introduction}
+\input{sections/v4_cdx/02_state_laws}
+\input{sections/v4_cdx/03_audit}
+\input{sections/v4_cdx/04_guarantees}
+\input{sections/v4_cdx/05_manifesto_results}
+\input{sections/v4_cdx/06_simulation_bridge}
+\input{sections/v4_cdx/07_preference_scope}
+
+\appendix
+\etocdepthtag.toc{minimalappendixfront}
+\appendixcontents
+\etocdepthtag.toc{minimalappendix}
+
+\input{appendix/minimal/A_notation_assumptions}
+\input{appendix/v4_cdx/A_dsl_audit}
+\input{appendix/minimal/B_algebraic_background}
+\input{appendix/minimal/C_proofs_formalization}
+\input{appendix/minimal/D_neural_operator}
+\input{appendix/minimal/E_markov_details}
+\input{appendix/v4_cdx/B_supervision_allocation}
+\input{appendix/minimal/F_hll_details}
+\input{appendix/minimal/G_manifesto_details}
+\input{appendix/minimal/H_audit_details}
+\input{appendix/minimal/I_related_scope}
+
+\clearpage
+\bibliographystyle{plainnat}
+\bibliography{../refs}
+
+\end{document}

@@ -1,0 +1,525 @@
+\section{Mergeable Summaries as a Local-Law Subclass}
+\label{app:proof-mergeable}
+
+This appendix makes the topology in the mergeable-summary comparison explicit.
+A classical mergeable-summary guarantee is usually stated with an implicit merge
+tree: encode the shards at the leaves, merge states up an allowed binary tree,
+and query the root. C-TreePO writes the tree \(T\) explicitly because the local
+laws are checked on the realized leaf and merge calls. The clean containment is
+therefore a same-tree statement first, followed by the stronger all-schedules
+statement.
+
+\subsection{Same-Tree Embedding}
+
+Fix a leaf partition \(D_1,\ldots,D_n\) and a binary tree \(T\) over those
+leaves. A classical state-level summary supplies
+\[
+  \mathrm{build}:\mathrm{Stream}(\alpha)\to S,\qquad
+  \mathrm{merge}:S\times S\to S,\qquad
+  \mathrm{query}:S\to Y,
+\]
+together with a validity relation \(\mathrm{Valid}(D,s)\). The state-level
+obligations are:
+\[
+  \mathrm{Valid}(D,\mathrm{build}(D)),
+  \qquad
+  \mathrm{Valid}(D_1,s_1)\wedge \mathrm{Valid}(D_2,s_2)
+  \Rightarrow
+  \mathrm{Valid}(D_1\Vert D_2,\mathrm{merge}(s_1,s_2)),
+\]
+and correctness of the root score for valid states.
+
+We first keep these obligations in exactly this Agarwal form, before
+translating them into C-TreePO language. The raw validity and mergeability
+obligations are:
+\begin{center}
+\small
+\begin{tabular}{l}
+\path|agarwalOriginal_validity_of_mergeTree|\\
+\path|agarwalOriginal_readout_of_mergeTree|\\
+\path|agarwalOriginal_build_valid_sized_state|\\
+\path|agarwalOriginal_merge_valid_sized_state|\\
+\path|agarwalOriginal_mergeTree_valid_sized_state|
+\end{tabular}
+\end{center}
+These are just the paper transition in compact notation: valid leaf summaries
+and valid-state mergeability imply a valid root state for every binary merge
+tree, and valid-state query correctness makes the root query answer the oracle
+on the concatenated stream. The sized variants are the fixed-\(\varepsilon\)
+statements for \(S(D,\varepsilon)\) and \(k(|D|,\varepsilon)\).
+
+Run this scheme on the same tree \(T\). Leaves store
+\(s_v=\mathrm{build}(D_v)\). Internal nodes store
+\(s_v=\mathrm{merge}(s_L,s_R)\). Then C1 is exactly leaf validity/score
+preservation, and C3 is exactly validity closure under the state merge at the
+corresponding internal node. If the C-Tree state map is the serialized
+sketch-state operation, this is the same computation with different notation.
+
+C2 is the extra C-TreePO reuse law. It is automatic only when the sketch/codec
+also has a stable re-entry witness: passing a produced state through the
+summary interface again does not change the task-relevant score. This is why
+the bridge uses explicit sketch-local witnesses, not just associativity of the
+state merge. In the appendix notation, the same-tree inclusion is:
+\[
+\texttt{sameTree\_sketch\_to\_local\_laws}
+\]
+with the reusable statement
+\[
+\texttt{local\_laws\_bundle\_of\_sketch}.
+\]
+The exact and approximate routes are
+\[
+\texttt{sketchCodec\_nests\_exactLocalLaws},\qquad
+\texttt{sketchCodecApprox\_nests\_approxLocalLaws}.
+\]
+
+\subsection{Validity Recovered by Exact and Approximate Laws}
+
+The C-TreePO reverse direction is a validity statement, not a state-identity
+statement. The validity relation is:
+\[
+\texttt{CTreeSummaryValid}\ f^\star\ x\ z
+\quad\equiv\quad
+D(f^\star(z),f^\star(x))=0,
+\]
+with the epsilon variant
+\[
+\texttt{CTreeSummaryValidWithin}\ f^\star\ \varepsilon\ x\ z
+\quad\equiv\quad
+D(f^\star(z),f^\star(x))\le \varepsilon.
+\]
+For distributions, the supportwise and expected forms are:
+\begin{center}
+\small
+\begin{tabular}{l}
+\path|CTreeSummaryPMFValid|\\
+\path|CTreeSummaryPMFValidWithin|\\
+\path|CTreeSummaryPMFExpectedValidWithin|
+\end{tabular}
+\end{center}
+
+The Agarwal side is represented by the corresponding valid-summary sets:
+\[
+\texttt{AgarwalValidSummarySet}
+\qquad\text{and}\qquad
+\texttt{AgarwalValidSizedSummarySet}.
+\]
+The first is the set of states satisfying the chosen
+\(\mathrm{Valid}_{\varepsilon}(D,s)\) relation. The second also records the
+paper's \(k(|D|,\varepsilon)\) size bound.
+
+Exact laws give supportwise validity. C1 and C3 on a fixed tree imply that the
+one-pass root distribution is supported on valid summaries for the represented
+input:
+\[
+\texttt{exactLocalLaws\_root\_validSummaryPMF}.
+\]
+With C2 included, the same statement holds for multi-round \(Z_R\) reductions:
+\[
+\texttt{exactLocalLaws\_multiround\_validSummaryPMF}.
+\]
+C2 is also the re-entry statement for produced summaries:
+\[
+\texttt{exactLocalLaws\_resummary\_valid}.
+\]
+This is the same claim in the notation above: if the local laws hold exactly,
+the root summary is valid.
+
+If an external bridge maps C-Tree oracle-validity into the selected Agarwal
+validity relation, the same conclusion becomes set containment:
+\begin{center}
+\small
+\begin{tabular}{l}
+\path|exactLocalLaws_root_support_subset_agarwalValidSummarySet|\\
+\path|exactLocalLaws_multiround_support_subset_agarwalValidSummarySet|\\
+\path|exactLocalLaws_root_support_subset_agarwalValidSizedSummarySet|\\
+\path|exactLocalLaws_multiround_support_subset_agarwalValidSizedSummarySet|
+\end{tabular}
+\end{center}
+The sized versions use the supplied Agarwal size-profile hypothesis; they do
+not derive \(k(|D|,\varepsilon)\) from local laws.
+
+Combining this with the classical valid-state query guarantee gives the exact
+query equivalence used in Proposition~\ref{prop:exact-query-equivalence}.
+If the C-Tree \(T\) and the classical merge tree \(t\) represent the same input,
+then every realized C-Tree output has the same oracle value as the classical
+root query:
+\[
+\texttt{exactLocalLaws\_stateLevelReadout\_equivalence}.
+\]
+The conclusion is deliberately equality of oracle/query values, not
+identity of internal states.
+
+The set-level version quantifies over every Agarwal-valid state for the same
+represented stream:
+\begin{center}
+\small
+\begin{tabular}{l}
+\path|exactLocalLaws_agarwalValidSummarySet_readout_equivalence|\\
+\path|exactLocalLaws_agarwalValidSizedSummarySet_readout_equivalence|\\
+\path|exactLocalLaws_stateLevelValidSummarySet_readout_equivalence|
+\end{tabular}
+\end{center}
+Thus exact equivalence is not tied to a single chosen merge tree: any state in
+the valid \(S(D,\varepsilon)\) set has the same root score.
+
+Approximate laws have two distinct readings. If one assumes a supportwise
+epsilon law, supportwise epsilon-validity follows:
+\begin{center}
+\small
+\begin{tabular}{l}
+\path|supportwiseApproxLocalLaws_root_validSummaryPMF|\\
+\path|supportwiseApproxLocalLaws_multiround_validSummaryPMF|
+\end{tabular}
+\end{center}
+The audited aggregate bundle used in the paper is weaker: it bounds expected
+root distortion through the composed C1/C3/C2 budget. The corresponding statement
+is:
+\[
+\texttt{approxLocalLaws\_expectedValidSummaryPMF},
+\]
+and, when the bundle is certified below a target \(\varepsilon\),
+\[
+\texttt{approxLocalLaws\_certifiedAtEpsilon\_expectedValidSummaryPMF}.
+\]
+Thus aggregate audits certify expected or probabilistic error statements; they
+do not by themselves say that every randomized support point is
+\(\varepsilon\)-valid.
+
+Finally, Agarwal's \(S(D,\varepsilon)\) notation also includes a size profile
+\(k(|D|,\varepsilon)\). Local laws recover oracle/query validity. A
+\(\texttt{ValidSizedState}\) follows only after supplying an external bridge
+from C-Tree validity to the chosen state-validity relation and an external size
+profile. The sized variants make this explicit:
+\begin{center}
+\small
+\begin{tabular}{l}
+\path|exactLocalLaws_root_validSizedState_of_external_sizeProfile|\\
+\path|exactLocalLaws_multiround_validSizedState_of_external_sizeProfile|
+\end{tabular}
+\end{center}
+
+\subsection{State-Level Nesting}
+
+The Agarwal-style state-level statement does not require scalar query answers
+to merge. The state carries whatever information is needed for the root query;
+the query is applied after all state merges have finished. This is the crucial
+distinction from a strict oracle-homomorphism statement.
+
+The relational phrasing records that distinction. A state-level summary
+with build validity, merge validity, and valid-state query correctness
+instantiates C-TreePO's C1/C3 local-law fragment and its relational shape.
+At the local-law level, the exact C1 and C3 facts are:
+\[
+\texttt{agarwalOriginal\_C1\_localLaw},\qquad
+\texttt{agarwalOriginal\_C3\_localLaw}.
+\]
+Together they recover the root decision statement
+\[
+\texttt{agarwalOriginal\_localLaw\_readout\_of\_mergeTree}.
+\]
+At the relational C-TreePO level, the same hypotheses give:
+\begin{center}
+\small
+\begin{tabular}{l}
+\path|agarwalOriginal_nests_relational_ctreepo|\\
+\path|stateLevelSummary_nests_relational_ctreepo|
+\end{tabular}
+\end{center}
+For any merge tree \(t\), the root score then follows as
+\begin{center}
+\small
+\begin{tabular}{l}
+\path|agarwalOriginal_readout_of_mergeTree|\\
+\path|stateLevelSummary_root_readout_nests_ctreepo|
+\end{tabular}
+\end{center}
+Metric and randomized variants keep their own guarantees:
+\begin{center}
+\small
+\begin{tabular}{l}
+\path|agarwalOriginal_readout_error_of_mergeTree|\\
+\path|agarwalOriginal_nests_epsilon_relational_ctreepo|\\
+\path|epsilonStateLevelSummary_root_readout_nests_ctreepo|\\
+\path|randomizedStateLevelSummary_nests_relational_ctreepo|
+\end{tabular}
+\end{center}
+Thus an \(\varepsilon\)-valid summary remains \(\varepsilon\)-valid
+for the query, and a randomized summary with root-validity probability
+at least \(p\) gives C-TreePO query success with the same probability. No exact
+deterministic equality is asserted in those cases.
+
+\subsection{Local-Law Subspace Inclusion}
+
+Let \(\mathrm{MS}(f)\) be the class of operators induced by sketch/codec
+systems carrying the exact leaf, merge, and compatibility witnesses above.
+For a fixed tree \(T\), let \(\mathrm{ExactLL}(T,f)\) be the exact C1/C2/C3
+local-law subspace. The inclusion is
+\[
+  \mathrm{MS}(f) \subseteq \mathrm{ExactLL}(T,f),
+\]
+recorded as
+\[
+\texttt{mergeableSketch\_nests\_exactLocalLawSubspace}.
+\]
+Inside a chosen neural-operator class \(\mathcal C\), the overlap
+\(\mathcal C\cap\mathrm{MS}(f)\) is contained in the exact local-law neural
+operator subspace:
+\[
+\texttt{mergeableSketchOverlap\_nests\_exactLocalLawNeuralOperators}.
+\]
+This is a membership claim, not an optimization guarantee. A neural operator
+does not become mergeable merely by being expressive; it must either supply
+these witnesses or be certified by the local-law audit.
+
+\subsection{Fixed-\texorpdfstring{\(\varepsilon\)}{epsilon} NO/FNO Recovery}
+
+The fixed-target learned route is stated as expected-validity. The condition
+\[
+\texttt{EpsilonGoodLearnedSummary}
+\]
+means that the \(Z_R\) root distribution has expected oracle distortion at most
+the selected target \(\varepsilon\).
+
+For ordinary neural-operator approximation, the expected-validity statement is:
+\[
+\texttt{neuralOperator\_fixedEpsilon\_expectedValidSummaryPMF}.
+\]
+Its hypotheses are exactly the ingredients used in
+Proposition~\ref{prop:fixed-epsilon-no-recovery}: an exact ideal operator in
+the class, a realized neural operator in the class, a compact realized-call
+approximation bridge, and a transferred local-law budget below the fixed target.
+The conclusion is expected-\(\varepsilon\) validity for the learned
+multi-round tree.
+
+For the FNO route, the finite-dimensionalization argument supplies the same
+kind of realized-call bridge:
+\[
+\texttt{fno\_fixedEpsilon\_expectedValidSummaryPMF}.
+\]
+Use this route when the approximation witness comes from the
+finite-mode/Fourier neural-operator certificate rather than a generic
+uniform neural-operator approximation assumption.
+
+When local laws are checked through a learned score \(\widehat f\), the true
+oracle statement includes the two-sided proxy-oracle gap slack:
+\begin{center}
+\small
+\begin{tabular}{l}
+\path|calibratedNeuralOperator_fixedEpsilon_expectedValidSummaryPMF|\\
+\path|calibratedFNO_fixedEpsilon_expectedValidSummaryPMF|
+\end{tabular}
+\end{center}
+These statements require the total proxy-oracle gap budget, namely the local-law
+budget plus \(2\varepsilon_{\mathrm{orc}}\), to be at most the final target
+\(\varepsilon\). They still certify expected validity, not supportwise validity
+of every randomized realization.
+
+The same idea can be phrased existentially as "learn an
+\(\varepsilon\)-good version":
+\begin{center}
+\small
+\begin{tabular}{l}
+\path|exists_neuralOperator_fixedEpsilon_goodLearnedSummaryPMF|\\
+\path|exists_fno_fixedEpsilon_goodLearnedSummaryPMF|\\
+\path|exists_calibratedNeuralOperator_fixedEpsilon_goodLearnedSummaryPMF|\\
+\path|exists_calibratedFNO_fixedEpsilon_goodLearnedSummaryPMF|
+\end{tabular}
+\end{center}
+These variants do not say that gradient descent finds the operator. They say
+that any approximation or learning guarantee that returns a realized NO/FNO with
+the certified budget immediately yields an \(\varepsilon\)-good learned C-Tree
+summary.
+
+The proxy-oracle gap assumption is given its legacy Lean name:
+\[
+\texttt{OracleRecoveredWithin}.
+\]
+It is a name for uniform recovery of \(\fstar\) by the learned readout
+\(\widehat f\). Under this assumption, the true-oracle budget reads:
+\begin{center}
+\small
+\begin{tabular}{l}
+\path|neuralOperator_oracleRecovery_expectedValidSummaryPMF|\\
+\path|fno_oracleRecovery_expectedValidSummaryPMF|
+\end{tabular}
+\end{center}
+These state that the true-oracle expected distortion is bounded by the
+local-law budget measured through \(\widehat f\), plus the two-sided
+proxy-oracle gap slack \(2\varepsilon_{\mathrm{orc}}\).
+
+\subsection{Expanded DSL/IPW Certificate}
+
+The translation table below gives the reading used by the main text. The
+local-law argument supplies the validity, transport, oracle-transfer, and
+certificate arithmetic. The survey-sampling layer supplies the standard
+HT/H\'ajek/IPW, standard-error, law-of-large-numbers, and effective-sample-size
+interpretation cited in the main text.
+
+\begin{center}
+\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.18\linewidth}p{0.24\linewidth}p{0.29\linewidth}p{0.20\linewidth}@{}}
+\toprule
+Reader object & Econometric object & Audit notation & Paper role \\
+\midrule
+Local-law population &
+Finite population of realized C1/C3/C2 checks &
+\texttt{samples}, \(N,M,R\) in \texttt{computeDSLBound} &
+Defines what the audit estimates. \\
+\addlinespace
+Audited law error &
+HT/H\'ajek/IPW estimate of aggregate local-law residual &
+\texttt{ipwUnionBound} &
+Point estimate \(\widehat E_{\mathrm{law},R}^{\mathrm{IPW}}\). \\
+\addlinespace
+Audit uncertainty &
+Design-based standard error for the same logged node sample &
+\texttt{ipwUnionBoundSE} &
+Sampling term \(\widehat{\mathrm{SE}}_{\mathrm{IPW}}\). \\
+\addlinespace
+Practical audit bound &
+Estimate plus confidence multiplier and proxy-oracle gap margin &
+\texttt{DSLBound.upperBound} &
+Paper term
+\(\widehat E_{\mathrm{law},R}^{\mathrm{IPW}}
++B_{\mathrm{gap}}+c_\alpha\widehat{\mathrm{SE}}_{\mathrm{IPW}}\). \\
+\addlinespace
+True-oracle transfer &
+Uniform recovery of \(\fstar\) by \(\widehat f\) &
+\texttt{OracleRecoveredWithin} &
+Adds \(2\varepsilon_{\mathrm{orc}}\). \\
+\addlinespace
+Certified tree error &
+Audit bound plus oracle-transfer slack &
+\texttt{CertifiedTreeError} &
+Full certificate. \\
+\addlinespace
+Expected-valid summary &
+Aggregate approximate local laws imply expected root validity &
+\path|approxLocalLaws_expectedValidSummaryPMF| &
+Does not claim supportwise validity from aggregate audit bounds. \\
+\addlinespace
+Exact valid summaries &
+Exact local laws imply root support lies in valid summaries &
+\path|exactLocalLaws_root_validSummaryPMF|;\newline
+\path|exactLocalLaws_multiround_validSummaryPMF| &
+Exact supportwise validity. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+For sampled audits, we use the existing DSL/IPW certificate quantity rather than
+introducing a new black-box IPW term. The canonical quantity is
+\texttt{DSLBound}. Its upper bound expands as
+\[
+  \texttt{b.upperBound}
+  =
+  \texttt{b.gap\_estimate}
+  + \texttt{b.bias\_margin}
+  + \texttt{b.z\_score}\cdot\texttt{b.se}.
+\]
+For a tree audit this corresponds to
+\[
+  \widehat E_{\mathrm{law},R}^{\mathrm{IPW}}
+  + B_{\mathrm{gap}}
+  + c_\alpha\,\widehat{\mathrm{SE}}_{\mathrm{IPW}}.
+\]
+Here \(c_\alpha\) is only the paper notation for the confidence multiplier
+stored as \texttt{b.z\_score}; we avoid the letter \(z\) because it is already
+used for internal summary states.
+The estimate and standard error come from the DSL/IPW layer after the local-law
+checks have been chosen as the finite-population outcomes, following the
+standard design-based estimators cited in the main text. Concretely,
+\[
+\begin{aligned}
+  b &= \texttt{computeDSLBound}(\texttt{samples},N,M,R,\texttt{cal},c_\alpha),
+  \\
+  b.\texttt{gap\_estimate} &= \texttt{ipwUnionBound}(\texttt{samples},N,M,R),
+  \\
+  b.\texttt{se} &= \texttt{ipwUnionBoundSE}(\texttt{samples},N,M,R).
+\end{aligned}
+\]
+The first line is the IPW/H\'ajek estimate of the union-bound composition
+\(N\widehat p_{\mathrm{leaf}}+M\widehat p_{\mathrm{merge}}
++(R-1)\widehat p_{\mathrm{idemp}}\).  The second line is the corresponding
+design-based standard error computed from the same logged samples. Thus
+\(\widehat E_{\mathrm{law},R}^{\mathrm{IPW}}\) and
+\(\widehat{\mathrm{SE}}_{\mathrm{IPW}}\) are not additional assumptions; they
+are the estimate and uncertainty fields of the existing DSL certificate.
+The true-oracle certificate adds only the already-defined proxy-oracle gap slack:
+\[
+  \texttt{CertifiedTreeError b }\varepsilon_{\mathrm{orc}}
+  =
+  \texttt{b.upperBound}
+  + 2\varepsilon_{\mathrm{orc}}.
+\]
+The expanded equality is
+\[
+\texttt{CertifiedTreeError\_eq\_expanded}.
+\]
+Thus the certificate has no hidden IPW remainder; it is exactly
+the reported estimate plus the proxy-oracle gap margin and the existing DSL/IPW
+standard-error term.
+
+The appendix also records the standard empirical-Bernstein alternative
+\citep{MaurerPontil2009}. The radius
+\[
+  \texttt{UnionBoundEBRadius}
+  =
+  N r_{\mathrm{leaf}} + M r_{\mathrm{merge}} + (R-1)r_{\mathrm{idemp}}
+\]
+is defined by applying \texttt{empiricalBernsteinRadius} separately to the
+weighted leaf, merge, and re-summary samples.  The variant
+\[
+\texttt{ipwUnionBound\_empirical\_bernstein\_from\_components\_expanded}
+\]
+states that componentwise empirical-Bernstein events imply the corresponding
+union-bound error event with exactly this displayed radius.  Effective sample
+size enters through these standard errors or radii; it is a statement about
+audit uncertainty, not a guarantee that more training data monotonically lowers
+the learned residual.
+
+\subsection{Schedule Invariance}
+
+The same-tree containment is the minimal correspondence. Classical mergeable
+summaries often prove more: a valid root is obtained for every allowed merge
+schedule. For ordered data, "allowed" means rebracketings that preserve leaf
+order. For unordered sketches, additional commutativity can make permutations
+valid too.
+
+C-TreePO has the corresponding query-level bridge. If C1 and C3 hold on two
+trees \(T\) and \(T'\) with the same leaves, then both roots have zero
+expected oracle distortion, hence the schedules agree at the task level:
+\[
+\texttt{localLaw\_schedule\_bridge}.
+\]
+This is deliberately weaker than byte-identical state equality. Classical
+associative sketches may give identical root states; C-TreePO gives the
+equivalence needed by the oracle/query the task cares about. When
+intermediate summaries are reused in a two-level plan, C2 supplies the stable
+re-entry condition:
+\[
+\texttt{localLaw\_foldOfFolds\_bridge}.
+\]
+
+For ordered free-monoid summaries, the classical side has the stronger
+Gibbons-style rebracketing result:
+\[
+\texttt{orderedClassicalSchedule\_bridge}.
+\]
+It gives identical state evaluation for two merge trees with the same ordered
+stream data, without assuming commutativity. This is the state-equality
+counterpart to C-TreePO's oracle-level schedule invariance.
+
+\subsection{One-Way and Restricted Summaries}
+
+One-way summaries are not automatically arbitrary-tree summaries. Their merge
+operation absorbs a fresh suffix into an existing state, so the certified
+topology is a sequential fold unless a separate full mergeability guarantee is
+available. In the local-law language, such a method can be used on the
+topologies its validity statement covers; it should not be cited as a full
+binary-tree nesting guarantee. This is why GK-style one-way summaries are marked
+sequential-only, while full state-level sketches such as HLL, Count-Min, and
+KLL-style mergeable variants can be used in arbitrary binary merge trees when
+their corresponding witnesses are present.

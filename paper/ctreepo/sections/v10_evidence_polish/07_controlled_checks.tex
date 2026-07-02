@@ -1,0 +1,140 @@
+\section{Building Intuition}
+\label{sec:v10-controlled-checks}
+
+The Benoit replication is the real measurement task. Two completed
+checks isolate pieces that the replication leaves entangled. Their
+role is deliberately modest: they explain why the certificate and
+training design should work before a completed human node audit is
+available. The Markov check fixes the oracle and the sufficient state,
+then shows when local supervision can replace some root supervision
+under a fixed token budget. The IPW check fixes the audit estimand and
+stresses the sampling design, then shows how logged propensities
+recover the finite-population target while changing the variance.
+
+\subsection{Markov Sandbox: What Local State Must Carry}
+\label{sec:v10-markov-check}
+
+The Markov sandbox keeps the tree mechanics visible. A document is a
+length-\(128\) token sequence. At each position, a hidden Markov chain
+selects one of \(K\) registers; the selected register emits an
+observed token from a disjoint synonym palette. The learner sees the
+token row, not the hidden registers. The oracle \(f^\ast\) counts
+adjacent hidden-register changes.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}lcc@{}}
+\toprule
+ & Recoverable & Structural \\
+\midrule
+Hidden registers \(K\) & \(4\) & \(12\) \\
+Document length & \multicolumn{2}{c}{\(128\) tokens} \\
+Synonym tokens per register & \multicolumn{2}{c}{\(4\), disjoint palettes} \\
+Switch probability \(h\) & \(0.039\) & \(0.079\) \\
+Expected changepoints & \({\sim}5\) & \({\sim}10\) \\
+Training documents & \multicolumn{2}{c}{\(10{,}240\)} \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Markov data-generating process.} The hidden register
+stays fixed with probability \(1-h\), otherwise switches to a uniformly
+chosen alternative. The observed token is drawn uniformly from that
+register's palette.}
+\label{tab:v10-markov-dgp}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{markov_changepoint_combined.pdf}
+\caption{\textbf{Counting register changes with boundary state.}
+A \(12\)-token illustration with four hidden colors and synonym tokens.
+The learner observes the word row. Each leaf summary records internal
+count, first register, and last register. The merge adds child counts
+plus the boundary correction
+\(\One\{\text{left last}\ne\text{right first}\}\), detecting changes
+that neither child sees alone.}
+\label{fig:v10-markov-changepoint-main}
+\end{figure}
+
+The sufficient state for any span is
+\[
+  (\mathrm{count},\mathrm{first},\mathrm{last}),
+\]
+where the count records transitions inside the span and the boundary
+fields let parent merges add the one transition that may cross the
+child boundary:
+\[
+(c_L,a_L,b_L)\otimes(c_R,a_R,b_R)
+=
+(c_L+c_R+\One\{b_L\ne a_R\},a_L,b_R).
+\]
+The state is ordered and associative. A scalar child count lacks the
+boundary information needed to decide whether the right edge of the
+left child matches the left edge of the right child. This is the core
+intuition behind local state: the node label is useful because it
+supervises a mergeable representation rather than a cheaper scalar copy
+of the root score.
+
+The completed allocation grid asks the budget question directly. It
+uses leaf sizes \(128,64,32,16,8\), root-label shares from \(100\%\)
+down to \(10\%\), and three local-allocation policies where the tree
+has non-root nodes to distinguish them. A full-document label on a
+\(128\)-token sequence costs \(128\) token observations. A label on a
+\(16\)-token leaf costs \(16\) token observations, so eight such leaf
+labels spend the same full-document-equivalent mass as one root label.
+The budget split asks whether reallocating missing root-label mass to
+local count labels keeps root MAE near the all-root reference.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.94\linewidth]{markov_budget_split.png}
+    \caption{\textbf{Splitting a fixed token budget between root and
+    local labels.} The green star is the all-root reference. The green
+    line spends only the reduced root-label budget, so total budget
+    shrinks. The blue, purple, and rose curves keep total supervision
+    mass fixed by assigning the missing mass to local labels under
+    three allocation policies.}
+    \label{fig:v10-markov-budget-main}
+\end{figure}
+
+Figure~\ref{fig:v10-markov-budget-main} gives the main intuition. The
+local-allocation curves stay close to the all-root reference through a
+broad interior band, while the root-only curve degrades as total
+supervision shrinks. The effect is strongest in the recoverable scope
+and remains useful in the structural scope, where more registers and
+more boundaries make small leaves harder. Appendix~\ref{app:v10-markov}
+gives the full leaf-size grid and provenance. The lesson is narrow but
+useful: when the local state is known and node labels measure the state
+needed for composition, node supervision can substitute for some root
+supervision at fixed budget.
+
+\subsection{IPW Audit Stress Check}
+\label{sec:v10-ipw-check}
+
+The IPW stress ladder tests the estimator in
+Equation~\eqref{eq:v8-ht-distortion}. It simulates hard finite
+populations with Bernoulli or without-replacement sampling, balanced
+or adversarial propensities, and document-nonseparable oracle losses.
+The large run covers \(4\) hard cases, \(7\) document counts from
+\(60\) to \(3{,}840\), \(64\) population seeds, and \(15{,}000\)
+sampling trials per cell, for \(1{,}792\) raw rows.
+
+The stress cases behave as the certificate predicts. Logged
+propensity weighting keeps the preference-loss and violation-rate
+biases close to zero even when the smallest joint propensities are
+below \(0.001\) and maximum joint weights exceed \(1{,}000\). The
+price is variance: effective sample size falls sharply in the
+adversarial designs, and confidence intervals widen. At
+\(3{,}840\) documents, the hardest boundary-adversarial case has
+minimum joint propensity \(0.00091\), maximum joint weight
+\(1{,}099\), and mean effective sample size about \(7{,}206\);
+preference coverage remains \(1.000\), while violation coverage is
+\(0.994\). Appendix~\ref{app:v10-ipw-stress} gives the compact
+table and source path.
+
+The Markov and IPW checks support the human node-audit path for the
+Manifesto trees. They make the submission evidence tiered. The
+Manifesto benchmark supports the root-observed application claim; the
+teacher-trace gaps support a diagnostic claim; the Markov check
+supports the local-supervision mechanism; and the IPW stress ladder
+supports the audit-estimator component used by the certificate.

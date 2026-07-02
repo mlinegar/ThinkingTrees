@@ -1,0 +1,98 @@
+\section{Mergeable Sketches and the Algebraic Target}\label{sec:mergeable-sketches}
+
+C-TreePO inherits its shape from a familiar engineering pattern. Database
+and streaming systems have long handled aggregate queries by splitting a
+stream into shards, building a compact summary of each shard, merging
+sibling summaries pairwise up a tree, and reading the query off the root.
+HyperLogLog estimates distinct counts in a few kilobytes, Count-Min
+answers frequency queries under a space budget, Bloom filters answer
+membership; in each, the summary state, the merge operator, and the
+readout are engineered \emph{before} training, and correctness is proved
+once by algebra rather than checked at runtime
+\citep{Agarwal2013MergeableTODS,FlajoletEtAl2007,CormodeMuthukrishnan2005}.
+C-TreePO generalizes the same pattern to settings where no hand-designed
+sketch is available (a manifesto, a clinical narrative, a play) by
+replacing the hand-designed merge with a learned summarizer $g$ and
+replacing algebraic correctness with a sampled audit at the leaves and
+merges. Table~\ref{tab:sketch-mapping} makes the
+correspondence concrete: every column of a classical mergeable sketch
+has a C-TreePO counterpart, with the runtime audit standing in for the
+hand-designed merge's algebraic proof.
+
+\paragraph{Fibers and sufficient states.}
+A \emph{state} for the oracle $\fstar$ is any map $\sigma:X\to S$
+whose value determines the oracle: if two inputs $x,x'$ are assigned
+the same state, $\fstar$ does not distinguish them. Calling the
+preimage $\sigma^{-1}(s)=\{x\in X:\sigma(x)=s\}$ the \emph{fiber} of
+$\sigma$ over $s$, the condition is that every $\sigma$-fiber lies
+inside a single $\fstar$-fiber:
+\[
+    \sigma(x)=\sigma(x') \quad\Longrightarrow\quad
+    \fstar(x)=\fstar(x').
+\]
+Equivalently, there is a readout $F:S\to Y$ with
+$\fstar(x)=F(\sigma(x))$: once $\sigma(x)$ is known, raw-text
+differences inside the same fiber are irrelevant to the oracle. This
+is the standard sufficiency idea
+\citep{Fisher1922,Blackwell1953,Kallenberg2002FMP}, specialized to an
+oracle-valued text target. The mergeable-sketch requirement is one
+further algebraic condition: the state itself composes locally,
+$\sigma(x\concat y)=\mathrm{merge}(\sigma(x),\sigma(y))$, so the root
+state can be recovered from leaf states without rereading raw text
+\citep{Agarwal2013MergeableTODS}.
+
+The summarizer $g$ produces an estimate of $\sigma(x)$ in two
+practical forms. When $g$ is a language model
+(Section~\ref{sec:manifesto-llm}), the estimate $g(x)$ is a
+plain-text \emph{summary}: a paragraph or page of natural language
+that stands in for the state the rubric oracle would need. When $g$
+is a neural operator or an embedding model
+(Section~\ref{sec:fno-primer}), the estimate is a vector that we
+assume approximates $\sigma(x)$ up to a tolerance the local-law audit
+measures. The fiber language describes what each realization is
+trying to capture; the local laws (Section~\ref{sec:framework}) and
+the audit (Section~\ref{sec:estimation}) develop what it means for
+an estimate to pass.
+
+\begin{table}[t]
+    \centering
+    \small
+    \begin{tabular}{p{0.46\linewidth}p{0.46\linewidth}}
+        \toprule
+        Classical mergeable sketch & C-TreePO semantic compression \\
+        \midrule
+        Data shard $d_i$ & Leaf text block $b_i$ \\
+        Bounded sketch state $S_B(d_i)$ & Leaf summary $s_i = g(b_i)$ \\
+        Merge operator $\oplus_B$ & Learned merge $g(s_{u_L}\concat s_{u_R})$ \\
+        Query (e.g., distinct count, frequency) & Oracle query $\fstar(x)$ (task value) \\
+        Memory budget $B$ controls what survives merges & Summary budget controls interaction-bearing content retention \\
+        Correctness by algebraic proof (no runtime check) & Correctness by probabilistic audit (Section~\ref{sec:estimation}) \\
+        Error = sketch estimation variance & Error = $L \cdot \Delta_R$ + estimation envelopes (Theorem~\ref{thm:e2e}) \\
+        \bottomrule
+    \end{tabular}
+    \caption{Mapping from a classical mergeable sketch to the C-TreePO setting. In classical sketches, the merge operator is hand-designed and algebraically exact; in C-TreePO, it is learned and certified by audit.}
+    \label{tab:sketch-mapping}
+\end{table}
+
+Section~\ref{sec:framework} develops the local laws that make the
+audit precise, Section~\ref{sec:theorems} the optimization view that
+makes them trainable, and Section~\ref{sec:estimation} the gap bound
+that makes them reportable. The classical-to-
+learned correspondence is also a formal claim:
+Proposition~\ref{prop:mergeable-reduction} (stated and proved in
+Appendix~\ref{app:mergeable-background}) shows that when $g$ serializes
+a classical mergeable sketch, C-TreePO reduces to that sketch under the
+local laws: byte-for-byte for register-based implementations, and in
+expectation otherwise. Classical full mergeable summaries nest in C-TreePO
+through relational state-level C-Trees. Randomized mergeable summaries nest in
+the same formulation in probability: root readout is correct on the event that
+the merged root state is valid. This keeps Agarwal et al.'s union view intact:
+shards combine as datasets, $\varepsilon$ remains fixed in the size/error
+profile, and sample-size or training-data requirements enter as separate
+concentration side conditions rather than scalar child-query merge laws.
+Section~\ref{sec:hll-parity} exhibits the
+collapse on HyperLogLog. The full literature backstop, the algebraic
+$(\mathrm{encode}, \oplus, \mathrm{query})$ view, and the formal
+proposition statement are in
+Appendix~\ref{app:mergeable-background}; the corresponding HLL primer
+is in Appendix~\ref{app:hll-primer}.

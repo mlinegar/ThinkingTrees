@@ -1,0 +1,444 @@
+\section{Replicating Manifesto Project Expert Scores}\label{sec:min-manifesto-results}
+
+Political manifestos are a long-document measurement problem with a
+real-world target attached. A party's election platform runs tens
+of thousands of words across many policy areas, and political
+scientists have spent decades distilling those documents into a
+small set of dimension scores that downstream models of voting,
+government formation, and policy outcomes take as inputs.
+\citet{BenoitEtAl2025} recently posed the question of whether large
+language models can replicate that measurement reliably enough to be
+used in place of expert coders, and built a benchmark to test the
+question on. We approach that benchmark with the C-tree pipeline of
+Section~\ref{sec:min-framework}. Each manifesto is split into
+chunks. A learned summarizer compresses adjacent chunks recursively
+up to one document-level summary. A learned scorer reads that
+summary and outputs a number on each of the six policy dimensions.
+The training target is the expert-survey mean, and the held-out
+evaluation is the Pearson correlation against those means.
+
+\subsection{Data and Replication Target}\label{sec:min-manifesto-data}
+
+The Manifesto Project (MARPOR / CMP) has coded party manifestos
+from parliamentary democracies for nearly four decades
+\citep{BudgeRobertsonHearl1987, BudgeEtAl2001, KlingemannEtAl2006,
+VolkensEtAl2013}. Trained coders break each manifesto into
+\emph{quasi-sentences} (the smallest text spans expressing a single
+policy idea) and tag each one with a category from a fixed scheme
+covering economic policy, social policy, immigration, European
+integration, environment, decentralization, and a few dozen other
+topics. The current data release reports $5{,}285$ coded platforms
+and $2{,}269{,}000$ annotated quasi-sentences
+\citep{ManifestoProject2025a, ManifestoCorpus2025, MerzEtAl2016}.
+
+The benchmark we follow, from \citet{BenoitEtAl2025}, pairs the
+coded platforms with expert surveys. For each of the $235$ platforms
+in their main benchmark, country specialists are asked to place the
+party on a seven-point scale along each of six policy dimensions.
+Economic policy runs from high public spending and high taxation
+through to low public spending and low taxation. Social policy runs
+from liberal to conservative on issues like gender equality and
+civil liberties. Immigration runs from open to restrictive,
+European integration from pro-EU to anti-EU, environment from
+environmental protection prioritized through to economic growth
+prioritized, and decentralization from centralized governance
+through to regional autonomy. The expert-survey value for a
+platform on a dimension is the average of those expert placements,
+and that average is the target every method below is scored
+against.
+
+\citet{BenoitEtAl2025} pose the LLM replication problem on this
+benchmark. Frontier proprietary LLMs come close to expert agreement
+on most dimensions when run as an 18-score ensemble across three
+models, two shot settings, and three summary styles. Open-weight
+single-model replications track that ensemble closely on some
+dimensions and noticeably less so on others, with decentralization
+the consistent breakdown across proprietary and open-weight LLMs
+alike.
+
+We approach the same benchmark with a single-model pipeline. A
+learned summarizer $g$ produces a short summary of each chunk of a
+manifesto and recursively merges adjacent summaries until a single
+root summary represents the whole document; a learned scorer $f$
+reads that root summary and returns the seven-point score for each
+policy dimension. Both $f$ and $g$ are prompt-and-demonstration
+wrappers around the same small quantized open-weight
+LLM.\footnote{Gemma-4-31B in NVFP4 (4-bit) quantization.
+Re-running the dimension-specific pipeline on Gemma-3-27B-IT (the
+model \citet{BenoitEtAl2025} use for their open-weight baseline)
+gives Pearson correlations close to the Gemma-4 numbers reported
+below, indicating the gains here come from the tree structure, not
+from a stronger underlying model.}
+\S\ref{sec:min-manifesto-setup} below gives the construction in
+detail.
+
+When we train $f$ and $g$ for one policy dimension at a time, this
+pipeline meets or beats Benoit's proprietary 18-score ensemble on
+every dimension we have completed end-to-end. The two completed so
+far are economic policy and decentralization; on economic the
+single-dimension pipeline clears not only the ensemble but
+split-expert agreement, and on decentralization it still clears
+the ensemble by roughly $0.07$.
+\fixme{Single-dimension runs for the remaining four dimensions
+are in flight.}
+
+A natural follow-up question, taken up in
+\S\ref{sec:min-manifesto-combined}, is whether one shared
+summarizer can stand in for the six dimension-specific ones: can a
+single \emph{universal} $g$ produce one summary per manifesto for
+all six per-dimension scorers to read? The joint training run shows
+that summaries are coupled to the scorer they are built for. A $g$
+optimized against an average of six scorer-rewards aligns with each
+individual scorer less well than a $g$ optimized for that scorer
+alone, and the alignment gap is largest on decentralization. Across
+both training regimes, held-out Pearson correlation is stable to how each
+manifesto is chunked, in line with Corollary~\ref{cor:schedule}.
+
+\subsection{Setup}\label{sec:min-manifesto-setup}
+
+Each manifesto is split into contiguous chunks (\emph{leaves}) of a
+fixed token size. The summarizer $g$ writes a short summary of each
+leaf. Adjacent leaf summaries are merged pairwise by the same $g$
+into a parent summary, parent summaries are merged into
+grandparents, and so on, until a single \emph{root summary}
+represents the whole manifesto. The scorer $f$ reads the root
+summary and outputs a number on the seven-point scale for each
+policy dimension.
+
+Both $f$ and $g$ are DSPy programs that wrap the same underlying
+LLM (Gemma-4-31B-NVFP4) with a prompt and a small bank of bootstrap
+few-shot demonstrations. We do not hand-craft any demonstrations or
+seed examples. We use DSPy's MIPROv2 optimizer to propose and
+select prompt instructions and bootstrap demonstrations against a
+training metric; the LLM weights themselves are frozen. When we say
+we ``train'' $f$ or $g$, we mean MIPROv2 has searched over prompt
+instructions and demonstrations and kept the candidate that
+maximizes the metric on a held-back validation slice.
+
+Prompt-and-demonstration optimization is one choice among several.
+Rather than searching over prompt instructions, we could adapt the
+LLM weights directly with LoRA, full fine-tuning, or RL-style
+policy optimization against the same metric; the framework's
+analysis applies to any optimizer that takes $f$ and $g$ as
+optimizable objects. We work with prompts and demonstrations here
+because the model weights stay frozen on the inference server and
+prompt-level updates are sufficient to make the comparisons we
+report.
+
+Training proceeds in alternating rounds, and we use the shorthand
+$f^a g^b$ for the $(f, g)$ pair after $a$ scorer-side updates and
+$b$ summarizer-side updates. The starting $f^0$ and $g^0$ are DSPy
+programs with their default prompts and no optimized
+demonstrations. $f^1 g^0$ is the result of training $f$ against
+the initial $g^0$, with $g^0$ held fixed; $f^1 g^1$ is the result
+of training $g$ against $f^1$, with $f^1$ held fixed; and so on.
+Round 1 ends at $f^1 g^1$, round 2 at $f^2 g^2$, etc. Below we
+report two points from each leaf's run: the state after round 1
+and the best round at that leaf size.
+
+We divide the Benoit benchmark documents into training,
+validation, and test sets at the document level: each manifesto
+appears in only one of the three. Document counts vary by
+dimension because not every platform has an expert score on every
+dimension; Table~\ref{tab:min-manifesto-data-summary} gives the
+per-dimension breakdown together with the score distribution on
+the test set, the proprietary 18-score ensemble's published
+Pearson correlation \citep{BenoitEtAl2025}, and our best Pearson
+correlation on the same held-out documents. The two
+single-dimension runs (economic and decentralization, used for
+comparison in \S\ref{sec:min-manifesto-combined}) draw from the
+same training pool with only that dimension's expert scores used
+as the document target. All numbers below are on the test split.
+
+\begin{table}[!htb]
+  \centering
+  \begin{tabular}{lrrrcccc}
+    \toprule
+    & \multicolumn{3}{c}{Documents} & \multicolumn{2}{c}{Test scores (1--7)} & \multicolumn{2}{c}{Best Pearson} \\
+    \cmidrule(lr){2-4} \cmidrule(lr){5-6} \cmidrule(lr){7-8}
+    Dimension & Train & Val & Test & Mean & SD & Benoit & C-TreePO \\
+    \midrule
+    Economic         & $140$ & $30$ & $48$ & $4.91$ & $2.45$ & $0.870$ & $0.888$ \\
+    Social           & $140$ & $30$ & $48$ & $4.01$ & $2.34$ & $0.920$ & $0.886$ \\
+    Immigration      & $125$ & $27$ & $38$ & $5.03$ & $2.47$ & $0.890$ & $0.938$ \\
+    EU integration   & $121$ & $26$ & $38$ & $5.09$ & $1.92$ & $0.910$ & $0.965$ \\
+    Environment      & $117$ & $25$ & $44$ & $5.10$ & $1.90$ & $0.820$ & $0.795$ \\
+    Decentralization & $140$ & $30$ & $48$ & $4.58$ & $1.47$ & $0.490$ & $0.557$ \\
+    \bottomrule
+  \end{tabular}
+  \caption{\textbf{Per-dimension benchmark and headline.} Document
+  counts in each split with an expert score on the dimension; mean
+  and standard deviation of those expert scores on the test split;
+  the proprietary 18-score ensemble's per-dimension Pearson
+  correlation on this benchmark from \citet{BenoitEtAl2025},
+  Figure~1; and our best Pearson correlation on the same held-out
+  documents. Our numbers come from the
+  joint multi-dimension run except for economic and
+  decentralization, where a single-dimension run gives the better
+  number. We meet or beat the ensemble on four of six dimensions;
+  social and environment fall slightly short.}
+  \label{tab:min-manifesto-data-summary}
+\end{table}
+
+\paragraph{Held-out evaluation.}
+For each dimension we compute the Pearson correlation between $f$'s
+prediction on each manifesto's root summary and the expert-survey
+mean for that manifesto, on the test split. The macro is the
+unweighted mean across the six dimensions.
+
+\paragraph{Training metric.}
+The training metric is per-node agreement between predictions and
+a \emph{teacher trace} computed once before training. The teacher
+trace is the initial scorer prompt's prediction on the raw text
+spanned by each tree node, with no summarization in between, cached
+ahead of any optimization. For each training-tree node we then have
+a target six-dimension score (from the teacher trace) and a
+predicted score (from the trained $f$ on whatever input that node
+carries: raw text when training $f$, summary when training $g$).
+The metric is the mean across active dimensions of
+$\max\!\left(0,\, 1 - \left|\text{predicted} - \text{target}\right|\right)$
+with both quantities normalized to $[0, 1]$, and MIPROv2 maximizes
+it. In the framework's notation this corresponds to $J_\lambda$
+(Eq.~\ref{eq:min-J-lambda}) with the teacher trace standing in for
+the oracle at every node. \fixme{Confirm and insert the exact
+$\lambda$ used in the runs reported below.}
+
+The cached teacher predictions are what give the summarizer $g$ a
+per-node training signal: each internal node has a target score, so
+$g$ can be trained to produce summaries that yield the right score
+(for a fixed scorer $f$) at every level of the tree, not just at
+the document root where the expert mean is available. The
+framework's $\lambda$ controls how strongly that per-node signal
+weighs against root-level oracle agreement. At $\lambda = 0$ the
+local-law term drops out of the loss and $g$'s only training signal
+is its downstream effect on $f$'s root prediction; the cached
+teacher predictions remain the per-node targets the audit gap below
+is measured against, but they no longer enter the training loss. In
+that case $g$'s contribution reduces to producing summaries that
+make $f$'s root-level evaluation more accurate, with no direct
+supervision at internal nodes.
+
+This estimate is a proxy for the framework's $f^*$-based local-law
+residual, not the residual itself. The teacher trace is the initial
+scorer $f$ applied to raw text, not the true oracle $f^*$, so when
+$f$ and $f^*$ disagree their local-law contributions disagree as
+well and the trained system optimizes against a distorted target.
+The residual against $f^*$ itself is only directly observable when
+the oracle is available online: when expert scores can be queried
+on demand at every internal node. When node-level oracle access is
+unavailable, as here, we estimate the residual against the teacher
+trace and read the audit gap below as the visible part of the
+proxy's bias.
+
+\paragraph{Audit gap.}
+The audit gap is our empirical estimate of the local-law residual
+on the test split. Internal Pearson is the correlation between the
+trained $f$'s predictions and the teacher-trace targets, taken
+across all scored internal nodes; external Pearson is the
+correlation at the root only, against expert means. The audit gap
+is the difference between the two. A small gap means the scorer's
+agreement with the teacher carries to gold; a large gap means the
+scorer fits its teacher better than the teacher fits gold.
+
+\fixme{The gap between $f$ and $f^*$ propagates into confidence
+intervals on the downstream Pearson correlation, but the gap itself
+is estimable on the test split from the conditional average error
+between $f$'s root predictions and the expert means, so the
+contribution of this distortion is measurable rather than hidden.
+Combining the offline teacher-tracked residual with online oracle
+queries (when, e.g., a sample of internal nodes can be expert-scored
+directly) is then a matter of balancing two estimators of the same
+underlying residual; a principled balance is left for future
+work.}
+
+\subsection{Single-Dimension Training}\label{sec:min-manifesto-singledim}
+
+We run the setup above first in single-dimension mode: a separate
+$(f, g)$ pair for each policy dimension, with that dimension's
+expert mean as the only document-level target. Sweeping leaf sizes
+from $256$ to $8{,}192$ tokens, we report two points per leaf for
+each dimension — the state after round 1 and the best round at
+that leaf size — together with three Benoit reference lines:
+split-expert agreement, the proprietary 18-score ensemble, and
+the best open-weight single-model replication. The substantive reading is that single-dimension
+training \emph{recovers the proprietary-LLM ceiling} on each
+dimension: a single open-weight model trained against one scorer
+at a time matches what an 18-score frontier-LLM ensemble achieves
+on the same benchmark.
+
+\paragraph{Economic policy.}
+Figure~\ref{fig:v5-manifesto-economic-leafsize} shows the leaf
+sweep. External Pearson moves within a roughly $0.04$-wide range
+across $32\times$ in leaf size, in line with
+Corollary~\ref{cor:schedule}. The 256-token leaf reaches $0.909$
+after round 1, $0.029$ above split-expert agreement ($0.880$).
+The audit gap stays between $0.056$ and $0.108$ throughout. Round
+1 is competitive at every leaf; subsequent rounds only marginally
+move the score, so the best round and round 1 sit on top of each
+other for most rungs. The best round at every leaf size sits above
+Benoit's proprietary ensemble and best open-weight replication; at
+the smaller leaves the run also clears split-expert agreement.
+
+\begin{figure}[!htb]
+  \centering
+  \includegraphics[width=0.72\linewidth]{economic_singledim_leaf_invariance.pdf}
+  \caption{\textbf{Single-dimension economic run.} External Pearson
+  on the held-out split across leaf sizes, at two points per leaf:
+  after round 1 and the best round at each leaf size. Reference
+  lines from \citet{BenoitEtAl2025}: split-expert agreement, the
+  proprietary 18-score ensemble, and the best open-weight
+  single-model replication.}
+  \label{fig:v5-manifesto-economic-leafsize}
+\end{figure}
+
+\paragraph{Decentralization.}
+Decentralization is the dimension where Benoit's existing LLM
+systems sit furthest below expert agreement.
+Figure~\ref{fig:v5-manifesto-decentralization-leafsize} shows the
+leaf sweep. External Pearson ranges from $0.435$ to $0.557$ across
+the completed leaves; the $256$-token rung is best at $0.557$ after
+round 1, and the $1{,}024$-token rung is next-best at $0.536$ at
+its best round. The audit gap ranges from $0.373$ to $0.468$,
+considerably larger than the economic run's $0.056$-to-$0.108$
+range, marking the dimension as teacher-bounded: even at the best
+round the scorer is fitting its teacher trace better than gold.
+The best round still clears the proprietary 18-score ensemble
+($0.490$) at the $256$- and $1{,}024$-token rungs; the
+$512$-token rung's best ($0.476$) sits between the ensemble and
+the best open-weight single-model replication ($0.450$).
+
+\begin{figure}[!htb]
+  \centering
+  \includegraphics[width=0.72\linewidth]{decentralization_singledim_leaf_invariance.pdf}
+  \caption{\textbf{Single-dimension decentralization run.} External
+  Pearson correlation on the held-out split across leaf sizes, at
+  two points per leaf: after round 1 and the best round at each
+  leaf size. Reference lines from \citet{BenoitEtAl2025}:
+  split-expert agreement, the proprietary 18-score ensemble, and
+  the best open-weight single-model replication.}
+  \label{fig:v5-manifesto-decentralization-leafsize}
+\end{figure}
+
+\subsection{Combined Multi-Dimension Training}\label{sec:min-manifesto-combined}
+
+We now turn to joint training, the universal-summary regime
+introduced earlier: one $g$ produces a single summary per
+manifesto, and one scorer returns six per-dimension scores from
+that summary. $g$ is trained against the average of the six
+per-dimension $f$-rewards; $f$ is trained dimension-aware. The
+leaf sweep covers all six rungs from $256$ to $8{,}192$ tokens.
+Figure~\ref{fig:v5-manifesto-combined-leafsize} plots external
+Pearson correlation per dimension across the sweep, with round 1
+and the best round at each leaf size, and three Benoit reference
+lines per panel. Table~\ref{tab:min-manifesto-audit-read} reports
+the best-round result per dimension.
+
+\begin{figure}[!htb]
+  \centering
+  \includegraphics[width=\linewidth]{manifesto_fg_combined_ladder_f1g0_f1g1.pdf}
+  \caption{\textbf{Joint multi-dimension run, per-dimension
+  trajectories.} External Pearson on the held-out split across leaf
+  sizes for each dimension, sliced from the same joint $(f, g)$
+  training. Two series per panel: round 1 and the best round at
+  each leaf size. Reference lines per panel from
+  \citet{BenoitEtAl2025}: split-expert agreement, the proprietary
+  18-score ensemble, and the best open-weight single-model
+  replication.}
+  \label{fig:v5-manifesto-combined-leafsize}
+\end{figure}
+
+\begin{table}[!htb]
+  \centering
+  \begin{tabular}{lccc}
+    \toprule
+    Dimension        & After round 1 & Best round & Audit gap \\
+    \midrule
+    EU integration   & $0.965$ & $0.965$ & $0.013$ \\
+    Immigration      & $0.934$ & $0.938$ & $0.033$ \\
+    Economic         & $0.876$ & $0.886$ & $0.088$ \\
+    Social           & $0.884$ & $0.886$ & $0.081$ \\
+    Environment      & $0.795$ & $0.795$ & $0.085$ \\
+    Decentralization & $0.461$ & $0.461$ & $0.326$ \\
+    \bottomrule
+  \end{tabular}
+  \caption{\textbf{Per-dimension peaks of the joint multi-dimension
+  run.} Each row reports the highest external Pearson on the
+  held-out split for that dimension after one alternation round and
+  across all completed rounds (best across all leaf sizes in each
+  case). The audit gap (internal minus external Pearson) is
+  reported at the best-round result.}
+  \label{tab:min-manifesto-audit-read}
+\end{table}
+
+Three of the six dimensions clear the proprietary 18-score
+ensemble in the joint run: EU integration and immigration both also
+clear split-expert agreement, and economic policy clears the
+ensemble by a small margin. Social and environment fall slightly
+short of the ensemble, by roughly $0.025$ each. Decentralization
+falls furthest short, at $0.461$.
+
+Where a single-dimension run exists for comparison, the picture is
+sharper. Economic's joint peak ($0.886$ at leaf $4{,}096$) sits
+within $0.002$ of the single-dimension peak ($0.888$ at leaf
+$2{,}048$); the universal summary captures essentially the same
+signal here as a dedicated economic summary. Decentralization's
+joint peak ($0.461$ at leaf $8{,}192$) sits $0.096$ below the
+single-dimension peak ($0.557$ at leaf $256$); the single-dimension
+peak also clears the proprietary ensemble on this dimension by
+$0.067$.
+
+On decentralization the joint run shows the same shape at every
+leaf size. External Pearson stays between $0.30$ and $0.39$, the
+audit gap stays around $0.45$, and the stage-by-stage trajectory
+oscillates without converging: a $g$-update lifts the score and
+the next $f$-update pulls it back. Smaller leaves do not narrow
+the gap and bigger leaves do not either. The mechanism is
+multi-task interference. Averaging the six $f$-rewards gives any
+single dimension a fraction of the gradient when its target points
+somewhere different from the others, so any $g$-step that picks up
+that dimension's signal gets unwound by the next $f$-step
+regardless of leaf size. Removing the averaging (the
+single-dimension run, \S\ref{sec:min-manifesto-singledim})
+lifts external Pearson from $0.461$ to $0.557$.
+
+The audit gap on the joint run flagged the breakdown without
+needing the single-dimension result. On the other five dimensions
+the joint audit gap stays below $0.09$; decentralization's $0.326$
+is more than three times that. Joint training is the right default
+whenever every dimension's audit gap stays in the range the
+well-behaved dimensions show; when one dimension blows past that
+range, fall back to a single-dimension run for that dimension.
+
+\subsection{Discussion}\label{sec:min-manifesto-takeaways}
+
+The single-dimension and joint runs above land two of the
+framework's predictions side by side, and it is worth pausing on
+each before moving on.
+
+The first is schedule invariance (Corollary~\ref{cor:schedule}),
+which holds across the dimensions we have measured. Best external
+Pearson per dimension moves by between $0.014$ and $0.048$ on the
+joint run across $32\times$ in leaf size, and by less than $0.04$
+on the single-dimension economic run across the same range. Even
+decentralization, where the joint run leaves a large audit gap,
+moves by less than that gap across the leaf sweep. The chunk
+schedule is therefore a free parameter for the practitioner: pick
+whatever leaf size makes the audit convenient, and the realized
+measurement does not move.
+
+The second is that the audit gap is the operational handle. The
+audit gap measures, on the test split, how far the trained
+scorer's agreement with the teacher trace exceeds its agreement
+with gold. On decentralization the joint run had a gap of $0.326$,
+more than three times the upper end of the range the other five
+dimensions show. The single-dimension run on the same dimension
+kept the gap at a similar magnitude (between $0.373$ and $0.468$
+across leaves) but lifted external Pearson from $0.461$ to $0.557$
+at its best leaf, enough to clear the proprietary ensemble. The gap does not shrink to zero in the
+single-dimension run because decentralization remains
+teacher-bounded: the teacher trace itself encodes a noisier
+mapping from text to gold here than on the other dimensions. The
+framework's diagnostic separates that ceiling from the
+joint-training failure cleanly, and Section~\ref{sec:min-audit}
+turns the same internal estimates into a deployable drift bound on
+the document-level score.

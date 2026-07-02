@@ -1,0 +1,235 @@
+\section{C-Tree Math}\label{sec:v8-ctree-math}
+
+\subsection{Objects and States}
+
+Let \(\mathcal X\) be the input domain for manifestos and manifesto spans, let
+\(\mathcal Y\) be the task-output space, and let \(\mathcal Z\) be the
+policy-state space. Fix a manifesto \(x\in\mathcal X\). A realized C-Tree is a
+finite ordered binary tree \(T\) with node set \(V(T)\) and leaves forming a
+fixed contiguous partition of \(x\). Each node \(v\in V(T)\) represents a span
+\(x_v\in\mathcal X\): at a leaf, \(x_v\) is the raw manifesto span; at an
+internal node with left child \(u\) and right child \(w\),
+\(x_v=x_u\concat x_w\). Here \(\concat\) denotes ordered concatenation. The
+root span is \(x_{\mathrm{root}}=x\).
+
+The C-Tree learns one state map, written \(g\). The same \(g\) is called in
+different C-Tree contexts: on a raw block, on a produced state that re-enters
+the summarizer, or on a pair of child states. The stored state at node \(v\)
+is
+\[
+  z_v =
+  \begin{cases}
+    g(x_v), & v \text{ is a leaf},\\
+    g(z_u,z_w), & v \text{ has children }u,w.
+  \end{cases}
+\]
+The argument type and tree context determine which call is being made; the
+learned object is still one \(g\).
+States are queryable either directly or through a renderer into the readout
+interface. We suppress that renderer and write \(f(z)\) and \(\widehat f(z)\)
+for a readout applied to the state \(z\).
+
+The target oracle is \(f^\ast\), and the fitted proxy readout is
+\(\widehat f\). In the Manifesto application, \(f^\ast\) is the expert policy
+score or the application-aligned rubric score for one policy dimension. It is
+directly observed only when the oracle is called. The hat in \(\widehat f\)
+marks a cheaper estimated readout used for dense local supervision. For any
+readout \(q\), query equivalence is
+\[
+  a\sim_q b
+  \quad\Longleftrightarrow\quad
+  d_Y(q(a),q(b))=0 .
+\]
+Here \(d_Y\) is the task-space discrepancy on \(\mathcal Y\), and
+\(a\sim_q b\) means that \(a\) and \(b\) are indistinguishable by query \(q\).
+For the main text we specialize to the oracle query \(q=f^\ast\) and write
+\[
+  a\sim_\ast b
+  \quad\Longleftrightarrow\quad
+  d_Y(f^\ast(a),f^\ast(b))=0 .
+\]
+This convention treats an \(f^\ast\) call as observation-error-free once it is
+made; the estimation problem is that such calls are sparse. Approximate
+equivalence replaces \(0\) by a tolerance. Training may measure local residuals
+through \(\widehat f\) and then correct or transfer those residuals back to
+\(f^\ast\).
+
+\begin{table}[t]
+  \centering
+  \small
+  \begin{tabular}{@{}p{0.22\linewidth}p{0.68\linewidth}@{}}
+    \toprule
+    Symbol & Meaning \\
+    \midrule
+    \(x,T,V(T),v\) & Manifesto, realized C-Tree, node set of the tree, and a node. \\
+    \(u,w\) & Left and right child nodes of an internal node. \\
+    \(x_v,z_v\) & Manifesto span represented by node \(v\), and the policy state stored at \(v\). \\
+    \(g\) & One learned C-Tree state map/program, called in leaf, re-entry, and merge contexts. \\
+    \(\mathcal X,\mathcal Y,\mathcal Z,\concat\) & Input domain, task-output space, state space, and ordered concatenation. \\
+    \(d_Y,\sim_\ast\) & Task-space discrepancy and oracle equivalence. \\
+    \(f^\ast,\widehat f\) & Target oracle readout and fitted proxy readout. \\
+    C1/C2/C3 & Leaf preservation, re-entry preservation, and merge preservation local laws. \\
+    \bottomrule
+  \end{tabular}
+  \caption{\textbf{Core notation for the C-Tree math.}}
+  \label{tab:v8-core-notation}
+\end{table}
+
+\begin{assumption}[Fixed Realized Tree]\label{ass:v8-fixed-tree}
+For each document \(x\), the leaf partition and tree topology are conditioned
+on as fixed when stating the local laws and the objective.
+\end{assumption}
+
+The assumption isolates representation validity from partition selection. A
+deterministic partition rule returns the same statement after conditioning on
+its realized tree.
+
+\subsection{Local Laws}
+
+The three local laws are stated on the realized calls made by the tree.
+
+\begin{definition}[Oracle C-Tree Local Laws]\label{def:v8-local-laws}
+For a realized tree \(T\), state map \(g\), and target oracle \(f^\ast\), the
+local laws are:
+\[
+\begin{aligned}
+\mathrm{C1:}\quad&
+g(x_v)\sim_\ast x_v
+&&\text{for every leaf }v,\\
+\mathrm{C2:}\quad&
+g(z_v)\sim_\ast z_v
+&&\text{for every produced state }z_v,\\
+\mathrm{C3:}\quad&
+g(z_u,z_w)\sim_\ast x_u\concat x_w
+&&\text{for every internal node }v=(u,w).
+\end{aligned}
+\]
+\end{definition}
+
+C1 is the entry condition. It says that once a raw manifesto span enters the
+tree, the state \(g(x_v)\) is already sufficient for oracle-facing questions
+about that span. A leaf state may be shorter, more structured, or more
+readable than the raw text, but it must stay in the same \(f^\ast\)-fiber.
+
+C2 is the on-range stability condition. It says that a policy state produced
+by \(g\) remains oracle-equivalent if it is passed through \(g\) again. This
+prevents a cleanup or re-summary pass from turning a conditional policy claim
+into a different expert-facing position.
+
+C3 is the compositional condition. It says that merging two child states
+produces a parent state equivalent to the represented parent span
+\(x_u\concat x_w\). This is where cross-section policy meaning matters. The
+parent state must preserve interactions that are invisible from scalar child
+scores: qualifications, contradictions, cross-references, and tradeoffs between
+tax, spending, welfare, environmental, or decentralization claims.
+
+The local laws are not only diagnostics applied after training. They define
+which learned state maps count as sensible for the task. The oracle-specialized
+laws above define the ideal admissible class. In practice, dense local training
+uses \(\widehat f\), so the fitted proxy induces the constraint surface on
+\(g\) between sparse oracle calls. Sampled \(f^\ast\) node calls then estimate
+and correct the proxy-oracle gap in that local-law channel.
+
+\subsection{Why States Matter}
+
+The local laws are state laws, not scalar-score laws. If an economic-policy
+leaf stores only \(f^\ast(x_v)\), then the parent has no access to evidence
+that may matter only after two spans are read together. Two child spans can
+have the same local score and still differ in whether they supply a tax
+qualification, spending condition, or regional-autonomy exception. The state
+\(z_v\) is the carrier for that interaction information.
+
+This is the sense in which a C-Tree can support more than one downstream
+readout of the same compressed manifesto, provided those readouts respect the
+oracle equivalence relation. The theorem below does not say that a bag of
+local policy scores is enough. It says that if the states satisfy the local
+laws, then the root state lies in the same \(\sim_\ast\) class as the original
+manifesto. Anything that is constant on those classes can then be evaluated at
+the root.
+
+\begin{theorem}[Local Laws Preserve the Root]\label{thm:v8-root-preservation}
+If C1, C2, and C3 hold exactly for \(g\), \(T\), and \(f^\ast\), then the root
+state preserves the document oracle:
+\[
+  d_Y\!\left(f^\ast(z_{\mathrm{root}}),f^\ast(x)\right)=0 .
+\]
+For stochastic C-Tree reductions and \(m\ge 1\) re-summary rounds, the
+expected oracle distortion is zero.
+\end{theorem}
+
+The proof is induction over the tree plus the re-entry step supplied by C2.
+The appendix records the corresponding machine-checked theorem names.
+
+\begin{corollary}[Oracle-Compatible Readouts Pass Through C-Tree Nodes]
+\label{cor:v8-preferences-pass-to-root}
+Call a readout \(\Phi\) \emph{oracle-compatible} if
+\[
+  a\sim_\ast b \quad\Longrightarrow\quad \Phi(a)=\Phi(b).
+\]
+Under exact C1/C2/C3 local laws, every realized node \(v\in V(T)\) satisfies
+\[
+  \Phi(z_v)=\Phi(x_v).
+\]
+Taking \(v=\mathrm{root}\) gives the root statement
+\(\Phi(z_{\mathrm{root}})=\Phi(x)\).
+
+For pairwise preferences, let \(P\) be a comparison rule that is
+oracle-compatible in both arguments:
+\[
+  a\sim_\ast a',\ b\sim_\ast b'
+  \quad\Longrightarrow\quad
+  P(a,b)=P(a',b').
+\]
+Then any two valid node states, from the same C-Tree or from different
+C-Trees satisfying the same oracle laws, can replace their raw blocks:
+\[
+  P(z_v,z_{v'})=P(x_v,x_{v'}).
+\]
+\end{corollary}
+
+The node-level form is what makes the local-law losses useful as local
+supervision rather than only as an indirect route to a final document score. If
+the raw block \(x_v\) is a meaningful unit for a task-facing readout, then a
+valid state \(z_v\) is meaningful for the same readout, provided the readout
+depends only on the oracle equivalence class. The root is only the largest
+such block.
+
+The restriction is essential. A preference about information not represented in
+\(f^\ast\) is not certified by this theorem, even if the root preserves
+\(f^\ast\) exactly. To certify that preference, the oracle must be expanded to
+include the relevant readout, or the local laws must be stated for a richer
+query family. Within the chosen oracle interface, the corollary is the
+preference-learning reason the exact theorem matters: a valid C-Tree root can
+stand in for the original long document for scores that respect that interface.
+
+This is the sense in which the policy-state story connects to classical
+mergeable summaries. A classical sketch chooses the state by hand and proves
+the merge law. A learned C-Tree chooses a state class and uses local-law losses
+plus audits to decide whether the fitted state behaves as a valid
+task-relative state machine.
+
+\subsection{From Exact Laws to Learning}
+
+The exact statement above assumes that the oracle is readily available and can
+be queried wherever we need it. If we could call \(f^\ast\) at every leaf,
+state, and merge, then the learning problem would be almost direct: search for
+a \(g\) whose C1/C2/C3 discrepancies are small under \(f^\ast\), while also
+fitting the manifesto-level target.
+
+In the manifesto LLM setting, that is usually not the regime we are in. An
+\(f^\ast\) call may be an expert label, an expensive teacher judgment, or a
+local policy-evidence label derived from application-aligned coding. We
+therefore do not generally observe the oracle local-law loss at every node.
+Before discussing estimation, however, we should still say what the
+optimization problem is. C-TreePO optimizes one learned state map \(g\) for
+two purposes at once: it should be useful at the root, and it should behave
+like a valid C-Tree state throughout the realized tree.
+
+A realized tree makes this approximation problem concrete. At a leaf, we ask
+whether the state preserves the raw policy evidence. At a produced state, we
+ask whether re-entry changes the expert-facing content. At an internal node,
+we ask whether merging child states preserves the concatenated span. These are
+the same semantic requirements used in the exact theorem.
+Section~\ref{sec:v8-objective} turns them into an optimization target, and
+Section~\ref{sec:v8-audit-certificate} explains how sparse oracle calls
+estimate the local-law channel when dense training uses \(\widehat f\).

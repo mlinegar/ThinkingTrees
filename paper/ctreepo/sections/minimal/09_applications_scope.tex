@@ -1,0 +1,38 @@
+\section{Applications and Scope}\label{sec:min-applications}
+
+The natural application class is rubric-driven measurement on long, sectioned
+documents: manifestos, policy platforms, legal records, clinical narratives,
+and book-length reports. These tasks have global targets but many local
+evidence sites. C-TreePO is useful when the target can be expressed as a
+task-relative state that survives local replacement: paragraphs support
+section summaries, sections support document summaries, and the root supports
+the original document-level judgment.
+
+The observation level depends on the application. Some studies, including the
+Manifesto/Benoit benchmark reported here, observe full-document labels for the
+sampled corpus and evaluate only the root prediction. Other deployments need a
+node-level certificate because they want to replace some root labeling with
+local labels, audit a deployed tree, or train the local summarizer directly.
+
+The framework does not make LLM surrogate labels automatically safe.
+\citet{EgamiEtAl2024} emphasize that high prediction quality can still bias
+downstream inference when surrogate errors interact with the estimand. C-TreePO
+addresses the compression part of that problem. It separates local
+preservation error from judge calibration error and reports both in the
+objective-gap certificate.
+
+Neighboring methods solve related but different problems. Long-context models
+reduce truncation pressure but do not certify that one read preserved every
+rubric-relevant interaction. RAG retrieves useful chunks but does not certify
+what un-retrieved evidence was lost. Tree-based text compression provides
+composition machinery
+\citep{KnightMarcu2000SentenceCompression,BarzilayMcKeown2005SentenceFusion,ClarkeLapata2008ILPSentenceCompression,KuznetsovaEtAl2014TreeTalk};
+C-TreePO adds the task oracle, local laws, and design-based audit.
+
+The failure modes are also clear. If the economic score depends on evidence
+that the leaves never see, C1 will fail. If the score depends on a tension
+between sections and the child summaries drop one side, C3 will fail. If a
+cleanup pass changes the measured position, C2 will fail. If annotators care
+about style, persuasion, or tone beyond the stated content oracle, the
+oracle-measurability assumption for preference training fails and the target
+must be widened or the certificate must report the residual.

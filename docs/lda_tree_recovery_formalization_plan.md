@@ -183,6 +183,23 @@ Its role is to prove:
 2. any histogram-based document utility is preserved exactly,
 3. bag-of-words LDA document likelihood is therefore preserved exactly.
 
+New aggregate-statistics file:
+
+- `FormalProofs.OPT.LDAAggregateStatistics`
+
+Its role is to prove:
+
+1. leaf-level word counts, soft topic counts, word-topic responsibility counts,
+   and outer-product word co-occurrences merge into the full-document statistic,
+2. document topic proportions and smoothed topic proportions are exact readouts
+   from the tree root statistic,
+3. adjacent word co-occurrences are exact when the sketch carries boundary
+   first/last words,
+4. any LDA document target `fstar` that factors through the aggregate state has
+   an exact summary/oracle decomposition using one node-level summary operator
+   `ldaExactG` plus an oracle/readout `f`, with zero doc-level supervision
+   error on every supported document tree.
+
 Planned next Lean file after that:
 
 - a local-mixture bridge showing when pooled document counts cease to be sufficient for the target.

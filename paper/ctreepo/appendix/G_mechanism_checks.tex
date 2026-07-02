@@ -1,16 +1,216 @@
 \section{Controlled Mechanism Checks}\label{app:mechanism-checks}
 
-This appendix is self-contained. It collects the controlled simulations
-that test the paper's mechanism claims in isolation --- phase behavior
-on the toy sketch, failure attribution on a complexity ladder, learning
-a merge rule from oracle feedback alone, full-tree shared-$g$ supervision
-with sampled-node IPW, and tree--FNO parity in the single-leaf regime.
-Each subsection asks whether a specific failure or recovery pattern
-predicted by the theory appears when ground truth is known exactly. None
-of these results are headline claims; they are diagnostics that let a
-reader stress-test the theory piece by piece. The same appendix also
-documents the FNO-head architecture and the repo-wide $2\times$ headroom
-invariant that Section~\ref{sec:fno-primer} points to.
+This appendix is self-contained. It collects the synthetic
+data-generating process and supervision-allocation specification
+behind the headline plot of Section~\ref{sec:markov-walkthrough},
+plus the controlled simulations that test the paper's mechanism
+claims in isolation --- phase behavior on the toy sketch, failure
+attribution on a complexity ladder, learning a merge rule from oracle
+feedback alone, full-tree shared-$g$ supervision with sampled-node
+IPW, and tree--FNO parity in the single-leaf regime. Each subsection
+asks whether a specific failure or recovery pattern predicted by the
+theory appears when ground truth is known exactly. None of these
+results are themselves headline claims; they are the reproducibility
+backstop and diagnostics that let a reader stress-test the theory
+piece by piece. The same appendix also documents the FNO-head
+architecture and the repo-wide $2\times$ headroom invariant that
+Section~\ref{sec:fno-primer} points to.
+
+\subsection{Walk-Through DGP and Models}\label{app:walkthrough-dgp}
+
+\paragraph{The two regimes.}
+Section~\ref{sec:markov-walkthrough} reports tree-vs-flat results on
+the controlled Markov changepoint DGP from
+\S\ref{sec:scene-register-example}. Two regimes appear in the
+figures. The \textbf{recoverable} regime uses $K=4$ hidden registers
+and roughly five register changes per document, sized so that an
+oracle estimator built on $(\text{internal shifts}, \text{first
+register}, \text{last register})$ achieves zero MAE; this is the
+``can the model match the oracle floor'' setting. The
+\textbf{structural} regime uses $K=12$ hidden registers and ten to
+twelve segments per document, so the same $(c, \text{first},
+\text{last})$ triple has more boundary information to track at each
+node. Documents are sequences of $128$ positions, each emitting one
+observed token from a $4$-token disjoint palette per register.
+Table~\ref{tab:dgp} summarizes both.
+
+\begin{table}[t]
+    \centering
+    \small
+    \begin{tabular}{lcc}
+        \toprule
+        & \textbf{Recoverable} & \textbf{Structural} \\
+        \midrule
+        Hidden registers $K$ & 4 & 12 \\
+        Document length & \multicolumn{2}{c}{128 tokens} \\
+        Synonym tokens per register & \multicolumn{2}{c}{4 (disjoint palettes)} \\
+        \midrule
+        Switch probability $h$ & $0.039$ & $0.079$ \\
+        Expected register shifts & ${\sim}5$ & ${\sim}10$--$12$ \\
+        \bottomrule
+    \end{tabular}
+    \caption{\textbf{Walk-through data-generating process.}
+    At each position the hidden register stays (prob.\ $1{-}h$) or switches to a uniformly random alternative (prob.\ $h/(K{-}1)$ each). The observed token is drawn uniformly from that register's $4$-token palette. Both regimes use $10{,}240$ training documents and a fixed $1{,}024$-document test set (data seed held at $0$).}
+    \label{tab:dgp}
+\end{table}
+
+\paragraph{Models.}
+The flat baseline is a Fourier neural operator applied to the full
+$128$-token document with a classification head trained against the
+root oracle (cross-entropy). The tree applies the same FNO core to
+each leaf, then merges sibling states pairwise up to the root with a
+small learned MLP. The FNO architecture in both is identical:
+$128$-wide Fourier layers, $8$ modes, $4$ layers, with a token
+embedding and masked mean pooling. The tree's read-out is a two-stage
+projection: a leaf projector concatenates the pooled FNO output with
+first/last token features, and a shared encoder $g$ (MLP) maps that
+to the leaf state. The merge projector takes two child states to a
+parent state of the same dimension and applies the same $g$. FNO
+parameters are shared across all leaves. With one leaf spanning the
+full document the tree reduces to the flat baseline up to the
+readout-head difference; \S\ref{sec:single-leaf-parity} verifies the
+empirical parity.
+
+\paragraph{Two-stage training.}
+The flat FNO trains for $40$ epochs against root labels only. The
+tree trains in two stages. \emph{Stage 1} ($10$ epochs) uses only
+local terms: each leaf and merge node predicts the count on its span,
+trained against the closed-form oracle (C1 leaf supervision and C3
+merge supervision). \emph{Stage 2} ($30$ epochs) adds root loss at
+$20\%$ weight while keeping local terms at $80\%$. Stage 1
+checkpoints are shared across all panels in a column of the
+walk-through grids, so differences within a column are driven by
+stage-2 supervision only.
+
+\paragraph{Supervision-budget vocabulary.}
+The walk-through varies the fraction of documents receiving root
+(full-document) labels from $100\%$ down to $10\%$. To make
+``equal total supervision'' precise, think in \emph{token mass}. At
+$100\%$ root share, every one of the $10{,}240$ training documents
+contributes a full-document label observed over $128$ tokens, for a
+total budget of $10{,}240 \times 128 = 1{,}310{,}720$
+token-observations. At $50\%$ root share without compensation, only
+half the documents get root labels and the budget halves. The
+\emph{reallocation} family keeps that total budget fixed by
+substituting local labels for the missing root labels: a leaf label
+on a $16$-token span counts as $16$ token-observations, so
+eight leaf labels equal one root label's worth of budget.
+
+\paragraph{Three reallocation policies.}
+Three policies distribute the local portion of the budget
+differently:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Leaf-only:} all local budget goes to leaf-level
+          count labels.
+    \item \textbf{Depth-equal:} local budget split equally across
+          non-root tree depths.
+    \item \textbf{Balanced-node:} local budget split equally across
+          all non-root nodes.
+\end{itemize}
+At leaf sizes $128$ and $64$ there are no non-root internal nodes,
+so the three policies are identical; they diverge starting at leaf
+size $32$.
+
+\paragraph{Protocol.}
+Every panel uses the same $10{,}240$-document training bundle and the
+same fixed $1{,}024$-document test set (data seed held at $0$).
+Within the root-only family, the set of documents receiving root
+labels at $r\%$ is a nested prefix subset of the set at $r'\%$
+whenever $r<r'$, i.e., $\mathrm{docs}(r{=}10\%) \subset
+\mathrm{docs}(r{=}20\%) \subset \cdots \subset
+\mathrm{docs}(r{=}100\%)$. The same nesting holds within the
+reallocation-policy family, both for root labels and for the
+additional local labels. The root-only family and the reallocation
+family sample from slightly different seeded orderings (overlap
+${\approx}\,90\%$ at $r{=}90\%$), so the two families are jointly
+calibrated but not identical doc-for-doc. Each configuration is
+trained with a single seed; averaging across seeds is expected to
+remove the visible single-seed outliers in the leaf-mass plots
+without changing the ordering.
+
+\paragraph{Recoverable companion plot.}
+The structural panel in main (Figure~\ref{fig:leaf-size-structural})
+has a recoverable companion shown in
+Figure~\ref{fig:leaf-size-recoverable}: the same axes, the same
+training protocol, but on the four-register regime where the oracle
+floor is exactly zero. Comparing the two panels shows that the
+``safe band'' of leaf sizes ($32$--$64$ tokens) holds in both
+regimes; the structural panel just has a wider quantitative gap
+between the safe band and the failure regime.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.92\linewidth]{markov_leaf_size_fixed_recoverable.pdf}
+    \caption{\textbf{Recoverable-regime companion of Figure~\ref{fig:leaf-size-structural}.} Same axes (root share $\times$ leaf size), same protocol, but on the four-register DGP with about five expected register shifts per document. The oracle floor is zero MAE in this regime; the tree reaches it across the safe band of leaf sizes ($32$--$64$ tokens) for most root-share rows.}
+    \label{fig:leaf-size-recoverable}
+\end{figure}
+
+\paragraph{Earlier leaf-mass and budget-split plots.}
+Figures~\ref{fig:simple-leaf-mass-app}, \ref{fig:hard-leaf-mass-app},
+and~\ref{fig:budget-split-app} are the per-policy and per-regime
+plots from earlier rounds of the walk-through. They are kept here for
+reproducibility: the simple-case leaf-mass plot
+(Figure~\ref{fig:simple-leaf-mass-app}) panels the four-register DGP
+across root-label budgets and shows the three reallocation policies
+tracking each other; the hard-case version
+(Figure~\ref{fig:hard-leaf-mass-app}) repeats the same layout on the
+twelve-register DGP and shows the policy spread widening at low root
+share; the budget-split plot
+(Figure~\ref{fig:budget-split-app}) sweeps the fraction of total
+token budget spent on root vs.\ local labels at fixed leaf geometry,
+and pins down the ``half the root labels can be replaced at no cost''
+finding.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{markov_simple_leaf_mass.png}
+    \caption{\textbf{Recoverable case ($K=4$, ${\sim}5$ shifts): supervision-budget panels.}
+    Each panel fixes a root-label share ($10{,}240$ docs total).
+    \emph{x}: leaf size (leaves per doc). \emph{y}: test MAE (lower is better).
+    \textcolor{green!50!black}{\textbf{Green}}: root labels only (lower total token budget).
+    \textcolor{blue!70!black}{\textbf{Blue}}/\textcolor{violet}{\textbf{purple}}/\textcolor{red!50!blue}{\textbf{rose}}: same total token budget as $100\%$, split between root and local labels under the three allocation policies.
+    \textcolor{orange!80!black}{\textbf{Amber}}: flat FNO.
+    At leaf~$128$: hollow diamond = 1-leaf tree (parity check, matches FNO red~X); gray triangle = richer local targets (ceiling).
+    The three reallocation curves track each other in aggregate, and the tree outperforms FNO at every budget. Single-seed outliers remain visible at the 1-leaf geometry where local labels coincide with the root label.}
+    \label{fig:simple-leaf-mass-app}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{markov_hard_leaf_mass.png}
+    \caption{\textbf{Structural case ($K=12$, ${\sim}10$ shifts): supervision-budget panels.}
+    Same layout as Figure~\ref{fig:simple-leaf-mass-app}, and same protocol. Tree outperforms FNO at every budget (MAE $0.83$--$1.21$ vs.\ $1.25$--$2.43$). Allocation policies overlap, confirming the finding. Margins compressed; policy divergence sharper at low budgets.}
+    \label{fig:hard-leaf-mass-app}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{markov_budget_split.png}
+    \caption{\textbf{Splitting the token budget between root and local labels.}
+    Total token budget is held fixed at the $100\%$ level across the blue/purple/rose curves.
+    \emph{x}-axis: what fraction of that budget is spent on root labels; the rest goes to local labels. Each panel fixes a leaf geometry (only leaf~$32$, $16$, $8$ shown---these are the geometries with non-root internal nodes where allocation policies can differ).
+    \textcolor{green!50!black}{\textbf{Green star}}: all-root reference ($100\%$ root).
+    \textcolor{green!50!black}{\textbf{Green line}}: root labels only at each share (total budget shrinks).
+    \textcolor{blue!70!black}{\textbf{Blue}}/\textcolor{violet}{\textbf{purple}}/\textcolor{red!50!blue}{\textbf{rose}}: three local-allocation policies (total budget fixed).
+    \textcolor{orange!80!black}{\textbf{Amber}}: flat FNO.
+    The reallocation curves stay flat from $100\%$ down to ${\sim}40\%$ root, then degrade---roughly half the root labels can be replaced by local labels at no cost to accuracy.}
+    \label{fig:budget-split-app}
+\end{figure}
+
+\paragraph{Three findings carried forward.}
+Three findings from the leaf-mass and budget-split panels carry into
+the headline plot in main. First, \textbf{decomposition does not lose
+information}: the tree matches or improves on the flat FNO at every
+supervision level, in both regimes; the one-leaf parity check
+(hollow diamond) confirms the gains come from the decomposition
+rather than from differences at the readout head. Second, \textbf{the
+supervision budget can be split}: keeping the same total token
+budget but replacing some root labels with local labels on smaller
+spans produces nearly the same root accuracy, and the allocation
+policy barely matters in aggregate. Third, \textbf{limits are real}:
+the structural regime compresses the safe band, very low root
+budgets degrade all policies, and the allocation curves diverge more
+when the leaves are too small to carry the boundary information.
 
 \subsection{Phase Behavior}
 
@@ -45,7 +245,7 @@ On held-out fully labeled trees, we therefore report two distinct quantities. Th
 
 \subsection{Tree--FNO Parity in the Single-Leaf Regime}\label{sec:single-leaf-parity}
 
-\textbf{What this tests:} whether the tree architecture, when configured with a single leaf spanning the full document, achieves empirical parity with the flat FNO baseline. In this regime the tree has no merge operations and the local laws hold vacuously: C1 (leaf sufficiency) is trivial because the leaf \emph{is} the document, and C2 (merge consistency) is trivial because no internal nodes exist ($\texttt{internal\_nodes}(\texttt{leaf}\;b) = \varnothing$, so the universal quantifier in L2 is vacuously true). The \texttt{single\_leaf\_one\_pass} corollary therefore guarantees zero expected distortion whenever L1 holds, regardless of law weights or merge-network parameters. The hierarchical reduction is definitionally the encoder: $\texttt{reduce}\;g\;(\texttt{leaf}\;b) = g\;b$.
+\textbf{What this tests:} whether the tree architecture, when configured with a single leaf spanning the full document, achieves empirical parity with the flat FNO baseline. In this regime the tree has no merge operations and the merge-side law is vacuous: C1 (leaf sufficiency) is trivial because the leaf \emph{is} the document, and C3 (merge consistency) has no internal-node instances ($\texttt{internal\_nodes}(\texttt{leaf}\;b) = \varnothing$, so the universal quantifier in Lean L2 is vacuously true). C2/idempotence is relevant only if additional re-summarization rounds are invoked. The \texttt{single\_leaf\_one\_pass} corollary therefore guarantees zero expected distortion whenever L1 holds, regardless of law weights or merge-network parameters. The hierarchical reduction is definitionally the encoder: $\texttt{reduce}\;g\;(\texttt{leaf}\;b) = g\;b$.
 
 At the implementation level, the tree model (\texttt{FNOCountSketch}) and the standalone FNO baseline (\texttt{FNOCountPredictor}) share the same 1D FNO processing core---token embedding, Fourier layers, masked mean pooling---but differ in their readout heads: the tree uses a two-stage projection (leaf projector then scalar readout with sigmoid), while the FNO uses a classification head with cross-entropy loss. In the single-leaf regime the tree's merge network exists but is never invoked (the code returns the leaf state directly). This experiment therefore tests \emph{empirical} parity: whether these architectural differences at the readout layer are negligible in practice when the FNO core is matched.
 

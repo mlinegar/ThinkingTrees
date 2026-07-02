@@ -1,0 +1,65 @@
+\section{Social-Science Measurement Setting}\label{sec:social-measurement}
+
+The semantic application in the next section is a measurement problem,
+not a long-context summarization benchmark: a researcher has a
+rubric, a trusted but expensive target judgment, and a downstream analysis
+that can be biased if cheaper labels preserve surface accuracy while
+dropping task-relevant distinctions. That is the setting in which the
+oracle language of Sections~\ref{sec:framework}--\ref{sec:theorems}
+matters most.
+
+\subsection{Rubrics, Expert Means, and Agreement}
+
+Comparative-politics text measurement is built around expert-defined
+constructs: economic left--right placement, social liberalism, immigration,
+European integration, environmental policy, decentralization, and related
+issue scales. The Manifesto Project provides the long-document corpus
+\citep{ManifestoProject2025a}; \citet{BenoitEtAl2025} provide the recent
+LLM benchmark we use, comparing model-produced scores to expert-survey
+means on seven-point policy scales. In this design, the target is a
+construct-level party-position estimate obtained by aggregating expert
+judgments, not a single annotator's sentence label; split-expert
+correlations are an empirical agreement reference for how noisy that
+measurement target is.
+
+This matters for C-TreePO because the object being preserved is the
+rubric-indexed judgment, not the literal text. A summary can safely discard
+stylistic details, slogans, and redundant examples if the expert-scale
+position remains unchanged. It fails when it drops evidence that changes
+the issue placement or a cross-section interaction that an expert would
+have used to resolve an ambiguous platform.
+
+\subsection{Surrogate Labels and Downstream Inference}
+
+LLMs are attractive in this setting because they can cheaply produce
+rubric labels, explanations, and summaries for many long documents.
+Social-science use demands more than correlation with expert means.
+\citet{EgamiEtAl2024} show that using imperfect surrogate
+labels in downstream inference can induce bias even when prediction
+quality is high, and their design-based supervised-learning framework
+uses gold-standard annotations to correct that risk. C-TreePO addresses
+the complementary compression question: when a long document is replaced
+by a tree summary, what evidence has to survive for the downstream
+oracle-indexed claim to remain valid?
+
+The audit in Section~\ref{sec:estimation} is therefore a measurement
+instrument, not a generic quality score. It samples leaf, idempotence, and
+merge checks from the realized tree; the calibration residual measures the
+gap between the judge used during training or auditing and the expert
+oracle the researcher ultimately trusts; and the finite-sample envelope
+states how much uncertainty remains after collecting global and local
+labels.
+
+\subsection{Why the Manifesto Benchmark Fits}
+
+Manifestos have exactly the structure the framework is meant to test.
+They are long, sectioned documents; their issue positions are rubric-coded;
+their evidence is often local but can be resolved by interactions across
+sections; and the benchmark reports external expert means rather than only
+model-internal consistency. Section~\ref{sec:manifesto-llm} keeps the
+empirical protocol and numbers in one place. The interpretation to carry
+into it: matching the benchmark is evidence that a
+single open-weight, tree-structured prompt program can preserve a
+social-science measurement target, while the local-law audit supplies the
+failure modes and finite-sample caveats that a flat long-context read does
+not expose.

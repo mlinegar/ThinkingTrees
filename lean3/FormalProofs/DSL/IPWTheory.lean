@@ -1,6 +1,7 @@
 import FormalProbability.DSL.IPWTheory
 import FormalProofs.OPT.ExpectationTheory
 import Mathlib.Probability.Moments.SubGaussian
+import Mathlib.Probability.Moments.Covariance
 import Mathlib.Probability.Independence.Basic
 import Mathlib.Probability.ProbabilityMassFunction.Integrals
 
@@ -24,6 +25,7 @@ open scoped BigOperators Real Nat Classical Pointwise NNReal ENNReal MeasureTheo
 open MeasureTheory Measure ProbabilityTheory
 
 set_option maxHeartbeats 400000
+set_option synthInstance.maxHeartbeats 80000
 set_option maxRecDepth 4000
 set_option relaxedAutoImplicit false
 set_option autoImplicit false
@@ -58,6 +60,451 @@ lemma htExp_unbiased (f : ι → ℝ) :
   simpa [htExpEstimator, Exp, tsum_fintype] using
     (ht_expectation (p := pi) (hp_pos := hpi_pos) (hp_le := hpi_le)
       (y := fun i => (p i).toReal * f i))
+
+/-- Exact HT unbiasedness needs only correct logged marginal propensities, not
+independent sampling. This is the design-based form used by the audit
+robustness discussion: if the logged propensity `pi i` is the marginal
+inclusion probability of unit `i`, inverse-propensity weighting targets
+`Exp p f`. -/
+theorem htExp_unbiased_of_logged_marginals
+    (μ : Measure (ι → Bool)) [IsFiniteMeasure μ]
+    (f : ι → ℝ)
+    (hpi_pos : ∀ i, 0 < pi i)
+    (h_marginal : ∀ i, ∫ ω, indicator i ω ∂μ = pi i) :
+    ∫ ω, htExpEstimator p pi f ω ∂μ = Exp p f := by
+  classical
+  have h_int : ∀ i ∈ (Finset.univ : Finset ι),
+      Integrable (fun ω => indicator i ω / pi i * ((p i).toReal * f i)) μ := by
+    intro i _
+    exact Integrable.of_finite
+  have h_sum :
+      ∫ ω, htExpEstimator p pi f ω ∂μ =
+        ∑ i, ∫ ω, indicator i ω / pi i * ((p i).toReal * f i) ∂μ := by
+    simpa [htExpEstimator, htEstimator] using
+      (integral_finset_sum (μ := μ) (s := Finset.univ)
+        (f := fun i ω => indicator i ω / pi i * ((p i).toReal * f i)) h_int)
+  have h_term :
+      ∀ i, ∫ ω, indicator i ω / pi i * ((p i).toReal * f i) ∂μ =
+        (p i).toReal * f i := by
+    intro i
+    have hpi_ne : pi i ≠ 0 := ne_of_gt (hpi_pos i)
+    calc
+      ∫ ω, indicator i ω / pi i * ((p i).toReal * f i) ∂μ
+          = (∫ ω, indicator i ω / pi i ∂μ) * ((p i).toReal * f i) := by
+              simpa [mul_comm, mul_left_comm, mul_assoc] using
+                (integral_mul_const (μ := μ) (r := (p i).toReal * f i)
+                  (f := fun ω => indicator i ω / pi i))
+      _ = ((∫ ω, indicator i ω ∂μ) / pi i) * ((p i).toReal * f i) := by
+              congr 1
+              simpa using (integral_div (μ := μ) (r := pi i)
+                (f := fun ω => indicator i ω))
+      _ = (pi i / pi i) * ((p i).toReal * f i) := by simp [h_marginal i]
+      _ = (p i).toReal * f i := by field_simp [hpi_ne]
+  calc
+    ∫ ω, htExpEstimator p pi f ω ∂μ
+        = ∑ i, ∫ ω, indicator i ω / pi i * ((p i).toReal * f i) ∂μ := h_sum
+    _ = ∑ i, (p i).toReal * f i := by
+          refine Finset.sum_congr rfl ?_
+          intro i _
+          exact h_term i
+    _ = Exp p f := by simp [Exp, tsum_fintype]
+
+/-!
+## Audit Robustness: Constrained-Design Variance Proxy
+
+The paper's adversarial-sampling appendix separates two facts:
+
+1. HT unbiasedness only needs correct logged marginal propensities.
+2. A variance bound additionally needs an independent Bernoulli design or an
+   explicit covariance-control condition.
+
+The definitions below expose that second condition directly. They are stated
+for a uniform finite population because that is the appendix estimator
+`N^{-1} ∑ᵢ ZᵢYᵢ/πᵢ`.
+-/
+
+/-- Uniform finite-population mean. -/
+def uniformFiniteMean (y : ι → ℝ) : ℝ :=
+  (1 / (Fintype.card ι : ℝ)) * ∑ i, y i
+
+/-- HT estimator for the uniform finite-population mean. -/
+def htUniformMeanEstimator (pi : ι → ℝ) (y : ι → ℝ) (ω : ι → Bool) : ℝ :=
+  (1 / (Fintype.card ι : ℝ)) * ∑ i, indicator i ω / pi i * y i
+
+/-- The independent-Bernoulli / covariance-controlled variance proxy:
+`N^{-2} ∑ᵢ ((1-πᵢ)/πᵢ)Yᵢ²`. -/
+def htUniformMeanVarianceProxy (pi : ι → ℝ) (y : ι → ℝ) : ℝ :=
+  (1 / (Fintype.card ι : ℝ)^2) *
+    ∑ i, ((1 - pi i) / pi i) * (y i)^2
+
+/-- Logged-marginal unbiasedness for the uniform finite-population HT mean. -/
+theorem htUniformMean_unbiased_of_logged_marginals
+    (μ : Measure (ι → Bool)) [IsFiniteMeasure μ]
+    (pi : ι → ℝ) (y : ι → ℝ)
+    (hpi_pos : ∀ i, 0 < pi i)
+    (h_marginal : ∀ i, ∫ ω, indicator i ω ∂μ = pi i) :
+    ∫ ω, htUniformMeanEstimator pi y ω ∂μ = uniformFiniteMean y := by
+  classical
+  have h_int : ∀ i ∈ (Finset.univ : Finset ι),
+      Integrable (fun ω => indicator i ω / pi i * y i) μ := by
+    intro i _
+    exact Integrable.of_finite
+  have h_sum :
+      ∫ ω, htUniformMeanEstimator pi y ω ∂μ =
+        (1 / (Fintype.card ι : ℝ)) *
+          ∑ i, ∫ ω, indicator i ω / pi i * y i ∂μ := by
+    simp [htUniformMeanEstimator]
+    rw [integral_const_mul]
+    congr 1
+    exact integral_finset_sum (μ := μ) (s := Finset.univ)
+      (f := fun i ω => indicator i ω / pi i * y i) h_int
+  have h_term :
+      ∀ i, ∫ ω, indicator i ω / pi i * y i ∂μ = y i := by
+    intro i
+    have hpi_ne : pi i ≠ 0 := ne_of_gt (hpi_pos i)
+    calc
+      ∫ ω, indicator i ω / pi i * y i ∂μ
+          = (∫ ω, indicator i ω / pi i ∂μ) * y i := by
+              simpa [mul_comm, mul_left_comm, mul_assoc] using
+                (integral_mul_const (μ := μ) (r := y i)
+                  (f := fun ω => indicator i ω / pi i))
+      _ = ((∫ ω, indicator i ω ∂μ) / pi i) * y i := by
+              congr 1
+              simpa using (integral_div (μ := μ) (r := pi i)
+                (f := fun ω => indicator i ω))
+      _ = (pi i / pi i) * y i := by simp [h_marginal i]
+      _ = y i := by field_simp [hpi_ne]
+  calc
+    ∫ ω, htUniformMeanEstimator pi y ω ∂μ
+        = (1 / (Fintype.card ι : ℝ)) *
+          ∑ i, ∫ ω, indicator i ω / pi i * y i ∂μ := h_sum
+    _ = (1 / (Fintype.card ι : ℝ)) * ∑ i, y i := by
+          congr 1
+          refine Finset.sum_congr rfl ?_
+          intro i _
+          exact h_term i
+    _ = uniformFiniteMean y := by rfl
+
+/-- Covariance-control condition connecting the actual variance of the HT mean
+to the usual Bernoulli-design proxy. Independent Bernoulli sampling discharges
+this condition; nonpositive cross-covariances also suffice. -/
+def HTUniformMeanCovarianceControlled
+    (μ : Measure (ι → Bool)) (pi : ι → ℝ) (y : ι → ℝ) : Prop :=
+  ProbabilityTheory.variance (htUniformMeanEstimator pi y) μ ≤
+    htUniformMeanVarianceProxy pi y
+
+/-- Measurability of a Bernoulli product-coordinate indicator. -/
+lemma indicator_aemeasurable_bernoulliProductMeasure
+    (pi : ι → ℝ) (hpi_pos : ∀ i, 0 < pi i) (hpi_le : ∀ i, pi i ≤ 1)
+    (i : ι) :
+    AEMeasurable (fun ω : ι → Bool => indicator i ω)
+      (bernoulliProductMeasure pi hpi_pos hpi_le) := by
+  have h_bool : Measurable (fun b : Bool => if b then (1 : ℝ) else 0) :=
+    Measurable.of_discrete
+  have h_eval : Measurable (fun ω : ι → Bool => ω i) := measurable_pi_apply i
+  simpa [indicator] using (h_bool.comp h_eval).aemeasurable
+
+/-- Square-integrability of a Bernoulli product-coordinate indicator. -/
+lemma indicator_memLp_bernoulliProductMeasure
+    (pi : ι → ℝ) (hpi_pos : ∀ i, 0 < pi i) (hpi_le : ∀ i, pi i ≤ 1)
+    (i : ι) :
+    MemLp (fun ω : ι → Bool => indicator i ω) 2
+      (bernoulliProductMeasure pi hpi_pos hpi_le) := by
+  let μi : ι → Measure Bool := fun i => bernoulliMeasure pi hpi_pos hpi_le i
+  letI : ∀ i, IsProbabilityMeasure (μi i) := by
+    intro i
+    dsimp [μi, bernoulliMeasure]
+    infer_instance
+  letI : IsProbabilityMeasure (bernoulliProductMeasure pi hpi_pos hpi_le) := by
+    simpa [bernoulliProductMeasure, μi] using
+      (Measure.pi.instIsProbabilityMeasure (μ := μi))
+  refine MemLp.of_bound
+    (indicator_aemeasurable_bernoulliProductMeasure
+      (pi := pi) (hpi_pos := hpi_pos) (hpi_le := hpi_le) i).aestronglyMeasurable
+    1 ?_
+  apply ae_of_all
+  intro ω
+  by_cases h : ω i <;> simp [indicator, h]
+
+/-- The square of a Bernoulli indicator has the same expectation as the
+indicator. -/
+lemma indicator_sq_integral_bernoulliProductMeasure
+    (pi : ι → ℝ) (hpi_pos : ∀ i, 0 < pi i) (hpi_le : ∀ i, pi i ≤ 1)
+    (i : ι) :
+    ∫ ω : ι → Bool, (indicator i ω)^2
+        ∂bernoulliProductMeasure pi hpi_pos hpi_le = pi i := by
+  have hfun : (fun ω : ι → Bool => (indicator i ω)^2) =
+      fun ω => indicator i ω := by
+    funext ω
+    by_cases h : ω i <;> simp [indicator, h]
+  rw [hfun]
+  exact indicator_expectation (p := pi) (hp_pos := hpi_pos) (hp_le := hpi_le) i
+
+/-- Variance of a Bernoulli product-coordinate indicator. -/
+lemma indicator_variance_bernoulliProductMeasure
+    (pi : ι → ℝ) (hpi_pos : ∀ i, 0 < pi i) (hpi_le : ∀ i, pi i ≤ 1)
+    (i : ι) :
+    ProbabilityTheory.variance (fun ω : ι → Bool => indicator i ω)
+      (bernoulliProductMeasure pi hpi_pos hpi_le) = pi i - (pi i)^2 := by
+  let μ : Measure (ι → Bool) := bernoulliProductMeasure pi hpi_pos hpi_le
+  let μi : ι → Measure Bool := fun i => bernoulliMeasure pi hpi_pos hpi_le i
+  letI : ∀ i, IsProbabilityMeasure (μi i) := by
+    intro i
+    dsimp [μi, bernoulliMeasure]
+    infer_instance
+  letI : IsProbabilityMeasure μ := by
+    simpa [μ, bernoulliProductMeasure, μi] using
+      (Measure.pi.instIsProbabilityMeasure (μ := μi))
+  have hmem :=
+    indicator_memLp_bernoulliProductMeasure
+      (pi := pi) (hpi_pos := hpi_pos) (hpi_le := hpi_le) i
+  calc
+    ProbabilityTheory.variance (fun ω : ι → Bool => indicator i ω)
+        (bernoulliProductMeasure pi hpi_pos hpi_le)
+        = ∫ ω : ι → Bool, ((fun ω => indicator i ω)^2) ω
+            ∂bernoulliProductMeasure pi hpi_pos hpi_le
+          - (∫ ω : ι → Bool, indicator i ω
+              ∂bernoulliProductMeasure pi hpi_pos hpi_le)^2 := by
+            simpa [μ] using (variance_eq_sub (μ := μ) hmem)
+    _ = pi i - (pi i)^2 := by
+            simp [indicator_sq_integral_bernoulliProductMeasure
+              (pi := pi) (hpi_pos := hpi_pos) (hpi_le := hpi_le) i,
+              indicator_expectation (p := pi) (hp_pos := hpi_pos) (hp_le := hpi_le) i]
+
+/-- Independent Bernoulli product sampling satisfies the variance-proxy control
+used by the constrained-design audit robustness theorem. -/
+theorem htUniformMean_covarianceControlled_independent_bernoulli
+    (pi : ι → ℝ) (y : ι → ℝ)
+    (hcard_pos : 0 < (Fintype.card ι : ℝ))
+    (hpi_pos : ∀ i, 0 < pi i)
+    (hpi_le : ∀ i, pi i ≤ 1) :
+    HTUniformMeanCovarianceControlled
+      (bernoulliProductMeasure pi hpi_pos hpi_le) pi y := by
+  classical
+  let μ : Measure (ι → Bool) := bernoulliProductMeasure pi hpi_pos hpi_le
+  let N : ℝ := Fintype.card ι
+  let X : ι → (ι → Bool) → ℝ :=
+    fun i ω => (1 / N) * (indicator i ω / pi i * y i)
+  let μi : ι → Measure Bool := fun i => bernoulliMeasure pi hpi_pos hpi_le i
+  letI : ∀ i, IsProbabilityMeasure (μi i) := by
+    intro i
+    dsimp [μi, bernoulliMeasure]
+    infer_instance
+  letI : IsProbabilityMeasure μ := by
+    simpa [μ, bernoulliProductMeasure, μi] using
+      (Measure.pi.instIsProbabilityMeasure (μ := μi))
+  have hX_meas : ∀ i, AEMeasurable (X i) μ := by
+    intro i
+    have h_bool :
+        Measurable (fun b : Bool =>
+          (1 / N) * (((if b then (1 : ℝ) else 0) / pi i) * y i)) :=
+      Measurable.of_discrete
+    have h_eval : Measurable (fun ω : ι → Bool => ω i) := measurable_pi_apply i
+    simpa [X, indicator, μ] using (h_bool.comp h_eval).aemeasurable
+  have hX_mem : ∀ i, MemLp (X i) 2 μ := by
+    intro i
+    refine MemLp.of_bound (hX_meas i).aestronglyMeasurable
+      (‖(1 / N) * (y i / pi i)‖) ?_
+    apply ae_of_all
+    intro ω
+    by_cases h : ω i
+    · simp [X, indicator, h, div_eq_mul_inv, mul_comm, mul_left_comm, mul_assoc]
+    · have hnonneg : 0 ≤ |N|⁻¹ * (|y i| / |pi i|) := by positivity
+      simpa [X, indicator, h, div_eq_mul_inv, Real.norm_eq_abs, abs_mul, abs_div,
+        mul_comm, mul_left_comm, mul_assoc] using hnonneg
+  have h_ind : iIndepFun X μ := by
+    let Xsingle : ι → Bool → ℝ :=
+      fun i b => (1 / N) * (((if b then (1 : ℝ) else 0) / pi i) * y i)
+    have hsingle : ∀ i, AEMeasurable (Xsingle i) (μi i) := by
+      intro i
+      exact Measurable.of_discrete.aemeasurable
+    have h := iIndepFun_pi (μ := μi) (X := Xsingle) hsingle
+    simpa [X, Xsingle, μ, μi, bernoulliProductMeasure, indicator] using h
+  have h_pair : Set.Pairwise (↑(Finset.univ : Finset ι))
+      fun i j => X i ⟂ᵢ[μ] X j := by
+    intro i _ j _ hne
+    have hj_not : j ∉ ({i} : Finset ι) := by simp [hne.symm]
+    have h :=
+      h_ind.indepFun_finset_sum_of_notMem₀ hX_meas
+        (s := ({i} : Finset ι)) (i := j) hj_not
+    simpa using h
+  have hest_eq : htUniformMeanEstimator pi y = fun ω => ∑ i, X i ω := by
+    funext ω
+    simp [htUniformMeanEstimator, X, N, Finset.mul_sum, mul_assoc]
+  have hvar_sum' :
+      ProbabilityTheory.variance (∑ i, X i) μ =
+        ∑ i, ProbabilityTheory.variance (X i) μ := by
+    simpa using
+      (IndepFun.variance_sum (μ := μ) (X := X) (s := Finset.univ)
+        (fun i _ => hX_mem i) h_pair)
+  have hsum_fun : (∑ i, X i) = fun ω => ∑ i, X i ω := by
+    ext ω
+    simp
+  have hvar_sum :
+      ProbabilityTheory.variance (fun ω => ∑ i, X i ω) μ =
+        ∑ i, ProbabilityTheory.variance (X i) μ := by
+    rw [← hsum_fun]
+    exact hvar_sum'
+  have hvar_i : ∀ i,
+      ProbabilityTheory.variance (X i) μ =
+        (1 / N^2) * (((1 - pi i) / pi i) * (y i)^2) := by
+    intro i
+    have hpi_ne : pi i ≠ 0 := ne_of_gt (hpi_pos i)
+    have hN_ne : N ≠ 0 := ne_of_gt hcard_pos
+    have hX_eq : X i =
+        fun ω => ((1 / N) * (y i / pi i)) * indicator i ω := by
+      funext ω
+      by_cases h : ω i <;>
+        simp [X, indicator, h, div_eq_mul_inv, mul_comm, mul_left_comm, mul_assoc]
+    calc
+      ProbabilityTheory.variance (X i) μ
+          = ProbabilityTheory.variance
+              (fun ω => ((1 / N) * (y i / pi i)) * indicator i ω) μ := by
+              rw [hX_eq]
+      _ = ((1 / N) * (y i / pi i))^2 *
+            ProbabilityTheory.variance (fun ω => indicator i ω) μ := by
+              rw [variance_const_mul]
+      _ = ((1 / N) * (y i / pi i))^2 * (pi i - (pi i)^2) := by
+              rw [indicator_variance_bernoulliProductMeasure
+                (pi := pi) (hpi_pos := hpi_pos) (hpi_le := hpi_le) i]
+      _ = (1 / N^2) * (((1 - pi i) / pi i) * (y i)^2) := by
+              field_simp [hpi_ne, hN_ne]
+  have heq :
+      ProbabilityTheory.variance
+          (htUniformMeanEstimator pi y) (bernoulliProductMeasure pi hpi_pos hpi_le) =
+        htUniformMeanVarianceProxy pi y := by
+    calc
+      ProbabilityTheory.variance
+          (htUniformMeanEstimator pi y) (bernoulliProductMeasure pi hpi_pos hpi_le)
+          = ProbabilityTheory.variance (fun ω => ∑ i, X i ω) μ := by
+              rw [hest_eq]
+      _ = ∑ i, ProbabilityTheory.variance (X i) μ := hvar_sum
+      _ = ∑ i, (1 / N^2) * (((1 - pi i) / pi i) * (y i)^2) := by
+              simp [hvar_i]
+      _ = htUniformMeanVarianceProxy pi y := by
+              simp [htUniformMeanVarianceProxy, N, Finset.mul_sum]
+  exact le_of_eq heq
+
+/-- The constrained-design variance proxy is controlled by the minimum
+propensity. This is the algebraic core of the appendix bound. -/
+theorem htUniformMeanVarianceProxy_le_constrained
+    (pi : ι → ℝ) (y : ι → ℝ)
+    (pi_min D_max : ℝ)
+    (hcard_pos : 0 < (Fintype.card ι : ℝ))
+    (hpi_pos : ∀ i, 0 < pi i)
+    (hpi_le : ∀ i, pi i ≤ 1)
+    (hpi_min_pos : 0 < pi_min)
+    (hpi_min_le_one : pi_min ≤ 1)
+    (hpi_min_le : ∀ i, pi_min ≤ pi i)
+    (hD_nonneg : 0 ≤ D_max)
+    (hy_bound : ∀ i, |y i| ≤ D_max) :
+    htUniformMeanVarianceProxy pi y ≤
+      (D_max^2 / (Fintype.card ι : ℝ)) * (1 / pi_min - 1) := by
+  classical
+  let N : ℝ := (Fintype.card ι : ℝ)
+  let C : ℝ := (1 / pi_min - 1) * D_max^2
+  have hN_pos : 0 < N := hcard_pos
+  have hC_nonneg : 0 ≤ C := by
+    have hratio : 0 ≤ 1 / pi_min - 1 := by
+      have hone : 1 ≤ 1 / pi_min := one_le_one_div hpi_min_pos hpi_min_le_one
+      linarith
+    exact mul_nonneg hratio (sq_nonneg D_max)
+  have hterm :
+      ∀ i, ((1 - pi i) / pi i) * (y i)^2 ≤ C := by
+    intro i
+    have hratio_nonneg : 0 ≤ (1 - pi i) / pi i := by
+      exact div_nonneg (by linarith [hpi_le i]) (le_of_lt (hpi_pos i))
+    have hratio_le : (1 - pi i) / pi i ≤ 1 / pi_min - 1 := by
+      have hpi_ne : pi i ≠ 0 := ne_of_gt (hpi_pos i)
+      have hinv : 1 / pi i ≤ 1 / pi_min :=
+        one_div_le_one_div_of_le hpi_min_pos (hpi_min_le i)
+      have heq : (1 - pi i) / pi i = 1 / pi i - 1 := by
+        field_simp [hpi_ne]
+      rw [heq]
+      linarith
+    have hy_sq : (y i)^2 ≤ D_max^2 := by
+      have habs_nonneg : 0 ≤ |y i| := abs_nonneg (y i)
+      have hsq := mul_le_mul (hy_bound i) (hy_bound i) habs_nonneg hD_nonneg
+      simpa [sq_abs, pow_two] using hsq
+    have hy_sq_nonneg : 0 ≤ (y i)^2 := sq_nonneg (y i)
+    calc
+      ((1 - pi i) / pi i) * (y i)^2
+          ≤ (1 / pi_min - 1) * (y i)^2 := by
+              exact mul_le_mul_of_nonneg_right hratio_le hy_sq_nonneg
+      _ ≤ (1 / pi_min - 1) * D_max^2 := by
+              have hratio_min_nonneg : 0 ≤ 1 / pi_min - 1 :=
+                le_trans hratio_nonneg hratio_le
+              exact mul_le_mul_of_nonneg_left hy_sq hratio_min_nonneg
+      _ = C := rfl
+  have hsum :
+      ∑ i, ((1 - pi i) / pi i) * (y i)^2 ≤ N * C := by
+    calc
+      ∑ i, ((1 - pi i) / pi i) * (y i)^2
+          ≤ ∑ _i : ι, C := by
+              exact Finset.sum_le_sum (fun i _ => hterm i)
+      _ = N * C := by simp [N]
+  have hscale_nonneg : 0 ≤ 1 / N^2 := by positivity
+  calc
+    htUniformMeanVarianceProxy pi y
+        = (1 / N^2) * ∑ i, ((1 - pi i) / pi i) * (y i)^2 := by
+            simp [htUniformMeanVarianceProxy, N]
+    _ ≤ (1 / N^2) * (N * C) := by
+            exact mul_le_mul_of_nonneg_left hsum hscale_nonneg
+    _ = (D_max^2 / N) * (1 / pi_min - 1) := by
+            have hN_ne : N ≠ 0 := ne_of_gt hN_pos
+            calc
+              (1 / N^2) * (N * C) = C / N := by
+                field_simp [hN_ne]
+              _ = ((1 / pi_min - 1) * D_max^2) / N := by
+                rfl
+              _ = (D_max^2 / N) * (1 / pi_min - 1) := by
+                ring
+
+/-- Actual variance bound for any design whose covariance structure is
+controlled by the Bernoulli-design proxy. -/
+theorem htUniformMean_variance_bound_of_constrained_design
+    (μ : Measure (ι → Bool)) (pi : ι → ℝ) (y : ι → ℝ)
+    (pi_min D_max : ℝ)
+    (hcard_pos : 0 < (Fintype.card ι : ℝ))
+    (hcontrol : HTUniformMeanCovarianceControlled μ pi y)
+    (hpi_pos : ∀ i, 0 < pi i)
+    (hpi_le : ∀ i, pi i ≤ 1)
+    (hpi_min_pos : 0 < pi_min)
+    (hpi_min_le_one : pi_min ≤ 1)
+    (hpi_min_le : ∀ i, pi_min ≤ pi i)
+    (hD_nonneg : 0 ≤ D_max)
+    (hy_bound : ∀ i, |y i| ≤ D_max) :
+    ProbabilityTheory.variance (htUniformMeanEstimator pi y) μ ≤
+      (D_max^2 / (Fintype.card ι : ℝ)) * (1 / pi_min - 1) := by
+  exact hcontrol.trans
+    (htUniformMeanVarianceProxy_le_constrained
+      (pi := pi) (y := y) (pi_min := pi_min) (D_max := D_max)
+      hcard_pos hpi_pos hpi_le hpi_min_pos hpi_min_le_one hpi_min_le hD_nonneg hy_bound)
+
+/-- Independent-Bernoulli surface for the audit robustness bound. The sampling
+measure is the existing Bernoulli product measure; covariance control is proved
+from product independence by `htUniformMean_covarianceControlled_independent_bernoulli`. -/
+theorem htUniformMean_variance_bound_of_independent_bernoulli
+    (pi : ι → ℝ) (y : ι → ℝ)
+    (pi_min D_max : ℝ)
+    (hcard_pos : 0 < (Fintype.card ι : ℝ))
+    (hpi_pos : ∀ i, 0 < pi i)
+    (hpi_le : ∀ i, pi i ≤ 1)
+    (hpi_min_pos : 0 < pi_min)
+    (hpi_min_le_one : pi_min ≤ 1)
+    (hpi_min_le : ∀ i, pi_min ≤ pi i)
+    (hD_nonneg : 0 ≤ D_max)
+    (hy_bound : ∀ i, |y i| ≤ D_max) :
+    ProbabilityTheory.variance (htUniformMeanEstimator pi y)
+        (bernoulliProductMeasure pi hpi_pos hpi_le) ≤
+      (D_max^2 / (Fintype.card ι : ℝ)) * (1 / pi_min - 1) :=
+  htUniformMean_variance_bound_of_constrained_design
+    (μ := bernoulliProductMeasure pi hpi_pos hpi_le)
+    (pi := pi) (y := y) (pi_min := pi_min) (D_max := D_max)
+    hcard_pos
+    (htUniformMean_covarianceControlled_independent_bernoulli
+      (pi := pi) (y := y) hcard_pos hpi_pos hpi_le)
+    hpi_pos hpi_le hpi_min_pos hpi_min_le_one hpi_min_le hD_nonneg hy_bound
 
 lemma htExpEstimator_abs_le
     (f : ι → ℝ) (M : ℝ) (hM : 0 ≤ M) (hbound : ∀ i, |f i| ≤ M)

@@ -7,6 +7,8 @@
 %
 \RequirePackage{tikz}
 \RequirePackage{amsmath, amssymb}
+\RequirePackage{etoolbox}
+\RequirePackage{xstring}
 \usetikzlibrary{calc, shapes.geometric, arrows.meta, positioning, fit, backgrounds, shadows, decorations.pathreplacing}
 
 \makeatletter
@@ -37,6 +39,11 @@
   },
   referencenode/.style={
     activenode, fill=gray!5, text=black!70
+  },
+  % --- Sampled (audit-label) node: highlighted node drawn during random-sampling figures ---
+  samplednode/.style={
+    draw=blue!70!black, fill=blue!15, text=black,
+    rounded corners=2pt, minimum width=0.9cm, minimum height=0.5cm, font=\scriptsize\bfseries
   },
   % --- Arrow Styles ---
   % Solid = Summarize / Concatenate / Merge (actual operations)
@@ -73,6 +80,32 @@
 % Based on the full Figure 5 extents
 \newcommand{\fixboundingbox}{
   \useasboundingbox (-1.3, -2.2) rectangle (9.8, 6.3);
+}
+
+% Tight bounding box for the tree-only variant (no legends, no background labels).
+% Tree spans x \in [1,8] with node half-width ~0.3 units at x=1.6cm, and
+% y \in [0, 4.8] with node half-height ~0.2 units at y=1.5cm.
+\newcommand{\fixboundingboxplain}{
+  \useasboundingbox (0.4, -0.35) rectangle (8.6, 5.15);
+}
+
+% Current sampled-node set (comma-separated list of node IDs). Default: empty.
+% A caller (e.g. 01_base_sampled_grid.tex) can \renewcommand this before
+% \input'ing a tree tikz to highlight those nodes via \treenodestyle.
+\providecommand{\samplednodes}{}
+
+% Helper: resolve the style for a given node id into \currentnodestyle.
+% Call \setnodestyle{<id>} immediately before \node[\currentnodestyle] (<id>) ...
+% This two-step dance avoids the pgfkeys "Illegal parameter number" failure
+% that occurs if you try to expand a \newcommand with a #1 body directly
+% inside a \node[...] options list.
+% Wrapping both sides in commas guarantees exact-token matching
+% (so "s12" does not falsely match inside "s1234").
+\newcommand{\currentnodestyle}{solidnode}
+\newcommand{\setnodestyle}[1]{%
+  \IfSubStr{,\samplednodes,}{,#1,}%
+    {\renewcommand{\currentnodestyle}{samplednode}}%
+    {\renewcommand{\currentnodestyle}{solidnode}}%
 }
 
 % Legend macro - anchored relative to two nodes (use b4 and b5 for consistency)

@@ -1,0 +1,154 @@
+\section{Discussion}\label{sec:min-discussion}
+
+The theorems in Section~\ref{sec:min-guarantees} preserve the oracle when
+the local laws hold, and the experiments in
+Section~\ref{sec:min-manifesto-results} exercise that preservation against
+expert-survey means on a real political-text benchmark. The remaining
+sections of the discussion state the finite-sample trade-off in plain
+language, place the global-versus-local label split in context, and sketch
+the distillation chain the same audit certifies once node-level results land.
+
+\subsection{The Finite-Sample Gap Decomposition}\label{sec:min-tradeoff}
+
+Under the local laws, the finite-sample gap between a preference objective
+on tree summaries and the corresponding full-document objective decomposes
+into three non-negative pieces:
+\begin{equation}\label{eq:min-discussion-bound}
+|G|
+\;\le\;
+\underbrace{\hat{\Delta}_R}_{\text{empirical IPW estimate}}
+\;+\;
+\underbrace{B_{\mathrm{cal}}}_{\text{fixed residual}}
+\;+\;
+\underbrace{\text{SE}(n_{\mathrm{global}} + n_{\mathrm{local}})}_{\text{shrinking envelope}}.
+\end{equation}
+This is the decomposition the gap-bound theorem
+(Theorem~\ref{thm:e2e}) gives on any audit-produced certificate. The three
+pieces behave differently and pay attention to different design knobs.
+
+The empirical term $\hat{\Delta}_R$ is an IPW union bound over sampled
+leaves, merge nodes, and idempotence rounds. Equivalently, it is the
+audit's empirical estimate of how far the realized approximation error
+fails to vanish on the C1/C2/C3 subspace. It is zero when every sampled
+unit passes its check and grows linearly with the realized violation rate.
+The neural-operator route (Appendix~\ref{app:min-neural}) gives the
+upstream interpretation: a practitioner chooses an approximation tolerance
+on the realized calls of the tree and converts that tolerance, through
+explicit transfer moduli, into per-law audit budgets.
+
+The fixed residual $B_{\mathrm{cal}}$ is the irreducible projection gap
+between the accessible judge and the trusted oracle. It depends on the
+calibration set and the confidence level, and only on those. Adding
+downstream labels does not shrink it. If the judge is the oracle,
+$B_{\mathrm{cal}} = 0$; otherwise it is the residual of the measurement
+instrument, and the audit reports it explicitly rather than absorbing it.
+
+The envelope $\text{SE}(n_{\mathrm{global}} + n_{\mathrm{local}})$ is the
+part labels pay for. The idealized rate $C/\sqrt{n+1}$ is non-negative,
+bounded by the structural constant $C$, and strictly decreasing in $n$
+whenever $C > 0$; the separate-monotonicity statement extends this to two
+label types so that holding one fixed, adding the other still tightens the
+envelope. Concretely, $n_{\mathrm{global}}$ counts full-document labels and
+$n_{\mathrm{local}}$ counts sampled audit nodes; both feed the same sum.
+
+The function-space view also clarifies what local-law training does. The
+per-law-weighted oracle objective has one term fitting the oracle and a
+$\lambda$-weighted local-law term pushing the realized operator toward the
+local-law-constrained subspace. The endpoints make the interpretation
+literal: $\lambda = 0$ is pure oracle risk and $\lambda = 1$ is pure
+projection penalty. Treating local-law weights as a projection and treating
+the approximation error as structured by C1/C2/C3 are the same formal
+assumption (Appendix~\ref{app:min-proofs}). The HLL anchor starts inside
+the local-law subspace by construction, the Markov tree learns an ordered
+boundary-sensitive member of it, and the manifesto pipeline uses audits to
+estimate how close the deployed LLM operator lands to it.
+
+Long context windows do not remove that issue; they change where the
+engineering pressure appears. A million-token window may cut hard
+truncation, but it does not certify that a single read made the same
+rubric decision an expert would have made after tracking evidence across
+the whole document. The local architecture gives a different claim: if
+small leaves and pairwise merges preserve the oracle-relevant evidence,
+then the root measurement is stable under divide-and-conquer and the audit
+has localized places to look when it is not. The Manifesto results are
+meant in exactly that sense.
+
+\subsection{Global and Local Labels}\label{sec:min-global-local}
+
+The global/local split is what the envelope responds to. Replacing
+some fraction of root labels by a
+proportionate amount of local labels at matched token mass leaves root
+accuracy essentially unchanged across a wide budget range, because the
+envelope responds to the \emph{total} label count and not to the ratio of
+its two components (Appendix~\ref{app:min-markov} reports this trade
+quantitatively on the controlled changepoint task). Leaf-size invariance
+is what makes the same trade meaningful in long-document settings: when
+changing the leaf size leaves the root estimate stable, each smaller
+leaf becomes another less expensive site for sampling and supervision
+rather than a change in the estimand. The Manifesto plateau in
+Section~\ref{sec:min-manifesto-results} is the same observation under
+rubric-driven semantics.
+
+\subsection{The Distillation Chain}\label{sec:min-distillation}
+
+The audit + IPW machinery generalizes one more time. Three label tiers can
+be stacked, with the same audit certifying each transition:
+
+\begin{itemize}[leftmargin=1.5em]
+\item \textbf{Gold human labels.} A small random sample of expert-coded
+documents (or expert-coded spans, where they exist) sets the calibration
+oracle and bounds $B_{\mathrm{cal}}$.
+\item \textbf{Strong-LLM proxy.} A frontier or large open-weight LLM is
+prompted or trained to score documents under the same rubric. An audit
+against the gold sample reports the strong-proxy distortion in oracle
+units; if the audited residual meets the application's threshold, the
+strong proxy stands in for the gold judge on much larger corpora.
+\item \textbf{Small-LM distillation.} Because the strong proxy is cheap
+enough to query at every realized node (leaf, merge, idempotence), it
+produces \emph{node-level} labels rather than only document-level labels.
+A smaller language model is then distilled against those node-level
+targets, with the same C1/C2/C3 audit certifying the smaller model's
+realized operator.
+\end{itemize}
+
+The step where the chain pays off is the third one. A strong proxy queried
+at the document level costs the same as the document-level gold standard
+and adds no node-level supervision; queried at every realized node it
+produces the local labels the audit's estimation envelope responds to. In the Manifesto
+setting the gold tier is already in place: the Manifesto Project's expert
+\emph{quasi-sentence} codings cover $2{,}157$ platforms ($\sim\!2.27$M
+coded spans) and give ground-truth oracle values at every leaf and at
+every internal-node union span. The strong proxy is the Gemma-4-31B
+pipeline of Section~\ref{sec:min-manifesto-results}; the distilled small
+proxy is implementation-ready (Appendix~\ref{app:min-manifesto} sketches
+the wiring). Distillation results are pending and will be added on
+convergence; the framing here is that the same algebra and the same audit
+that preserve the root score under one rubric also certify the next-tier
+distillation under the same rubric.
+
+\subsection{Scope}\label{sec:min-scope}
+
+Equation~\eqref{eq:min-discussion-bound} is conditional. It assumes the
+local laws hold on the realized tree, which the audit checks. Tasks whose
+oracle does not decompose into a locally checkable sufficient statistic
+(rhetorical-tone or discourse-level semantics in which replacing a span
+with a locally equivalent one changes how neighboring text is interpreted)
+will show high C1/C3 violation rates under the audit, and the bound will
+honestly report that the tree's root prediction is no better than a flat
+baseline on such tasks. The framework does not always apply; it applies
+when the audit says it applies.
+
+\subsection{Applications in Social-Scientific Measurement}\label{sec:min-applications-discussion}
+
+Many social-scientific measurement problems share the Manifesto shape:
+rubrics with locally codable categories, span-grounded expert judgments,
+and aggregates that decompose across sections, chapters, or acts.
+Comparative-politics party-position scoring
+\citep{BenoitEtAl2025,ManifestoProject2025a}, policy-agenda coding,
+clinical narrative review, and legal-corpus analysis all fit this
+description. The practical value of the framework in these settings is
+that Equation~\eqref{eq:min-discussion-bound} turns long-document
+annotation into an audit-budget problem: a fixed calibration set sets
+$B_{\mathrm{cal}}$ once, and any combination of global and local labels
+the researcher can collect tightens the envelope along the monotone curve
+$C/\sqrt{n+1}$.

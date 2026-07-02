@@ -1,0 +1,32 @@
+\section{Conclusion}\label{sec:v8-conclusion}
+
+C-TreePO treats long-document measurement as a state-composition
+problem. The expert score is global; the evidence that determines it
+is local and relational. A C-Tree stores policy-evidence states at
+the leaves and at every internal merge, and the local laws say when
+those states can replace the raw spans they represent. The objective
+separates two channels: a root loss fits the document-level expert
+target, and a local-law channel trains and audits the state map
+inside the realized tree. Sparse oracle calls and logged
+propensities correct proxy bias in the local channel.
+
+The Benoit replication gives us the root-observed tier. The
+per-dimension tree reaches macro \(r=0.829\); the universal-summary
+configuration reaches \(0.807\). Five of the six policy dimensions
+track their per-dimension ceilings under shared compression.
+Decentralization is where shared compression breaks down, and the
+local diagnostic gap flags that breakdown directly, without any
+appeal to root-score comparisons.
+
+The supporting checks build intuition around the claim surface. The
+Markov sandbox fixes the oracle and sufficient state, then shows how
+local labels can replace some root-label mass under a fixed budget
+when they supervise the state needed for composition. The IPW stress
+ladder fixes the estimator side: logged propensities center the
+node-level estimand, and hard designs reveal themselves through larger
+variance and smaller effective sample size. Together with the
+preservation, transport, and audit arguments, these checks leave a
+clear submission claim. The real application works at the root-observed tier, the
+local diagnostics identify where a human node audit should spend its
+next labels, and the certificate machinery is ready for that sampled
+audit when those labels are collected.

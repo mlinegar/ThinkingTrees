@@ -1,3 +1,4 @@
+-- OLD_ ARCHIVED (2026-07-02): superseded scaffolding; role absorbed by DSL/MomentFunctions + DSL/AsymptoticCore. Not imported, not built. Do not edit or import.
 import FormalProofs.DSL.MomentFunctions
 import FormalProofs.CLT.Core
 

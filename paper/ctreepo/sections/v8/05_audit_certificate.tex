@@ -1,0 +1,134 @@
+\section{Audit and Proxy-Corrected Estimation}
+\label{sec:v8-audit-certificate}
+
+\subsection{Audit Units}
+
+The audit is a finite-population survey over a realized manifesto tree. For a
+document \(x\), the population contains the leaf states, produced states, and
+merge states whose C1/C2/C3 losses define the local-law channel. Each audit
+unit \(i\) has a represented raw span \(S(i)\), a produced state \(s_i\), a
+law channel, and a logged marginal inclusion probability \(\pi_i>0\).
+
+The first diagnostic quantity is a violation rate for each law channel. It
+tells the analyst whether the problem is leaf retention, re-summary drift, or
+merge failure. The certificate quantity is mean distortion. A run can have few
+violations with large distortion on the failing nodes, or many small
+violations whose root impact is limited. Both diagnostics should be reported
+when the node-level audit is run.
+
+\subsection{Dense Proxy, Sparse Oracle}
+
+The statistical problem is that \(L_{\mathrm{law}}^\ast\) in
+Equation~\eqref{eq:v8-local-law-estimand} is usually not fully observed. In
+the Manifesto application, root expert-survey means are observed for held-out
+documents, while local checks are usually available through teacher traces,
+quasi-sentence-derived targets, or a learned readout \(\widehat f\). Direct
+local calls to the target oracle \(f^\ast\) are sparse.
+
+The dense local quantity is the same C1/C2/C3 comparison measured through the
+fitted proxy:
+\[
+  \widehat\ell_v
+  =
+  \ell_{\mathrm{law}}(v;\widehat f,g).
+\]
+The proxy gives training signal throughout the tree. It is useful only because
+sampled oracle nodes can estimate how the proxy surface differs from the
+target oracle surface. Define the node bias
+\[
+  b_v=\widehat\ell_v-\ell_v^\ast .
+\]
+
+Let \(R_v\in\{0,1\}\) indicate whether node \(v\) is sampled and evaluated
+with \(f^\ast\), and let \(\pi_v>0\) be the logged marginal probability that
+the audit design samples \(v\). The corrected node loss is
+\begin{equation}
+\label{eq:v8-corrected-node-loss}
+  \ell_v^{\mathrm{corr}}
+  =
+  \widehat\ell_v
+  +
+  \frac{R_v}{\pi_v}
+  \left(\ell_v^\ast-\widehat\ell_v\right).
+\end{equation}
+Unsampled nodes contribute proxy loss. Sampled nodes add back the observed
+oracle--proxy difference with inverse-propensity weight. With correct logged
+propensities, \(\mathbb E[\ell_v^{\mathrm{corr}}\mid T]=\ell_v^\ast\).
+
+The corrected local-law channel is
+\[
+  L_{\mathrm{law}}^{\mathrm{corr}}(g,T)
+  =
+  \sum_{v\in V(T)}\gamma^{d(v)}\ell_v^{\mathrm{corr}} .
+\]
+The finite-data objective is therefore
+\begin{equation}
+\label{eq:v8-corrected-objective}
+  J_\lambda^{\mathrm{corr}}(g;T)
+  =
+  (1-\lambda)L_{\mathrm{root}}(g)
+  +
+  \lambda L_{\mathrm{law}}^{\mathrm{corr}}(g,T).
+\end{equation}
+The correction estimates the oracle local-law channel. It does not define a
+new population target.
+
+\subsection{HT Distortion Certificate}
+
+For certificate transport, let \(\mathcal U\) be the finite population of
+sample-eligible manifesto tree units, \(N=|\mathcal U|\), and let
+\[
+  D_i^J
+  =
+  d_Y\!\left(J(s_i),J(S(i))\right)
+\]
+be the distortion measured by an accessible judge or readout \(J\). If \(Z_i\)
+is the audit inclusion indicator and \(\pi_i\) is the logged inclusion
+probability, the Horvitz--Thompson estimator is
+\begin{equation}
+\label{eq:v8-ht-distortion}
+  \widehat{\Delta}_{\mathrm{HT}}^{J}
+  =
+  \frac{1}{N}
+  \sum_{i\in\mathcal U}
+  \frac{Z_i}{\pi_i}D_i^J .
+\end{equation}
+With strict positivity and correct logged propensities, this is unbiased for
+the corresponding finite-population mean. Unequal propensities affect variance
+and effective sample size; they do not change the target being estimated.
+
+The certificate combines the sampled distortion estimate with three envelopes:
+calibration, sampling error, and clipping bias. In the compact reporting form,
+\begin{equation}
+\label{eq:v8-finite-sample-certificate}
+  |G_{\mathrm{meth}}|
+  \le
+  C_{\mathrm{meth}}\widehat{\Delta}_{\mathrm{HT}}
+  +
+  B_{\mathrm{cal}}
+  +
+  B_{\mathrm{est}}
+  +
+  B_{\mathrm{clip}} .
+\end{equation}
+Here \(B_{\mathrm{cal}}\) is the gap between the accessible judge and
+\(f^\ast\), \(B_{\mathrm{est}}\) is sampling uncertainty after method
+transport, and \(B_{\mathrm{clip}}\) is bias introduced by clipping
+inverse-propensity weights or residuals. A high-probability version attaches
+the corresponding failure budgets and combines them by a union bound.
+
+\subsection{Reading the Manifesto Evidence}
+
+The current Manifesto results use this stack in two tiers. The reported
+held-out correlations are root-observed: the C-Tree root is scored against
+external expert-survey means. The available local diagnostic figures are
+proxy/teacher-trace diagnostics, which show where the local channel is likely
+misaligned. A completed node-level certificate would sample realized leaves
+and merges, evaluate them against an application-aligned \(f^\ast\) node
+oracle, and report Equation~\eqref{eq:v8-finite-sample-certificate}.
+
+Quasi-sentence codings provide the most direct Manifesto route to such an
+audit. They are local policy statements already tied to the Manifesto coding
+tradition. For a sampled leaf or merge span, those local statements can be
+aggregated into a dimension-specific evidence target when the aggregation is
+declared before the audit and matches the root policy dimension.

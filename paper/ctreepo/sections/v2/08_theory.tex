@@ -10,7 +10,13 @@ the theorems that govern both, plus the setting yet to come
 Before the three theorem tiers there is one realizability step. The
 neural-operator layer of Section~\ref{sec:fno-primer} does not replace
 the local laws; it provides a route for realizing them approximately
-from an ideal target operator.
+from an ideal target operator. The core theorem stack is stochastic
+over the $\mathrm{PMF}$-valued summarizers of Definition~\ref{def:summarizer}.
+The neural-operator bridge below is the deterministic subcase: it
+certifies a deterministic realizer and embeds it as a point-mass
+summarizer. Randomized summarizers are covered directly by the broader
+local-law theorem stack unless one supplies a separate randomized
+operator-approximation theorem.
 
 \begin{proposition}[Neural-operator realization bridge]\label{prop:neural-operator-bridge}
 Fix a tree $T$ and an ideal deterministic summarizer $s^\dagger$.
@@ -23,6 +29,12 @@ $(\varepsilon_{\mathrm{leaf}}, \varepsilon_{\mathrm{merge}},
 \varepsilon_{\mathrm{idemp}})$. Then $s$ is approximately
 theorem-backed on $T$ with those budgets.
 \end{proposition}
+
+Thus the proposition should be read as a theorem-backed route for
+deterministic neural operators, not as a restriction of C-TreePO to
+deterministic summarization. The stochastic exact and approximate
+routes are the same local-law implications stated on the underlying
+$\mathrm{PMF}$-valued summarizer.
 
 The same framework names the constrained function spaces that the
 audit is checking. Let $\mathcal{N}$ be a chosen neural-operator class,
@@ -82,12 +94,14 @@ the theorem can tolerate, and the resulting budgets are the quantities
 passed to $\Delta_R$ and then to the preference-gap bounds. Appendix~\ref{app:projection-interpretation}
 spells out the iff and the exact subspace equality.
 
-The remaining results come in three tiers. The \emph{structural} tier
-asks whether local validity composes to the root summary. The
-\emph{optimization} tier adds assumptions saying that downstream
-training depends on a document only through the preserved oracle value.
-The \emph{certificate} tier adds the transport and sampling assumptions
-needed to turn sampled audits into a finite-sample bound.
+The remaining results come in three tiers after the neural-operator
+realizability layer has supplied either exact local laws or explicit
+approximate budgets. The \emph{structural} tier asks whether those local
+laws compose to the root summary. The \emph{optimization} tier adds
+assumptions saying that downstream training depends on a document only
+through the preserved oracle value. The \emph{certificate} tier adds
+the method-transport and sampling assumptions needed to turn
+operator-level or sampled-audit budgets into a finite-sample bound.
 Figure~\ref{fig:theorem-deps} gives the downstream dependency graph once
 exact or approximate theorem-backedness has been established, and
 Table~\ref{tab:assumption-bundles} gives the named bundles used below.
@@ -106,7 +120,7 @@ Table~\ref{tab:assumption-bundles} gives the named bundles used below.
 \node[assumption, right=of C2] (CC) {Context\\compat.};
 \node[theorem, below=of C1C3, xshift=1.2cm] (pres) {Preservation + multi-round\\(Thm~\ref{thm:one-pass},\\Thm~\ref{thm:multi-round})};
 \node[assumption, right=2.4cm of pres] (CF) {Factorization\\(Asm~\ref{ass:CF})};
-\node[assumption, right=of CF] (LIP) {Lipschitz +\\integrability};
+\node[assumption, right=of CF] (LIP) {Method transport\\(Lipschitz/int.)};
 \node[theorem, below=of pres, xshift=1.2cm] (equiv) {Equivalence\\(Thm~\ref{thm:pref-equiv})};
 \node[theorem, right=of equiv] (gap) {Gap bound\\(Thm~\ref{thm:unified-gap})};
 \node[theorem, below=of equiv, xshift=0.6cm] (e2e) {Audited gap bound\\(Thm~\ref{thm:e2e})};
@@ -158,7 +172,7 @@ Assume the run is realized-valid for the Recompression Stack. Then $\E[\metric(\
 
 \noindent\textit{Proof:} See Appendix~\ref{app:proof-preservation}.
 
-Proposition~\ref{prop:mergeable-reduction}, stated in Section~\ref{sec:mergeable-sketches} as the paper's thesis, is the strengthening of this theorem to the deterministic global setting: when the local laws are replaced by global identities and $\fstar$ admits an oracle-level merge, $g$ becomes a classical mergeable summary. Section~\ref{sec:hll-parity} verifies this collapse numerically on HyperLogLog. The remainder of this section takes the learned version one step further --- from preservation at the root to equivalence of optimization objectives.
+Proposition~\ref{prop:mergeable-reduction}, stated in Section~\ref{sec:mergeable-sketches} as the paper's thesis, separates two deterministic global limits. If the task value itself admits a merge, the local laws become a strict oracle homomorphism. If instead a bounded state carries the information needed by the readout, the framework reduces to a classical mergeable summary without requiring scalar oracle values to compose. Section~\ref{sec:hll-parity} verifies the state-level collapse numerically on HyperLogLog. The remainder of this section takes the learned version one step further --- from preservation at the root to equivalence of optimization objectives.
 
 \subsection{Preference Learning Equivalence}
 
@@ -206,7 +220,7 @@ In practice this means annotators can be shown summaries $Z^{(R)}$ instead of fu
 
 \subsection{Quantitative Gap Bounds}
 
-The next step is the approximate version of the same statement. Exact preservation gives zero training gap. Approximate preservation gives a nonzero gap, and the size of that gap is controlled by how sensitive the objective is to oracle distortion.
+The next step is the approximate version of the same statement. Exact preservation gives zero training gap. Approximate preservation gives a nonzero gap. In the learned-operator setting the first quantity to control is not a preference-loss Lipschitz constant but the operator error budget: the neural-operator approximation layer proposes a realized-call tolerance, the transfer moduli turn it into local-law budgets, and only then does method-level transport convert oracle distortion into objective drift.
 
 When the local conditions hold only approximately, define the expected distortion
 \[
@@ -235,8 +249,25 @@ existing approximate-local-law route gives the distortion control:
 \;+\;
 (R-1)\,\varepsilon_{\mathrm{idemp}},
 \]
-where $R$ is the number of re-summarization rounds. So the
-neural-operator result does not bypass the local laws; it feeds them.
+where $R$ is the number of re-summarization rounds. If the transfer
+moduli are written
+$\varepsilon_{\mathrm{leaf}}=\omega_{\mathrm{leaf}}(\varepsilon)$,
+$\varepsilon_{\mathrm{merge}}=\omega_{\mathrm{merge}}(\varepsilon)$, and
+$\varepsilon_{\mathrm{idemp}}=\omega_{\mathrm{idemp}}(\varepsilon)$,
+then, writing $C_{\mathrm{meth}}$ for the method transport constant $L$
+below, the neural-operator-first bound feeding the downstream objective is
+\[
+|G_{\mathrm{meth}}|
+\;\le\;
+C_{\mathrm{meth}}\Big(
+\omega_{\mathrm{leaf}}(\varepsilon)
++\omega_{\mathrm{merge}}(\varepsilon)
++(R-1)\omega_{\mathrm{idemp}}(\varepsilon)
+\Big),
+\]
+before calibration and sampling envelopes are added. So the
+neural-operator result does not bypass the local laws; it feeds them,
+and the observational audit checks the same budgets on the realized run.
 
 \begin{theorem}[Unified Preference Gap]\label{thm:unified-gap}
 For any coupled pair $(X, Z^{(R)}(X))$, let $E_\pi(x)$ denote the method-specific expected inner loss. Assume:
@@ -251,13 +282,13 @@ Then
 \]
 \end{theorem}
 
-\noindent Exact preservation gives $\Delta_R = 0$ and therefore zero gap; approximate preservation gives a gap no larger than a method-specific Lipschitz constant times the expected distortion.
+\noindent Exact preservation gives $\Delta_R = 0$ and therefore zero gap; approximate preservation gives a gap no larger than a method-specific transport constant times the expected distortion. The representational part of the bound is the neural-operator/local-law budget above; the Lipschitz or random-utility condition is only the last multiplier from oracle units to objective units.
 
 \noindent\textit{Proof intuition:} The Lipschitz condition controls the pointwise loss difference by oracle distance, and boundedness/integrability justifies exchanging sums and expectations. Taking expectations gives $|\E[\mathcal{L}(X)] - \E[\mathcal{L}(Z)]| \le L \cdot \Delta_R$.
 
 \noindent\textit{Proof:} See Appendix~\ref{app:proof-equivalence}.
 
-The method-specific Lipschitz constant takes a different form in each case. For DPO, $L = 2|\beta| L_{\mathrm{pol}}$, where $L_{\mathrm{pol}}$ is the policy Lipschitz constant. For GRPO-PL, $L = L_{\mathrm{grpo}}$ from the Plackett--Luce ranking structure. For GRPO-RL, $L = L_{\mathrm{grpo-rl}}$ combines the clipping and KL penalty constants.
+The method-specific transport constant takes a different form in each case. For DPO, a sufficient condition is $L = 2|\beta| L_{\mathrm{pol}}$, where $L_{\mathrm{pol}}$ is the policy Lipschitz constant. For GRPO-PL, one sufficient route gives $L = L_{\mathrm{grpo}}$ from the Plackett--Luce ranking structure. For GRPO-RL, $L = L_{\mathrm{grpo-rl}}$ combines the clipping and KL penalty constants. These constants do not assert that the learned summarizer is good; that role is played by the neural-operator realization bridge and the sampled audit.
 
 To make $L \cdot \Delta_R$ concrete, consider an illustrative DPO
 setting with $\beta = 0.1$ and policy Lipschitz constant
@@ -277,7 +308,7 @@ The three conditions are not redundant. In particular, Idempotence (C2) is a gen
 
 \subsection{Main Result: Audited Preference-Gap Bound}
 
-The gap theorem is population-level: it assumes we know $\Delta_R$. The operational problem is to replace that unobserved quantity with sampled audit data from a deployed tree. The next theorem is the certificate step of the ladder. It says that once distortion is estimated from sampled nodes, and once calibration and sampling error are accounted for, the same Lipschitz transport yields a finite-sample bound on objective drift.
+The gap theorem is population-level: it assumes we know $\Delta_R$. There are two routes to an actionable upper bound. The representation route starts with a neural-operator approximation tolerance $\varepsilon$ and explicit transfer moduli, producing a design target for $\Delta_R$. The operational route estimates the actually realized distortion from sampled audit nodes. The next theorem is the certificate step of the ladder. It says that once distortion is estimated from sampled nodes, and once calibration and sampling error are accounted for, the same method-transport constant yields a finite-sample bound on objective drift.
 
 \begin{theorem}[Audited Preference-Gap Bound]\label{thm:e2e}
 Fix a method with transport constant $C_{\mathrm{meth}}$ and a realized tree-population $\mathcal{U}$ of size $N$. Define ideal and accessible-oracle distortion means

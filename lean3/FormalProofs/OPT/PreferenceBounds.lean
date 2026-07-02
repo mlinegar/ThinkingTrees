@@ -1,6 +1,7 @@
 import FormalProofs.OPT.ExpectationTheory
 import FormalProofs.OPT.AuditBounds
 import FormalProofs.OPT.PreferenceLearning
+import FormalProofs.OPT.MergeTriangle
 import FormalProofs.Shared.BoundedMetricSpace
 import FormalProbability.DSL.RUM
 import FormalProbability.DSL.PlackettLuce
@@ -697,6 +698,141 @@ theorem unified_preference_gap_bounded {Strings Y : Type*} [Monoid Strings] [Pse
     _ = L * Δ_R := by rw [h_Δ]
 
 /- Deprecated lemma `unified_preference_gap` removed; use `unified_preference_gap_bounded`. -/
+
+/-!
+## Unified Preference Gap Bound over an Arbitrary Coupling
+
+`unified_preference_gap_bounded` hard-codes the independent product coupling
+`μ_X ⊗ μ_Z`. The paper's Theorem (`thm:unified-gap`) speaks of *any* coupled
+pair `(X, Z^(R)(X))`; the version below takes an arbitrary joint distribution
+`μ` over document/summary pairs, with `Δ_R` the coupled expected oracle
+distance. The product form is the special case `μ = μ_X ⊗ μ_Z`; the canonical
+document-summary coupling is `documentSummaryCoupling` below.
+-/
+
+/-- **Unified Preference Gap Bound (coupled version).** For any joint
+distribution `μ` over `(document, summary)` pairs, the objective gap is bounded
+by `L` times the coupled expected oracle distance — the paper's statement
+"for any coupled pair (X, Z^(R)(X))" verbatim. -/
+theorem unified_preference_gap_bounded_coupled {Strings Y : Type*} [Monoid Strings]
+    [PseudoMetricSpace Y]
+    (fstar : Strings → Y)
+    (E_gen : Strings → ℝ)
+    (μ : PMF (Strings × Strings))
+    (L : ℝ≥0) (Δ_R : ℝ)
+    (D_max : ℝ) (hD_max : 0 ≤ D_max)
+    (h_dist_bound : ∀ x z, dist (fstar x) (fstar z) ≤ D_max)
+    (h_lip : ∀ x z, |E_gen x - E_gen z| ≤ L * dist (fstar x) (fstar z))
+    (h_Δ : Δ_R = ∑' q : Strings × Strings, (μ q).toReal * dist (fstar q.1) (fstar q.2)) :
+    |∑' q : Strings × Strings, (μ q).toReal * (E_gen q.1 - E_gen q.2)| ≤ L * Δ_R := by
+  have hLD : (0 : ℝ) ≤ (L : ℝ) * D_max := mul_nonneg (NNReal.coe_nonneg L) hD_max
+  have hdiff_bound : ∀ q : Strings × Strings, |E_gen q.1 - E_gen q.2| ≤ (L : ℝ) * D_max :=
+    fun q => (h_lip q.1 q.2).trans
+      (mul_le_mul_of_nonneg_left (h_dist_bound q.1 q.2) (NNReal.coe_nonneg L))
+  have hdist_abs : ∀ q : Strings × Strings, |dist (fstar q.1) (fstar q.2)| ≤ D_max :=
+    fun q => by rw [abs_of_nonneg dist_nonneg]; exact h_dist_bound q.1 q.2
+  have hsum_diff : Summable (fun q : Strings × Strings =>
+      (μ q).toReal * (E_gen q.1 - E_gen q.2)) :=
+    PMF.summable_coe_real_mul_of_bounded μ _ ((L : ℝ) * D_max) hLD hdiff_bound
+  have hsum_dist : Summable (fun q : Strings × Strings =>
+      (μ q).toReal * dist (fstar q.1) (fstar q.2)) :=
+    PMF.summable_coe_real_mul_of_bounded μ _ D_max hD_max hdist_abs
+  calc |∑' q : Strings × Strings, (μ q).toReal * (E_gen q.1 - E_gen q.2)|
+      ≤ ∑' q : Strings × Strings, |(μ q).toReal * (E_gen q.1 - E_gen q.2)| := by
+        simpa [Real.norm_eq_abs] using norm_tsum_le_tsum_norm (f := fun q : Strings × Strings =>
+          (μ q).toReal * (E_gen q.1 - E_gen q.2)) (by simpa [Real.norm_eq_abs] using hsum_diff.abs)
+    _ ≤ ∑' q : Strings × Strings, (μ q).toReal * ((L : ℝ) * dist (fstar q.1) (fstar q.2)) := by
+        exact Summable.tsum_le_tsum (fun q => by
+            rw [abs_mul, abs_of_nonneg ENNReal.toReal_nonneg]
+            exact mul_le_mul_of_nonneg_left (h_lip q.1 q.2) ENNReal.toReal_nonneg)
+          hsum_diff.abs
+          ((hsum_dist.mul_left (L : ℝ)).congr (fun q => by ring))
+    _ = (L : ℝ) * ∑' q : Strings × Strings, (μ q).toReal * dist (fstar q.1) (fstar q.2) := by
+        rw [← tsum_mul_left]
+        exact tsum_congr fun q => by ring
+    _ = L * Δ_R := by rw [h_Δ]
+
+/-- The canonical coupling of a document with its own multi-round summary:
+draw `x ~ μ_X`, then `z ~ Z^(R)(x)` on the tree assigned to `x`, and return the
+pair `(x, z)`. This is the coupling the paper's `thm:unified-gap` intends. -/
+noncomputable def documentSummaryCoupling {Strings : Type*} [Monoid Strings]
+    (g : Summarizer Strings) (μ_X : PMF Strings) (Tpi : Strings → BinTree Strings)
+    (R : ℕ) : PMF (Strings × Strings) :=
+  μ_X.bind fun x => (ZR g x R (Tpi x)).map fun z => (x, z)
+
+/-- Support of the document-summary coupling. -/
+lemma mem_support_documentSummaryCoupling_iff {Strings : Type*} [Monoid Strings]
+    (g : Summarizer Strings) (μ_X : PMF Strings) (Tpi : Strings → BinTree Strings)
+    (R : ℕ) (q : Strings × Strings) :
+    q ∈ (documentSummaryCoupling g μ_X Tpi R).support ↔
+      q.1 ∈ μ_X.support ∧ q.2 ∈ (ZR g q.1 R (Tpi q.1)).support := by
+  unfold documentSummaryCoupling
+  constructor
+  · intro hq
+    rw [PMF.mem_support_bind_iff] at hq
+    obtain ⟨x, hx, hq⟩ := hq
+    rw [PMF.mem_support_map_iff] at hq
+    obtain ⟨z, hz, hzq⟩ := hq
+    cases hzq
+    exact ⟨hx, hz⟩
+  · rintro ⟨h1, h2⟩
+    rw [PMF.mem_support_bind_iff]
+    exact ⟨q.1, h1, by rw [PMF.mem_support_map_iff]; exact ⟨q.2, h2, rfl⟩⟩
+
+/-- **Coupled distortion vanishes under the local laws.** On the canonical
+document-summary coupling, the local laws make the coupled `Δ_R` exactly zero —
+the population-level closure of the gap bound. -/
+theorem documentSummaryCoupling_delta_zero {Strings Y : Type*} [Monoid Strings]
+    [PseudoMetricSpace Y]
+    (g : Summarizer Strings) (fstar : Strings → Y)
+    (μ_X : PMF Strings) (Tpi : Strings → BinTree Strings) (R : ℕ) (hR : R ≥ 1)
+    (hp : ∀ x ∈ μ_X.support, S (Tpi x) = x)
+    (hctx : ContextCompatible fstar)
+    (h1 : ∀ x ∈ μ_X.support, LeafSufficiency g (Tpi x) fstar)
+    (h2 : ∀ x ∈ μ_X.support, MergeSufficiency g (Tpi x) fstar)
+    (h3 : RangeIdempotence g fstar) :
+    ∑' q : Strings × Strings,
+      ((documentSummaryCoupling g μ_X Tpi R) q).toReal * dist (fstar q.1) (fstar q.2) = 0 := by
+  have hterm : ∀ q : Strings × Strings,
+      ((documentSummaryCoupling g μ_X Tpi R) q).toReal * dist (fstar q.1) (fstar q.2) = 0 := by
+    intro q
+    by_cases hq : q ∈ (documentSummaryCoupling g μ_X Tpi R).support
+    · rw [mem_support_documentSummaryCoupling_iff] at hq
+      have hzx : OracleEquiv fstar q.2 q.1 :=
+        population_preservation g fstar μ_X Tpi R hR hp hctx h1 h2 h3 q.1 hq.1 q.2 hq.2
+      have : dist (fstar q.1) (fstar q.2) = 0 := by
+        rw [dist_comm]; exact hzx
+      rw [this, mul_zero]
+    · rw [PMF.mem_support_iff, not_not] at hq
+      rw [hq]
+      simp
+  rw [tsum_congr hterm]
+  exact tsum_zero
+
+/-- **Population preference gap vanishes under the local laws (coupled form).**
+Combining the coupled gap bound with the vanishing coupled distortion: for any
+Lipschitz method loss, the population objective computed on documents equals
+the population objective computed on their multi-round summaries. -/
+theorem population_gap_zero_of_local {Strings Y : Type*} [Monoid Strings]
+    [PseudoMetricSpace Y]
+    (g : Summarizer Strings) (fstar : Strings → Y) (E_gen : Strings → ℝ)
+    (μ_X : PMF Strings) (Tpi : Strings → BinTree Strings) (R : ℕ) (hR : R ≥ 1)
+    (L : ℝ≥0)
+    (D_max : ℝ) (hD_max : 0 ≤ D_max)
+    (h_dist_bound : ∀ x z, dist (fstar x) (fstar z) ≤ D_max)
+    (h_lip : ∀ x z, |E_gen x - E_gen z| ≤ L * dist (fstar x) (fstar z))
+    (hp : ∀ x ∈ μ_X.support, S (Tpi x) = x)
+    (hctx : ContextCompatible fstar)
+    (h1 : ∀ x ∈ μ_X.support, LeafSufficiency g (Tpi x) fstar)
+    (h2 : ∀ x ∈ μ_X.support, MergeSufficiency g (Tpi x) fstar)
+    (h3 : RangeIdempotence g fstar) :
+    ∑' q : Strings × Strings,
+      ((documentSummaryCoupling g μ_X Tpi R) q).toReal * (E_gen q.1 - E_gen q.2) = 0 := by
+  have hgap := unified_preference_gap_bounded_coupled fstar E_gen
+    (documentSummaryCoupling g μ_X Tpi R) L 0 D_max hD_max h_dist_bound h_lip
+    (documentSummaryCoupling_delta_zero g fstar μ_X Tpi R hR hp hctx h1 h2 h3).symm
+  rw [mul_zero] at hgap
+  exact abs_eq_zero.mp (le_antisymm hgap (abs_nonneg _))
 
 /-!
 ## DPO-Specific Infrastructure

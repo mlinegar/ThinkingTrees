@@ -1,0 +1,182 @@
+\section{Design-Based Partial-Document Supervision}\label{sec:min-audit}
+
+The local laws encode the framework's key assumption: that the oracle
+judgment of a long document decomposes across the leaves and merges of
+a recursive summarization tree. Concretely, C1 says each leaf summary
+preserves its span's evidence, C2 says re-summarizing a stored summary
+does not drift, and C3 says split-then-merge preserves the same
+cross-span interactions as summarize-together.
+
+Two consequences of the assumption matter for the rest of the paper.
+The first is root preservation (Theorem~\ref{thm:one-pass}): the
+oracle judgment of the root summary equals the oracle judgment of the
+full document. The second is schedule invariance
+(Corollary~\ref{cor:schedule}): the choice of merge tree and chunk
+grid does not change that judgment, so a researcher can move the
+supervision granularity without changing the estimand. An equivalent
+operator-side formulation appears in
+Appendix~\ref{app:min-proofs}: the realized summarizer sits inside the
+local-law subspace; equivalently, its approximation error vanishes on
+that subspace.
+
+The local laws are testable, and the audit is the procedure that
+tests them. A realized tree is a finite population of partial-document
+units. Leaves test C1. Stored summaries test C2. Merge nodes test C3.
+Optional post-processing rounds test re-summary drift. A sampling design
+selects units with logged positive propensities. An accessible judge
+or gold oracle scores the sampled checks. Inverse-propensity weighting
+transports those local observations back to the full population.
+
+The design-based logic is the same one DSL uses for surrogate-label
+inference. If we only inspect convenient nodes, we do not know what
+population of local failures we measured. If we sample tree units at
+random and log their inclusion probabilities, Horvitz--Thompson or
+H\'ajek estimates recover the population signal under the design.
+C-TreePO's extension is that the sampled units are leaves and merges,
+the substructures that determine whether the labeled object still
+represents the original document.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{01_base_sampled_grid.pdf}
+\caption{\textbf{Six node-sample sets on the same tree.} Each panel
+highlights one possible sampled set of tree units. Highlighted nodes
+contribute to the local-law distortion estimate, weighted by their logged
+propensities. The root can be sampled, but it is not privileged in the
+node-level estimand.}
+\label{fig:min-audit-sample}
+\end{figure}
+
+The audit reports two different quantities. \emph{Violation rates} are
+diagnostic: which local law fails, and how often? \emph{Distortion means} are
+certificate inputs: how far, in oracle units, is the realized tree from the
+projection target where C1, C2, and C3 hold? A deployment should report both.
+A low violation rate can still be costly if the failing nodes have large
+distortion, and a high violation rate can be less damaging if each failure is
+small in the task metric.
+
+The natural design is nested. First sample documents from the target corpus.
+Then sample nodes within selected documents. If the audit compares candidate
+summaries or pairwise preferences, sample those actions within the selected
+node. The logged probability for a labeled unit is the product of the relevant
+design probabilities, for example
+$p_i=p_d\,p_{u\mid d}$ for a node audit or
+$p_i=p_d\,p_{u\mid d}\,p_{a\mid u}$ for an action-level label. Adaptive or
+bandit-style sampling is allowed, but it needs an exploration floor and
+logged propensities; otherwise the audit is no longer a design-based
+estimator of the intended population.
+
+For a realized audit population $\mathcal U$ of size $N$, unit $i$ has
+inclusion indicator $Z_i$, logged propensity $\pi_i>0$, and distortion
+contribution $Y_i$. The basic Horvitz--Thompson mean is
+\[
+  \hat\mu_{\mathrm{HT}}
+  =
+  \frac{1}{N}\sum_{i\in\mathcal U}\frac{Z_i}{\pi_i}Y_i.
+\]
+This is the node-level object. It is distinct from a root-observed corpus
+evaluation, where every sampled document already has a full-document target
+and the root prediction is scored directly against it.
+
+The certificate has four pieces:
+\[
+  |G|
+  \le
+  C_{\mathrm{meth}}\hat{\Delta}_R
+  + B_{\mathrm{cal}} + B_{\mathrm{est}} + B_{\mathrm{clip}}.
+\]
+$\hat{\Delta}_R$ is observed local distortion after $R$ rounds.
+$C_{\mathrm{meth}}$ converts oracle distortion into the downstream objective
+unit. $B_{\mathrm{cal}}$ covers the gap between the accessible judge and the
+trusted target oracle. $B_{\mathrm{est}}$ is sampling error from querying only
+some nodes. $B_{\mathrm{clip}}$ records stabilization bias from clipped
+weights. More local labels shrink the design-based estimation term; they do
+not remove calibration error between the judge and the social-science target.
+
+This is where granularity becomes a methodological choice. If a paragraph,
+section, or merge span can be audited against the same oracle-preservation
+property as the full document, the researcher can observe cheaper local units
+and aggregate them without changing the target. If local laws fail, the audit
+does not hide that fact; it estimates the resulting distortion and shows
+which law failed.
+
+\subsection{Projection and Estimation: Two Uses of the Local Laws}\label{sec:min-projection-estimation}
+
+Each local law is a statement about the oracle $f^*$ itself, not an
+external constraint imposed on the learned operator. Written out:
+\begin{align}
+\text{C1:}\quad & \fstar(g(b)) \sim \fstar(b) && \text{on realized leaves } b, \notag \\
+\text{C2:}\quad & \fstar(g(s)) \sim \fstar(s) && \text{on stored summaries } s \in \operatorname{range}(g), \notag \\
+\text{C3:}\quad & \fstar\!\big(g(g(u)\concat g(v))\big) \sim \fstar(u\concat v) && \text{on merge calls } (u, v), \notag
+\end{align}
+all up to the oracle equivalence $\sim$ from
+Section~\ref{sec:min-framework}. The framework uses these in two ways:
+training-time projection and audit-time estimation.
+
+\paragraph{Training-time projection.} The learned operator $(f, g)$
+can be fit by minimizing
+\begin{equation}\label{eq:min-J-lambda}
+J_\lambda(f, g) = (1 - \lambda)\,L_{\text{oracle}}(f, g)
+\;+\; \lambda\,L_{\text{local}}(f, g),
+\end{equation}
+where $L_{\text{oracle}}$ is the expected loss between $f$'s root
+prediction and the observed root label, and $L_{\text{local}}$ is the
+sum of expected per-law residuals on the realized calls of the
+deployed tree. Adding the $\lambda$-weighted local-law term projects
+the learned operator toward the subspace of $f^*$-approximations that
+satisfy C1/C2/C3.
+
+The endpoints have direct readings. $\lambda = 0$ is pure oracle
+fit and the operator may sit anywhere in the function space; the
+local laws play no role at training time. $\lambda = 1$ is pure
+projection: the operator is pushed into the local-law subspace, with
+no pressure to match $f^*$ on observed labels. Intermediate $\lambda$
+trades the two off. The choice is a design decision rather than a
+structural constant identified by the data: a practitioner with
+strong prior confidence in the laws (e.g., classical mergeable
+sketches whose merge is algebraically exact) can run with large
+$\lambda$; a practitioner whose laws are an empirical bet on the
+operator (the LLM case) sets $\lambda$ from validation behavior and
+lets the audit report the residual the choice produced.
+
+\paragraph{Audit-time estimation.} $L_{\text{local}}$ is the same
+object the audit estimates on the deployed tree. The certificate's
+$\hat{\Delta}_R$ above is the IPW-weighted estimate of $L_{\text{local}}$
+at the realized call frequencies, computed from sampled units rather
+than swept across the full population. Training projection and audit
+estimation are pointed at the same target (distance from the
+local-law subspace) from opposite sides of deployment; the
+downstream consequence of the realized residual is the gap bound in
+Section~\ref{sec:min-guarantees}.
+
+The local laws reference an oracle $f^*$. The audit estimates $f^*$ at
+sampled units from gold-standard labels collected by random assignment,
+and computes local-law residuals against those estimates. Two valid
+sources of gold-standard labels both work, and the audit math is the
+same in either case.
+
+\paragraph{Pre-existing root-level labels.} Document-level expert
+codings exist in many social-science settings (Manifesto-Project
+quasi-sentence codings are one example). Random assignment is satisfied
+by sample splitting: hold out a randomly-chosen subset of documents at
+training time and evaluate the audited tree against that held-out set.
+
+\paragraph{Online node-level labeling.} When new gold-standard labels
+are being collected during deployment, the audit consumes them at the
+level they are collected. Random assignment is satisfied by drawing
+audited nodes with logged inclusion probabilities.
+
+The two modes are equivalent per unit of supervision in the controlled
+Markov benchmark (Appendix~\ref{app:min-markov},
+Figure~\ref{fig:min-markov-leaf-size}): tree supervision (root plus
+sampled leaf labels) matches or improves on flat root-only supervision
+across the budget range, with the gain depending mostly on the total
+number of labeled units rather than the root-vs-leaf split. The
+practical payoff: a researcher who has only document-level expert
+labels can still audit, by sample splitting; a researcher who can pay
+for new labels gets more signal per unit of expert effort by spending
+those labels at the leaf level.
+
+Appendix~\ref{app:min-audit} gives the design map, logging schema,
+clustered uncertainty calculation, and Lean/proof anchors for the
+DSL/IPW certificate layer.

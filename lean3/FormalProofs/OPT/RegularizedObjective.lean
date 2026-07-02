@@ -35,10 +35,129 @@ namespace FormalProofs.OPT
 variable {Strings : Type*} [Monoid Strings]
 variable {Y : Type*} [PseudoMetricSpace Y]
 
+/-! ## No-cost empirical training objective -/
+
+/-- Empirical objective used for the paper-facing learned-tree story.
+
+The parameter type is intentionally generic: in applications it may be a pair
+`(θ, φ)` of state-map and score-map parameters, or a prompt/program choice. The
+fields are losses already estimated on the training sample. This objective has
+no summary-cost term; summary cost remains available in the more general
+population objective below, but is not part of the present empirical training
+surface. -/
+structure NoCostLearnedTreeObjective (Param : Type*) where
+  calibrationLoss : Param → ℝ
+  /-- Gold-standard root prediction loss. Kept as `rootLoss` for API
+  compatibility with earlier objective statements. -/
+  rootLoss : Param → ℝ
+  c1Loss : Param → ℝ
+  c3Loss : Param → ℝ
+  c2Loss : Param → ℝ
+  calibrationWeight : ℝ
+  rootWeight : ℝ
+  c1Weight : ℝ
+  c3Weight : ℝ
+  c2Weight : ℝ
+
+namespace NoCostLearnedTreeObjective
+
+variable {Param : Type*}
+
+/-- Paper-facing name for the gold-standard root prediction loss. -/
+def goldLoss (obj : NoCostLearnedTreeObjective Param) : Param → ℝ :=
+  obj.rootLoss
+
+/-- Paper-facing name for the gold-standard root prediction weight. -/
+def goldWeight (obj : NoCostLearnedTreeObjective Param) : ℝ :=
+  obj.rootWeight
+
+/-- Local-law part of the no-cost empirical objective. -/
+def localLawPenalty (obj : NoCostLearnedTreeObjective Param) (p : Param) : ℝ :=
+  obj.c1Weight * obj.c1Loss p
+    + obj.c3Weight * obj.c3Loss p
+    + obj.c2Weight * obj.c2Loss p
+
+/-- Calibration plus gold-standard root-fit part of the no-cost empirical
+objective. -/
+def supervisedPenalty (obj : NoCostLearnedTreeObjective Param) (p : Param) : ℝ :=
+  obj.calibrationWeight * obj.calibrationLoss p
+    + obj.goldWeight * obj.goldLoss p
+
+/-- Total no-cost empirical objective:
+calibration + gold-standard root fit + C1/C3/C2 local-law penalties. -/
+def value (obj : NoCostLearnedTreeObjective Param) (p : Param) : ℝ :=
+  obj.supervisedPenalty p + obj.localLawPenalty p
+
+/-- Expanded form of the no-cost empirical objective. -/
+theorem value_eq
+    (obj : NoCostLearnedTreeObjective Param) (p : Param) :
+    obj.value p =
+      obj.calibrationWeight * obj.calibrationLoss p
+        + obj.rootWeight * obj.rootLoss p
+        + obj.c1Weight * obj.c1Loss p
+        + obj.c3Weight * obj.c3Loss p
+        + obj.c2Weight * obj.c2Loss p := by
+  simp [value, supervisedPenalty, localLawPenalty, goldWeight, goldLoss]
+  ring_nf
+
+/-- Expanded paper-facing form of the no-cost empirical objective, with the
+root prediction loss named as gold-standard loss. -/
+theorem value_eq_gold_form
+    (obj : NoCostLearnedTreeObjective Param) (p : Param) :
+    obj.value p =
+      obj.calibrationWeight * obj.calibrationLoss p
+        + obj.goldWeight * obj.goldLoss p
+        + obj.c1Weight * obj.c1Loss p
+        + obj.c3Weight * obj.c3Loss p
+        + obj.c2Weight * obj.c2Loss p := by
+  simpa [goldWeight, goldLoss] using value_eq (obj := obj) p
+
+/-- If the local-law weights are zero, the objective reduces to calibration
+and gold-standard root fit. -/
+theorem value_eq_supervisedPenalty_of_zero_localLawWeights
+    (obj : NoCostLearnedTreeObjective Param) (p : Param)
+    (h1 : obj.c1Weight = 0) (h3 : obj.c3Weight = 0)
+    (h2 : obj.c2Weight = 0) :
+    obj.value p = obj.supervisedPenalty p := by
+  simp [value, localLawPenalty, h1, h3, h2]
+
+/-- If the calibration/root weights are zero, the objective is pure local-law
+projection pressure. -/
+theorem value_eq_localLawPenalty_of_zero_supervisedWeights
+    (obj : NoCostLearnedTreeObjective Param) (p : Param)
+    (hcal : obj.calibrationWeight = 0) (hroot : obj.rootWeight = 0) :
+    obj.value p = obj.localLawPenalty p := by
+  simp [value, supervisedPenalty, goldWeight, goldLoss, hcal, hroot]
+
+/-- Nonnegativity under nonnegative weights and nonnegative component losses. -/
+theorem value_nonneg
+    (obj : NoCostLearnedTreeObjective Param) (p : Param)
+    (hWcal : 0 ≤ obj.calibrationWeight)
+    (hWroot : 0 ≤ obj.rootWeight)
+    (hW1 : 0 ≤ obj.c1Weight)
+    (hW3 : 0 ≤ obj.c3Weight)
+    (hW2 : 0 ≤ obj.c2Weight)
+    (hLcal : 0 ≤ obj.calibrationLoss p)
+    (hLroot : 0 ≤ obj.rootLoss p)
+    (hL1 : 0 ≤ obj.c1Loss p)
+    (hL3 : 0 ≤ obj.c3Loss p)
+    (hL2 : 0 ≤ obj.c2Loss p) :
+    0 ≤ obj.value p := by
+  rw [value_eq]
+  positivity
+
+end NoCostLearnedTreeObjective
+
 /-- Generic cost on produced summaries (e.g. length, bits, latency proxy). -/
 abbrev SummaryCost (Strings : Type*) := Strings → ℝ
 
-/-- Weight bundle for the regularized oracle objective. -/
+/-- Weight bundle for the regularized oracle objective.
+
+These are optimization weights, usually denoted by a vector such as `λ` in the
+paper.  They control how strongly training penalizes distortion, summary cost,
+and local-law residuals.  They are not certification thresholds; epsilon-level
+certification is expressed separately by the local-law error in
+`ApproxLocalLawsBundle.CertifiedAtEpsilon`. -/
 structure RegularizedObjectiveWeights where
   distortion : ℝ
   summary : ℝ

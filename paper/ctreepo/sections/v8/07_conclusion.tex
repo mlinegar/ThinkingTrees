@@ -1,0 +1,23 @@
+\section{Conclusion}\label{sec:v8-conclusion}
+
+C-TreePO treats long-document learning as a representation, objective, and
+audit problem on a realized compression tree. The C-Tree supplies the
+representation; C1/C2/C3 state the semantic contract; the root/local objective
+turns that contract into a learning target; and proxy-corrected local-law
+estimation keeps dense LLM supervision aimed at the target oracle.
+
+The main theorem is conditional and task-relative. If the local laws hold
+relative to \(f^\ast\), then node and root states can replace their raw spans
+for oracle-compatible readouts. The objective section explains what is learned
+when \(f^\ast\) is sparse: \(\widehat f\) supplies dense local geometry, and
+sampled \(f^\ast\) calls audit and correct the local-law channel rather than
+changing the population target.
+
+The Manifesto study is the current LLM instantiation. It demonstrates
+root-observed performance against external expert-survey targets while exposing
+local states and proxy diagnostics that identify where node-level oracle audit
+would matter most. The stronger local-law certificate is the next measurement
+layer, not a prerequisite for reading the current root-level result. Classical
+sketch and controlled-state appendices provide backstops for the same
+state-composition idea; the main contribution is to make that idea usable for
+long-document LLM supervision.

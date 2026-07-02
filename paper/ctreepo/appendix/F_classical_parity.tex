@@ -8,6 +8,39 @@ outputs, and the benchmark driver live under
 \texttt{scripts/run\_classical\_parity\_benchmark.py} in the companion
 repository; full logged outputs are in \texttt{outputs/classical\_parity/hll/}.
 
+\subsection{HyperLogLog: A Brief Primer}\label{app:hll-primer}
+
+HyperLogLog makes the mergeable-sketch story concrete. A sketch of
+precision $p$ consists of $m = 2^p$ registers $r_1, \ldots, r_m \in
+\{0, 1, 2, \ldots\}$. For a hashable token $x$, the encode step hashes
+$x$ to a uniform bit string, uses the first $p$ bits as a register
+index $j$, and writes $\max(r_j, \rho)$ into register $j$ where $\rho$
+is the position of the leading $1$ in the remaining bits. The merge
+is pointwise max: $(r \oplus r')_j = \max(r_j, r'_j)$. This merge is
+associative, commutative, and idempotent, so any tree-shape reduction
+of shards produces the same register vector.
+
+The cardinality estimate is the harmonic-mean formula
+\[
+\hat n \;=\; \frac{\alpha_m \, m^2}{\sum_{j=1}^m 2^{-r_j}},
+\qquad
+\alpha_m \;\approx\; 0.7213 / (1 + 1.079/m),
+\]
+with a small-range correction for low cardinalities that substitutes
+linear counting when many registers are empty. The relative standard
+error is $\mathrm{RSE} = 1.04/\sqrt{m}$, independent of the stream's
+content or distribution \citep{FlajoletEtAl2007}. Precision $p=14$
+costs about 16\,KB and estimates cardinality with relative standard
+error under one percent; the Lean bridge checks the arithmetic value
+$1.04/\sqrt{2^{14}}=13/1600<1\%$.
+
+This is the pattern Section~\ref{sec:hll-parity} verifies on the
+running examples: a bounded-size state, an associative merge, and a
+query that reads out a task value. Because $\mathrm{encode}$,
+$\oplus$, and $\mathrm{query}$ are all deterministic and closed-form,
+a single algebraic proof covers every realized shard, and no runtime
+audit is needed.
+
 \subsection{Protocol}
 
 Every cell in the sweep is a training call with a zero-optimization
@@ -18,7 +51,7 @@ other knobs held constant. Two classical HLL implementations share
 the protocol. The \textbf{native} path is a plain register-based
 implementation whose merge is pointwise max on a \texttt{uint8}
 register array, so register state is byte-deterministic across any
-A1--A3-satisfying pipeline. The \textbf{DataSketches} path wraps
+state-level mergeable pipeline. The \textbf{DataSketches} path wraps
 Apache DataSketches' HLL sketch and union: its internal representation
 transitions between list, sparse, and dense modes based on cardinality,
 so the serialized bytes of an equivalent summary can depend on the
@@ -47,6 +80,116 @@ Table~\ref{tab:classical-parity-hll}) is:
 
 Total: $360$ cells, run in parallel over CPU cores. On a 128-core host
 the full sweep completes in a few minutes.
+
+\subsection{Byte-Level Parity and Learning Behavior}\label{app:hll-empirical-collapse}
+
+This subsection elaborates the headline result Section~\ref{sec:hll-parity}
+states briefly, and is referenced from there. It mirrors the structure
+of the empirical collapse of Proposition~\ref{prop:mergeable-reduction}.
+
+\paragraph{Classical methods.}
+For the classical methods, Proposition~\ref{prop:mergeable-reduction}
+predicts that the tree-reduced summary should match the flat-reduced
+summary up to oracle equivalence. The full per-cell parity grid in
+Table~\ref{tab:classical-parity-hll} confirms this on every cell:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Native HLL: byte-exact.} The register vectors
+          produced by $\texttt{reduce\_hll\_sketches}$ at every tree
+          shape are byte-identical to those produced by the flat
+          pipeline. The \texttt{bytes=} column is $1.00$ on every row.
+    \item \textbf{DataSketches HLL: estimate-exact.} The
+          \texttt{state\_equal} check (estimate agreement within
+          $2\times$ HLL RSE) holds on every cell; the \texttt{bytes=}
+          check fails because DataSketches' list$\to$sparse$\to$dense
+          transitions depend on build order, but the functional
+          oracle answer agrees.
+\end{itemize}
+
+This is Proposition~\ref{prop:mergeable-reduction}'s state-level
+collapse made concrete. The native run instantiates $g$ as serialized
+HLL register state and the merge as register-wise max; for a register-
+based implementation the reduction is literally byte-for-byte.
+
+\paragraph{Learned methods.}
+The two learned methods ask a different question: if we pointed the
+same \texttt{fit()} pipeline at the classical HLL as an oracle, how
+close can a learned $g$---with or without a learned readout---come to
+reproducing its behavior? In the projection view, the classical
+methods begin in the exact local-law subspace, while the learned
+methods test how well different representable subspaces and readouts
+can approach that same target under local-law supervision.
+Figure~\ref{fig:classical-parity-hll} shows the relative MAE of each
+method against precision, one panel per leaf count, and the picture
+tells a clean story:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Learned $g$+$f$ (end-to-end)} tracks the classical
+          sketch within a small multiple of the theoretical RSE floor
+          and \emph{improves} as the tree gets deeper. At $p=13$,
+          relative MAE drops from $\sim\!0.27$ at $L=2$ to
+          $\sim\!0.19$ at $L \ge 8$: more merges mean more gradient
+          signal at internal nodes, and the learned readout can
+          compensate for imprecision anywhere in the state.
+    \item \textbf{Learned $g$ with classical $f$} \emph{degrades} as
+          the tree gets deeper. At $p=13$, relative MAE grows from
+          $\sim\!0.27$ at $L=1$ to $\sim\!0.43$ at $L=2$ to
+          $\sim\!0.86$ at $L=16$. When the readout is a fixed
+          non-learnable formula, mismatches at internal nodes channel
+          through an unforgiving estimator and compound rather than
+          average.
+\end{itemize}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.88\linewidth]{hll_parity_curves.pdf}
+    \caption{Relative MAE against the supplied HLL oracle as leaves per document increase. The native HLL row is exact and is shown at the plotting floor. DataSketches is included as an independent implementation check. The oracle-state learned lane fixes native HLL leaf registers and the HLL estimator \(f^\star\), learning only the merge map \(g\); it is exact at one leaf and remains below the HLL RSE floor after training. The learned-\(f+g\) lane jointly learns state and scoring, so it does not inherit the exact HLL state semantics.}\label{fig:classical-parity-hll}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.85\linewidth]{hll_merge_learning_memory_median.pdf}
+    \caption{HLL merge-learning memory curve, median over seeds. Single-panel companion to Figure~\ref{fig:classical-parity-hll} that isolates how memory budget tracks the learned merge as the tree grows.}\label{fig:hll-merge-learning-memory-median}
+\end{figure}
+
+\paragraph{Two structural takeaways.}
+Two findings follow from this experiment. First, when the state-level
+conditions of Proposition~\ref{prop:mergeable-reduction} hold, the
+classical collapse is exact: C-TreePO reduces to the classical
+mergeable sketch not merely in distribution but byte-for-byte on the
+reference implementation. This is the tightest empirical version of
+the generalization claim the paper can make for this representative
+sketch; the formal version is the sketch-generic inclusion
+\texttt{mergeableSketchSummaryClass\_subset\_exactLocalLawSubspace}.
+Second, the register-space constraint is a real optimization barrier:
+with identical data, identical training objective, and identical
+hyperparameters, the only difference between \texttt{learned\_g} and
+\texttt{learned\_gf} is whether the readout $f$ is learnable or fixed
+to the classical HLL estimator. The gap between the two---and its
+direction-of-scaling with $L$---is therefore a clean statement that
+some learned-$g$ settings pay a real cost when the readout must live
+in the classical sketch's exact state space. A practitioner building
+on this framework who does not need byte-for-byte parity with a
+specific reference sketch would pick the end-to-end learned path.
+
+\paragraph{Count-Min and Frequent Items: not idempotent.}
+The HLL parity result rests on three algebraic properties of the
+register-wise max merge: associativity, commutativity, and
+idempotence. The frequency-sketch family (Count-Min, Frequent Items,
+Misra--Gries, the heavy-hitter sketches) shares the first two but
+not the third: repeated evidence must \emph{count}, not be absorbed
+by a semilattice merge. C2 (idempotence) therefore plays a different
+role on these sketches than on HLL: re-summarizing a stored frequency
+sketch does not leave it unchanged, and the local-law audit instead
+checks that the additive merge composes consistently with the
+underlying counting query. The state-level reduction in
+Proposition~\ref{prop:mergeable-reduction} still applies---the
+condition is mergeability, not idempotence---but Count-Min and
+Frequent Items are listed in
+Appendix~\ref{app:mergeable-background} as empirical-only rows in
+this paper unless and until a matching local-law artifact is added
+to the Lean surface. The companion \texttt{treepo-bench classical-
+sketches} suite reports the per-cell tree-vs-flat numbers for each.
 
 \subsection{Learned Variants in Detail}\label{app:classical-parity-variants}
 

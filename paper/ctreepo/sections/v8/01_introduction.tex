@@ -1,0 +1,62 @@
+\section{Introduction}\label{sec:v8-introduction}
+
+Political manifestos are long measurement objects. A party platform can run
+for dozens or hundreds of pages, and the target score is a document-level
+expert judgment about a policy dimension. Economic policy, for example, is
+spread across fiscal pledges, welfare commitments, industrial strategy,
+privatization language, and qualifications about when each commitment applies.
+The measurement target is global. The evidence is local and dispersed.
+
+Large language models make this tension more visible. They can read and score
+long texts, but high predictive accuracy on LLM-produced surrogate labels does
+not by itself protect downstream empirical estimates from bias
+\citep{EgamiEtAl2024}. Long inputs add another failure mode: relevant evidence
+can be missed or diluted when it is buried in the middle of a context window
+\citep{LiuEtAl2024LostMiddle}. A single full-context score gives the analyst
+one number. It does not say which policy distinctions were preserved, which
+were compressed away, or where an expert should audit the result.
+
+The Manifesto Project illustrates the cost side of the problem. Trained coders
+and expert surveys provide trusted political-text measurements, and the
+Manifesto corpus supplies party election programs across countries and time
+\citep{ManifestoProject2025a,ManifestoCorpus2025}. Each new full-document
+expert target is expensive because the unit is the whole platform. The same
+corpus also contains smaller evidence units, especially quasi-sentence coding,
+that suggest a different supervision design: audit and train at the span or
+merge level when those units measure the same policy target.
+
+C-TreePO makes that design explicit. A compression tree splits a manifesto into
+contiguous leaves, summarizes each leaf into a policy-evidence state, merges
+sibling states up the tree, and scores the root. The learned state map is
+valid for a target oracle \(f^\ast\) only when it satisfies three local laws:
+leaf summaries preserve the relevant evidence in their spans, produced states
+can be reused without policy drift, and merged states preserve the represented
+parent span. These laws are local, but their consequence is global: a valid
+root state can replace the original manifesto for oracle-compatible readouts.
+
+The objective has the same two-level shape. The root channel fits the observed
+document-level expert target. The local-law channel trains and audits the
+state map inside the realized tree. In LLM practice, the dense local signal is
+usually a learned proxy \(\widehat f\) or a teacher trace, while direct
+\(f^\ast\) calls are sparse. C-TreePO therefore uses \(\widehat f\) for local
+training geometry and sampled node-level \(f^\ast\) calls, with logged
+propensities, to correct proxy bias in the local-law channel.
+
+The empirical application is the six-dimension Manifesto/Benoit benchmark
+\citep{BenoitEtAl2025}. The current evidence is root-observed: held-out
+platforms have external expert-survey means, and the C-Tree root is scored
+against those document targets. The same runs produce readable leaves, merges,
+and proxy diagnostics that define the next audit layer. That separation is the
+point of the framework. Root accuracy measures the final task; node audit
+measures whether the final score is carried by locally faithful policy states.
+
+Section~\ref{sec:v8-manifesto-mechanism} introduces the manifesto policy-state
+mechanism. Section~\ref{sec:v8-ctree-math} states C-Trees and the local laws.
+Section~\ref{sec:v8-objective} gives the objective and theorem ladder.
+Section~\ref{sec:v8-audit-certificate} gives the audit estimator and
+finite-sample certificate. Section~\ref{sec:v8-manifesto-results} reports the
+Manifesto application. Section~\ref{sec:v8-scope-related} places the work
+against measurement, long-context, compression, sketching, preference-learning,
+and neural-operator literatures. Section~\ref{sec:v8-discussion} discusses
+how to read the certificate, spend root and node labels, and diagnose
+manifesto failure modes.

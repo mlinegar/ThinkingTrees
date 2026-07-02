@@ -57,8 +57,13 @@ Use this order when another LLM needs to understand or safely modify the repo.
    traces, and law-stress benchmark.
 6. `src/tree/` and `src/training/ctreepo_trainer.py` for neural-tree and
    PyTorch/FNO training.
-7. `scripts/` entry points only after identifying the workflow category below.
-8. `tests/` for pinned behavior and expected compatibility surfaces.
+7. `src/ctreepo/sim/core/clean_unified_fg.py` if you are working on a
+   research-clean f/g composition (not the production `FNOCountSketch`
+   path). Two model classes -- `CleanUnifiedFG` (vector state) and
+   `CleanUnifiedNO` (function state, FNO g shared between leaves and
+   merges) -- driven by `scripts/probe_clean_unified_no.py`.
+8. `scripts/` entry points only after identifying the workflow category below.
+9. `tests/` for pinned behavior and expected compatibility surfaces.
 
 ## Repo Faces
 
@@ -67,7 +72,7 @@ The repo currently serves two related but different paper tracks.
 | Face | Main purpose | Primary code |
 | --- | --- | --- |
 | C-TreePO | Fixed tree structure, local laws, IPW/certification, formal/simulation evidence, f/g alternation, manifesto and Markov examples | `src/ctreepo`, `src/tree`, `src/tasks/manifesto`, `treepo/src/treepo`, `lean3/FormalProofs`, many `scripts/run_*` and `scripts/report_*` files |
-| Semantic Forests | Adaptive/windowed systems stack, batching, runtime evaluation, preference training, feedback infra, multi-server orchestration | `src/core`, `src/preprocessing`, `src/runtime`, `src/training`, `src/feedback`, `src/pipelines` |
+| Semantic Forests | Adaptive/windowed systems stack, batching, runtime evaluation, preference training, preference collection, multi-server orchestration | `src/core`, `src/preprocessing`, `src/runtime`, `src/training`, `src/preference_collection`, `src/pipelines` |
 
 Shared infrastructure includes tree data models, builders, strategy wrappers,
 LLM clients, preprocessing, batch execution, logged supervision, optimizer
@@ -86,7 +91,7 @@ wrappers, and dataset plugins.
 | `src/runtime/` | Long-context runtime backbone, benchmark adapters, tracing, memory, repair, verifier abstractions | Mainly Semantic Forests/runtime evaluation support. |
 | `src/datasets/` | Dataset plugin registry and plugins for JSONL, Manifesto, PDF | Thin plugin layer used by training/eval scripts. |
 | `src/pipelines/` | Batched document pipeline | `batched.py` is the high-throughput document pipeline around batch orchestration and scoring. |
-| `src/feedback/` | Feedback collector/server/store types | Preference and feedback infrastructure. |
+| `src/preference_collection/` | Preference collector/server/store types | Preference request, response, store, and collector infrastructure. |
 | `src/diffusion/` | Diffusion/generate-first experimental stack | Used by TreePO generate-first experiments. |
 | `src/experiments/` | Experiment API and experiment runner helpers | Supports structured experiment runs. |
 | `src/stats/` | Sampling utilities | PPS/systematic sampling support. |
@@ -632,6 +637,248 @@ Flow:
 3. Detached mode writes launcher manifests and logs.
 4. Reports aggregate oracle-budget, effective-training-docs, full-doc FNO,
    parity, and local-law diagnostics.
+
+#### Contextual Sbijax Optimize-To-Zero Controls
+
+Source-audit note (2026-05-05): this subsection was updated after a source
+inventory (`rg --files src scripts tests docs lean3`, 1644 paths), AST parse
+of `src/ctreepo/sim/core/contextual_sbijax.py`,
+`src/ctreepo/sim/core/clean_unified_fg.py`,
+`scripts/probe_contextual_sbijax.py`, and `scripts/probe_clean_unified_no.py`,
+plus targeted searches for `learned_local_laws`, `local_law_package_weight`,
+`law_architecture`, `c2_merge_target`, `CleanUnifiedNO`, and the relevant Lean
+contextual-sufficiency anchors.
+
+Primary files:
+
+- `src/ctreepo/sim/core/contextual_sbijax.py`
+- `src/ctreepo/sim/core/clean_unified_fg.py`
+- `scripts/probe_contextual_sbijax.py`
+- `src/ctreepo/sim/cli/probe_contextual_sbijax.py`
+- `scripts/run_optimize_to_zero_laws_grid.sh`
+- `scripts/run_optimize_to_zero_theta_sup_grid.sh`
+- `scripts/run_optimize_to_zero_laws_hard_inputs.sh`
+- `scripts/run_optimize_to_zero_fg_architecture_ablation.sh`
+- `scripts/run_optimize_to_zero_laws_hybrid_grid.sh`
+- `scripts/run_clean_unified_fg_contextual_ablation.sh`
+
+Current trainer lanes:
+
+- `fit_contextual_sbijax_package_direct` (`--sbijax-trainer package`):
+  package `sbijax.NASS` / `sbijax.NASSS` baseline. It can fit contextual
+  responses while failing sufficient-state recovery, so treat it as an
+  approximate baseline.
+- `fit_contextual_sbijax_theta_supervised` (`--sbijax-trainer theta_supervised`):
+  direct theta-MSE control for the Markov sketch.
+- `fit_contextual_sbijax_identity_theta` (`--sbijax-trainer identity_theta`):
+  analytic identity control, requiring `markov_exact_sketch` input.
+- `fit_contextual_sbijax_exact_zero_markov`
+  (`--sbijax-trainer exact_zero_markov`): deterministic structural Markov
+  sketch baseline.
+- `fit_contextual_sbijax_learned_local_laws`
+  (`--sbijax-trainer learned_local_laws`): current exact-zero lane. With
+  `markov_exact_sketch` input on the t128 hazard-panel grid, it reaches max
+  contextual MAE `3.61e-9` over leaves `1, 2, 4, 8, 16, 32, 64`, with
+  first/last accuracy `1.0 / 1.0`. This trainer now also exposes
+  `local_law_package_weight` for opt-in NASS/NASSS auxiliary pressure and
+  `law_architecture` / `c2_merge_target` for learned merge/readout ablations.
+- `evaluate_contextual_sbijax`: shared diagnostic evaluator used by all lanes.
+
+Post-resolution ablations (2026-05-05):
+
+- JAX f/g architecture grid:
+  `outputs/optimize_to_zero_fg_architecture_ablation_t128/summary.json`
+  (`36` rows). Learned merge, learned decoder, and fully learned variants work
+  inside the local-law lane; all architecture groups preserve first/last
+  accuracy at `1.0 / 1.0`. Best contextual MAE is `1.53e-5` for
+  `learned_merge + c2_self_consistency + leaf=1`.
+- Hybrid NASS/NASSS + laws grid:
+  `outputs/optimize_to_zero_laws_hybrid_grid_t128/summary.json` (`42` rows).
+  Best row is `nasss / regime_one_hot / leaf=1 / w=0.1`, contextual MAE
+  `1.47e-5`. NASS is weaker; `normalized_token_ids` remains a hard encoding.
+- Clean general f/g grid:
+  `outputs/clean_unified_fg_contextual_ablation_t128/summary.json` (`15` rows).
+  Best row is `contextual_sufficiency/dep_none/leaf_tokens_16`, root MAE
+  `1.1451`, contextual MAE `1.1187`. This is the honest general f/g path with
+  no exact Markov merge/decoder installed, and it has not reached exact-zero.
+
+Full report:
+
+- `outputs/markov_contextual_ablation_grid_report_20260505.md`
+- `docs/markov_contextual_sufficiency_ablation_handoff_2026-05-05.md`
+
+Required status metrics for this thread:
+
+- contextual fit: `contextual_mae` / raw contextual MAE.
+- sketch recovery: `theta_mae`, raw count MAE,
+  `theta_first_regime_accuracy`, and `theta_last_regime_accuracy`.
+- local laws: `eps_leaf`, `eps_merge`, and `eps_idemp`.
+
+Do not claim exact-zero from contextual MAE alone. The resolved handoff is
+`docs/contextual_sbijax_optimize_to_zero_resolved_2026-05-05.md`; it records
+the central finding that local laws select the sufficient sketch while package
+NASS/NASSS can plateau on a non-canonical summary.
+
+Lean link: the Python artifacts are empirical evidence about training. The
+theorem surface lives in `lean3/FormalProofs/OPT/MarkovCountSketchExample.lean`,
+`MarkovPathDGP.lean`, `ContextualQuerySufficiency.lean`,
+`MarkovSufficiency.lean`, `SlicedContextualSufficiency.lean`,
+`DependenceObjectiveProxies.lean`, `HybridSummarySufficiency.lean`, and the
+neural-operator bridge files. Lean proves the exact sketch, contextual/sliced
+implication, and local-law/readout interfaces; it does not prove SGD convergence
+for `learned_local_laws` or `CleanUnifiedNO`.
+
+#### Performance: forward_doc_unified collect_full_trace
+
+`FNOCountSketch.forward_doc_unified` in
+`src/ctreepo/sim/core/markov_neural_operator_baselines.py` defaults to
+`collect_full_trace=False`. With this default the per-doc forward pass
+stays GPU-resident: predictions for all nodes are computed in a single
+batched `predict_norm_from_state` call, and the per-node
+`FullTreeNodeRecord` / `StateNode` trace tree (which would force one
+`.cpu()` sync per node) is skipped. On long merge chains this is a ~9x
+training-loop speedup (measured at recoverable_v5_t2048 leaf=16, 128
+leaves/doc / 127 merges/doc: ~950 leaves/sec → ~8800 leaves/sec on a
+single RTX PRO 6000).
+
+Telemetry consumers must opt back in by passing `collect_full_trace=True`.
+Current opt-in callers:
+
+- The phi-feature pair-statistics collector
+  (`_collect_phi_pair_statistics_for_method` in
+  `markov_neural_operator_baselines.py`, ~line 18371) which iterates
+  `out["node_records"]` and `out["document_record"]`.
+- The standalone test
+  `test_forward_doc_unified_keeps_document_target_separate_from_node_sampling`
+  in `tests/ctreepo/test_neural_operator_baselines.py`.
+
+The tradeoff_pipeline training and eval call sites in the same file
+(`forward_doc_unified` invocations near lines 17836 and 17930) explicitly
+pass `collect_full_trace=False` to make the intent obvious to readers,
+even though that matches the default. New consumers that only read the
+GPU-tensor outputs (`document_pred_norm`, `all_node_preds`,
+`all_node_proxy_targets`, `all_node_oracle_targets`,
+`all_node_observed`, `all_node_propensities`, `all_node_depths`,
+`root_pred_count`) should not pass the flag - the default is correct for
+them and any per-node `.cpu()` sync added back in will silently re-tank
+throughput on long merge chains.
+
+The regression test
+`test_forward_doc_unified_collect_full_trace_false_skips_telemetry`
+asserts numerical parity between the two code paths and that the
+telemetry side-channel is empty under the default.
+
+#### Head Capacity
+
+The unified-g tree reference presets default to:
+
+- `state_dim = 128`
+- `hidden_dim = 512` (count-head bottleneck, "f")
+- `tree_merge_hidden_dim` defaults to `hidden_dim` (so 512 for the merge head, "g")
+
+These are the **conservative defaults**. A wide-heads experiment (2026-05-03)
+tested whether bumping to `state_dim=2048, hidden_dim=2048,
+tree_merge_hidden_dim=4096` would crack the ~2.14 zero-merge root_mae
+floor on `recoverable_v5_t2048` (fixed_leaf_tokens=2048, 1 leaf/doc,
+no merge composition - a trivially-easy single-leaf count regression).
+**The hypothesis was refuted.** Wide-heads results from the experiment
+(`outputs/markov_t2048_full_grid_wide_heads_20260503_003820/`):
+
+| package | leaf | merges | OLD root_mae | WIDE root_mae |
+|---|---:|---:|---:|---:|
+| full100 | 2048 | 0 | 2.14 | **2.13** (noise) |
+| full100 | 1024 | 1 | 1.51 | 3.72 (worse) |
+| full100 | 256 | 7 | **1.06** | 3.72 (much worse) |
+| full100_leaf+internal | 256 | 7 | **0.92** | 0.89 (slight improvement) |
+| full100_leaf+internal | 1024 | 1 | 1.38 | 1.40 (noise) |
+
+The wide model overfit to bad local minima in several composition cells
+(best_epoch=2 / 10 vs 25-30 for the conservative defaults). The
+~2.14 zero-merge floor is therefore NOT head-capacity-bound; the real
+limit is somewhere else - likely the FNO leaf encoder
+(`tree_leaf_fno_width=128, n_modes=8, n_layers=4`), the count-head
+input pooling, or DGP irreducible noise.
+
+Two non-default presets exist for explicit ablations:
+
+- `unified_g_full_local_laws_small_v1`: half size
+  (`state_dim=64, hidden_dim=256, fno_width=64, fno_n_modes=4,
+  fno_n_layers=2`). For memory-constrained or small-model ablations.
+- `unified_g_full_local_laws_wide_heads_v1`: bumps
+  `hidden_dim=2048, tree_merge_hidden_dim=4096` (state_dim stays at the
+  parent's 128). Kept for explicit wide-head ablations; do not promote
+  to default without re-validating.
+
+When tempted to widen heads for performance, first run a zero-merge cell
+(`fixed_leaf_tokens = doc_tokens`). If root_mae is comparable to the FNO
+baseline at the same setup, the bottleneck is upstream of the heads -
+look at FNO width/modes, leaf pooling, or the DGP itself.
+
+#### apply_fno_token_encoder Helper (single source of truth)
+
+`src/ctreepo/sim/core/fno_doc_baselines.py:apply_fno_token_encoder`
+is the canonical implementation of the
+embed -> optional projection -> FNO -> masked-pool sequence. Three
+call sites delegate to it:
+
+- `FNOTokenEncoder.forward` (the official wrapper class).
+- `FNOCountSketch._encode_token_batch` (the unified-g leaf encoder).
+- `FNOCountSketch.predict_doc_sequence_logits` (the doc-sequence FNO
+  baseline; supplies `input_proj` so the helper handles a per-token
+  width-projection step).
+
+Pooling mode is configurable per-call (`mean` or `sum`). On
+`FNOCountSketch`, the pool mode comes from the `tree_leaf_fno_pooling`
+config knob (default `mean`). Adding new code paths that do
+"embed + FNO + pool" should also delegate here rather than re-implement
+the sequence inline.
+
+#### Clean f/g Composition Models
+
+`src/ctreepo/sim/core/clean_unified_fg.py` is a fresh, narrow
+implementation of the C-TreePO-style f/g/leaf_encoder composition.
+It is **not** plugged into the supervision_recovery pipeline; it is a
+research-clean alternative driven by
+`scripts/probe_clean_unified_no.py`.
+
+Two model classes:
+
+- `CleanUnifiedFG`: vector-state. Three named submodules --
+  `leaf_encoder` (`embed + FNO + pool`), `g` (bare
+  `nn.Linear(2*state_dim, state_dim)`), `f` (bare
+  `nn.Linear(state_dim, 1)`). Useful as a slim baseline that
+  matches the existing pool-then-scalar pattern but without any
+  custom MLP cruft.
+- `CleanUnifiedNO`: function-state, neural-operator end-to-end.
+  Three named submodules -- `token_embedding` (trivial
+  `nn.Embedding`), `g` (a single `neuralop.FNO` shared between leaves
+  and merges, signature `(B, 2C, L) -> (B, C, L)`), `f` (an FNO +
+  pool + Linear scalar readout). At leaves, `g.encode_leaf` lifts
+  `(B, C, L)` to `(B, 2C, L)` by zero-padding the right half so the
+  same g call applies. Test
+  `test_g_at_leaves_is_same_instance_as_g_at_merges` asserts there is
+  exactly one `g.fno` module in the model graph.
+
+Both classes return a `TreeForwardOutput`/`TreeForwardOutputNO`
+dataclass with per-node count predictions for root, every leaf, and
+every internal merge. Loss helpers (`root_mse_loss`, `leaf_mse_loss`,
+`merge_mse_loss`) work on either output type and accept observed-mask
+tensors so the trainer can express the C1/C2/C3 supervision-sparsity
+packages directly.
+
+If you want to extend either model, swap a named submodule with a
+different `nn.Module` of the same input/output signature -- avoid
+expanding the body in-place, since the design intent is that each
+component stays a thin wrapper around an "official" primitive.
+
+Current contextual-sufficiency ablation status (2026-05-05): the general
+`CleanUnifiedNO` path completed `15` rows in
+`outputs/clean_unified_fg_contextual_ablation_t128/summary.json`. The best
+setting was `contextual_sufficiency/dep_none/leaf_tokens_16`, with root MAE
+`1.1451` and contextual MAE `1.1187`. This is better than the one-leaf rows but
+still far from the exact Markov witness, so do not present it as solved. The
+next useful extension is local-law-compatible state/witness supervision on this
+general f/g surface.
 
 ### Runtime Evaluation
 

@@ -1,0 +1,50 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{microtype}
+\usepackage{natbib}
+\usepackage[hidelinks]{hyperref}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0pt}
+
+\newcommand{\X}{\mathcal{X}}
+\newcommand{\Y}{\mathcal{Y}}
+\newcommand{\fstar}{f^\ast}
+
+\begin{document}
+\begin{center}
+{\Large\bf C-TreePO: Design-Based Partial-Document Supervision for Long-Document Political Measurement}
+\end{center}
+
+\paragraph{Summary.}
+Long-document political measurement is attractive precisely where it is most fragile: the task values researchers care about often depend on interactions distributed across a document, while the models and annotation workflows we can actually run are local. In practice we split a document into spans, summarize locally, merge summaries up a tree, and score the final summary. That makes compression part of the research design. The analyst no longer observes the object whose label is being used as data. Design-based Supervised Learning (DSL) shows why imperfect surrogates can bias downstream inference when LLM outputs are treated as labels \citep{EgamiEtAl2024}; in long-document settings there is an earlier failure mode where the compression pipeline changes the target before any label is assigned.
+
+We introduce C-TreePO (Compression Tree Preference Optimization), an auditable compression-tree framework organized around an oracle $\fstar:\X\to\Y$, the full-information task value we want to recover. In the running application, $\fstar(x)$ is the professional Manifesto Project RILE score \citep{ManifestoProject2025a}, but $\X$ can be text, transcripts, or video-derived representations, and $\fstar$ can be any rubric-governed researcher judgement on the full object. C-TreePO identifies three locally testable laws---sufficiency, idempotence, and merge consistency---that are exactly the conditions needed for local summaries to aggregate into an oracle-preserving full-document label. We then go one step further by applying DSL principles to the \emph{nodes} of a summary tree: treating leaves and merges as a finite population, randomly sampling nodes for gold-standard oracle judgements with logged propensities, and using inverse-probability weighting and concentration bounds to recover unbiased estimates (and uncertainty) not only for document labels, but for arbitrary oracle-indexed losses and preference objectives under partial supervision.
+
+\paragraph{The object we preserve.}
+C-TreePO starts from a simple premise: the object of interest is an \emph{oracle} judgement, the task value the researcher would trust if full-information coding were feasible. This can be a professional label (RILE), an expert coding protocol, or a high-quality full-information procedure. Compression is introduced only because oracle evaluation is expensive. This task-relative framing parallels sufficiency ideas in decision theory \citep{Blackwell1953}: a compressed representation is valid only insofar as it preserves the distinctions the oracle uses.
+
+\paragraph{C-TreePO as a learned mergeable sketch.}
+Hierarchical summarization is not a neutral engineering step. The analyst observes a tree of local summaries, and the final measurement becomes a functional of the \emph{compression process}. C-TreePO treats recursive summarization as a learned mergeable sketch: a fixed compression tree over contiguous spans in which every node stores a bounded summary and every edge can be audited locally. The framework is organized around three local laws. (C1) \emph{sufficiency}: each leaf summary preserves the oracle-relevant evidence in its source span. (C2) \emph{idempotence}: once information is stored in a summary, re-summarization does not drift at the oracle. (C3) \emph{merge consistency}: merges preserve cross-span interactions; the parent summary should agree with what a direct full-information read of the combined span would imply. These laws play the same role for semantic compression that mergeability conditions play for classical sketches \citep{Agarwal2013MergeableTODS}: they specify an interface under which local states can be safely aggregated, and they support interpretable failure attribution (leaf omission, merge interaction loss, drift under recompression).
+
+\paragraph{Design-based partial supervision on tree nodes.}
+C-TreePO goes one step further by applying DSL principles at the node level \citep{EgamiEtAl2024}. Leaves and merges form a finite population of audit units. We randomly sample nodes for gold-standard oracle judgements, log inclusion propensities, and use inverse-probability weighting (plus concentration bounds) to estimate mean oracle distortion and preference-objective drift under partial supervision. Concretely, if $d_u$ is a bounded distortion at node $u$ and $\pi_u$ its inclusion probability, Horvitz--Thompson estimators recover design-unbiased estimates of population means from sampled nodes via weights $1/\pi_u$. This design also supports adaptive auditing (e.g., oversampling uncertain merges) provided propensities are logged. The key is generality: because many downstream labels, losses, and preference objectives factor through $\fstar(x)$, estimating distortion on sampled nodes provides a direct handle on how much compression can move full-document measurements and any oracle-indexed downstream objective.
+
+\paragraph{Manifesto Project RILE.}
+We demonstrate the approach on Manifesto Project RILE scoring \citep{ManifestoProject2025a}. Manifestos are long and internally structured, so naive compression can erase cross-section interactions that matter for ideological judgements. In our current corpus build there are 3{,}327 text-available manifesto documents with RILE labels from 62 countries between 1945 and 2025, and 1{,}006 texts exceed 8{,}192 characters, making compression a binding design constraint rather than a convenience.\footnote{Counts are computed from the repository's local copy of the Manifesto Project dataset with text availability and non-missing RILE labels.} The empirical goal is not to propose a new ideological scaling algorithm. It is to make the measurement design explicit: compare full-document RILE labels to summary-based surrogates and report audit-based certificates describing where compression changes the oracle and how large the remaining uncertainty is under a fixed node-level supervision budget.
+
+\paragraph{What this enables.}
+C-TreePO connects two active methodological conversations: scalable LLM-based political measurement \citep{BenoitEtAl2025} and design-based inference with imperfect surrogates \citep{EgamiEtAl2024}. The payoff is not another prompt-engineering recipe. It is a design-based measurement procedure with three deliverables: (i) a scalable surrogate label produced from a compression tree, (ii) a certificate describing compression-induced error under the supervision design, and (iii) diagnostics indicating which local law fails when the pipeline breaks.
+
+\paragraph{Scope and broader use.}
+C-TreePO is strongest for content-based tasks with a well-defined full-information oracle and explicit rubric, where the key failure mode is semantic information loss under compression rather than an ill-posed target. It does not claim generic lossless compression, and it does not solve settings where the oracle itself is unstable or contested. The intended use is to make long-document measurement honest: if the analyst cannot read everything, the pipeline should still produce a reportable estimate and uncertainty statement, rather than a silent preprocessing step.
+
+Because the objects and guarantees are oracle-indexed, the same design applies beyond manifestos to legislative speeches, hearing transcripts, party platforms, court opinions, and other long political materials, and to multimodal settings where the relevant input is a transcript or structured representation derived from audio/video. The core methodological move is the same: treat the summary tree as part of the sampling design, and treat node-level gold labels as design-based supervision rather than ad hoc spot checks.
+
+\clearpage
+\bibliographystyle{plainnat}
+{\small\bibliography{../../paper/refs}}
+
+\end{document}

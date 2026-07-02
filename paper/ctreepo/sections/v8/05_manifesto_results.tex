@@ -1,0 +1,187 @@
+\section{Manifesto / LLM Results}\label{sec:v8-manifesto-results}
+
+The Manifesto application asks whether a learned C-Tree can preserve a
+social-science measurement target while exposing readable local states. The
+source documents are party election programs from the Manifesto Project
+\citep{ManifestoProject2025a,ManifestoCorpus2025}. The benchmark organized by
+\citet{BenoitEtAl2025} matches $235$ party platforms to expert-survey means on
+six seven-point policy dimensions: economic policy, social policy,
+immigration, European integration, environmental policy, and decentralization.
+An expert-survey mean is the document-level target obtained by averaging expert
+placements for a party platform on one of these dimensions. For a given
+dimension, Pearson \(r\) is the correlation across held-out manifestos between
+the C-Tree prediction and that dimension's expert-survey mean. Macro \(r\) is
+the unweighted average of those six dimension-level Pearson correlations.
+
+This evidence should be read as a root-observed corpus evaluation. The held-out
+documents have full-document expert targets, and the tree root is evaluated
+directly against those targets. That is already the root channel in the
+C-TreePO objective. It is not, by itself, a completed node-level local-law
+certificate; that stronger claim requires sampled \(f^\ast\) checks inside the
+realized tree.
+
+Each manifesto--dimension pair is one document and one policy dimension. A
+held-out pair is reserved for final evaluation rather than training or model
+selection, and it has a full-document expert target. The root channel in
+Equation~\eqref{eq:v8-main-objective} is therefore directly observed on the
+evaluation split. The local-law channel is trained through teacher traces and
+proxy scores: a teacher trace is a recorded local supervision signal for a
+leaf or merge, and \(\widehat f\) supplies local losses on leaves and merges.
+The stronger \(f^\ast\)-node audit described in Section~\ref{sec:v8-objective}
+remains the next measurement layer.
+
+\subsection{Tree Setup and Splits}\label{sec:v8-benoit-tree-setup}
+
+The C-Tree version keeps Benoit's document-level target and changes the
+representation being scored. A flat baseline scores the manifesto text
+directly. A tree run chunks the manifesto into contiguous leaves, maps each
+leaf into a readable policy-evidence state, recursively merges adjacent
+states, and scores the root state. The f/g ladder alternates the state map and
+readout: with \(\widehat f\) fixed, train \(g\) against node targets; with
+\(g\) fixed, train \(\widehat f\) on the summaries produced by the current
+tree. In this shorthand, \(g\) is one learned summarization/state map used
+through the tree, and \(f\) or \(\widehat f\) is the readout used to score
+states; a ladder stage such as \(f^2g^1\) means the second readout update
+paired with the first state-map update.
+
+The current f/g artifacts use $218$ manifestos split into $140$ training
+documents, $30$ reserved documents used for model selection and diagnostics,
+and $48$ held-out test documents used only for final reporting. Reported
+metrics are held-out Pearson correlations against expert-survey means. The
+generated figures and tables live under \texttt{assets/benoit/}.
+
+\subsection{Single-Dimension Ladders}\label{sec:v8-benoit-single-dim}
+
+Single-dimension training uses one \((\widehat f,g)\) pair per policy
+dimension. This is the per-dimension ceiling for the tree representation
+before asking one shared summary to serve all six dimensions.
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=\linewidth]{manifesto_singledim_per_dim_live.pdf}
+  \caption{\textbf{Single-dimension f/g ladders, all six policy dimensions.}
+  External Pearson \(r\) against expert-survey means on the $48$-document
+  held-out split, plotted against leaf token size. External means the score is
+  computed on documents not used for training or model selection. Reference
+  lines are from
+  \citet{BenoitEtAl2025}.}
+  \label{fig:v8-benoit-singledim-per-dim}
+\end{figure}
+
+Figure~\ref{fig:v8-benoit-singledim-per-dim} shows that separate
+dimension-specific trees recover the published frontier range on most
+dimensions. Economic policy, EU integration, immigration, and social policy
+clear the proprietary ensemble reference in the best cells. Decentralization
+is the stress dimension: it improves under single-dimension training, but its
+audit gap remains high. Here an audit gap is the local diagnostic difference
+between the teacher-trace target and the proxy/readout behavior, so a high
+value marks the teacher/proxy channel as the limiting piece.
+
+\subsection{Universal Summary}\label{sec:v8-benoit-universal-summary}
+
+The universal-summary run trains one shared \(g\) to produce a single summary
+per manifesto. Six per-dimension scorers then read that shared state. This is
+the LLM application closest to the C-TreePO objective: root expert anchors
+preserve the document target, while teacher/proxy local-law losses push one
+state map to retain evidence for multiple downstream readouts.
+
+\begin{table}[t]
+  \centering
+  \resizebox{\linewidth}{!}{\input{assets/benoit/tables/benoit_comparison_pearson.tex}}
+  \caption{\textbf{Pearson \(r\) against Benoit expert-survey means.}
+  Reference rows reproduce the Benoit benchmark; C-Tree rows use the learned
+  manifesto compression pipeline.}
+  \label{tab:v8-benoit-headline}
+\end{table}
+
+Table~\ref{tab:v8-benoit-headline} gives the six-dimension benchmark. The
+per-dimension tree reaches macro \(r=0.829\) at the reported character-leaf
+setting, meaning the leaf size is controlled in characters rather than tokens.
+The universal-summary tree reaches macro \(r=0.807\), with most of the gap
+concentrated in decentralization. The result is consistent with the
+state-sufficiency view: one summary can carry the shared evidence for several
+dimensions, while dimensions with different evidence geometry need either more
+capacity, different law weights, or their own state map.
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=\linewidth]{manifesto_fg_combined_ladder_f1g0_f1g1.pdf}
+  \caption{\textbf{Universal-summary run, per-dimension trajectories.}
+  External Pearson \(r\) against expert-survey means on the $48$-document
+  held-out split from one shared \((\widehat f,g)\) training trajectory.}
+  \label{fig:v8-benoit-combined-ladder}
+\end{figure}
+
+\begin{table}[t]
+  \centering
+  \begin{tabular}{lrrrr}
+    \toprule
+    Dimension & Best \(r\) & Leaf tokens & Stage & \(n\) \\
+    \midrule
+    Economic & \(0.886\) & \(4{,}096\) & \(f^2g^1\) & \(47\) \\
+    Social & \(0.886\) & \(1{,}024\) & \(f^2g^2\) & \(43\) \\
+    Immigration & \(0.938\) & \(4{,}096\) & \(f^3g^3\) & \(29\) \\
+    European integration & \(0.965\) & \(2{,}048\) & \(f^1g^1\) & \(35\) \\
+    Environment & \(0.795\) & \(1{,}024\) & \(f^1g^1\) & \(42\) \\
+    Decentralization & \(0.461\) & \(8{,}096\) & \(f^1g^1\) & \(42\) \\
+    \bottomrule
+  \end{tabular}
+  \caption{\textbf{Best per-dimension cells under the universal summary.}
+  Leaf tokens is the token budget for one leaf, stage is the f/g ladder state,
+  and \(n\) is the number of held-out documents with usable labels for that
+  dimension. A common deployed row would choose one leaf size and one stage;
+  this table shows the best cell per dimension to diagnose state-sharing
+  limits.}
+  \label{tab:v8-benoit-joint-dim-best}
+\end{table}
+
+Figure~\ref{fig:v8-benoit-combined-ladder} and
+Table~\ref{tab:v8-benoit-joint-dim-best} show the same pattern at the
+trajectory level. Economic, social, immigration, EU integration, and
+environmental policy remain close to their single-dimension ceilings.
+Decentralization loses more under shared compression, which points to
+multi-task interference rather than a generic failure of tree compression.
+
+\subsection{Local Diagnostics}\label{sec:v8-benoit-local-diagnostics}
+
+The available local diagnostics are teacher-trace residuals, not a completed
+human node audit. A teacher-trace residual is the discrepancy between a
+recorded teacher local target and the current proxy/readout behavior at the
+corresponding node. These diagnostics still serve the v8 objective story: the
+proxy \(\widehat f\) produces local-law losses everywhere, while future sampled
+\(f^\ast\) node calls can correct the proxy channel using
+Equation~\eqref{eq:v8-corrected-node-loss}.
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=\linewidth]{manifesto_fg_combined_audit_gap.pdf}
+  \caption{\textbf{Universal-summary local diagnostic gaps.}
+  Per-dimension teacher-trace gaps from the universal-summary run.}
+  \label{fig:v8-benoit-combined-audit-gap}
+\end{figure}
+
+\begin{figure}[!htbp]
+  \centering
+  \includegraphics[width=\linewidth]{manifesto_singledim_per_dim_live_audit_gap.pdf}
+  \caption{\textbf{Single-dimension local diagnostic gaps.}
+  Teacher-trace gap for the single-dimension ladders in
+  Figure~\ref{fig:v8-benoit-singledim-per-dim}.}
+  \label{fig:v8-benoit-single-audit-gap}
+\end{figure}
+
+The local diagnostic figures identify where proxy supervision is least aligned
+with the held-out expert target. Under the v8 objective, that is exactly where
+sampled \(f^\ast\) node labels have the highest value: they estimate and
+correct \(b_v=\widehat\ell_v-\ell_v^\ast\) rather than merely adding another
+root score.
+
+\subsection{Takeaway}\label{sec:v8-benoit-takeaway}
+
+The Manifesto results instantiate the stack from
+Section~\ref{sec:v8-objective}. Expert-survey means supply the observed root
+channel, teacher traces and proxy readouts supply dense local training geometry
+for \(g\), and the diagnostic gaps identify where sampled \(f^\ast\) node
+calls would most improve the corrected local-law channel. The current evidence
+therefore supports the root-observed LLM compression claim and sets up the
+stronger node-level audit, rather than treating the proxy diagnostics as a
+separate objective.

@@ -1,0 +1,387 @@
+\section{Doubly Robust Adjustment for Local-Law Losses}
+\label{app:doubly-robust-local-law-adjustment}
+
+The local laws are stated as oracle conditions: a state should preserve
+the value that the task oracle \(\fstar\) assigns to the object it
+represents. In the cleanest version, every local check can be evaluated
+with \(\fstar\). In the teacher-first regime this is not what we see.
+We usually have document-level labels at the root, use those labels to
+fit or select a learned query \(\widehat f\), and then evaluate most
+local-law violations through \(\widehat f\). Direct node-level oracle
+feedback, when available, arrives only on a sampled subset of nodes.
+
+This creates a measurement problem. The proxy local-law loss measured
+through \(\widehat f\) is useful because it is available everywhere, but
+it need not equal the local-law loss that would have been measured
+through \(\fstar\). The correction below is the standard DSL
+design-adjusted outcome applied to the local-law loss itself. It does
+not estimate the full oracle function \(\fstar\). It estimates the
+oracle-measured local-law objective that would be used if every node
+had oracle feedback. To keep the notation readable, we use descriptive
+names: \(L_\star\) for the oracle law loss, \(L_{\mathrm{proxy}}\) for
+the all-proxy law loss, and \(L_{\mathrm{corrected}}\) for the
+corrected law loss actually used by the objective. We write
+\(L_{\mathrm{gap}}\) for the proxy-oracle gap loss, the loss that
+measures how far the learned query \(\widehat f\) is from \(\fstar\) on
+the available root-level supervision.
+
+\subsection{The Estimand}
+\label{app:drlaw-estimand}
+
+Fix a realized tree \(T\). For each node \(v\), let \(d(v)\) be its
+depth, with \(d(v)=0\) at the root. Suppress the C1/C2/C3 channel index
+for notational clarity; the same construction applies separately to
+each law channel, or to any chosen scalar mixture of them. Let
+\[
+  \ell_v^\star
+  =
+  \ell_{\mathrm{law}}(v;\fstar,g)
+\]
+be the local-law loss at node \(v\) measured with the oracle, and let
+\[
+  \widehat\ell_v
+  =
+  \ell_{\mathrm{law}}(v;\widehat f,g)
+\]
+be the corresponding proxy loss measured with the learned query. The
+target local-law functional is the discounted oracle law loss
+\begin{equation}
+\label{eq:drlaw-oracle-objective}
+  L_\star(T)
+  =
+  \sum_{v\in V(T)}
+  \gamma^{d(v)}\,\ell_v^\star .
+\end{equation}
+This is the quantity the local-law part of the objective would use if
+all node-level oracle labels were available.
+
+The root supervision term is separate. It trains or evaluates the final
+answer at the root using the available document-level label. The local
+law term \(L_\star(T)\) instead asks whether the
+realized intermediate states behave like oracle-valid summaries.
+
+The learned query \(\widehat f_\theta\) also has its own proxy-oracle
+gap loss, which is the clearer name for the term sometimes called
+calibration in older notes:
+\[
+  L_{\mathrm{gap}}(\theta)
+  =
+  \E_{x\in\mathcal D_{\mathrm{root}}}
+  \ell_{\mathrm{gap}}
+  \bigl(\widehat f_\theta(x),\fstar(x)\bigr).
+\]
+For a metric-valued oracle one may take
+\(\ell_{\mathrm{gap}}(\widehat f_\theta(x),\fstar(x))
+=d_Y(\widehat f_\theta(x),\fstar(x))\), or the corresponding squared
+or task-specific root-label loss. This term measures how well
+\(\widehat f\) matches the oracle used to define local laws; it is not
+the root-output loss of the tree itself.
+
+\subsection{Node-Level DSL Adjustment}
+\label{app:drlaw-node-adjustment}
+
+Let \(R_v\in\{0,1\}\) indicate whether node \(v\) receives direct
+oracle feedback, and let \(\pi_v>0\) be the propensity used for the
+inverse-propensity correction. The corrected node loss is
+\begin{equation}
+\label{eq:drlaw-node-adjustment}
+  \ell_v^{\mathrm{corrected}}
+  =
+  \widehat\ell_v
+  +
+  \frac{R_v}{\pi_v}
+  \left(\ell_v^\star-\widehat\ell_v\right).
+\end{equation}
+Equivalently,
+\[
+  \ell_v^{\mathrm{corrected}}
+  =
+  \widehat\ell_v
+  -
+  \frac{R_v}{\pi_v}
+  \left(\widehat\ell_v-\ell_v^\star\right),
+\]
+which is exactly the DSL design-adjusted outcome with
+prediction \(\widehat\ell_v\) and observed oracle outcome
+\(\ell_v^\star\). If \(R_v=0\), the corrected loss is the proxy loss.
+If \(R_v=1\) and \(\pi_v=1\), the corrected loss is the oracle loss.
+
+It is often easiest to read this through the proxy-oracle local-law
+bias
+\[
+  b_v
+  =
+  \widehat\ell_v-\ell_v^\star .
+\]
+Then the same corrected node loss is
+\begin{equation}
+\label{eq:drlaw-node-bias-form}
+  \ell_v^{\mathrm{corrected}}
+  =
+  \ell_v^\star
+  +
+  \left(1-\frac{R_v}{\pi_v}\right)b_v .
+\end{equation}
+Thus the correction does not hide the bias: it leaves exactly the
+residual multiplier \(1-R_v/\pi_v\) times the proxy-oracle law error.
+
+Condition on the realized tree, the fitted \(g\), the fitted
+\(\widehat f\), and all logged design information except the Bernoulli
+draw \(R_v\). Let
+\[
+  \pi_v^\star
+  =
+  \Prob(R_v=1\mid \mathcal F)
+\]
+be the true marginal inclusion probability under this conditioning
+information. The DSL misspecified-propensity identity gives the exact
+residual:
+\begin{align}
+  \E\!\left[
+    \ell_v^{\mathrm{corrected}}-\ell_v^\star
+    \mid \mathcal F
+  \right]
+  &=
+  \E\!\left[
+    \left(1-\frac{R_v}{\pi_v}\right)
+    \left(\widehat\ell_v-\ell_v^\star\right)
+    \mid \mathcal F
+  \right] \notag\\
+  &=
+  \left(1-\frac{\pi_v^\star}{\pi_v}\right)
+  \left(\widehat\ell_v-\ell_v^\star\right).
+\label{eq:drlaw-misspecified-residual}
+\end{align}
+The first equality is algebra from~\eqref{eq:drlaw-node-adjustment};
+the second is the design-adjusted DSL expectation identity. No
+independence across nodes is needed for this scalar statement. For the
+tree aggregate, linearity of expectation applies node by node.
+
+\subsection{Doubly Robust Reading}
+\label{app:drlaw-doubly-robust}
+
+Equation~\eqref{eq:drlaw-misspecified-residual} is the doubly robust
+statement in this setting. The residual vanishes under either of two
+routes:
+\[
+  \pi_v=\pi_v^\star
+  \qquad\text{or}\qquad
+  \widehat\ell_v=\ell_v^\star .
+\]
+The first route is correct design logging: the propensity used in the
+correction is the actual node inclusion probability. Then the oracle
+residual is removed regardless of the quality of \(\widehat f\). The
+second route is exact local-law prediction: the proxy loss already
+equals the oracle loss, so there is no proxy error left for a wrong
+propensity to amplify.
+
+When both routes fail, the remaining bias is explicit:
+\[
+  \left(1-\frac{\pi_v^\star}{\pi_v}\right)
+  \left(\widehat\ell_v-\ell_v^\star\right).
+\]
+This is why the propensity residual is kept visible in the local-law
+certificate. Sampling that depends on proxy violations, depth, node
+type, retry behavior, or human triage is harmless only if the logged
+propensity represents that realized sampling law. If the logged
+propensity ignores part of the sampling mechanism, the residual above
+is the price paid, scaled by the proxy-oracle local-law error.
+
+\subsection{Discounted Tree Aggregation}
+\label{app:drlaw-tree-aggregation}
+
+The corrected tree-level law loss is
+\begin{equation}
+\label{eq:drlaw-adjusted-tree-loss}
+  L_{\mathrm{corrected}}(T)
+  =
+  \sum_{v\in V(T)}
+  \gamma^{d(v)}\,\ell_v^{\mathrm{corrected}} .
+\end{equation}
+Substituting~\eqref{eq:drlaw-node-adjustment} gives the simple
+one-line adjustment:
+\[
+  L_{\mathrm{corrected}}(T)
+  =
+  \sum_{v\in V(T)}
+  \gamma^{d(v)}
+  \left[
+    \widehat\ell_v
+    +
+    \frac{R_v}{\pi_v}
+    \left(\ell_v^\star-\widehat\ell_v\right)
+  \right].
+\]
+The endpoints match the intended cases. If there are no node-level
+oracle observations, \(R_v=0\) for every node, and
+\[
+  L_{\mathrm{corrected}}(T)
+  =
+  L_{\mathrm{proxy}}(T)
+  =
+  \sum_{v\in V(T)}
+  \gamma^{d(v)}\,\widehat\ell_v ,
+\]
+the proxy-only discounted local-law objective. If every node is
+observed with \(\pi_v=1\), then
+\[
+  L_{\mathrm{corrected}}(T)
+  =
+  \sum_{v\in V(T)}
+  \gamma^{d(v)}\,\ell_v^\star
+  =
+  L_\star(T).
+\]
+Under correct logged propensities, the conditional expectation of
+the corrected aggregate equals the oracle aggregate:
+\[
+  \E\!\left[
+    L_{\mathrm{corrected}}(T)
+    -
+    L_\star(T)
+    \mid \mathcal F
+  \right]
+  =
+  0.
+\]
+Under misspecified propensities, the aggregate residual is the
+discounted sum of the node residuals in
+\eqref{eq:drlaw-misspecified-residual}.
+
+Using the bias notation \(b_v=\widehat\ell_v-\ell_v^\star\), the same
+tree loss can be written as
+\begin{equation}
+\label{eq:drlaw-tree-bias-form}
+  L_{\mathrm{corrected}}(T)
+  =
+  L_\star(T)
+  +
+  \sum_{v\in V(T)}
+  \gamma^{d(v)}
+  \left(1-\frac{R_v}{\pi_v}\right)b_v .
+\end{equation}
+Taking conditional expectations replaces \(R_v\) by
+\(\pi_v^\star\), so the expected residual bias is
+\[
+  \E\!\left[
+    L_{\mathrm{corrected}}(T)-L_\star(T)
+    \mid\mathcal F
+  \right]
+  =
+  \sum_{v\in V(T)}
+  \gamma^{d(v)}
+  \left(1-\frac{\pi_v^\star}{\pi_v}\right)b_v .
+\]
+This vanishes when propensities are logged correctly, and it also
+vanishes when the proxy law loss is exact, \(b_v=0\), even if the
+propensity is misspecified.
+
+\subsection{From Adjustment to the Single-\texorpdfstring{\(\lambda\)}{lambda} Objective}
+\label{app:drlaw-single-lambda}
+
+The corrected law loss is the local-law channel used by the objective.
+There is no additional agreement gate and no additive gap penalty in
+the optimized loss. Restoring the candidate parameter \(\theta\) and
+the supervised training channels, the theorem-facing objective is the
+two-channel root/local objective
+\begin{equation}
+\label{eq:drlaw-final-objective}
+  J(\theta;T)
+  =
+  \underbrace{
+  (1-\lambda)
+  L_{\mathrm{root}}(\theta)
+  }_{\text{root supervision}}
+  +
+  \underbrace{
+    \lambda L_{\mathrm{corrected}}(\theta,T)
+  }_{\text{corrected local laws}} .
+\end{equation}
+In lambda mode, the user supplies \(\lambda\in[0,1]\) and an active law
+set. The root channel receives share \(1-\lambda\), and the active
+local laws split \(\lambda\) equally. If \(\lambda=0\), the objective is
+root-only. In explicit-weight mode, the user instead supplies root and
+per-law weights \(w_{\mathrm{root}}, w_1,\ldots,w_k\), supplies no
+\(\lambda\), and we normalize
+\[
+  W = w_{\mathrm{root}}+\sum_{i=1}^k w_i,
+  \qquad
+  J(\theta;T)
+  =
+  \frac{w_{\mathrm{root}}}{W}L_{\mathrm{root}}(\theta)
+  +
+  \sum_{i=1}^k \frac{w_i}{W}L_i^{\mathrm{corrected}}(\theta,T).
+\]
+The implied local-law share is reported as
+\(\lambda=\sum_i w_i/W\), but it is not accepted as a second input in
+explicit-weight mode. A configuration that supplies both \(\lambda\)
+and explicit root/law weights is therefore ill-posed and rejected.
+
+The proxy-oracle gap, sampling uncertainty, oracle-transfer slack, and
+propensity residual remain audit diagnostics for
+\(L_{\mathrm{corrected}}\). They explain the quality of the corrected
+local-law estimate, but they do not appear as additive terms in \(J\)
+and they do not shrink \(\lambda\).
+
+Substituting the bias form~\eqref{eq:drlaw-tree-bias-form} gives the
+equivalent bias-explicit objective
+\begin{align}
+\label{eq:drlaw-final-objective-bias-form}
+  J(\theta;T)
+  &=
+  \underbrace{
+    (1-\lambda)
+    L_{\mathrm{root}}(\theta)
+  }_{\text{root supervision}}
+  \notag\\
+  &\quad+
+  \lambda
+  \Bigg[
+    \underbrace{L_\star(\theta,T)}_{\text{oracle law target}}
+    \notag\\
+  &\qquad\qquad+
+    \underbrace{
+      \sum_{v\in V(T)}
+      \gamma^{d(v)}
+      \left(1-\frac{R_v}{\pi_v}\right)b_v(\theta)
+    }_{\text{residual law bias}}
+  \Bigg].
+\end{align}
+Equivalently, the last channel is
+\[
+  \underbrace{
+    \lambda L_\star(\theta,T)
+  }_{\text{oracle local-law pressure}}
+  +
+  \underbrace{
+    \lambda
+    \sum_{v\in V(T)}
+    \gamma^{d(v)}
+    \left(1-\frac{R_v}{\pi_v}\right)b_v(\theta)
+  }_{\text{bias left after correction}} .
+\]
+This is the same objective as~\eqref{eq:drlaw-final-objective}. The
+first term learns from root labels, and the bracketed local-law term is
+the oracle local-law target plus whatever residual bias remains after
+node-oracle correction. The proxy-oracle gap affects diagnostics for
+the corrected channel, not the displayed objective weight.
+
+\subsection{Interpretation}
+\label{app:drlaw-interpretation}
+
+The distinction between \(\fstar\) and the local-law estimand is
+important. The corrected law loss above targets
+\(L_\star(T)\), the oracle-measured local-law objective on a realized
+tree. It does not recover the entire function \(\fstar\). The role of
+\(\widehat f\) is as a nuisance/proxy: it provides local-law losses
+everywhere and reduces variance, while direct node-oracle observations
+correct its residual bias when sampled.
+
+If the oracle is exactly mergeable within the chosen representation
+class, correct sampling makes the local-law channel behave as if the
+oracle local-law objective were observed. If the oracle is not
+mergeable in the chosen class, nonzero local-law pressure does not
+recover \(\fstar\) exactly; it projects the learned tree toward the
+best local-law-compatible approximation available in the class. Oracle
+labels affect this pressure through \(L_{\mathrm{corrected}}\), not
+through a separate weight-shrinkage mechanism.

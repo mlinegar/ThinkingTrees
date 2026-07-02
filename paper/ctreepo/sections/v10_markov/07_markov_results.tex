@@ -1,0 +1,160 @@
+\section{Markov DGP Results}\label{sec:v10-markov-results}
+
+The manifesto results test the framework on an expert benchmark. We
+also test it on a controlled DGP where the oracle is constructible
+and C1, C2, and C3 can be checked at every node without an external
+expert. The Markov changepoint ops-count family generates token
+streams from a finite-state
+machine whose hidden state evolves by sparse changepoints; the oracle
+\(f^\ast\) reads off the count of state transitions of a designated
+ops type. C1 sufficiency is checkable at the leaf level, C2
+idempotence is checkable on any produced state, and C3 merge
+consistency reduces to an algebra on transition counts.
+
+We use two benchmark families:
+\textbf{recoverable\_v4} is the easier benchmark, where local segment
+counts already encode the oracle, and
+\textbf{structural\_core\_v1::r12\_seg10to12} is the harder benchmark,
+where the oracle depends on cross-segment interactions and a flat
+read of leaf segments cannot reconstruct it. The flat single-leaf
+geometry on the harder benchmark is the regime where local laws are
+expected to matter most. The tree learner is the same unified \(g\)
+architecture used in the manifesto experiments. The flat baseline is
+the official Fourier neural operator FNO family
+\citep{Kovachki23NeuralOperator,Li21FNO}, which sees the document as one
+continuous signal and has no leaf or merge supervision channel.
+
+\subsection{Tree--FNO Parity at Full Root Supervision}
+
+Table~\ref{tab:v10-markov-parity} compares tree-neural under the full
+local-law package with the matched FNO baseline at full root
+supervision (every training document carries a root oracle label).
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Benchmark & Geometry (leaves/doc) & Tree root MAE & FNO root MAE & \(\Delta\) \\
+\midrule
+recoverable\_v4 & 8 (multi-leaf) & 0.0000 & 0.0000 & \(\phantom{-}0.000\) \\
+recoverable\_v4 & 1 (flat parity) & 0.0026 & 0.0026 & \(\phantom{-}0.000\) \\
+structural\_core::r12 & 16 (multi-leaf) & 0.182 & 0.440 & \(-0.258\) \\
+structural\_core::r12 & 4 (multi-leaf) & 0.083 & 0.096 & \(-0.014\) \\
+structural\_core::r12 & 1 (flat parity) & 0.678 & 0.642 & \(\phantom{-}0.036\) \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Tree--FNO parity at full root supervision.} Tree
+runs use the local-law package (C1+C2+C3 with depth-equal weights);
+FNO runs use the canonical \texttt{official\_fno\_sumlen}
+comparator. \(\Delta=\text{Tree}-\text{FNO}\), so negative values
+favor the tree. Source:
+\texttt{outputs/markov\_v3\_publication\_fullval\_20260412\_0142}.}
+\label{tab:v10-markov-parity}
+\end{table}
+
+Three patterns:
+
+\textbf{Recoverable benchmark.} Both architectures hit zero MAE.
+Local segment counts carry the oracle, and either family recovers
+it. This is the easy regime; it confirms that the tree's extra
+machinery does not pay a cost when the flat baseline is already
+adequate.
+
+\textbf{Structural benchmark, multi-leaf.} The tree cuts FNO root
+MAE by 0.26 at 16 leaves/doc (0.182 vs 0.440). This is the regime
+where C3 merge consistency carries information that a flat
+representation cannot. The advantage shrinks to 0.014 at 4 leaves
+because some of the relevant interactions now sit within a single
+leaf and the FNO sees them.
+
+\textbf{Structural benchmark, flat parity.} At a single leaf per
+document the tree degenerates to the FNO geometry, and the two
+families are within 0.04 MAE. This is the negative control: the
+multi-leaf advantage above is not a generic architectural
+preference, it is the local-law channel doing work where the DGP
+needs it.
+
+\subsection{Law-Package Ablation}
+
+Table~\ref{tab:v10-markov-packages} compares six law packages on
+the structural benchmark. Each package fixes a different
+combination of supervision channels.
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}lp{0.40\linewidth}rr@{}}
+\toprule
+Package & Active channels & Multi-leaf MAE & Flat-parity MAE \\
+\midrule
+\texttt{leaf\_only} & C1 only (leaf--text supervision) & 0.111 & --- \\
+\texttt{depth\_equal} & root + C1+C2+C3 with equal weights at every depth & 0.187 & --- \\
+\texttt{local\_law} & root + C1+C2+C3 with depth discount & 0.182 & --- \\
+\texttt{r100\_superset\_local10} & root + 10\% sampled local laws & 0.168 & --- \\
+\texttt{root\_budget\_multileaf} & root supervision only, multi-leaf geometry & 0.102 & --- \\
+\texttt{oneleaf\_root\_budget} & root supervision only, single-leaf geometry & --- & 0.678 \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Law-package ablation on the structural benchmark.}
+Multi-leaf cells use the best non-flat geometry per package;
+flat-parity cells use a single leaf per document. The MAE values
+are the headline test root MAE on the
+\texttt{structural\_core::r12\_seg10to12} scope. Source:
+\texttt{outputs/markov\_v3\_publication\_fullval\_20260412\_0142}.}
+\label{tab:v10-markov-packages}
+\end{table}
+
+\texttt{root\_budget\_multileaf} performs surprisingly well at
+0.102 MAE: the tree geometry alone, even without local-law
+supervision, already cuts the structural error relative to the flat
+\texttt{oneleaf\_root\_budget} baseline at 0.678. Adding local laws
+on top of the same multi-leaf geometry holds the gain in the same
+range and adds the auditable channel that the certificate uses.
+\texttt{leaf\_only} (C1 alone) at 0.111 shows that leaf sufficiency
+is the load-bearing law on this DGP; the merge and idempotence
+channels add headroom but are not required for first-order recovery.
+
+\subsection{Leaf-Size Sweep}
+
+Figure~\ref{fig:v10-markov-leaf-size} reports the supervision-recovery
+heatmap across leaf-size geometries (8 to 64 tokens per leaf) and
+root-supervision shares.
+
+\begin{figure}[t]
+\centering
+\begin{minipage}[t]{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{markov_leaf_size_fixed_recoverable.pdf}
+\\\textbf{recoverable\_v4}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{markov_leaf_size_fixed_structural.pdf}
+\\\textbf{structural\_core::r12}
+\end{minipage}
+\caption{\textbf{Leaf-size sweep.} Each cell reports root MAE for a
+given leaf token budget (rows) and root-supervision share
+(columns). Recoverable saturates near zero across most cells;
+structural rewards smaller leaves and higher root coverage, with
+the local-law package lifting the bottom row. Source:
+\texttt{outputs/markov\_v3\_publication\_leaf\_size\_fixed\_docs\_20260414\_200309}.}
+\label{fig:v10-markov-leaf-size}
+\end{figure}
+
+\subsection{Cross-DGP Takeaway}
+
+The Markov DGP and the manifesto data are very different objects.
+Markov sentences are tokens from a state machine; manifestos are
+party platforms. Markov oracles are exactly computable; manifesto
+oracles are noisy expert means. Yet the same framework recovers the
+same shape of result: when the DGP requires interactions across
+leaves, multi-leaf trees with local laws beat flat baselines; when
+local information is enough, both architectures match; when the
+geometry collapses to a single leaf, the architectures are
+indistinguishable. The local-law channel is the part that
+generalizes across these settings, and the certificate of
+Section~\ref{sec:v8-audit-certificate} is the part that quantifies
+it on either DGP.

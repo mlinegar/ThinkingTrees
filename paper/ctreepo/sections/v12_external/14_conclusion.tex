@@ -1,0 +1,70 @@
+\section{Conclusion}\label{sec:conclusion}
+
+If local summaries preserve the evidence a task oracle needs, and local
+merges preserve the cross-span interactions, then preference
+optimization can be carried out on compression trees rather than full
+documents. The neural-operator layer now makes explicit where the
+learned architecture enters: discretization invariance and compact-set
+approximation for the equation-(6) operator family explain how an ideal
+operator can be realized to a chosen tolerance, the transformer-inclusion
+argument identifies finite attention stacks with that architecture
+surface, and the realization bridge of
+Proposition~\ref{prop:neural-operator-bridge} converts that tolerance
+into approximate local-law budgets. The oracle/projection objective
+supplies the training interpretation: fit the task oracle while
+weighting C1/C2/C3 as a projection toward the theorem-eligible
+subspace. The projection/structured-error equivalence says this is the
+same as assuming the approximation error is structured so that its zero
+set is exactly local-law validity. Everything downstream then reuses
+the existing theorem-backed route: the structural bundle gives root
+preservation, the optimization bundle gives objective equivalence for
+DPO/GRPO, and the certificate bundle turns sampled audits into the
+finite-sample gap decomposition laid out in Section~\ref{sec:discussion}:
+an empirical IPW estimate plus a fixed calibration residual plus an
+estimation envelope that shrinks monotonically in the total number of
+labels collected, global or local. The four statements the Discussion
+uses (the main gap bound, fixed calibration, envelope rate, and
+global/local decomposition) are cross-referenced to their formalized
+versions in Appendix~\ref{app:proof-artifacts}.
+
+The argument arcs from the classical to the learned case along a single
+gradient. Section~\ref{sec:mergeable-sketches} grounds the framework in
+the data-systems literature on mergeable sketches, with HLL as the
+empirical representative and a broader encode/merge/decode class
+covering the rest.
+Sections~\ref{sec:markov-interlude}--\ref{sec:markov-walkthrough} show
+a task whose oracle defeats unordered register-wise merges without
+boundary state and a tree-plus-FNO
+instance of the more general neural-operator realization layer that
+resolves it. Section~\ref{sec:hll-parity} closes the
+classical-limit loop empirically: running the framework with a
+deterministic register-wise merge recovers HyperLogLog byte-for-byte on
+a register-based implementation, and a fully end-to-end learned version
+tracks the classical sketch within a small multiple of its theoretical
+relative standard error. Appendix~\ref{app:operator-overlap} records the
+formal overlap: transformer stacks sit inside equation-(6) neural
+operators, mergeable sketches sit inside exact local-law operators, and
+the certified intersection is the mergeable neural-operator subspace.
+Section~\ref{sec:social-measurement} sets up the social-science
+measurement setting, and Section~\ref{sec:manifesto-llm} then takes the
+same machinery to Manifesto-RILE scoring, where no hand-designed sketch
+exists and the sufficient statistic is a high-dimensional learned
+representation. The Manifesto section also adds the prompt-program case: the
+summarizer and scorer can be updated repeatedly, but the empirical claim
+is still local preservation, not blind faith in a full-context read.
+Section~\ref{sec:manifesto-qsentence} completes the arc with genuine
+node-level supervision: the corpus's quasi-sentence expert codes give a
+gold oracle at every node, a trained neural-operator merge composes on
+every signal-dense policy dimension, and the failures land exactly
+where the label system predicts them (sparse dimensions, constructs the
+codes do not determine, objectives that do not price the local laws).
+The main finding: for
+tasks whose structure aligns with the local laws, reliable measurement
+on long documents becomes a question of local architecture and audit
+budget rather than of full-document annotation alone. The trade
+restricts the framework's scope to locally-decomposable oracles, and it
+pays off in the many social-scientific settings where such
+decomposition is natural.
+
+The Semantic Forests companion extends these ideas to orchestration
+and deployment at system scale.

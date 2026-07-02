@@ -91,7 +91,14 @@ If L1 (leaf sufficiency) and L2 (merge consistency) hold at every realized node,
 then the expected distortion at the root is 0:
   `E[D(Z^(1), x)] = 0`
 
-This is the base case for multi-round preservation (Theorem 2 = `multi_round_bounded`). -/
+This is the base case for multi-round preservation (Theorem 2 = `multi_round_bounded`).
+
+**⚠ Read-off, not composition:** because L2 is subtree-level, its root instance
+is definitionally this conclusion; the proof reads it off via
+`nodewise_preservation`. The compositional version — one-call local laws plus
+context compatibility, proved by real induction — is `one_pass_of_local` in
+`FormalProofs/OPT/MergeTriangle.lean`, and `L2_of_local` there derives the L2
+hypothesis used here. Cite `one_pass_of_local` for the paper's Theorem 1. -/
 theorem one_pass (g : Summarizer Strings) (T : BinTree Strings) (x : Strings) (fstar : Strings → Y)
   (hp : S T = x) (h1 : L1 g T fstar) (h2 : L2 g T fstar) :
   Egu g (root T) (fun z => D fstar z x) = 0 := by
@@ -141,7 +148,13 @@ For any fixed partition, every full binary tree on the leaves yields the same
 expected oracle whenever L1 and L2 hold on all realized edges. In particular,
 balanced reductions and daisy chains are interchangeable.
 
-Both trees produce expected distortion 0, so they are trivially equal. -/
+Both trees produce expected distortion 0, so they are trivially equal.
+
+**⚠ Legacy statement:** the same-partition hypothesis `_h_l` is unused here and
+the conclusion equates two zeros. The honest Corollary 1 — where the hypothesis
+forces the spans to coincide and the conclusion is oracle equivalence of the two
+reductions — is `schedule_invariance_of_local` in
+`FormalProofs/OPT/MergeTriangle.lean`. Cite that for the paper's Corollary 1. -/
 theorem schedule_invariance (g : Summarizer Strings) (T T' : BinTree Strings) (fstar : Strings → Y)
   (_h_l : leaves T = leaves T') (h1 : L1 g T fstar) (h2 : L2 g T fstar) (h1' : L1 g T' fstar) (h2' : L2 g T' fstar) :
   Egu g (root T) (fun z => D fstar z (S T)) = Egu g (root T') (fun z => D fstar z (S T')) := by
@@ -163,7 +176,14 @@ L3 holds on the intermediate summaries, the composite schedule preserves
 f* in expectation regardless of the within-fold or over-fold parenthesizations.
 
 Note: This is a specialized version of `one_pass`. The main theorem `multi_round_bounded`
-provides the full multi-round guarantee using L1, L2, and L3. -/
+provides the full multi-round guarantee using L1, L2, and L3.
+
+**⚠ Legacy statement without fold structure:** `T_comp` here is an arbitrary
+tree and the `_h3` hypothesis is unused — this is `one_pass` restated. The
+honest Corollary 2, with the two-level plan explicit (`graft`) and the
+same-leaves hypothesis doing work, is `fold_of_folds_of_local` /
+`fold_of_folds_preserves_of_local` in `FormalProofs/OPT/MergeTriangle.lean`.
+Cite those for the paper's Corollary 2. -/
 theorem fold_of_folds (g : Summarizer Strings) (T_comp : BinTree Strings) (x : Strings) (fstar : Strings → Y)
   (hp : S T_comp = x) (h1 : L1 g T_comp fstar) (h2 : L2 g T_comp fstar) (_h3 : L3 g fstar) :
   Egu g (root T_comp) (fun z => D fstar z x) = 0 := by

@@ -1,0 +1,80 @@
+\section{Sketch-Simulation Details}
+\label{app:sketch-simulations}
+
+This appendix expands the compact sketch evidence reported in
+Section~\ref{sec:v7-tree-comparisons}. The main text uses three anchors:
+exact HLL state parity, a broad family summary, and a learned-state
+capacity diagnostic. The generated artifacts behind those anchors are kept
+here so the main paper can stay readable while the full comparison remains
+auditable.
+
+\paragraph{Run provenance.}
+The paper figures and tables are copied from the generated sketch-comparison
+bundle recorded in
+\texttt{classical\_sketches\_figure\_manifest.json}. The copied paper
+artifacts live under
+\texttt{paper/ctreepo/assets/sketches/}. The figure manifest records leaf
+sizes \(16,32,64,128,256\), one random seed, \(145\) aggregate rows, and
+\(40\) learned rows.
+Official rows use library or analytic sketch implementations; learned rows
+are empirical comparisons against the chosen oracle or reference behavior.
+
+\paragraph{Generated grid.}
+Table~\ref{tab:app-classical-sketches-compact} is the generated compact
+summary. The full row-level grid is stored as
+\texttt{assets/sketches/tables/classical\_sketches\_grid.tex}; the
+machine-readable version with run metadata is
+\texttt{assets/sketches/tables/classical\_sketches\_aggregate.csv}. We keep
+the full grid as an artifact rather than typesetting every row in the
+manuscript because the grid is a provenance object, while the compact table
+and panels below are the readable scientific summary.
+
+\begin{table}[p]
+\centering
+\scriptsize
+\resizebox{\linewidth}{!}{\input{assets/sketches/tables/classical_sketches_compact.tex}}
+\caption{\textbf{Generated compact sketch grid.} Official rows are
+reference sketch reductions or controls. Learned rows are empirical
+approximations in the chosen state/query class, not claims of recovering the
+library implementation.}
+\label{tab:app-classical-sketches-compact}
+\end{table}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=0.48\linewidth]{classical_sketches_distinct_detail.pdf}\hfill
+\includegraphics[width=0.48\linewidth]{classical_sketches_frequency_detail.pdf}
+\caption{\textbf{Distinct-count and frequency panels.} The distinct-count
+panel includes the HLL/Theta/CPC-style cardinality comparisons and learned
+counterparts. The frequency panel shows Count-Min and related
+point-frequency comparisons.}
+\label{fig:app-sketch-distinct-frequency}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=0.48\linewidth]{classical_sketches_quantile_detail.pdf}\hfill
+\includegraphics[width=0.48\linewidth]{classical_sketches_set_detail.pdf}
+\caption{\textbf{Quantile and set panels.} Quantile rows compare
+rank-preserving sketches and learned approximations. Set rows compare union,
+intersection, and difference-style queries.}
+\label{fig:app-sketch-quantile-set}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\includegraphics[width=0.64\linewidth]{classical_sketches_sampling_detail.pdf}
+\caption{\textbf{Sampling-style panel.} Weighted and accumulator-style
+summaries are treated as empirical references unless their state-level
+local laws are supplied separately.}
+\label{fig:app-sketch-sampling}
+\end{figure}
+
+\paragraph{Interpretation.}
+The exact HLL row is the state-level parity check: with the native register
+state and pointwise-max merge, the tree reduction and flat reduction agree
+as states. Broader official rows are empirical references for familiar
+sketch families. Learned rows test whether the selected state/query class
+can approximate the reference behavior; remaining error is interpreted as
+optimization error only when the target law is representable in that class,
+and otherwise as a structural gap.

@@ -113,7 +113,17 @@ L2 captures the **composition** of both parts via transitivity:
 `E[D(reduce g (node T_L T_R), S (node T_L T_R))] = 0`
 
 where `reduce g (node T_L T_R)` hierarchically reduces both subtrees and then
-summarizes their concatenation: `g(reduce(T_L) * reduce(T_R))`. -/
+summarizes their concatenation: `g(reduce(T_L) * reduce(T_R))`.
+
+**⚠ Packaging caveat (see `MergeTriangle.lean`):** each L2 instance constrains
+the *full recursive reduction of the subtree* at that node, not a single merge
+call. At the root, L2 therefore already asserts the conclusion of `one_pass` —
+the legacy preservation theorems are read-offs, not compositions. The genuinely
+one-call local laws are `LeafSufficiency` / `MergeSufficiency` /
+`ContextCompatible` in `FormalProofs/OPT/MergeTriangle.lean`; the bridge
+`L2_of_local` derives this L2 from them, and `one_pass_of_local` proves
+preservation by honest induction. New work should state hypotheses in those
+terms and use L2 only as a derived quantity. -/
 def L2 (g : Summarizer Strings) (T : BinTree Strings) (fstar : Strings → Y) : Prop :=
   ∀ p, p ∈ internal_nodes T →
     let (T_L, T_R) := p
@@ -157,7 +167,12 @@ abbrev C1 := @L1
 /-- **Condition C2** (Paper notation alias for L3: Idempotence/On-Range Stability) -/
 abbrev C2 := @L3
 
-/-- **Condition C3** (Paper notation alias for L2: Merge Consistency) -/
+/-- **Condition C3** (Paper notation alias for L2: Merge Consistency).
+
+**⚠** The paper's C3 is a one-call two-link law (`u·v ~ g(u·v) ~ g(g(u)·g(v))`);
+this legacy alias points at the strictly stronger subtree-level L2. The faithful
+one-call formalization is `MergeSufficiency` + `MergeTriangle` in
+`FormalProofs/OPT/MergeTriangle.lean`. -/
 abbrev C3 := @L2
 
 /-!

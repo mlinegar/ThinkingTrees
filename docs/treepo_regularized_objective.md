@@ -72,6 +72,11 @@ are split across existing formal modules:
 - audit variance under subsampling:
   controlled by the IPW theorems in
   [TreeIPW.lean](/home/mlinegar/ThinkingTrees/lean3/FormalProofs/DSL/TreeIPW.lean)
+- influence-weighted sampled local-law bounds:
+  controlled by
+  [InfluenceWeightedLocalLaws.lean](/home/mlinegar/ThinkingTrees/lean3/FormalProofs/OPT/InfluenceWeightedLocalLaws.lean),
+  useful when root-relevant local-law residuals have non-uniform influence and
+  non-uniform query propensities
 - judge bias / variance decomposition:
   controlled by
   [JudgeCalibration.lean](/home/mlinegar/ThinkingTrees/lean3/FormalProofs/DSL/JudgeCalibration.lean)
@@ -81,6 +86,25 @@ are split across existing formal modules:
 So the new regularized objective is the optimization surface, while the
 existing probability / information-theory modules still carry the evaluation
 and bias-variance guarantees around it.
+
+## Influence-Weighted Bounds
+
+The regularizer can also be read through an influence-weighted certificate. For
+finite C1/C2/C3 audit rows `a`, residuals `r(a)`, influence weights
+`lambda(a)`, and logged propensities `pi(a)`, the bound surface is
+
+```text
+root_error
+  <= HT_lambda_proxy
+   + statistical_radius(D_lambda, W_lambda, m, delta)
+   + 2 * calibration_error * sum_a lambda(a)
+```
+
+where `D_lambda = sum_a lambda(a)^2 / pi(a)` and
+`W_lambda = max_a lambda(a) / pi(a)`. This generalizes the simple
+`epsLeaf + epsMerge + (R - 1) * epsIdemp` stack: the older stack is the
+uniform/budgeted special case, while the influence-weighted version makes
+non-uniform error propagation and hidden-needle audit overlap explicit.
 
 ## Simulation Mapping
 

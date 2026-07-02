@@ -1,0 +1,484 @@
+\section{Theorem and Certificate Details}
+\label{app:v8-theorem-certificate-details}
+\label{app:v8-full-proofs}
+
+This appendix records the full proof details behind the theorem ladder
+and the finite-sample certificate. The body proof sketches give the
+intuition; the subsections below state each argument in one place,
+with the active assumptions reprinted at the head of every claim.
+
+\subsection{Assumption-to-Claim Crosswalk}
+
+Each row of Table~\ref{tab:v10-assumption-claim} marks the assumptions
+the corresponding mathematical claim invokes. C1, C2, C3 are the local
+laws of Definition~\ref{def:v8-local-laws}; OC is oracle-compatibility
+of the downstream readout or loss; SP is strict positivity
+\(\pi_i>0\) of logged inclusion probabilities; CL is a bounded
+clipping radius on inverse-propensity weights; Lip is the method
+transport constant \(C_{\mathrm{meth}}\) (a Lipschitz or equivalent
+regularity condition on the downstream method); FT is
+Assumption~\ref{ass:v8-fixed-tree} (fixed realized tree).
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}lcccccccc@{}}
+\toprule
+Result & C1 & C2 & C3 & OC & SP & CL & Lip & FT \\
+\midrule
+Thm.~\ref{thm:v8-root-preservation} & \checkmark & \checkmark & \checkmark & & & & & \checkmark \\
+Cor.~\ref{cor:v8-preferences-pass-to-root} & \checkmark & \checkmark & \checkmark & \checkmark & & & & \checkmark \\
+Prop.~\ref{prop:v8-manifesto-preference-equivalence} & \checkmark & \checkmark & \checkmark & \checkmark & & & & \checkmark \\
+Prop.~\ref{prop:v10-population-gap} & \checkmark & \checkmark & \checkmark & \checkmark & & & \checkmark & \checkmark \\
+Prop.~\ref{prop:v10-corrected-loss-unbiased} & & & & & \checkmark & & & \checkmark \\
+Prop.~\ref{prop:v10-ht-unbiased} & & & & & \checkmark & & & \checkmark \\
+Prop.~\ref{prop:v10-finite-sample-certificate} & & & & \checkmark & \checkmark & \checkmark & \checkmark & \checkmark \\
+\bottomrule
+\end{tabular}
+\caption{\textbf{Assumption-to-claim crosswalk.}}
+\label{tab:v10-assumption-claim}
+\end{table}
+
+\subsection{Setup and Notation}
+
+Fix a realized C-Tree \(T\) for a manifesto \(x\). Each node \(v\) represents
+a contiguous raw span \(x_v\) and stores a produced policy-evidence state
+\(z_v\). Write
+\[
+  a\sim_\ast b
+  \quad\Longleftrightarrow\quad
+  d_Y\!\left(f^\ast(a),f^\ast(b)\right)=0 .
+\]
+The exact local laws say:
+\[
+\begin{array}{ll}
+\mathrm{C1:} & g(x_v)\sim_\ast x_v \quad\text{for leaves},\\[2mm]
+\mathrm{C2:} & g(z_v)\sim_\ast z_v \quad\text{for produced states},\\[2mm]
+\mathrm{C3:} & g(z_u,z_w)\sim_\ast x_u\concat x_w
+  \quad\text{for sibling nodes }u,w .
+\end{array}
+\]
+The displayed form suppresses implementation details about serialization. The
+state \(g(z_u,z_w)\) is the parent state produced from the two child states,
+and \(x_u\concat x_w\) is the represented parent manifesto span.
+
+\subsection{Root Preservation}
+
+\begin{proposition}[Fresh bottom-up laws preserve every represented span]
+\label{prop:v8-all-node-preservation}
+If C1 and C3 hold on the realized tree \(T\), then every produced node state
+\(z_v\) satisfies \(z_v\sim_\ast x_v\). In particular, the root state
+preserves the full manifesto for \(f^\ast\).
+\end{proposition}
+
+\begin{proof}
+Assume C1 and C3 hold on the realized tree. Proceed by induction over
+the tree. At a leaf, \(z_v=g(x_v)\), so C1 gives \(z_v\sim_\ast x_v\).
+At an internal node \(v\) with children \(u,w\), the parent state is
+\(z_v=g(z_u,z_w)\). C3 states directly that this merge state is
+\(f^\ast\)-equivalent to the represented parent span
+\(x_u\concat x_w=x_v\). Thus the claim holds for every internal node,
+and the root case is the full manifesto span.
+\end{proof}
+
+The proof above is the fresh one-pass argument. C2 is not needed for
+that pass because every internal merge is covered directly by C3. C2
+becomes active when produced states are re-entered into the state map:
+cleanup passes, stochastic re-summarization, repeated reductions, and
+audit probes all feed an already-produced state back through \(g\).
+
+\begin{proposition}[C2 preserves re-entry rounds]
+\label{prop:v8-reentry-preservation}
+Let \(z^{(0)}\) be a produced state with \(z^{(0)}\sim_\ast x\), and
+let \(z^{(r+1)}=g(z^{(r)})\) be a finite sequence of re-summarization
+rounds. If C2 holds for every re-entered state \(z^{(r)}\), then
+\(z^{(r)}\sim_\ast x\) for every round \(r\).
+\end{proposition}
+
+\begin{proof}
+Assume \(z^{(0)}\sim_\ast x\) and C2 holds for each produced state in
+the sequence. The proof is induction on \(r\). The base case is the
+assumption. For the step, C2 gives
+\(z^{(r+1)}=g(z^{(r)})\sim_\ast z^{(r)}\). The induction hypothesis
+gives \(z^{(r)}\sim_\ast x\). Transitivity of oracle equivalence gives
+\(z^{(r+1)}\sim_\ast x\). Thus re-entry cannot move the state out of
+the oracle fiber already established by the fresh pass.
+\end{proof}
+
+\begin{proof}[Proof of Theorem~\ref{thm:v8-root-preservation}]
+Assume C1, C2, and C3 hold exactly. The fresh root statement is the
+root instance of Proposition~\ref{prop:v8-all-node-preservation}.
+Applying the definition of \(\sim_\ast\) at the root gives
+\[
+  d_Y\!\left(f^\ast(z_{\mathrm{root}}),f^\ast(x)\right)=0 .
+\]
+For additional rounds that re-summarize produced states,
+Proposition~\ref{prop:v8-reentry-preservation} keeps every re-entered
+state in the same oracle fiber. For stochastic reductions whose
+realized paths satisfy the same laws, each path has zero distortion;
+the expected distortion is therefore zero.
+\end{proof}
+
+\subsection{Fixed Deterministic Partitions}
+\label{app:v8-fixed-partition}
+
+\begin{proposition}[Extension to any deterministic fixed partition]
+\label{prop:v8-fixed-partition}
+Let \(\Pi\) be any deterministic rule that maps a manifesto \(x\) to a finite
+ordered rooted tree \(T_\Pi(x)\) with contiguous leaves. If C1/C2/C3 hold on
+the realized calls induced by \(T_\Pi(x)\), then the root state of that tree
+preserves \(x\) for \(f^\ast\). Consequently the statement holds after
+averaging over any distribution of manifestos.
+\end{proposition}
+
+\begin{proof}
+Condition on \(x\). Since \(\Pi\) is deterministic, \(T_\Pi(x)\) is fixed.
+The root-preservation proof applies to this realized tree and yields zero
+root distortion conditional on \(x\). Taking expectation over \(X\) gives the
+population statement. The proposition is conditional: it does not say that an
+arbitrary partition rule automatically satisfies the local laws; it says that
+the local-to-global implication is independent of which deterministic
+contiguous partition was chosen.
+\end{proof}
+
+\subsection{C2 Is Independent}
+\label{app:v8-c2-counterexample}
+
+The following construction shows why re-entry preservation is a separate
+local law.
+
+\begin{example}[C1 and C3 do not imply C2]
+\label{ex:v8-c2-independent}
+Let the universe contain fresh raw inputs and two distinguished state
+tokens \(\mathrm{POS}\) and \(\mathrm{NEG}\). Fresh raw inputs are
+disjoint from those two state tokens. The oracle is binary, with
+\(f^\ast(\mathrm{POS})=1\), \(f^\ast(\mathrm{NEG})=0\), and
+\(f^\ast(x)\in\{0,1\}\) for every fresh raw input \(x\). Assume there
+is at least one fresh raw input \(p\) with \(f^\ast(p)=1\).
+
+For this example, ordered concatenation reads the left component's
+oracle value on fresh strings:
+\[
+  f^\ast(a\concat b)=f^\ast(a)
+\]
+whenever the displayed concatenation is one of the fresh inputs used
+by the tree. Also assume that concatenating two state tokens produces
+a fresh input. Define
+\[
+g_{\mathrm{bad}}(x)=
+\begin{cases}
+\mathrm{NEG}, & x\in\{\mathrm{POS},\mathrm{NEG}\},\\
+\mathrm{POS}, & x\notin\{\mathrm{POS},\mathrm{NEG}\}\text{ and }f^\ast(x)=1,\\
+\mathrm{NEG}, & \text{otherwise.}
+\end{cases}
+\]
+On every fresh raw input, \(g_{\mathrm{bad}}\) emits the state token
+with the same oracle value as the input, so C1 holds. For a fresh
+merge with children \(u,w\), the left-child state
+\(g_{\mathrm{bad}}(u)\) has the same oracle value as \(u\). Since the
+parent oracle reads the left component, applying \(g_{\mathrm{bad}}\)
+to the serialized pair of child states again emits a token with the
+same oracle value as \(u\concat w\). Thus C3 holds on the fresh merge
+calls. But \(\mathrm{POS}\) is in the range because
+\(g_{\mathrm{bad}}(p)=\mathrm{POS}\), while
+\(g_{\mathrm{bad}}(\mathrm{POS})=\mathrm{NEG}\). Re-summarizing that
+produced state flips the oracle value from \(1\) to \(0\), so C2 fails.
+\end{example}
+
+In manifesto terms, a system can be faithful when it first compresses a raw
+span and still drift when it is asked to compress its own policy state again.
+C2 rules out that drift.
+
+\subsection{Oracle-Compatible Readouts and Preferences}
+
+A readout \(\Phi\) is oracle-compatible when it is constant on
+\(f^\ast\)-fibers:
+\[
+  a\sim_\ast b \Rightarrow \Phi(a)=\Phi(b).
+\]
+By Proposition~\ref{prop:v8-all-node-preservation}, every valid node state can
+replace its represented raw span for such a readout. At the root, the C-Tree
+state can replace the full manifesto. At internal nodes, the same statement is
+the justification for local supervision and audit: a valid state is a valid
+measurement object for the span it represents.
+
+Pairwise preference transfer is the two-argument version. If a comparison rule
+\(P\) is constant on oracle fibers in both arguments, then
+\[
+  P(z_v,z_{v'})=P(x_v,x_{v'})
+\]
+for valid realized node states. A DPO or GRPO application therefore requires
+more than a valid C-Tree: the preference input channel must be compatible with
+the manifesto policy oracle being preserved. Preferences over style, phrasing,
+or formatting are outside this claim unless the oracle is widened to include
+those features.
+
+\begin{proof}[Proof of Proposition~\ref{prop:v8-manifesto-preference-equivalence}]
+Assume exact C1/C2/C3 local laws and oracle-compatibility of the
+downstream population integrand. Let \(E_\theta(x)\) be that integrand
+for the downstream method at parameter \(\theta\), after integrating
+over any comparison pairs, responses, rewards, ranks, or other
+method-internal randomness conditional on input \(x\). Oracle
+compatibility means that there exists a function \(\phi_\theta\) such that
+\[
+  E_\theta(x)=\phi_\theta(f^\ast(x)).
+\]
+For a valid C-Tree root \(z_{\mathrm{root}}\), Theorem~\ref{thm:v8-root-preservation}
+gives \(f^\ast(z_{\mathrm{root}})=f^\ast(x)\). Therefore
+\[
+  E_\theta(z_{\mathrm{root}})
+  =
+  \phi_\theta(f^\ast(z_{\mathrm{root}}))
+  =
+  \phi_\theta(f^\ast(x))
+  =
+  E_\theta(x)
+\]
+pointwise for every manifesto. Averaging over the manifesto population gives
+equality of the population preference objective for every \(\theta\), and
+therefore the same optimizer set whenever the optimizer exists.
+\end{proof}
+
+\subsection{DPO and GRPO Transport Conditions}
+
+The exact preference result above is qualitative. Approximate preservation
+requires a transport condition that converts oracle distortion into objective
+drift. For DPO, one sufficient condition is Lipschitz dependence of policy
+log-ratios on the manifesto policy oracle.
+
+\begin{lemma}[DPO pointwise transport]
+\label{lem:v8-dpo-transport}
+For a preferred--dispreferred pair \((a_w,a_l)\), define the DPO pointwise
+loss
+\[
+\ell_{\mathrm{DPO}}(x,a_w,a_l)
+=
+-\log\sigma\!\left(
+\beta\left[
+\log\frac{\pi_\theta(a_w\mid x)}{\pi_{\mathrm{ref}}(a_w\mid x)}
+-
+\log\frac{\pi_\theta(a_l\mid x)}{\pi_{\mathrm{ref}}(a_l\mid x)}
+\right]\right).
+\]
+If each policy log-ratio is \(L_{\mathrm{pol}}\)-Lipschitz in
+\(d_Y(f^\ast(x),f^\ast(x'))\), then
+\[
+|\ell_{\mathrm{DPO}}(x,a_w,a_l)-\ell_{\mathrm{DPO}}(x',a_w,a_l)|
+\le
+2|\beta|L_{\mathrm{pol}}\,
+d_Y(f^\ast(x),f^\ast(x')) .
+\]
+\end{lemma}
+
+\begin{proof}
+Let \(\Delta(x)\) be the bracketed log-ratio difference. The two log-ratio
+terms each move by at most
+\(L_{\mathrm{pol}}d_Y(f^\ast(x),f^\ast(x'))\), so
+\[
+  |\Delta(x)-\Delta(x')|
+  \le
+  2L_{\mathrm{pol}}d_Y(f^\ast(x),f^\ast(x')) .
+\]
+The function \(-\log\sigma(t)\) is 1-Lipschitz because its derivative has
+absolute value \(1-\sigma(t)\le 1\). Scaling by \(|\beta|\) gives the stated
+constant.
+\end{proof}
+
+For a DPO population objective, the pair generator must also be
+oracle-compatible: replacing \(x\) by another input with the same preserved
+manifesto policy oracle must not change the distribution of comparison pairs.
+Under that premise, Lemma~\ref{lem:v8-dpo-transport} lifts from pointwise
+pairs to the expected DPO integrand with the same transport constant. For
+GRPO-style group ranking or reinforcement objectives, the same route makes the analogous
+assumption directly: the expected group loss, including ranking, reward,
+clipping, and KL terms, is Lipschitz in the preserved manifesto policy oracle.
+These are assumptions on the downstream preference channel, not consequences
+of tree compression alone.
+
+\subsection{Population Gap Bound}
+
+\begin{proposition}[Population transport]
+\label{prop:v8-population-transport}
+Suppose the downstream method has an expected loss integrand \(E_\theta\)
+satisfying
+\[
+  |E_\theta(a)-E_\theta(b)|
+  \le
+  C_{\mathrm{meth}}d_Y(f^\ast(a),f^\ast(b)).
+\]
+Let \(\Delta_R\) be the population mean distortion between each produced state
+and its represented raw span. Then the downstream objective drift satisfies
+\[
+  |G_{\mathrm{meth}}|
+  \le
+  C_{\mathrm{meth}}\Delta_R .
+\]
+\end{proposition}
+
+\begin{proof}
+Let \(X\) denote the represented raw unit and \(Z\) the produced state
+that replaces it, under the finite node population or manifesto
+distribution being targeted. The downstream objective drift is
+\[
+  G_{\mathrm{meth}}=\mathbb E[E_\theta(X)-E_\theta(Z)] .
+\]
+By Jensen's inequality and the transport premise,
+\[
+\begin{aligned}
+|G_{\mathrm{meth}}|
+&=
+\left|\mathbb E\!\left[E_\theta(X)-E_\theta(Z)\right]\right|\\
+&\le
+\mathbb E\!\left[|E_\theta(X)-E_\theta(Z)|\right]\\
+&\le
+C_{\mathrm{meth}}\,
+\mathbb E\!\left[d_Y(f^\ast(X),f^\ast(Z))\right].
+\end{aligned}
+\]
+The final expectation is the represented-span distortion
+\(\Delta_R\). This gives the claimed bound.
+\end{proof}
+
+Exact C1/C2/C3 laws give \(\Delta_R=0\) on the relevant realized population.
+Approximate laws produce a nonzero budget; the audit estimates that budget.
+
+\subsection{Horvitz--Thompson Unbiasedness}
+
+Let \(\mathcal U\) be the finite population of sample-eligible tree units,
+\(N=|\mathcal U|\), and \(D_i\ge 0\) the distortion contribution for unit
+\(i\). The target finite-population mean is
+\[
+  \Delta=\frac{1}{N}\sum_{i\in\mathcal U}D_i .
+\]
+Let \(Z_i\) be the inclusion indicator and
+\(\pi_i=\mathbb P(Z_i=1)\) its logged marginal inclusion probability, with
+\(0<\pi_i\le 1\). The Horvitz--Thompson estimator is
+\[
+  \widehat{\Delta}_{\mathrm{HT}}
+  =
+  \frac{1}{N}\sum_{i\in\mathcal U}\frac{Z_i}{\pi_i}D_i .
+\]
+Taking expectation under the sampling design,
+\[
+  \mathbb E[\widehat{\Delta}_{\mathrm{HT}}]
+  =
+  \frac{1}{N}\sum_{i\in\mathcal U}
+  \frac{\mathbb E[Z_i]}{\pi_i}D_i
+  =
+  \Delta .
+\]
+This proof uses only logged marginal propensities and positivity. Independence
+is not required for unbiasedness. Independence, negative dependence, or
+bounded covariance assumptions enter only when reporting variance or
+high-probability envelopes.
+
+\subsection{Proxy-Corrected Local-Law Loss}
+
+For a node \(v\), let \(\widehat \ell_v\) be the dense proxy law loss and
+\(\ell_v^\ast\) the target-oracle law loss. With audit indicator \(R_v\) and
+logged propensity \(\pi_v>0\), the correction uses
+\[
+  \ell_v^{\mathrm{corr}}
+  =
+  \widehat\ell_v
+  +
+  \frac{R_v}{\pi_v}
+  (\ell_v^\ast-\widehat\ell_v).
+\]
+Conditioning on the realized tree and proxy values,
+\[
+\mathbb E[\ell_v^{\mathrm{corr}}\mid T]
+=
+\widehat\ell_v
++
+\frac{\mathbb E[R_v\mid T]}{\pi_v}
+(\ell_v^\ast-\widehat\ell_v)
+=
+\ell_v^\ast .
+\]
+Summing with the declared depth weights gives an unbiased estimate of the
+oracle local-law channel. The correction changes the estimator, not the
+population target.
+
+\subsection{Certificate Decomposition}
+
+The deployed certificate may use an accessible judge \(J\) for audited
+distortion. Let \(\mu^\ast\) be the true oracle mean distortion,
+\(\mu^J\) the corresponding accessible-judge mean, and
+\(\widehat\Delta_{\mathrm{HT}}^J\) the HT estimate. Let
+\(\widehat\Delta_{\mathrm{HT}}\) denote the reported estimate after any
+clipping or residual truncation. Suppose the following envelope inequalities
+hold on an event \(\mathcal E\):
+\[
+\begin{aligned}
+C_{\mathrm{meth}}|\mu^\ast-\mu^J| &\le B_{\mathrm{cal}},\\
+C_{\mathrm{meth}}|\mu^J-\widehat\Delta_{\mathrm{HT}}^J|
+&\le B_{\mathrm{est}},\\
+C_{\mathrm{meth}}|\widehat\Delta_{\mathrm{HT}}^J
+-\widehat\Delta_{\mathrm{HT}}|
+&\le B_{\mathrm{clip}} .
+\end{aligned}
+\]
+Combining Proposition~\ref{prop:v8-population-transport} with a telescoping
+decomposition gives
+\[
+\begin{aligned}
+|G_{\mathrm{meth}}|
+&\le C_{\mathrm{meth}}\mu^\ast\\
+&\le
+C_{\mathrm{meth}}\widehat\Delta_{\mathrm{HT}}
++
+C_{\mathrm{meth}}|\mu^\ast-\mu^J|
++
+C_{\mathrm{meth}}|\mu^J-\widehat\Delta_{\mathrm{HT}}^J|
++
+C_{\mathrm{meth}}|\widehat\Delta_{\mathrm{HT}}^J
+-\widehat\Delta_{\mathrm{HT}}|\\
+&\le
+C_{\mathrm{meth}}\widehat\Delta_{\mathrm{HT}}
++
+B_{\mathrm{cal}}
++
+B_{\mathrm{est}}
++
+B_{\mathrm{clip}} .
+\end{aligned}
+\]
+If \(\mathbb P(\mathcal E)\ge 1-\delta\), the displayed certificate holds
+with probability at least \(1-\delta\). In practice, \(\mathcal E\) is the
+intersection of calibration, sampling, and clipping events, and the reported
+failure probability follows by a union bound.
+
+\subsection{Propensity and Clipping Robustness}
+
+The HT guarantee is robust to adaptive or adversarial sampling designs in the
+following limited sense: unbiasedness is unchanged as long as the logged
+marginal inclusion probabilities are correct and strictly positive. A hostile
+or highly unequal design can still increase variance. A practical stress
+class is
+\[
+  \mathcal D(\pi_{\min},\kappa)
+  =
+  \{\pi:\ \pi_i\in[\pi_{\min},\kappa\pi_{\min}],
+  \ \sum_i\pi_i=n\}.
+\]
+Within this class, small \(\pi_{\min}\) and large spread \(\kappa\) inflate
+the worst-case variance but do not change the finite-population estimand. If
+distortions are bounded by \(D_{\max}\), a Bernoulli-style variance proxy is
+\[
+  \operatorname{Var}(\widehat\Delta_{\mathrm{HT}})
+  \le
+  \frac{D_{\max}^2}{N}
+  \left(\frac{1}{\pi_{\min}}-1\right),
+\]
+up to the covariance correction for the actual design. Clipping the inverse
+propensity weights at \(w_{\max}\) trades variance for bias; that bias is the
+\(B_{\mathrm{clip}}\) term in the certificate rather than an unreported
+change in target.
+
+For Manifesto measurement, the design consequence is simple. A node-level
+certificate should report the sampling law, the logged propensities, the
+effective sample size or variance envelope, the clipping rule, and diagnostic
+slices by policy dimension. Decentralization should be an explicit slice
+because the root and teacher-trace evidence identify it as the main local
+failure mode.

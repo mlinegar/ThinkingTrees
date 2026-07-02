@@ -1,0 +1,36 @@
+\section{Conclusion}\label{sec:v8-conclusion}
+
+C-TreePO treats long-document measurement as a state-composition
+problem. The expert score is global; the evidence that determines it
+is local and relational. A C-Tree stores policy-evidence states at
+the leaves and at every internal merge, and the local laws say when
+those states can replace the raw spans they represent. The objective
+separates two channels: a root loss fits the document-level expert
+target, and a local-law channel trains and audits the state map
+inside the realized tree. Sparse oracle calls and logged
+propensities correct proxy bias in the local channel.
+
+The Manifesto/Benoit results give us the root-observed tier. The
+per-dimension tree reaches macro \(r=0.829\); the universal-summary
+configuration reaches \(0.807\). Five of the six policy dimensions
+track their per-dimension ceilings under shared compression.
+Decentralization is where shared compression breaks down, and the
+local diagnostic gap flags that breakdown directly, without any
+appeal to root-score comparisons. The Markov DGP runs in
+Section~\ref{sec:v10-markov-results} repeat the same shape on a
+controlled benchmark with a constructible oracle: where the DGP
+requires cross-leaf interactions, multi-leaf trees with the
+local-law package cut flat-FNO root MAE by 0.26 (0.182 versus
+0.440); where local information is enough, both architectures hit
+the same recovery floor.
+
+The certificate of Section~\ref{sec:v8-audit-certificate} closes the
+loop. Sampled oracle calls with logged propensities give an unbiased
+estimate of representation distortion
+(Proposition~\ref{prop:v10-ht-unbiased}), and the four-term
+decomposition
+(Proposition~\ref{prop:v10-finite-sample-certificate}) attributes
+remaining drift to the components an analyst can act on.
+Manifesto Project quasi-sentences are the natural sampling frame for
+the next-tier human-graded audit, and the same machinery applies
+without further development of the framework.

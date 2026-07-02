@@ -1,0 +1,40 @@
+\section{Mergeable Sketches and Learned State Intuition}
+\label{sec:v8-mergeable-intuition}
+
+Classical mergeable summaries give the cleanest model of what a C-Tree should
+do. A distributed system replaces each shard by a compact state, merges states
+up a binary tree, and applies the query at the root
+\citep{Agarwal2013MergeableTODS}. The scalar answer is usually not the object
+that merges. HyperLogLog registers merge; cardinality is read after the merge.
+Count-Min tables merge; point-frequency answers are read after the merge.
+For ordered text, the analogous structure is an order-preserving state update,
+closer to a free-monoid homomorphism than to a commutative multiset aggregate
+\citep{Gibbons1996ThirdHomomorphism}.
+
+C-Trees keep this state-level shape and replace the hand-written sketch with a
+learned state map. A leaf call builds a state from a document block. A merge
+call builds a parent state from two child states. A readout \(f\), or in LLM
+practice a learned proxy \(\widehat f\), scores the resulting object. The
+oracle \(f^\ast\) names the task value the analysis is trying to preserve.
+
+The distinction between state and scalar answer matters for semantic tasks.
+Suppose two child spans each carry a local policy score. Those two numbers do
+not determine whether the spans jointly supply evidence, contradiction,
+qualification, or a cross-span premise-conclusion relation. A valid state must
+carry the information needed by the merge. The query is then a root readout of
+that state, not an additive bag of child scores.
+
+The local laws below are the learned analogue of sketch correctness. C1 says a
+leaf state preserves the oracle-relevant content of its raw block. C2 says a
+produced state can re-enter the summarizer without drifting. C3 says a merged
+state preserves the oracle-relevant content of the represented parent. A
+classical sketch proves these facts algebraically. A learned C-Tree trains
+toward them and audits the residuals on the realized tree.
+
+Neural operators, transformers, and prompt programs are representation routes
+for the single state map \(g\). Their role is capacity: they supply candidate
+implementations of the same learned update across leaf and merge contexts. The
+certificate still comes from the local laws and the sampling design.
+Appendix~\ref{app:v8-neural-operator-route} gives the neural-operator details;
+Appendix~\ref{app:v8-mergeable-nesting} gives the state-level nesting theorem
+for classical sketches.
