@@ -47,11 +47,13 @@ in `tests/conftest.py` still excludes anything importing
 ## Manifesto pass (same day, second round)
 
 The manifesto suites (`tests/tasks/test_manifesto_*`, `test_phase3_*`) are
-now 60 passed / 1 skipped / 1 failed:
+now fully green: 57 passed / 1 skipped / 0 failed on transformers 5.12.
 
-- `pyreadr` added to the `manifesto` extra (Benoit .rda readers);
-  `transformers` pinned `<5` in the `trl` extra (v5 changes model-loading
-  pickle defaults). Both installed in the venv.
+- `pyreadr` added to the `manifesto` extra (Benoit .rda readers).
+  `transformers` runs at the latest 5.x: the pickle guard that first looked
+  like a transformers-5 break was DSPy's own save/load guard, and the
+  transformers-touching suites score identically on 4.57 and 5.12 — while
+  the external-summary bundle test passes only on the upgraded stack.
 - `dspy.load` calls in `run_manifesto_full_doc_dspy_global_f.py` pass
   `allow_pickle=True` (local, self-produced program artifacts).
 - `phase3_full_pipeline_optimize._load_scorer_component` handles the
@@ -61,9 +63,9 @@ now 60 passed / 1 skipped / 1 failed:
 - `test_fg_ladder_exports_contract_fit_artifacts` is skipped: its subject
   is the archived `scripts/OLD_build_manifesto_fg_ladder_legacy.py`;
   current fg-ladder runs go through `run_manifesto_fg_real_training_grid.py`.
-- Remaining: `test_teacher_fg_leaf_grid_writes_external_summary_bundle_metadata`
-  — the external-summary bundle path writes 0 of 4 labeled trees; behavior
-  drift in the bundle writer, needs the owning thread.
+- `test_teacher_fg_leaf_grid_writes_external_summary_bundle_metadata`
+  passes on the upgraded datasets/transformers stack (it wrote 0 of 4
+  labeled trees on the older stack).
 
 treepo's own manifesto guard: the full Manifesto Project corpus integration
 test passes against v0.1.1

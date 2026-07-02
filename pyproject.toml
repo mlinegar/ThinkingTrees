@@ -83,9 +83,9 @@ contextual_sbi = [
 ]
 trl = [
     "trl>=0.8.0",
-    # transformers 5 changes model-loading defaults (pickle guard) that the
-    # fg-ladder and judge suites are pinned against; stay on the 4.x line.
-    "transformers>=4.40.0,<5",
+    # Suites verified on transformers 5.12 (the pickle guard that looked like
+    # a transformers-5 break was DSPy's; handled with allow_pickle=True).
+    "transformers>=4.40.0",
     "datasets>=2.14.0",
     "peft>=0.8.0",
     "bitsandbytes>=0.43.0",
