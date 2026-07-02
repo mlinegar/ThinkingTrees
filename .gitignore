@@ -1,7 +1,7 @@
 OmniThink/
 xmc.dspy/
 langextract/
-data/
+/data/
 outside_data/
 *.log
 *.code-workspace
@@ -11,6 +11,14 @@ outside_data/
 *.iml
 __pycache__/
 *.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
 .env
 .env.*  
 venv/
@@ -22,7 +30,13 @@ llm_compositions/
 *.fls
 *.fdb_latexmk
 *.out
+*.toc
+*.synctex.gz
 *.json
+!docs/literature/
+!docs/literature/mergeable_sketches/
+!docs/literature/mergeable_sketches/*.pdf
+!docs/literature/mergeable_sketches/manifest.json
 *.csv
 *.txt
 outputs/
@@ -32,6 +46,7 @@ parallel/
 tmp_search_debug/
 [\\]outputs/
 *.jsonl
+!tests/fixtures/runtime/longbench_v2_tiny.jsonl
 *.jpeg
 *.gif
 *.webp
@@ -63,3 +78,10 @@ markov_law_stress_suite_manifest.jsonl
 lean3/.tmp_check_*.lean
 paper/ctreepo/main_new.bbl
 paper/ctreepo/main_new.blg
+
+# Local archives of the standalone treepo package (history lives at
+# github.com/mlinegar/treepo) and downloaded third-party literature PDFs.
+/OLD_treepo/
+/OLD_treepo_cld/
+/treepo_old/
+/docs/literature/
