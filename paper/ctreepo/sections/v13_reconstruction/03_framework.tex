@@ -1,0 +1,184 @@
+\section{Framework and Local Laws}\label{sec:framework}
+
+Section~\ref{sec:mergeable-sketches} defined the algebraic target:
+compose bounded states locally, preserve the task readout, and reduce to a
+classical mergeable summary when the state and merge are hand-designed
+(Proposition~\ref{prop:mergeable-reduction}). We now formalize the local
+laws that operationalize that target for a learned summarizer.
+
+Before the formal definitions, Table~\ref{tab:settings-comparison} previews the three settings that exercise the framework. Each row names the oracle $\fstar$, the practical approximation we use for it, the summarizer $g$ that feeds the tree, and the objective we optimize or report. The table is a signpost: the definitions below formalize $\fstar$, $g$, and the local laws in the abstract, and Sections~\ref{sec:markov-walkthrough}, \ref{sec:hll-parity}, and~\ref{sec:manifesto-llm} instantiate the rows one at a time.
+
+\begin{table}[htbp]
+\centering\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{p{0.11\linewidth}p{0.20\linewidth}p{0.20\linewidth}p{0.21\linewidth}p{0.20\linewidth}}
+\toprule
+Setting & Oracle $\fstar$ & Approximation of $\fstar$ & Summarizer $g$ & Objective / success metric \\
+\midrule
+Markov changepoint (\S\ref{sec:markov-walkthrough}) &
+Count of color transitions in a $128$-token document &
+Closed-form; available exactly from the synthetic DGP &
+Shared 1D FNO leaf encoder $+$ small MLP merge &
+Root MAE against ground truth, with C1 and C3 local losses training the merge \\[2pt]
+HLL parity (\S\ref{sec:hll-parity}) &
+Distinct-item count; or the classical HLL scoring head when \texttt{oracle\_kind} $=$ \texttt{hll\_reference} &
+Classical HLL estimator $\alpha_m m^2 / \sum_j 2^{-r_j}$, applied to a classical register state or (for learned variants) to a learned state &
+Register-wise max (classical); MLP end-to-end (learned $g{+}f$); or learned $g$ with classical $f$ reading a register-space state &
+Byte-level register equality (native) or estimate-equivalence within $2\times$ RSE (DataSketches); relative MAE vs.\ the oracle for the learned variants \\[2pt]
+Manifesto RILE (\S\ref{sec:social-measurement}, \S\ref{sec:manifesto-llm}) &
+Manifesto-Project expert RILE coding on six policy dimensions &
+An open-weight LLM summarizer and scorer (\textsc{Gemma-4-31B-IT-NVFP4}) driven by rubric prompts &
+Tree of prompted-LM leaf summaries merged pairwise by a union-rubric prompt &
+Pearson $r$ against Benoit expert-survey means, macro and per-dimension \\
+\bottomrule
+\end{tabular}
+\caption{The three settings in which we exercise the framework. Each row names the task oracle $\fstar$, the practical approximation we use, the summarizer $g$ plugged into the tree, and the objective we optimize or report. The classical-to-learned gradient runs top to bottom: closed-form oracle and learned operator on synthetic data, to classical-sketch oracle and classical-or-learned operator on distinct counts, to rubric oracle and LLM operator on real manifestos.}
+\label{tab:settings-comparison}
+\end{table}
+
+\subsection{Preservation Objective}
+
+The hierarchy exists only to preserve a task judgment that is expensive to obtain on the full document. A researcher may trust an expert rubric, a deliberation-grade model, or a gold-standard annotation workflow, but cannot afford to run it on every long input during optimization. C-TreePO therefore compresses the document locally while auditing whether the resulting summaries still support the same oracle value.
+
+\begin{definition}[Oracle]\label{def:oracle}
+Let $\Strings$ denote the set of all finite token sequences, with concatenation written $u \concat v$. An \emph{oracle} is a function $\fstar: \Strings \to \Y$ mapping a document to the task value the researcher ultimately cares about.
+\end{definition}
+
+\begin{definition}[Summarizer]\label{def:summarizer}
+A \emph{summarizer} is a (possibly stochastic) map $g: \Strings \rightsquigarrow \Strings$. When $g$ uses randomness (temperature, seeds), statements about $g(x)$ are interpreted in expectation over this randomness.
+\end{definition}
+
+The formalization takes this stochastic reading as primitive: a summarizer is a $\mathrm{PMF}$-valued map. Deterministic operators, including the neural-operator realizers in Section~\ref{sec:fno-primer}, are the degenerate point-mass subcase.
+
+\begin{definition}[Readout]\label{def:readout}
+A \emph{readout} is a (possibly stochastic) map $f : \Strings \rightsquigarrow \Y$ that takes the final summary and produces the task value.
+\end{definition}
+
+In settings with a closed-form oracle the readout may be taken to be $\fstar$ itself; in learned settings (HLL, Manifesto) it is a separate, optionally learned, component.
+
+Every call to $g$ is \emph{local}: it sees either a leaf block or the concatenation of two child summaries. This locality is what makes the hierarchy computationally feasible and what makes verification possible. The two functions the framework cares about are $f$ and $g$. Everything else is a choice of parametric family used to represent $f$ and $g$ in a particular setting: neural operators (\S\ref{sec:fno-primer}), hand-designed mergeable sketches (\S\ref{sec:hll-parity}), LLM prompt stacks (\S\ref{sec:manifesto-llm}). The local laws, the audit, and the gap bound are stated on $f$ and $g$ alone, independent of that choice.
+
+\subsection{Hierarchical Pipeline Construction}
+
+Operationally we partition the document into contiguous chunks $(b_1,\dots,b_k)$ that fit inside the model's context window and assign them to the leaves of a full binary tree $T$. Each leaf is summarized once to produce $s_i = g(b_i)$, and every internal node $u$ receives the strings from its children, concatenates them, and calls the same summarizer again: $s_u := g(s_{u_L} \concat s_{u_R})$. Traversing the tree bottom-up shrinks an entire book into a single paragraph-width string at the root.
+
+During execution we only store the summaries $s_u$. The raw substrings $S(u)$ underneath a node exist conceptually so that we can compare the pipeline back to the document during a verification pass. Because $g$ always sees at most two child summaries, every operation fits inside a bounded context window, making the local summarizer literally the function invoked at each node.
+
+Figure~\ref{fig:plain-tree} shows the structure. The partition into leaves is fixed before any summarization begins: we choose the chunk boundaries once and hold them constant throughout the pipeline. The results extend to any finite rooted tree with contiguous leaves (Appendix~\ref{app:fixed-partition}), provided the stated local laws hold on the realized calls of that tree.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{01_base_plain.pdf}
+    \caption{A compression tree for a document partitioned into eight contiguous blocks $b_1, \ldots, b_8$. Each block is summarized to produce a leaf summary $s_i = g(b_i)$; sibling summaries are then merged pairwise ($s_{ij} = g(s_i \concat s_j)$) up to the root. The tree is fixed before summarization begins; only the summaries change as the pipeline runs.}
+    \label{fig:plain-tree}
+\end{figure}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{ll}
+\toprule
+Symbol & Meaning \\
+\midrule
+$\Strings$ & Set of all finite token sequences; $u \concat v$ = ``$u$ followed by $v$''; $\emptystr$ = empty string \\
+$\fstar: \Strings \to \Y$ & Oracle mapping strings to task values; $\metric: \Y \times \Y \to [0,\infty)$ scores discrepancies \\
+$g: \Strings \rightsquigarrow \Strings$ & Local summarizer (possibly stochastic) applied at every node \\
+$x_0$ & Base document; realized leaves $b_i$ are contiguous substrings of $x_0$ \\
+$u$ & Node of merge tree $T$ with ordered children $u_L,u_R$ and latent span $S(u)$ \\
+$s_u$ & Stored summary at node $u$ ($s_u=g(b)$ at leaves; $s_u=g(s_{u_L}\concat s_{u_R})$ internally) \\
+$r$ & Root node with latent span $S(r)=x$ and stored summary $s_r = Z^{(1)}(x)$ \\
+$Z^{(R)}(x)$ & $R$th-round summary ($Z^{(1)}(x)=s_r$, $Z^{(R+1)}(x)=g(Z^{(R)}(x))$) \\
+$\E$ & Expectation over $g$'s randomness \\
+\bottomrule
+\end{tabular}
+\caption{Notation recap for hierarchical compression.}
+\label{tab:notation-main}
+\end{table}
+
+\subsection{The Three Consistency Conditions}
+
+The key question is what a local summary must preserve so that the tree as a whole preserves the oracle value of the full document. We state the laws globally because the algebra is cleaner that way, but in deployment we audit their \emph{realized} instances: the actual leaf summaries and merge calls produced in one run of the tree.\footnote{Two equivalent readings of these laws recur from here on. The \emph{projection} reading (natural from an ML / optimization background) says that training the summarizer with local-law losses projects the learned operator onto the subspace where the laws hold. The \emph{structural-error} reading (natural from a statistics / econometrics background) says that we assume the approximation error is structured so that its zero set is exactly that subspace. Section~\ref{sec:theorems} states the iff in the main text and Appendix~\ref{app:projection-interpretation} gives the formal crosswalk; either reading works here.}
+
+\begin{table}[htbp]
+\centering\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{p{0.11\linewidth}p{0.18\linewidth}p{0.19\linewidth}p{0.22\linewidth}p{0.13\linewidth}}
+\toprule
+Law & Algebraic form & Plain-language test & Typical failure & Audit unit \\
+\midrule
+C1: Sufficiency & $g(b)\sim b$ & The leaf summary keeps the evidence its source span needs. & A chapter summary drops a decisive policy commitment or entity mention. & Leaves \\
+C2: Idempotence & $g(s)\sim s$ for $s \in \operatorname{range}(g)$ & Re-summarizing a stored summary does not change the task signal. & A clean-up pass smooths away a decisive qualifier. & Stored summaries \\
+C3: Merge Consistency & $u \concat v \sim g(u \concat v) \sim g(g(u)\concat g(v))$ & Split-then-merge preserves the same interaction as summarize-together. & Cross-span tension disappears because each child summary drops one side. & Merge nodes \\
+\bottomrule
+\end{tabular}
+\caption{Reader-facing view of the three local laws. The algebraic form is stated globally; the audit checks the corresponding realized calls on the deployed tree.}
+\label{tab:law-cards}
+\end{table}
+
+\paragraph{Condition 1: Sufficiency (C1).}
+\begin{equation}\tag{C1}\label{eq:leaf_sufficiency}
+\forall \text{ realized leaf } b:\quad g(b) \sim b.
+\end{equation}
+In the changepoint example, C1 fails when a leaf summary drops the identity of a boundary-adjacent color that the counting oracle inspects. In a semantic setting, C1 fails when a chapter summary drops a policy position the scoring rubric needs.
+
+\paragraph{Condition 2: Idempotence (C2).}
+\begin{equation}\tag{C2}\label{eq:leaf_idempotence}
+\forall \text{ summary } s \in \operatorname{range}(g):\quad g(s) \sim s.
+\end{equation}
+Without C2, a second pass can make a previously valid summary too vague for the task.
+
+\paragraph{Condition 3: Merge Consistency (C3).}
+\begin{equation}\tag{C3}\label{eq:leaf_compatibility}
+\forall u, v \in \Strings:\quad
+\underbrace{u \concat v}_{\text{Raw}} \;\sim\;
+\underbrace{g(u \concat v)}_{\text{Joint}} \;\sim\;
+\underbrace{g\big(g(u) \concat g(v)\big)}_{\text{Disjoint}}.
+\end{equation}
+The first link says a joint summary preserves the span. The second says that summarizing children separately and then merging them preserves the same cross-span interaction as summarizing the raw concatenation at once.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{05_full.pdf}
+    \caption{The three local laws, shown on the same tree from Figure~\ref{fig:plain-tree}. Each colored panel highlights one auditable check: \textbf{C1} (left) compares a leaf summary $s_i$ to its raw block $b_i$; \textbf{C2} (center) re-summarizes a stored summary and checks that the oracle value does not drift; \textbf{C3} (right) checks that merging two child summaries preserves the oracle value of the combined raw span. Gray nodes are not involved in the check. Every check fits in a bounded context window and can be sampled independently.}
+    \label{fig:local-laws-full}
+\end{figure}
+
+\paragraph{Global law vs.\ realized law.}
+A \emph{global law} is the universal algebraic statement above. A \emph{realized law} is the corresponding instantiated check on the specific strings produced in one execution of the tree. We call a run \emph{realized-valid} for a bundle of assumptions when all realized checks required by that bundle hold on that run. The audit never proves that a law holds for all strings; it estimates whether the deployed run is realized-valid often enough to support the desired guarantee.
+
+\subsection{Oracle Equivalence and Context Compatibility}
+
+Two strings $u, v \in \Strings$ are \emph{equivalent at the oracle}, denoted $u \sim v$, if their oracle outputs are indistinguishable:
+\[
+u \sim v \;\Longleftrightarrow\; \metric\big(\fstar(u), \fstar(v)\big) = 0.
+\]
+All conditions are stated modulo this relation. Because $\metric$ is a (pseudo)metric, $\sim$ is reflexive, symmetric, and transitive.
+
+To propagate local equivalences up the tree we need one more property: if two passages look the same to the oracle, then substituting either one into the same surrounding neighborhood should keep them equivalent. In plain language, equivalence should survive insertion into the same left and right context.
+
+\begin{assumption}[Context-compatible oracle]\label{ass:context}
+For every context $w \in \Strings$, $u \sim v$ implies both $w \concat u \sim w \concat v$ and $u \concat w \sim v \concat w$.
+\end{assumption}
+
+This is what makes the tree induction work: replacing one child with an oracle-equivalent string must not change the parent's oracle value. For content-based tasks such as changepoint counting, RILE scoring, or rubric-driven extraction, this is often plausible. It can fail for discourse-sensitive tasks such as irony or rhetorical tone, where replacing a locally equivalent span may change how neighboring text is interpreted.
+
+\subsection{Named Assumption Bundles}
+
+\begin{table}[htbp]
+\centering\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{p{0.16\linewidth}p{0.18\linewidth}p{0.20\linewidth}p{0.14\linewidth}p{0.18\linewidth}}
+\toprule
+Bundle & Ingredients & Reader-facing meaning & Needed for & How to stress-test \\
+\midrule
+Preservation Stack & C1 + C3 + Assumption~\ref{ass:context} & Local leaf and merge validity compose to the root. & Thm.~\ref{thm:one-pass}, Cor.~\ref{cor:schedule} & Node audits + context swaps \\
+Recompression Stack & Preservation Stack + C2 & Extra clean-up passes do not drift. & Thm.~\ref{thm:multi-round}, Cor.~\ref{cor:folds} & Re-summarization audits \\
+Optimization Stack & Recompression Stack + factorization/measurability & Training depends only on the preserved task value. & Thm.~\ref{thm:pref-equiv} & Surface-form probes \\
+Certificate Stack & Optimization Stack + transport, calibration, sampling assumptions & Approximate preservation becomes an empirical gap certificate. & Thm.~\ref{thm:unified-gap}, Thm.~\ref{thm:e2e} & Calibration + propensity diagnostics \\
+\bottomrule
+\end{tabular}
+\caption{Assumption bundles. The first two are structural; the latter two add downstream modeling ingredients used for training equivalence and finite-sample certificates.}
+\label{tab:assumption-bundles}
+\end{table}
+
+\paragraph{Structural vs.\ downstream assumptions.}
+The first two bundles govern the compression object itself: do local checks compose to a faithful root summary? The latter two bundles add assumptions about the downstream preference signal and about finite-sample transport from audit statistics to optimization guarantees. The split recurs in Sections~\ref{sec:theorems} and \ref{sec:verification}.

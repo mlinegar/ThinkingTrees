@@ -1,0 +1,156 @@
+\section{Classical Mergeable-Sketch Parity: HyperLogLog}\label{sec:hll-parity}
+
+The Markov walk-through showed that a tree of FNO leaves can handle an
+oracle that defeats unordered register-wise merges without boundary
+state. The converse test is a setting where the oracle \emph{is} a
+classical sketch's query: does the C-TreePO framework recover the
+classical sketch exactly? It does, up to byte-identity for a
+register-based implementation, and the register-space constraint is
+itself informative about what learned operators can and cannot do.
+
+We run the experiment on HyperLogLog \citep{FlajoletEtAl2007,HeuleEtAl2013}
+because it is the canonical sketch for distinct counting and because the
+merge operator (register-wise max) is associative at the state level. It is
+also commutative and idempotent, but those are HLL-specific properties rather
+than generic requirements of Proposition~\ref{prop:mergeable-reduction}.
+HLL should be read as a representative member of the larger mergeable-sketch
+class, not as the whole classical baseline: theorem-backed witnesses for
+Count-Min, KLL/GK quantile, bigram, and Markov-count sketches are available
+where their local-law obligations hold, and the crosswalk in
+Appendix~\ref{app:proof-artifacts} lists each.
+
+\subsection{Protocol}
+
+All runs go through the unified \texttt{fit()} entry point. A preset
+\texttt{classical\_hll\_parity\_task} builds a \texttt{TrainerConfig} whose
+trainer is a zero-optimization callable that plugs a \texttt{SketchAdapter}
+into \texttt{treepo\_reduce}. The same CSV schema holds four methods:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{classical-native:} the repo's own register-based HLL
+          implementation (\texttt{HyperLogLogSketch}). Merge is pointwise
+          max on a \texttt{uint8} register array.
+    \item \textbf{classical-DataSketches:} Apache DataSketches'
+          \texttt{hll\_sketch}/\texttt{hll\_union}, the canonical streaming
+          reference. Internal state transitions through list, sparse, and
+          dense modes based on cardinality.
+    \item \textbf{learned-$g$ (classical $f$):} a learned neural merge
+          $g$ produces a vector of dimension $m = 2^p$ interpreted as an
+          HLL register state; the readout $f$ is the classical HLL
+          estimator formula $\alpha_m m^2 / \sum 2^{-r_j}$ applied
+          differentiably to that state.
+    \item \textbf{learned-$g$+$f$ (end-to-end):} both the merge $g$ and
+          the scalar readout $f$ are learned MLPs, with
+          $\text{state\_dim} = 2\,\text{summary\_dim}$ respecting the
+          FNO head 2$\times$ invariant documented in
+          Appendix~\ref{app:mechanism-checks}.
+\end{itemize}
+
+For each method we sweep precisions $p \in \{7, 9, 11, 13\}$, leaf counts
+$L \in \{1, 2, 4, 8, 16\}$, and three seeds. Learned runs train for $150$
+epochs against per-node classical-HLL targets: \texttt{oracle\_kind} is
+set to the classical HLL's own scoring head, so the C1 (leaf sufficiency)
+and C3 (merge consistency) targets equal what the flat HLL would produce
+at each node, and classical HLL's register-wise structure makes C2
+(idempotence) automatic. In the projection language of
+Section~\ref{sec:theorems}, classical HLL \emph{already} lies in the
+exact local-law subspace by construction, so the learned runs are
+projecting a learned-operator class onto the same subspace the
+hand-designed sketch inhabits. Full reproduction details,
+training-budget analysis, and the complete per-cell table are in
+Appendix~\ref{app:classical-parity}.
+
+\subsection{Proposition~\ref{prop:mergeable-reduction} Empirically}
+
+For the classical methods, Proposition~\ref{prop:mergeable-reduction}
+predicts that the tree-reduced summary should match the flat-reduced
+summary up to oracle equivalence. The per-cell grid
+(Table~\ref{tab:classical-parity-hll} in
+Appendix~\ref{app:classical-parity}) confirms this on every cell:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Native HLL: byte-exact.} The register vectors produced
+          by $\texttt{reduce\_hll\_sketches}$ at every tree shape are
+          byte-identical to those produced by the flat pipeline. The
+          \texttt{bytes=} column is $1.00$ on every row.
+    \item \textbf{DataSketches HLL: estimate-exact.} The \texttt{state\_equal}
+          check (estimate agreement within $2\times$ HLL RSE) holds on
+          every cell; the \texttt{bytes=} check fails because
+          DataSketches' list$\to$sparse$\to$dense transitions depend on
+          build order, but the functional oracle answer agrees.
+\end{itemize}
+
+This is Proposition~\ref{prop:mergeable-reduction}'s state-level collapse
+made concrete. The native run instantiates $g$ as serialized HLL register
+state and the merge as register-wise max; for a register-based implementation
+the reduction is literally byte-for-byte.
+
+\subsection{Can a Learned Merge Recover the Classical Sketch?}
+
+The two learned methods ask a different question: if we pointed the same
+\texttt{fit()} pipeline at the classical HLL as an oracle, how close can
+a learned $g$ (with or without a learned readout) come to
+reproducing its behavior? In the projection view, the classical methods
+begin in the exact local-law subspace, while the learned methods test how
+well different representable subspaces and readouts can approach that same
+target under local-law supervision. Figure~\ref{fig:classical-parity-hll} shows
+the relative MAE of each method against precision, one panel per leaf
+count, and the picture tells a clean story:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Learned $g$+$f$ (end-to-end)} tracks the classical
+          sketch within a small multiple of the theoretical RSE floor and
+          \emph{improves} as the tree gets deeper. At $p=13$, relative
+          MAE drops from $\sim\!0.27$ at $L=2$ to $\sim\!0.19$ at
+          $L \ge 8$: more merges mean more gradient signal at internal
+          nodes, and the learned readout can compensate for imprecision
+          anywhere in the state.
+    \item \textbf{Learned $g$ with classical $f$} \emph{degrades} as the
+          tree gets deeper. At $p=13$, relative MAE grows from $\sim\!0.27$
+          at $L=1$ to $\sim\!0.43$ at $L=2$ to $\sim\!0.86$ at $L=16$.
+          When the readout is a fixed non-learnable formula, mismatches
+          at internal nodes channel through an unforgiving estimator and
+          compound rather than average.
+\end{itemize}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\linewidth]{hll_parity_curves.png}
+    \caption{Relative MAE against the oracle across precision, overlaying four methods on HyperLogLog: classical-native, classical-DataSketches, learned-$g$ (with classical $f$), and learned-$g$+$f$ (end-to-end). Dotted line: the HLL theoretical relative standard error $1.04/\sqrt{2^p}$. Each panel is a distinct leaf count $L \in \{1, 2, 4, 8, 16\}$. The two classical curves track each other within a fraction of the RSE floor, confirming Proposition~\ref{prop:mergeable-reduction}'s collapse. The learned-$g$+$f$ curve improves with $L$; the learned-$g$ (classical $f$) curve degrades with $L$.}\label{fig:classical-parity-hll}
+\end{figure}
+
+\subsection{Takeaway}
+
+Two structural findings follow from this experiment:
+
+\paragraph{The classical collapse is exact.}
+When the state-level conditions of Proposition~\ref{prop:mergeable-reduction} hold,
+C-TreePO reduces to the classical mergeable sketch byte-for-byte on the
+reference implementation, not merely in distribution. This is
+the tightest empirical form of the generalization claim
+for this representative sketch; the formal version is the
+sketch-generic inclusion
+\texttt{mergeableSketchSummaryClass\_subset\_exactLocalLawSubspace}.
+
+\paragraph{The register-space constraint is a real optimization barrier.}
+With identical data, identical training objective, and identical
+hyperparameters, the only difference between \texttt{learned\_g} and
+\texttt{learned\_gf} is whether the readout $f$ is learnable or fixed to
+the classical HLL estimator. The gap between the two (and its
+direction of scaling with $L$) is therefore a clean statement that
+some learned-$g$ settings pay a real cost when the readout must live in
+the classical sketch's exact state space. A practitioner building on this
+framework who does not need byte-for-byte parity with a specific
+reference sketch would pick the end-to-end learned path.
+
+The Markov interlude established that the framework handles oracles no
+classical sketch can; the HLL parity result shows it recovers the classical
+mergeable-sketch route when one exists. Section~\ref{sec:theorems} now states the
+theorems that govern both: local validity composing to root
+preservation, preservation lifting to training-equivalence for DPO and
+GRPO, the oracle/projection view that turns local-law weights into a
+structured approximation-error assumption, and sampled audits yielding
+finite-sample gap bounds. Once that
+machinery is in place, Section~\ref{sec:manifesto-llm} applies it to a
+setting where no classical sketch exists (the Manifesto-Project RILE
+rubric) and the learned $g$ must carry the full semantic load.

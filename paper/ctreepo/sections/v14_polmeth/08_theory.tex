@@ -1,0 +1,213 @@
+\section{Main Results}\label{sec:theorems}
+
+The theorems are stated over an abstract oracle $\fstar$: they apply
+whether $\fstar$ is a distinct-count query, a changepoint count, or a
+semantic rubric. Two controlled validations exercise the extremes of
+that range. On a Markov changepoint counting task, whose oracle defeats
+every unordered classical sketch, a tree of learned operators matches or
+improves on a flat baseline (Appendix~\ref{sec:markov-walkthrough}); on
+distinct counting, whose oracle \emph{is} a classical sketch, the same
+framework recovers HyperLogLog byte-for-byte
+(Appendix~\ref{sec:hll-parity}). Section~\ref{sec:manifesto-llm} takes
+the same statements to the semantic case.
+
+The results come in three tiers. The \emph{structural} tier asks
+whether the realized local laws compose to the root summary. The
+\emph{optimization} tier adds assumptions saying that downstream
+training depends on a document only through the preserved oracle value.
+The \emph{certificate} tier adds the method-transport and sampling
+assumptions needed to turn sampled-audit budgets into a finite-sample
+bound. Figure~\ref{fig:theorem-deps} gives the dependency graph, and
+Table~\ref{tab:assumption-bundles} names the assumption bundles used
+below.
+
+Feeding the three tiers is one realizability step. A learned operator
+never satisfies the local laws by fiat; it is trained toward them. For
+a scalar $\lambda\in[0,1]$, the regularized objective is
+\begin{equation}\label{eq:oracle-projection-objective}
+J_\lambda(g)
+  =
+  (1-\lambda)\,L_{\mathrm{oracle}}(g)
+  +
+  \lambda\,\big(
+    \varepsilon_{\mathrm{leaf}}
+    + \varepsilon_{\mathrm{merge}}
+    + \varepsilon_{\mathrm{idemp}}
+  \big).
+\end{equation}
+The first term fits the task oracle; the second term projects the
+realized operator toward the subspace where C1/C2/C3 hold, and the
+same three budgets are what the audit of Section~\ref{sec:estimation}
+estimates on the deployed run. Appendix~\ref{app:theory-details}
+develops this layer in full: the neural-operator realization bridge
+that converts an approximation tolerance into local-law budgets
+(Proposition~\ref{prop:neural-operator-bridge}), the law-constrained
+subspaces that place hand-designed sketches and learned operators in
+one diagram, and the equivalence between the projection reading and
+the structured-approximation-error reading of the $\lambda$ weights.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+    node distance=0.6cm and 1.2cm,
+    box/.style={rectangle, draw, rounded corners=2pt, minimum width=2.8cm, minimum height=0.55cm, font=\footnotesize, align=center},
+    assumption/.style={box, fill=blue!8},
+    theorem/.style={box, fill=green!8},
+    arr/.style={-{Stealth[length=4pt]}, thick}
+]
+\node[assumption] (C1C3) {C1 + C3};
+\node[assumption, right=of C1C3] (C2) {C2};
+\node[assumption, right=of C2] (CC) {Context\\compat.};
+\node[theorem, below=of C1C3, xshift=1.2cm] (pres) {Preservation\\(Thm~\ref{thm:one-pass})};
+\node[assumption, right=2.4cm of pres] (CF) {Factorization\\(Asm~\ref{ass:CF})};
+\node[assumption, right=of CF] (LIP) {Method transport\\(Lipschitz/int.)};
+\node[theorem, below=of pres, xshift=1.2cm] (equiv) {Equivalence\\(Thm~\ref{thm:pref-equiv})};
+\node[theorem, right=of equiv] (gap) {Gap bound\\(Thm~\ref{thm:unified-gap})};
+\node[theorem, below=of equiv, xshift=0.6cm] (e2e) {Audited gap bound\\(Thm~\ref{thm:e2e})};
+
+\draw[arr] (C1C3) -- (pres);
+\draw[arr] (C2) -- (pres);
+\draw[arr] (CC) -- (pres);
+\draw[arr] (pres) -- (equiv);
+\draw[arr] (CF) -- (equiv);
+\draw[arr] (LIP) -- (gap);
+\draw[arr] (equiv) -- (e2e);
+\draw[arr] (gap) -- (e2e);
+\end{tikzpicture}
+\caption{Logical dependency chain for the main results. Blue nodes are assumptions; green nodes are derived statements. The first tier is structural, the second is optimization, and the third is certificate transport.}
+\label{fig:theorem-deps}
+\end{figure}
+
+\subsection{Processing Invariance}
+
+The first tier says that if every leaf summary preserves the task signal and every merge preserves the cross-span interactions the oracle depends on, then the root summary preserves the task signal too.
+
+\begin{theorem}[Inductive Preservation]\label{thm:one-pass}
+Fix a document partition $x = b_1 \concat \dots \concat b_k$ and any full binary merge tree $T$. If the run is realized-valid for the Preservation Stack, then the final summary preserves the oracle in expectation:
+\[
+\E\left[\metric\big(\fstar(Z^{(1)}), \fstar(x)\big)\right] = 0.
+\]
+Furthermore, if \ref{eq:leaf_idempotence} holds, this preservation is maintained through any number of additional re-summarization rounds $Z^{(R)}$.
+\end{theorem}
+
+\noindent\textit{Interpretation:} because $\metric \ge 0$, the displayed expectation is zero if and only if the distortion is zero almost surely: the realized root summary is exact at oracle level, modulo the summarizer's own randomness.
+
+\noindent\textit{Proof intuition:} The proof is triangle induction. \emph{Base case:} C1 directly asserts $\fstar(g(b)) = \fstar(b)$ at leaves. \emph{Inductive step:} if children preserve the oracle, Lemma~\ref{lem:merge-triangle} closes the parent triangle: context compatibility propagates child equivalence through concatenation, and Triangle / Merge Consistency makes the realized parent merge agree with the direct parent summary. Multi-round stability follows from C2: once at the root, re-summarizing an on-range string is inert.
+
+\noindent\textit{Proof:} See Appendix~\ref{app:proof-preservation}. The formalization follows the same route: the one-call realized laws and Assumption~\ref{ass:context} enter as hypotheses, and \texttt{one\_pass\_of\_local} performs the induction (Appendix~\ref{app:proof-artifacts}).
+
+Three invariance statements follow from the same induction and are
+stated in Appendix~\ref{app:theory-details}: any two realized-valid
+trees on the same leaves give the same expected oracle value
+(Corollary~\ref{cor:schedule}), two-level fold-then-merge plans are
+parenthesization-free (Corollary~\ref{cor:folds}), and any number of
+extra clean-up passes on the root is inert at oracle level
+(Theorem~\ref{thm:multi-round}). Practitioners can therefore pick
+whatever reduction schedule matches their infrastructure without
+changing the estimand.
+
+\subsection{Preference Learning Equivalence}
+
+The next step is the Optimization Stack. The structural theorems above only say that the summary preserves the oracle value. To conclude that training on summaries targets the same population objective as training on full documents, we need the downstream preference signal to depend on the document \emph{only through} that preserved oracle value.
+
+\begin{assumption}[Conditional factorization]\label{ass:CF}
+There exists a measurable $\bar{Q}: \Y \times \A \to \mathbb{R}$ such that for every action $a \in \A$,
+\[
+\E\!\left[\sstar(X, a) \mid \fstar(X)\right] = \bar{Q}(\fstar(X), a) \quad \text{almost surely.}
+\]
+\end{assumption}
+
+This says that once the oracle value $\fstar(X)$ is known, the raw phrasing of $X$ carries no additional information about the supervision signal. It is a good approximation for tasks with explicit content rubrics and a poor approximation for tasks driven by style, fluency, or presentation.
+
+We also need two measurability conditions on the training objects themselves. An \emph{oracle-measurable} policy is one whose behavior depends on $x$ only through $\fstar(x)$; if two inputs are oracle-equivalent, the policy treats them the same. An \emph{oracle-indexed} generator is constant on oracle-equivalence classes in the same sense. For DPO, a concrete example is a setup in which two summaries with the same RILE-relevant content induce the same pairwise preference problem; a non-example is a policy that changes behavior because one summary is in bullet points and the other in prose even when the oracle value is unchanged.
+
+\begin{theorem}[Preference-Objective Equivalence]\label{thm:pref-equiv}
+Assume the compared run is realized-valid for the Recompression Stack, so that $\E[\metric(\fstar(Z^{(R)}), \fstar(x))] = 0$ (Theorem~\ref{thm:multi-round}), and add Assumption~\ref{ass:CF} plus the oracle-measurability/oracle-indexing conditions above. Then for any preference learning objective $\mathcal{L}$ whose population integrand factors through the oracle:
+\[
+\arg\min_\pi \E_X[\mathcal{L}(\pi; X)] = \arg\min_\pi \E_Z[\mathcal{L}(\pi; Z^{(R)})].
+\]
+\end{theorem}
+
+\noindent In plain terms: if summaries preserve the oracle and the learning signal depends only on that oracle, optimization cannot tell the difference between summaries and full documents at population level. The argmin is taken over the oracle-measurable policy class of Table~\ref{tab:measurability}; policies that react to surface form outside that class are not covered. The formalization proves the per-document equality and closes the population form by the tower step over the document distribution (\texttt{population\_loss\_transport}, Appendix~\ref{app:proof-artifacts}).
+
+\noindent\textit{Proof intuition:} Under oracle-measurability, the loss factors through the oracle: $\mathcal{L}(x) = \tilde{\mathcal{L}}(\fstar(x))$. When $\fstar(Z) = \fstar(X)$ almost surely, replacing $X$ with $Z$ does not change the oracle value, hence the loss is identical pointwise in the policy parameter. The argmin sets coincide.
+
+\noindent\textit{Proof:} See Appendix~\ref{app:proof-equivalence}. The result instantiates to DPO (Bradley--Terry pairwise), GRPO-PL (Plackett--Luce $k$-wise ranking), and GRPO-RL (clipped surrogate plus KL penalty); Table~\ref{tab:measurability} in Appendix~\ref{app:theory-details} lists the exact conditions each method requires.
+
+In practice, preference annotators can be shown summaries $Z^{(R)}$ rather than full documents. For RILE scoring, annotators would score manifesto summaries; in the controlled setting of Appendix~\ref{sec:markov-walkthrough}, the tree's root prediction replaces the full-document oracle query. Under the Optimization Stack, minimizing the summary-based objective targets the same population argmin set as minimizing the full-document objective.
+
+\subsection{Quantitative Gap Bounds}
+
+The next step is the approximate version of the same statement. Exact preservation gives zero training gap; approximate preservation gives a gap controlled by the expected distortion. When the local conditions hold only approximately, define
+\[
+\Delta_R := \E[\metric(\fstar(Z^{(R)}), \fstar(x))].
+\]
+The realization bridge of Appendix~\ref{app:theory-details} controls
+$\Delta_R$ by the three local-law budgets,
+$\Delta_R \le \varepsilon_{\mathrm{leaf}} + \varepsilon_{\mathrm{merge}} + (R-1)\,\varepsilon_{\mathrm{idemp}}$,
+so the quantity the audit estimates is the same quantity the bound
+consumes. The question is then how much a nonzero distortion can move
+the population objective.
+
+\begin{theorem}[Unified Preference Gap]\label{thm:unified-gap}
+For any coupled pair $(X, Z^{(R)}(X))$, let $E_\pi(x)$ denote the method-specific expected inner loss. Assume:
+\begin{enumerate}[nosep]
+\item $|E_\pi(x)-E_\pi(z)| \le L\,\metric(\fstar(x),\fstar(z))$ for all $x,z$,
+\item $|E_\pi(x)| \le E_{\max} < \infty$ for all $x$ (absolute summability/integrability),
+\item $\Delta_R = \E[\metric(\fstar(X),\fstar(Z^{(R)}(X)))] < \infty$.
+\end{enumerate}
+Then
+\[
+\left| \E_X[E_\pi(X)] - \E_Z[E_\pi(Z)] \right| \le L \cdot \Delta_R.
+\]
+\end{theorem}
+
+\noindent Exact preservation gives $\Delta_R = 0$ and therefore zero gap; approximate preservation gives a gap no larger than a method-specific transport constant times the expected distortion. The representational part of the bound is the local-law budget above; the Lipschitz or random-utility condition is only the last multiplier from oracle units to objective units. Method-specific transport constants and worked numeric examples are in Appendix~\ref{app:theory-details}.
+
+\noindent\textit{Proof intuition:} The Lipschitz condition controls the pointwise loss difference by oracle distance, and boundedness/integrability justifies exchanging sums and expectations. Taking expectations gives $|\E[\mathcal{L}(X)] - \E[\mathcal{L}(Z)]| \le L \cdot \Delta_R$.
+
+\noindent\textit{Proof:} See Appendix~\ref{app:proof-equivalence}. The formalization proves the bound both for an independent product coupling and for an arbitrary joint coupling of documents with summaries (\texttt{unified\_preference\_gap\_bounded\_coupled}); on the canonical coupling that pairs each document with its own multi-round summary, the local laws force $\Delta_R = 0$ and the gap vanishes (\texttt{population\_gap\_zero\_of\_local}, Appendix~\ref{app:proof-artifacts}).
+
+\subsection{Necessity: C2 is Independent}
+
+Idempotence (C2) is a genuinely additional requirement: it does not follow from enforcing Sufficiency (C1) and Triangle / Merge Consistency (C3) on the fresh inputs seen during one-pass tree construction. Appendix~\ref{app:counterexample} gives a formal two-token counterexample (Example~\ref{ex:c2-independent}).
+
+\subsection{Main Result: Audited Preference-Gap Bound}
+
+The gap theorem is population-level: it assumes we know $\Delta_R$. The operational route estimates the actually realized distortion from sampled audit nodes. The next theorem is the certificate step of the ladder: once distortion is estimated from sampled nodes, and once calibration and sampling error are accounted for, the same method-transport constant yields a finite-sample bound on objective drift.
+
+\begin{theorem}[Audited Preference-Gap Bound]\label{thm:e2e}
+Fix a method with transport constant $C_{\mathrm{meth}}$ and a realized tree-population $\mathcal{U}$ of size $N$. Define ideal and accessible-oracle distortion means
+\[
+\mu_{\mathrm{dist}}^{\star}:=\frac{1}{N}\sum_{i\in\mathcal{U}} \metric\!\big(\fstar(s_i),\fstar(S(i))\big),\qquad
+\mu_{\mathrm{dist}}^{J}:=\frac{1}{N}\sum_{i\in\mathcal{U}} \metric\!\big(f(s_i),f(S(i))\big),
+\]
+where $f$ is the accessible judge/oracle used operationally.
+
+Assume a sampling design with logged propensities satisfying strict positivity: $0 < \pi_{\min} \le \pi_i \le 1$ for all units $i \in \mathcal{U}$. Let
+\[
+\hat{\mu}_{\mathrm{HT}}^{J}=\frac{1}{N}\sum_{i\in\mathcal{U}}\frac{Z_i}{\pi_i}\,\metric\!\big(f(s_i),f(S(i))\big)
+\]
+be the unclipped HT estimator and let $\hat{\mu}_{\mathrm{dist}}$ be the deployed distortion estimator.
+
+Suppose there exist nonnegative envelopes $B_{\mathrm{cal}}, B_{\mathrm{est}}, B_{\mathrm{clip}}$ and an event $\mathcal{E}$ such that on $\mathcal{E}$:
+\[
+C_{\mathrm{meth}}\!\left|\mu_{\mathrm{dist}}^{\star}-\mu_{\mathrm{dist}}^{J}\right|\le B_{\mathrm{cal}},\quad
+C_{\mathrm{meth}}\!\left|\mu_{\mathrm{dist}}^{J}-\hat{\mu}_{\mathrm{HT}}^{J}\right|\le B_{\mathrm{est}},\quad
+C_{\mathrm{meth}}\!\left|\hat{\mu}_{\mathrm{HT}}^{J}-\hat{\mu}_{\mathrm{dist}}\right|\le B_{\mathrm{clip}}.
+\]
+Then on $\mathcal{E}$,
+\[
+|G_{\mathrm{meth}}| \le C_{\mathrm{meth}} \cdot \hat{\mu}_{\mathrm{dist}} + B_{\mathrm{cal}} + B_{\mathrm{est}} + B_{\mathrm{clip}},
+\]
+where each envelope is in objective units after method transport. If $\Prob(\mathcal{E})\ge 1-\delta$, the bound holds with probability at least $1-\delta$.
+\end{theorem}
+
+\noindent In words: after method transport, the objective drift is bounded by the audited distortion estimate plus three explicit envelopes (judge calibration, sampling estimation, clipping), with confidence $1-\delta$. Section~\ref{sec:estimation} builds the estimator and its envelopes; a worked numeric certificate is in Appendix~\ref{app:theory-details}.
+
+Appendix~\ref{app:theory-details} completes the ladder: the merge
+triangle behind the induction, the realizability layer, the invariance
+corollaries and multi-round recompression, per-method transport
+conditions and constants, and the extra transport, calibration, and
+sampling ingredients the certificate consumes, each with its
+falsification route.

@@ -1,0 +1,158 @@
+\section{Neural Operators in One Page}\label{sec:fno-primer}
+
+The Markov interlude showed that a commutative merge cannot carry the
+boundary information the oracle depends on, so the learned summarizer
+$g$ has to be a position-aware operator. One practical route to such a
+$g$ (and, in the Markov experiments, a readout $f$ baked into its
+training head) is a Fourier neural operator (FNO) backed by the
+equation-(6) neural-operator architecture of
+\citet{Kovachki23NeuralOperator}. Neural operators give
+us a parametric class with explicit approximation guarantees on compact
+realized calls and a clean bridge to the local-law budgets
+(Proposition~\ref{prop:neural-operator-bridge}), which is why we use
+them in the controlled benchmark. Other routes work too:
+Section~\ref{sec:manifesto-llm} instantiates $f$ and $g$ as
+prompted LLM calls (a different parametric family, optimized without
+gradient-based operator training), and the same local-law audit and
+gap bound still apply because they are stated on $f$ and $g$, not on a
+particular parameterization. The contribution here is the
+approximation-theoretic interface: an operator family that can be
+applied across the realized leaf, merge, and re-summary calls of one
+tree, with transfer moduli converting its tolerance $\varepsilon$ into
+the budgets $(\varepsilon_{\mathrm{leaf}}, \varepsilon_{\mathrm{merge}},
+\varepsilon_{\mathrm{idemp}})$ of Section~\ref{sec:theorems}.
+
+The architecture surface we use is the equation-(6) neural-operator form
+from \citet{Kovachki23NeuralOperator}: a pointwise lift, a finite stack
+of local-plus-kernel layers, and a pointwise projection,
+\begin{equation}\label{eq:equation6-no}
+\mathcal{G}_{\theta}
+  =
+  Q \circ
+  \sigma_T(W_{T-1}+K_{T-1}+b_{T-1})
+  \circ \cdots \circ
+  \sigma_1(W_0+K_0+b_0)
+  \circ P .
+\end{equation}
+We use this form only as a function-space interface. The FNO is one
+implementation of the kernel layers, not an additional theorem premise.
+
+A notation map relating Kovachki's operator-learning vocabulary to the
+C-TreePO objects used here (leaf calls, merge calls, on-range
+re-summary calls, and the corresponding index domains) is in
+Appendix~\ref{app:operator-overlap} (Table~\ref{tab:ctreepo-neural-operator-notation}).
+One shift from Kovachki's setting: our ``domain'' is the index set of
+the realized call currently being processed, not a PDE mesh alone.
+
+The first theoretical ingredient is \emph{discretization invariance} in
+the sense of \citet[Section~2.3]{Kovachki23NeuralOperator}: one
+parameter-sharing operator family can be evaluated on multiple
+discretizations of the same underlying object, and refinement improves
+the approximation rather than changing the target. This is the
+reusable requirement on the operator family: a single
+learned operator can be shared across short leaves, longer merge inputs,
+and re-summarized root states without changing the theorem surface.
+
+The second ingredient is Section~9's approximation theorem. We separate
+its two roles. First, Kovachki Lemma~22 finite-dimensionalizes a
+continuous operator on a compact set: under the approximation-property
+side conditions, $\mathcal{G}^\dagger$ can be written up to tolerance as
+$G_{J'}\circ\phi\circ F_J$, where $F_J$ is a finite list of input
+functionals, $\phi$ is a continuous finite-dimensional map, and $G_{J'}$
+is a finite output expansion.\footnote{Paraphrased form of
+\citet[Lemma~22]{Kovachki23NeuralOperator}: if $X,Y$ are Banach spaces
+with the approximation property and $G:X\to Y$ is continuous, then for
+every compact $K\subset X$ and $\varepsilon>0$ there exist
+$J,J'\in\mathbb{N}$, continuous linear maps
+$F_J:X\to\mathbb{R}^J$ and $G_{J'}:\mathbb{R}^{J'}\to Y$, and
+$\phi\in C(\mathbb{R}^J;\mathbb{R}^{J'})$ such that
+$\sup_{x\in K}\|G(x)-(G_{J'}\circ\phi\circ F_J)(x)\|_Y\le\varepsilon$,
+with $F_J(x)=(w_1(x),\ldots,w_J(x))$ and
+$G_{J'}(v)=\sum_{j=1}^{J'}v_j\beta_j$. Lemma~21 supplies the compact
+union of finite-rank input images used to obtain the required uniform
+continuity before choosing the finite-dimensional approximation.}
+Appendix~\ref{app:kovachki-finite-dimensionalization} gives the exact proof
+route we use for this finite-dimensionalization step, including the
+uniform-continuity specialization that discharges Lemma~21's stability
+premise when the target operator is uniformly continuous or Lipschitz on
+$K$.
+
+Second, the architecture theorem approximates the finite-dimensional
+map $\phi$ by an equation-(6) neural operator. We use only the
+fragment relevant to C-TreePO: on a compact realized-call set and under
+the usual Banach-space side conditions, a target operator can be
+approximated to any desired tolerance.\footnote{Paraphrased
+form of \citet[Theorem~11]{Kovachki23NeuralOperator}: under their
+Assumptions~9--10, for a continuous target operator
+$\mathcal{G}^\dagger:\mathcal{A}\to\mathcal{U}$, every compact
+$K\subset\mathcal{A}$, and every tolerance $0<\varepsilon\le1$, there
+exists an equation-(6)-style neural operator $\mathcal{G}$ with
+$\sup_{a\in K}\|\mathcal{G}^\dagger(a)-\mathcal{G}(a)\|_{\mathcal{U}}
+\le \varepsilon$.} When the downstream text uses expected risk rather
+than uniform-on-compact control, we use the corresponding
+Bochner-risk interface.\footnote{Paraphrased form of
+\citet[Theorem~13]{Kovachki23NeuralOperator}: under the paper's
+Banach/Hilbert and activation assumptions, if
+$\mathcal{G}^\dagger$ is square-integrable with respect to a probability
+measure $\mu$, then for every $0<\varepsilon\le1$ there is a neural
+operator whose $L^2_{\mu}$ Bochner error is at most $\varepsilon$.}
+Together these two statements give the ``arbitrary desired error
+tolerance'' on compact realized-call sets that the next step consumes;
+the equation-(6) architecture universal approximation itself is taken
+as a named external input from Kovachki Theorem~11/13.
+
+For C-TreePO the relevant compact sets are not all possible strings.
+They are the compact realized leaf calls, compact realized merge calls,
+and compact on-range re-summary calls induced by the tree we actually
+run. That restriction matters. The approximation theorem is used only on
+the support the pipeline visits, which is why the formal bridge works
+with compact realized-call sets rather than an unrestricted all-strings
+universe.
+
+The third ingredient is the bridge from approximation error to local-law
+budgets. The approximate local laws are phrased as audited violation
+probabilities, so uniform operator approximation alone leaves them
+unverified. The bridge of
+Proposition~\ref{prop:neural-operator-bridge} therefore takes three
+inputs explicitly: an ideal deterministic summarizer that is already
+exact theorem-backed, a uniform approximation witness on the compact
+realized leaf/merge/on-range call sets, and transfer assumptions that
+convert approximation tolerance $\varepsilon$ into leaf, merge, and
+idempotence budgets. This is the precise sense in which the
+neural-operator layer is the \emph{realizability layer}, while C1--C3
+remain the \emph{audit and certification layer}.
+Because this route certifies deterministic operators, it enters the
+general C-TreePO semantics through the point-mass specialization of the
+stochastic summarizer interface. A randomized LLM summarizer is therefore
+not certified by the neural-operator approximation theorem itself; it is
+covered by the PMF-valued local-law theorem stack, or by an additional
+randomized-operator approximation result if one is supplied.
+
+The Markov experiments instantiate this interface with a 1D FNO: token
+embeddings are mixed globally in Fourier space, pooled at leaves, and
+then passed through a learned merge map. FNOs are useful here because
+global frequency mixing makes boundary interactions available anywhere in
+the window, which is exactly what the commutative-sketch baseline loses.
+The theorems below are agnostic to the Fourier structure: any learned
+operator family satisfying the same realized-call approximation
+interface and the same audited transfer conditions can replace it
+unchanged.
+
+The transformer statement we use is architecture-level. Following
+\citet[Proposition~6]{Kovachki23NeuralOperator}, a finite
+single-head, pre-normalized attention stack (assembled from
+attention, residual/local maps, and pointwise feed-forward maps)
+instantiates the equation-(6) architecture: single-head attention
+agrees with a discretized kernel layer on the block's active
+coordinates, transformer blocks are neural-operator layers, and a
+finite encoder stack is an equation-(6) neural operator. A
+transformer summarizer can therefore be placed in the same operator-learning
+pipeline as the FNO: external equation-(6) approximation bounds supply
+the upstream realized-call tolerance, Proposition~\ref{prop:neural-operator-bridge}
+translates that tolerance into local-law budgets, and the audit checks
+the budgets actually realized by the deployed system. The inclusion
+does not certify tokenizers, runtime serving details, or a particular
+checkpoint; those remain deployment details outside the theorem
+surface. The manifesto section therefore uses the transformer
+inclusion as an architecture-level membership statement, and still uses
+the audited realized-call bridge as the load-bearing correctness step.

@@ -1,0 +1,369 @@
+\subsection{Gold Labels at Every Node: Oracle-Grounded Training}\label{sec:manifesto-qsentence}\label{sec:rile-oracle}
+
+The pipeline above is prompt-only: the oracle enters only at the root,
+through expert-survey means, and the local laws appear only as audit
+probes and prompt-design pressure. The Manifesto Corpus supports a
+stronger design. Trained human coders first split each platform into
+quasi-sentences (clause-level units; roughly one policy statement per
+unit) and then assign each coded quasi-sentence one category from the
+Comparative Manifesto Project (CMP) scheme. In our release slice, those
+annotations cover $2{,}157$ platforms ($\sim\!2.27$M coded spans). The
+hand labels stop there: no coder labels a C-Tree merge. But because the
+codes aggregate additively over contiguous spans, the quasi-sentence
+labels induce a gold oracle value at \emph{every node of every tree}:
+each leaf, each internal merge span, and the root. The oracle-grounded
+local-law supervision path that works in the controlled settings
+therefore transfers to this corpus with no oracle redesign; the needed
+span targets are induced from existing annotations. This is the
+known-oracle version of the question the alternating prompt ladder
+raises empirically: when local targets are available, train against
+them directly; when only prompt programs are being updated, measure
+whether the co-adapted pair still behaves like a local operator. Below
+are the two label systems, the harness that runs the experiments, and
+the results, including the leaf-size ladder
+(Appendix~\ref{app:qsentence-leaf-ladder}) and gold-seeded
+summarization (Appendix~\ref{app:gold-seeding}).
+
+\subsubsection{Two Label Systems: Documents and Quasi-Sentences}\label{sec:qsentence-labels}
+
+The Manifesto measurement problem comes with two distinct layers of
+ground truth, and the distinction does real work in what follows.
+
+\paragraph{Document-level labels.} Each platform carries document-level
+targets. The first is the pair used in the document-label experiments
+above: the \citet{BenoitEtAl2025} expert-survey means on six seven-point
+policy scales, available for the $235$-platform benchmark. The second is
+the Manifesto Project's own published MPDS row
+\citep{ManifestoProject2025a}: one electoral program per row, with total
+coded quasi-sentence counts and per-category shares. For every annotated
+platform used below, the Corpus quasi-sentence rows can be linked back
+to this document row. The document-level MPDS targets include the RILE
+left--right index on $[-100, 100]$ and per-domain salience shares. RILE
+is a deterministic function of the CMP category counts: with $R$ the
+count of quasi-sentences bearing one of $13$ designated right codes, $L$
+the count bearing one of $13$ left codes \citep{LaverBudge1992}, and
+$N$ the total count of coded non-header quasi-sentences,
+\begin{equation}\label{eq:rile}
+\mathrm{RILE} \;=\; 100\cdot\frac{R - L}{N},
+\qquad
+\mathrm{RILE}_{\mathrm{norm}} \;=\; \frac{\mathrm{RILE} + 100}{200}\in[0,1].
+\end{equation}
+In words: RILE is the signed share of coded statements that lean right,
+so it inherits the additivity of the counts it is built from. The seven
+domain shares $\mathrm{dom}_1,\dots,\mathrm{dom}_7$ are the analogous
+count ratios for the seven CMP handbook policy domains (external
+relations, freedom and democracy, political system, economy, welfare
+and quality of life, fabric of society, social groups).
+
+\paragraph{Quasi-sentence gold labels.} The Manifesto Corpus release
+\citep{ManifestoCorpus2025} provides the underlying
+per-quasi-sentence annotations: each coded quasi-sentence carries one
+CMP category code from a $56$-category scheme, assigned by a trained
+human coder under the project's handbook. These are the hand-coded gold
+labels. For any contiguous span $x$ of a platform, aggregating the
+codes of the quasi-sentences inside $x$ and applying
+Equation~\eqref{eq:rile} yields a gold oracle value $\fstar(x)$: an
+$8$-vector
+$(\mathrm{RILE}_{\mathrm{norm}}, \mathrm{dom}_1, \dots, \mathrm{dom}_7)$
+we call the \emph{compact state}. Because the aggregation is a count
+sum, the oracle is exactly mergeable in the sense of
+Section~\ref{sec:mergeable-sketches}: the compact state of a parent
+span is a known function of its children's counts. Thus the tree does
+not need human labels on merges. The two children and the parent inherit
+targets from the same quasi-sentence table, making the C3 triangle
+observable on real political text. Every node of every C-Tree over a
+coded platform therefore has a gold target, which is the structural
+property the controlled settings relied on and that generic
+long-document corpora lack.
+
+\paragraph{Rollup validity.} The first thing to check is that the
+bottom of this label system reproduces the top. Rolling the
+quasi-sentence codes up to the document level and correlating with the
+published MPDS document scores across the $2{,}157$ coded platforms
+gives Pearson $r = 0.9975$ for RILE and $r \in [0.924, 0.999]$ across
+the seven domain shares.\footnote{The residual is bookkeeping, not
+noise: the gold rollup uses the non-header quasi-sentence count as its
+denominator and folds handbook-v5 four-digit subcodes into their
+three-digit parents, while the published per-category percentages use
+MPDS's own denominator conventions. Correlations computed by
+\texttt{scripts/check\_qsentence\_doc\_label\_correlation.py}; full
+per-category table in the artifact
+\texttt{outputs/qsentence\_doc\_label\_correlation/}.} The
+document-level published label is, to numerical precision, the additive
+rollup of the quasi-sentence labels. Local-to-global reconstruction is
+therefore a well-posed target on this corpus: a method that recovers
+the right local states and merges them lawfully recovers the published
+document score.
+
+\paragraph{What the codes cannot reach.} The same check run against
+the \citet{BenoitEtAl2025} expert-survey means gives a much lower
+ceiling: ordinary least squares from the eight compact-state features
+to the expert mean attains five-fold cross-validated $R^2$ between
+$0.03$ (decentralization) and $0.47$ (immigration). The expert-survey
+construct is a holistic judgment that the additive category counts do
+not determine. This splits the measurement problem into two targets
+with different supervision economics. The \emph{internal} target (the
+teacher rollup of gold quasi-sentence codes) is fully decomposable and
+supervisable at every node. The \emph{external} target (expert-survey
+means) requires the model to read text, and quasi-sentence codes alone
+cannot reach it. The experiments below report both, following the
+principle that a low error against one target with no correlation
+against the other is a measurement failure, not a success.
+
+\subsubsection{Bundles, Splits, and the \texttt{treepo} Harness}\label{sec:qsentence-harness}
+
+The experiments run on frozen \emph{labeled-tree bundles}. A bundle
+fixes a leaf granularity $\ell \in \{1, 2, 4, 8, 16\}$ quasi-sentences
+per leaf, partitions each platform into contiguous leaves of $\ell$
+quasi-sentences, builds the binary merge tree, and stamps every node
+with its gold compact state via the count aggregation above. No LLM is
+involved in labeling, and no merge annotation is collected by hand; the
+parent target is the count rollup of the quasi-sentences under that
+parent. The corpus is $218$ Western European platforms
+under a fixed split ($140$ train, $30$ validation, $48$ test) shared
+across all leaf sizes, so a leaf-size comparison never mixes documents.
+Granularity changes the supervision surface by an order of magnitude:
+the $\ell = 1$ bundle has about $437{,}000$ labeled nodes, the
+$\ell = 16$ bundle about $28{,}000$.
+
+The implementation is the \texttt{treepo} package. Its public entry
+point is \texttt{treepo.fit}, which takes a declarative spec (family,
+data, schedule) and runs the alternating $f/g$ ladder of
+Section~\ref{sec:rile-fg-ladder} for any \emph{family}: an object
+supplying its own parameterization of the summarizer $g$ and readout
+$f$ behind a fixed four-method contract, while the surrounding loop
+(alternation schedule, node sampling, metrics, audit logging) stays
+family-agnostic. The contract is the operator interface of
+Section~\ref{sec:framework} made executable;
+Appendix~\ref{app:treepo-software} documents the package, the contract,
+a minimal three-call vignette, and the CLI that ran the sweeps below.
+Two families instantiate the contract here, chosen
+to sit at opposite ends of the parameterization spectrum:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{LLM prompt-program family} (\texttt{dspy}): $f$ and
+          $g$ are prompt programs over a fixed open-weight checkpoint,
+          optimized by prompt search against node-level rewards. The
+          state passed between nodes is text.
+    \item \textbf{Neural-operator family} (\texttt{fno}): leaves are
+          embedded once by a small embedding model
+          (\textsc{embeddinggemma-300m}), and $f$ and $g$ are Fourier
+          Neural Operators trained by gradient descent on node-level
+          losses, exactly as in Appendix~\ref{sec:fno-primer}. The state
+          is a learned vector.
+\end{itemize}
+Both families consume the same bundles and the same splits, and every
+run leaves behind the same artifact schema (per-stage grid summaries,
+per-node prediction records, iteration histories), so their numbers
+are directly comparable: the substrate comparisons in
+Appendix~\ref{app:qsentence-leaf-ladder} are a table join rather than
+a reconciliation exercise.
+
+Metrics follow the two-target split of
+Section~\ref{sec:qsentence-labels}. \emph{Internal} Pearson and MAE
+compare root predictions to the teacher rollup (the gold compact state
+of the root); \emph{external} Pearson compares them to the published
+MPDS document score. All correlations below are per-dimension:
+pooling the eight dimensions into one correlation inflates the number
+by between-dimension mean separation (the pooled statistic rewards a
+model for predicting that economy is discussed more than
+decentralization, which is not measurement), so a per-dimension
+report is the honest one.
+
+\subsection{Trained Substrates: The Learned Merge Composes Where the Signal Is Dense}\label{sec:qsentence-results}
+
+\paragraph{Leaf-size ladder.} Table~\ref{tab:qsentence-fno-ladder}
+(abridged; full grid in Appendix~\ref{app:qsentence-leaf-ladder})
+reports the neural-operator family on RILE across leaf sizes, test
+split, $n = 48$. Two stages matter: the $f$-stage (readout trained on
+leaf states, merge untrained) and the $g$-stage (learned merge trained
+against the current $f$).
+
+\begin{table}[htbp]
+    \centering
+    \begin{tabular}{rccc}
+    \toprule
+    leaf ($\ell$ qsent.) & $f$-stage ext.\ $r$ & $g$-stage ext.\ $r$ & $g$-stage MAE \\
+    \midrule
+    1  & $0.450$ & $0.479$ & $0.069$ \\
+    2  & $0.553$ & $0.537$ & $0.085$ \\
+    4  & $0.537$ & $0.538$ & $0.066$ \\
+    8  & $0.664$ & $\mathbf{0.718}$ & $0.058$ \\
+    16 & $0.645$ & $0.672$ & $0.070$ \\
+    \bottomrule
+    \end{tabular}
+    \caption{Neural-operator (FNO) family on RILE across quasi-sentence
+    leaf sizes. External Pearson $r$ against the published MPDS RILE
+    (normalized scale), test split ($n=48$), $g$-stage $= f^2g^2$.
+    Appendix~\ref{app:qsentence-leaf-ladder} gives the full grid with
+    internal metrics and the LLM-family counterpart.}
+    \label{tab:qsentence-fno-ladder}
+\end{table}
+
+Two features of the table carry the message. First, the learned merge
+helps at the granularities where it has signal to compose: at
+$\ell = 8$ the $g$-stage improves on the $f$-stage from $0.664$ to
+$0.718$, and the peak of the ladder sits there rather than at the
+coarsest leaf. Second, the profile over leaf size is a tension the
+fixed-prompt pipeline of Section~\ref{sec:benoit-headline} did not have:
+smaller leaves mean more supervised nodes but longer merge chains for
+a \emph{trained} operator to keep lawful, and at a fixed training
+budget the product peaks at an intermediate granularity. The
+prompt-only pipeline's chunk-invariance ($\pm 0.027$ macro over a
+$16\times$ sweep) is the behavior of a fixed, already-competent
+summarizer; the trained substrate's leaf-size profile is the cost of
+learning that summarizer from local supervision alone.
+
+\paragraph{Per-dimension substrate comparison.} Running both families
+on the same $\ell = 8$ bundle and scoring each of the eight compact
+dimensions separately gives Table~\ref{tab:qsentence-perdim} (internal
+Pearson, $g$-stage). The comparison needs one confound named before
+the numbers can be read. The LLM family's $f$-stage sees the gold leaf
+label in its input trace, and its readout learns to echo it
+(internal $r = 1.000$ exactly at the $f$-stage); the FNO family
+predicts from text embeddings alone. LLM cells are therefore
+upper bounds inflated by label echo, and FNO cells are honest
+predictions.
+
+\begin{table}[htbp]
+    \centering
+    \begin{tabular}{lccccc}
+    \toprule
+    dimension & teacher mean & FNO $f$ & FNO $g$ & dgemma $g$ & Gemma-4 $g$ \\
+    \midrule
+    RILE       & $0.47$  & $0.67$ & $\mathbf{0.72}$ & $0.12$  & $0.25$ \\
+    domain\_5  & $0.30$  & $0.67$ & $\mathbf{0.72}$ & $-0.04$ & $0.37$ \\
+    domain\_4  & $0.20$  & $0.64$ & $\mathbf{0.62}$ & $0.41$  & $0.04$ \\
+    domain\_6  & $0.15$  & $0.63$ & $\mathbf{0.63}$ & $-0.27$ & $-0.11$ \\
+    \midrule
+    domain\_3  & $0.125$ & $0.02$ & $0.02$  & $0.17$  & $0.32$ \\
+    domain\_7  & $0.09$  & $-0.13$ & $-0.13$ & $-0.13$ & $0.18$ \\
+    domain\_1  & $0.07$  & $0.00$ & $0.00$  & $-0.13$ & $-0.31$ \\
+    domain\_2  & $0.07$  & $0.00$ & $0.00$  & $-0.06$ & $0.13$ \\
+    \bottomrule
+    \end{tabular}
+    \caption{Per-dimension internal Pearson at the $g$-stage, $\ell=8$
+    bundle, test split. ``Teacher mean'' is the mean gold share of the
+    dimension (a signal-density proxy). The horizontal rule separates
+    dense dimensions (mean $\gtrsim 0.13$) from sparse ones. LLM
+    columns (dgemma = DiffusionGemma runtime, Gemma-4 = Gemma-4-31B)
+    are inflated by gold-label echo at the leaf stage; see text.}
+    \label{tab:qsentence-perdim}
+\end{table}
+
+The table is a signal-density story rather than a substrate horse race.
+On every dense dimension (gold share $\gtrsim 0.13$: RILE,
+domains~4--6) the neural-operator family both learns the leaf readout
+($f$ between $0.63$ and $0.67$) and composes it through the learned
+merge ($g$ between $0.62$ and $0.72$), beating both LLM merges. On the
+sparse dimensions ($87$--$93\%$ of leaves carry a zero share) every
+substrate fails: the FNO readout collapses to predicting zero, and the
+apparent LLM wins there are the label echo just described, not reading.
+The LLM merge's failure on dense dimensions has a specific, fixable
+cause: the prompt search optimizes a mean-over-dimensions accuracy
+reward, and with most dimensions sparse, predicting each dimension's
+corpus mean already scores about $0.90$ on that reward with roughly
+zero within-dimension correlation. The optimizer finds that degenerate
+optimum. This is a concrete instance of the projection story of
+Section~\ref{sec:theorems}: an objective that does not price the local
+laws lets the learned operator drift to a subspace where the laws fail
+while the headline reward looks healthy. It is also the same failure
+the joint prompt ladder hit on decentralization
+(Section~\ref{sec:rile-fg-ladder}), reproduced on a trained substrate
+with gold supervision.
+
+\paragraph{Expert-dimension reconstruction.} The internal target
+validates the mechanism; the external Benoit expert means test whether
+it survives contact with a construct the codes do not determine
+(Section~\ref{sec:qsentence-labels}). Training the neural-operator
+family at $\ell = 16$ with LLM-generated span supervision at internal
+nodes, then scoring roots against the expert means (three seeds per
+dimension, test split), gives $r = 0.715 \pm 0.024$ on social,
+$0.661 \pm 0.045$ on economic, and $0.642 \pm 0.069$ on environment;
+immigration reaches $0.438 \pm 0.094$, and decentralization ($0.244$)
+and EU ($0.232$) sit at the floor the CMP-code ceiling predicts for
+them. The full-document frontier-LLM read of
+Section~\ref{sec:benoit-headline} sits near $0.86$ on the same task, so
+the trained small-substrate stack recovers most of the dense-dimension
+signal at a tiny fraction of the per-call cost, and its failure
+ordering matches the construct-ceiling ordering rather than being
+random. Appendix~\ref{app:qsentence-leaf-ladder} reports the grid and
+the winning hyperparameters.
+
+\subsection{Seeding the Summarizer with Gold Quasi-Sentence States}\label{sec:gold-seeding}
+
+The gold labels support one more design worth isolating: using sampled
+gold quasi-sentence states to \emph{seed} the summarizer. The question
+is whether a learned $g$ can produce a full-document compact state from
+a small sample of leaf-window states, so that a fixed learned $f$
+matches the document gold: a budgeted version of the local-to-global
+reconstruction that Section~\ref{sec:qsentence-labels} showed is
+well-posed.
+
+The design has a failure mode we hit and document because it
+generalizes. The first implementation fed gold CMP means into the
+summarizer's prompt as the sampled state. The resulting $g$ scored
+well while learning nothing: it was regressing gold onto gold, and its
+outputs degraded when the gold crutch was removed. The corrected
+protocol feeds the learned $f$'s own per-leaf predictions
+(\texttt{--sample-state-source f\_states}) as the sampled state, so
+the pipeline is honest end-to-end: no gold enters at inference time.
+Under that protocol, at $\ell = 16$ with $16$ sampled leaf windows per
+document, the seeded $g$ reconstructs the full teacher rollup at
+all-dimension Pearson $0.953$ ($0.955$ on RILE), against a
+sample-only baseline of $0.966$ ($0.949$ on RILE), and agrees with
+that baseline at $0.984$: composing learned states recovers
+essentially everything the raw sample carries, and loses little to
+the additional learned-merge step. Appendix~\ref{app:gold-seeding}
+details the protocol, the leak diagnosis, and the per-dimension grid,
+and flags the two follow-ups still in flight (the scheduled-sampling
+exposure-bias arm and the cross-runtime transfer of gold-trained
+prompt programs).
+
+\subsection{What the Corpus Teaches the Framework}\label{sec:manifesto-lessons}
+
+The two supervision levels answer different halves of one question,
+and their answers compose into three lessons.
+
+First, the local laws must be priced in the objective, or optimizers
+will spend them. The two clearest failures in the corpus are the same
+failure at different supervision levels. In the joint prompt ladder,
+a mean-over-dimensions reward let the scorer pull the shared
+summarizer away from the one dimension whose signal cost the average
+(Section~\ref{sec:rile-fg-ladder}); in the trained-substrate
+comparison, a mean-over-dimensions reward let the prompt-program merge
+collapse to predicting corpus means while its headline reward looked
+healthy (Section~\ref{sec:qsentence-results}). Both are the projection
+story of Section~\ref{sec:theorems} running in reverse: an objective
+whose zero set is larger than the local-law subspace lets the learned
+operator drift off it. The remedies are correspondingly structural,
+either reweight the objective per dimension (the two-track recipe) or
+put the law terms into the reward, and the audit is what detects the
+drift when neither has been done.
+
+Second, signal density governs what a trained merge can learn. The
+neural-operator family composes lawfully on every dimension whose gold
+share crosses roughly $0.13$ and fails on every dimension below it,
+with the failure taking the honest form of a zero predictor rather
+than an inflated echo. Where the prompt-only pipeline's
+chunk-invariance shows a fixed, competent summarizer moving freely
+across leaf sizes, the trained substrate pays for its supervision:
+its accuracy peaks at an intermediate granularity where labeled nodes
+are plentiful and merge chains are still short.
+
+Third, construct ceilings bound any decomposition before any model is
+trained. The CMP codes determine the published document scores to
+numerical precision (rollup $r = 0.9975$) and determine the
+expert-survey constructs only partially (CV $R^2$ from $0.03$ to
+$0.47$), and the trained substrates inherit exactly that ordering:
+strong reconstruction of the internal target, external accuracy that
+falls off dimension by dimension as the ceiling drops. A researcher
+adopting this design gets the diagnosis before the compute: the label
+system itself predicts which constructs local supervision can reach.
+
+The prompt-only results show a tree of local calls preserving an
+expert measurement target at parity with a frontier ensemble; the
+oracle-grounded results show the same machinery training honestly
+where the label system supports it and failing legibly where it does
+not. Corpora without a gold node-level layer get the audit of
+Section~\ref{sec:estimation} instead, which is the same design run
+with sampled oracle calls in place of exhaustive ones.

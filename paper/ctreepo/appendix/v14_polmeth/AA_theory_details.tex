@@ -1,0 +1,269 @@
+\section{The Full Result Ladder}\label{app:theory-details}
+
+Section~\ref{sec:theorems} states the four headline results: inductive
+preservation, preference-objective equivalence, the unified gap bound,
+and the audited certificate. The remaining rungs of the ladder live
+here: the merge triangle that drives every preservation proof, the
+neural-operator realizability layer and its law-constrained subspaces,
+the schedule- and recompression-invariance corollaries, the per-method
+transport constants with worked numeric examples, and the extra
+transport, calibration, and sampling ingredients the certificate uses.
+
+\subsection{The Merge Triangle}\label{app:merge-triangle}
+
+The engine behind every preservation result is Lemma~\ref{lem:merge-triangle} in Section~\ref{sec:framework}: direct summarization of a parent span and split-then-merge summarization of its children agree at the oracle once the child summaries are already correct. The proof route has three steps. Child equivalence plus Assumption~\ref{ass:context} gives $z_u\concat z_v \sim u\concat v$; the realized merge call gives $g(z_u\concat z_v)\sim z_u\concat z_v$; transitivity puts the realized parent summary in the same oracle-equivalence class as $g(u\concat v)$ and the raw span.
+
+Its force is compositional. At an internal node whose children are already oracle-correct, the triangle is the only fact the merge step needs, so iterating it up the tree replaces the one infeasible call $g(x)$ on the whole document with the feasible hierarchy of bounded calls. Iterated, it gives a tree form: under the same realized laws at every node, the hierarchical reduction of any subtree is oracle-equivalent to a single summary call on that subtree's raw span. Theorem~\ref{thm:one-pass} is the root instance of this iteration, and the audit of Section~\ref{sec:estimation} is a sampled test of the triangle's premises, one merge at a time. In the formalization the triangle is \texttt{MergeTriangle}, its derivation from the realized laws is \texttt{mergeTriangle\_of\_local}, the tree form is \texttt{tree\_triangle}, and the induction is \texttt{one\_pass\_of\_local} (Appendix~\ref{app:proof-artifacts}).
+
+\subsection{Neural-Operator Realizability and Law-Constrained Subspaces}\label{app:realizability-layer}
+
+The neural-operator layer of Appendix~\ref{sec:fno-primer} provides a
+route for realizing the local laws approximately from an ideal target
+operator; it does not replace them. The core theorem stack is stochastic
+over the $\mathrm{PMF}$-valued summarizers of Definition~\ref{def:summarizer}.
+The neural-operator bridge below is the deterministic subcase: it
+certifies a deterministic realizer and embeds it as a point-mass
+summarizer. Randomized summarizers are covered directly by the broader
+local-law theorem stack unless one supplies a separate randomized
+operator-approximation theorem.
+
+\begin{proposition}[Neural-operator realization bridge]\label{prop:neural-operator-bridge}
+Fix a tree $T$ and an ideal deterministic summarizer $s^\dagger$.
+Suppose $s^\dagger$ is exact theorem-backed on $T$. Suppose further that
+a realized operator $s$ approximates $s^\dagger$ uniformly on compact
+realized leaf, merge, and on-range call sets, and that explicit
+transfer moduli convert the approximation tolerance $\varepsilon$ into
+leaf, merge, and idempotence budgets
+$(\varepsilon_{\mathrm{leaf}}, \varepsilon_{\mathrm{merge}},
+\varepsilon_{\mathrm{idemp}})$. Then $s$ is approximately
+theorem-backed on $T$ with those budgets.
+\end{proposition}
+
+Thus the proposition should be read as a theorem-backed route for
+deterministic neural operators, not as a restriction of C-TreePO to
+deterministic summarization. The stochastic exact and approximate
+routes are the same local-law implications stated on the underlying
+$\mathrm{PMF}$-valued summarizer.
+
+The same framework names the constrained function spaces that the
+audit is checking. Let $\mathcal{N}$ be a chosen neural-operator class,
+let $\mathrm{MS}$ be the mergeable-sketch summary class, and let
+\[
+\mathrm{ExactLL}_{\mathcal{N}}(T,\fstar)
+  := \{\,g\in\mathcal{N}: g \text{ is exact theorem-backed on }(T,\fstar)\,\}.
+\]
+There is also an approximate version
+$\mathrm{ApproxLL}_{\mathcal{N}}(T,\fstar;\varepsilon_{\mathrm{leaf}},
+\varepsilon_{\mathrm{merge}},\varepsilon_{\mathrm{idemp}})$ whose elements carry
+the three budgeted local laws.
+
+\begin{proposition}[Law-constrained neural-operator subspaces]\label{prop:law-constrained-no}
+Mergeable sketches with exact sketch-local witnesses induce exact
+local-law membership. Consequently, the certified overlap
+$\mathcal{N}\cap\mathrm{MS}$ lies inside
+$\mathrm{ExactLL}_{\mathcal{N}}(T,\fstar)$, and finite transformer
+encoder stacks of the architecture in Equation~\eqref{eq:equation6-no}
+belong to the neural-operator side of the same diagram.
+\end{proposition}
+
+In words, a certified mergeable sketch satisfies the exact local laws
+automatically, so any such sketch expressible as a neural operator
+already lies in the exact local-law subspace; hand-designed sketches and
+learned operators sit in one diagram.
+
+``Projection'' in Equation~\eqref{eq:oracle-projection-objective} is
+literal: the zero-penalty set
+of the local-law term is intended to be exactly the set of operators that
+satisfy C1/C2/C3 on the realized tree. Saying this as a projection statement
+and saying it as an approximation-error statement are equivalent: the local
+law weights project toward the theorem-eligible subspace if and only if
+zero structured approximation error is the same as local-law validity.
+The $\lambda$-weighted local-law terms are therefore not
+arbitrary regularization knobs. They specify which approximation errors
+the theorem can tolerate, and the resulting budgets are the quantities
+passed to $\Delta_R$ and then to the preference-gap bounds. Appendix~\ref{app:oracle-plus-projection}
+gives the per-law-weighted generalization of the objective and records
+that the uniform-share form in the main text is its specialization;
+Appendix~\ref{app:projection-interpretation}
+spells out the iff and the exact subspace equality.
+
+\subsection{Schedule and Recompression Invariance}\label{app:schedule-invariance}
+
+Theorem~\ref{thm:one-pass} preserves the oracle along one realized
+tree. The next statements say the choice of tree, and any number of
+extra clean-up passes, are free at oracle level.
+
+\begin{corollary}[Schedule invariance]\label{cor:schedule}
+Fix a partition $(b_1, \ldots, b_k)$. For any two full binary trees on these leaves that each satisfy C1 and C3 on their own realized edges (under Assumption~\ref{ass:context}), the resulting expected oracle values coincide. Balanced reductions and daisy chains are therefore interchangeable only within this assumption class.
+\end{corollary}
+
+\begin{corollary}[Fold-of-folds invariance]\label{cor:folds}
+Consider any two-level plan that first reduces contiguous ``folds'' and then reduces the fold summaries. Under Assumption~\ref{ass:context}, if C1 and C3 hold on every realized edge and C2 holds on the intermediate summaries, the composite schedule preserves $\fstar$ in expectation regardless of the within-fold or over-fold parenthesizations.
+\end{corollary}
+
+Together these results ensure that practitioners can pick whatever reduction schedule matches their infrastructure without changing the expected oracle, provided the compared schedules satisfy the required local conditions on their realized hierarchies. Adding C2 to this picture says that once a valid summary exists, further clean-up passes do not change the task signal.
+
+\begin{theorem}[Multi-round preservation]\label{thm:multi-round}
+Assume the run is realized-valid for the Recompression Stack. Then $\E[\metric(\fstar(Z^{(R)}(x)), \fstar(x))] = 0$ for every $R \geq 1$ with $Z^{(R+1)}(x) := g(Z^{(R)}(x))$.
+\end{theorem}
+
+\noindent\textit{Proof:} See Appendix~\ref{app:proof-preservation}.
+
+\noindent In words: re-summarizing the root any number of times leaves the expected oracle distortion at zero; recompression is free at oracle level.
+
+\subsection{Method Transport: Conditions, Constants, and Budgets}\label{app:method-transport}
+
+Theorem~\ref{thm:pref-equiv} instantiates to three modern preference
+methods: DPO (Bradley--Terry pairwise), GRPO-PL (Plackett--Luce
+$k$-wise ranking, generalizing DPO from pairs to groups), and GRPO-RL
+(DeepSeek-R1 style, combining a clipped surrogate with a KL penalty).
+Table~\ref{tab:measurability} lists the exact measurability/indexing
+conditions each method requires.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{llll}
+\toprule
+Method & Policy condition & Generator condition & Reward/ranker condition \\
+\midrule
+DPO & $\pi_\theta, \pi_{\mathrm{ref}}$ oracle-meas.\ & Pair gen.\ oracle-indexed & --- \\
+GRPO-PL & $\pi_\theta, \pi_{\mathrm{ref}}$ oracle-meas.\ & Group gen.\ oracle-indexed & Ranker oracle-indexed \\
+GRPO-RL & All $\pi$ oracle-meas.\ & Group gen.\ oracle-indexed & Reward oracle-meas.\ \\
+\bottomrule
+\end{tabular}
+\caption{Measurability/indexing conditions for Theorem~\ref{thm:pref-equiv} by method. ``Oracle-meas.''\ means the function depends on $x$ only through $\fstar(x)$; ``oracle-indexed'' means the distribution is constant on oracle-equivalence classes.}
+\label{tab:measurability}
+\end{table}
+
+The distortion $\Delta_R$ that enters Theorem~\ref{thm:unified-gap}
+comes from Proposition~\ref{prop:neural-operator-bridge},
+not from a direct identification with a Banach-space approximation
+norm. A Section~9-style
+neural-operator approximation theorem supplies a realized operator whose
+error on the compact realized leaf/merge/on-range call sets is at most a
+chosen tolerance $\varepsilon$, and the realization bridge of
+Proposition~\ref{prop:neural-operator-bridge} converts that
+tolerance (through explicit transfer moduli) into an approximate
+local-law bundle with budgets
+$(\varepsilon_{\mathrm{leaf}}, \varepsilon_{\mathrm{merge}},
+\varepsilon_{\mathrm{idemp}})$. Once those budgets are available, the
+existing approximate-local-law route gives the distortion control:
+\[
+\Delta_R \;\le\;
+\varepsilon_{\mathrm{leaf}}
+\;+\;
+\varepsilon_{\mathrm{merge}}
+\;+\;
+(R-1)\,\varepsilon_{\mathrm{idemp}},
+\]
+where $R$ is the number of re-summarization rounds. If the transfer
+moduli are written
+$\varepsilon_{\mathrm{leaf}}=\omega_{\mathrm{leaf}}(\varepsilon)$,
+$\varepsilon_{\mathrm{merge}}=\omega_{\mathrm{merge}}(\varepsilon)$, and
+$\varepsilon_{\mathrm{idemp}}=\omega_{\mathrm{idemp}}(\varepsilon)$,
+then, writing $C_{\mathrm{meth}}$ for the method transport constant $L$
+of Theorem~\ref{thm:unified-gap}, the neural-operator-first bound
+feeding the downstream objective is
+\[
+|G_{\mathrm{meth}}|
+\;\le\;
+C_{\mathrm{meth}}\Big(
+\omega_{\mathrm{leaf}}(\varepsilon)
++\omega_{\mathrm{merge}}(\varepsilon)
++(R-1)\omega_{\mathrm{idemp}}(\varepsilon)
+\Big),
+\]
+before calibration and sampling envelopes are added. So the
+neural-operator result does not bypass the local laws; it feeds them,
+and the observational audit checks the same budgets on the realized run.
+
+The method-specific transport constant takes a different form in each case. For DPO, a sufficient condition is $L = 2|\beta| L_{\mathrm{pol}}$, where $L_{\mathrm{pol}}$ is the policy Lipschitz constant. For GRPO-PL, one sufficient route gives $L = L_{\mathrm{grpo}}$ from the Plackett--Luce ranking structure. For GRPO-RL, $L = L_{\mathrm{grpo-rl}}$ combines the clipping and KL penalty constants. These constants do not assert that the learned summarizer is good; that role is played by the neural-operator realization bridge and the sampled audit.
+
+To make $L \cdot \Delta_R$ concrete, consider an illustrative DPO
+setting with $\beta = 0.1$ and policy Lipschitz constant
+$L_{\mathrm{pol}} = 2$, giving $L = 0.4$. If the realized bridge
+budgets imply $\Delta_R \le 0.03$, the gap bound is $0.012$. In an
+unsupported regime ($m < k$), $\Delta_R \approx 0.44$ yields a gap of
+$0.176$---large enough to materially distort optimization. The point of
+Appendix~\ref{sec:fno-primer}'s ``desired tolerance'' discussion is that,
+once a practitioner specifies an upstream operator tolerance
+$\varepsilon$, the transfer moduli determine the downstream
+$\Delta_R$ target; the audit then checks whether the deployed system
+actually attained it.
+
+Continuing the same DPO example through the audited bound
+(Theorem~\ref{thm:e2e}): suppose we audit $n = 200$ nodes with uniform propensities $\pi_i = 200/N$, observe $\hat{\mu}_{\mathrm{dist}} = 0.025$, use an LLM judge with calibration envelope $B_{\mathrm{cal}} = 0.005$, and obtain a post-transport estimation envelope $B_{\mathrm{est}} = 0.008$ at $\delta = 0.05$. With no clipping needed ($B_{\mathrm{clip}} = 0$), the bound reads $|G_{\mathrm{DPO}}| \le 0.4 \times 0.025 + 0.005 + 0.008 = 0.023$.
+
+\subsection{Assumption Check for Gap Bounds}\label{sec:verification}
+
+Table~\ref{tab:assumption-bundles} already separates the structural bundles from the downstream bundles. Quantitative transport and finite-sample certification use extra ingredients beyond both, recorded here.
+
+The Preservation Stack and Recompression Stack are structural: they ask whether local validity composes to the root and whether extra clean-up passes are safe. The gap theorems add a different kind of ingredient: they need a way to turn oracle distortion into objective drift, and they need empirical envelopes that connect a sampled audit to the unobserved target quantity.
+
+The quantitative preference-gap bounds (Theorem~\ref{thm:unified-gap} and Theorem~\ref{thm:e2e}) therefore require three extra classes of assumptions:
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Realization-to-local-law assumptions.} In the neural-operator route, external equation-(6) approximation bounds provide an upstream tolerance on compact realized calls, and Proposition~\ref{prop:neural-operator-bridge} requires explicit transfer moduli converting that tolerance into C1/C2/C3 budgets. When no such analytic route is asserted, the sampled audit estimates the realized budgets directly.
+    \item \textbf{Transport assumptions.} A method-level Lipschitz/integrability condition linking expected loss drift to oracle distance after the local-law budget has been obtained. For DPO this reduces to a policy-Lipschitz condition. For GRPO-PL the formal sufficient route uses a finite Plackett--Luce fixed-ranker condition; for GRPO-RL it uses a finite pointwise Lipschitz condition for the clipped-surrogate loss. Random-utility modeling \citep{Schervish1995} is one way to motivate those assumptions, not an extra theorem by itself.
+    \item \textbf{Calibration and sampling assumptions.} The accessible judge must be well enough calibrated to the target oracle on a representative held-out set, and the sampling design must satisfy the logged-propensity and positivity conditions used by Horvitz--Thompson estimation.
+\end{enumerate}
+
+Each of these premises has a direct falsification route: approximation/transfer residual checks for the operator layer, surface-form perturbation tests for factorization/measurability, context-swap checks for context compatibility, calibration-set audits for judge mismatch, and logged-propensity diagnostics for the sampling layer.
+
+For preferences, the application contributes a bundle of premises rather
+than a new theorem. DPO supplies oracle-measurable current/reference
+policies and an oracle-indexed pair generator; GRPO-PL supplies the
+policy/ranker/group-generator bundle; GRPO-RL supplies current/old/reference
+policy measurability, reward measurability, and an oracle-indexed group
+generator. If preferences are noisy or only approximately oracle-indexed,
+the theorem stack routes the residual through the same oracle-measurement
+term used in the two-stage and TreePO certificates.
+
+A practitioner wary of these extra ingredients can still use the structural theorems directly, or treat the transport and calibration constants as explicit sensitivity parameters rather than as fixed truths.
+
+\subsection{The Formalized Sketch-Literature Layer}\label{app:lean-literature-layer}
+
+Section~\ref{sec:mergeable-sketches} draws on a machine-checked layer
+of the mergeable-summary literature; the inventory is recorded here.
+Current Lean-backed instances include HLL's max-register merge
+laws, Count-Min's additive state merge, Misra--Gries/GK-style theorem surfaces,
+typed interval/range targets from the mergeable-summary literature, adjacent
+$\varepsilon$-kernel geometry when separately cited, and our bigram
+and Markov-count sketches. Separately, the Python benchmark suite wraps
+Apache DataSketches implementations for HLL, CPC, Theta, Count-Min,
+Frequent Items, KLL, classic quantiles, REQ, t-digest, Tuple, and VarOpt
+as official empirical references. CPC, Theta/KMV, Frequent Items, classic
+quantiles, REQ, t-digest, Tuple, and VarOpt should therefore be read as
+empirical-only rows unless a matching local-law artifact is added.
+
+The Lean artifact mirrors the split between reusable algebra and large
+external facts. It proves the
+state-level algebra (build, merge, validity, tree closure, and final
+readout) and separately exposes the large external facts as typed theorem
+obligations. For HLL, the checked part is the hash-to-register pipeline,
+pointwise-max merge, state-level collapse, the Poisson-mixture series package,
+and the fixed-cardinality consequence obtained from a depoissonization-transfer
+obligation; the Mellin-transform estimates and analytic depoissonization proof
+behind the estimator constants remain named obligations, with the Big-O
+consequence of the relative standard-error asymptotic checked in Lean
+(including the arithmetic value $1.04/\sqrt{2^{14}}=13/1600<1\%$ for
+precision $p=14$). For
+Agarwal-style summaries, the
+state-level interface, Count-Min contrast, Misra--Gries/GK surfaces, interval
+and range-space targets, finite VC traces via mathlib's
+Sauer--Shelah theorem, finite-trace failure union bounds,
+Misra--Gries decrement-debt accounting, SpaceSaving bookkeeping, and
+hybrid-promotion/random-buffer bookkeeping are typed; the
+same-weight complete-tree concentration step and the $\varepsilon n$ tail
+transport are checked as an explicit martingale argument, and the
+common-reference-frame width algebra is kept as adjacent background unless
+cited to a separate $\varepsilon$-kernel source. The remaining compact
+range-discrepancy construction stays as a named citation obligation rather
+than a hidden assumption. The standalone Lean entry point for
+this literature layer is
+\texttt{FormalProbability.ML.MergeableSummaries.Literature}; C-TreePO imports
+that surface and re-exports only the bridge names used in
+Section~\ref{sec:mergeable-sketches}.
+
+\subsection{Practical Workflow}\label{app:practical-workflow}
+
+Taken together, the theorem ladder defines a practical workflow. Build a compression tree. Check whether the run is realized-valid for the structural laws. If the downstream task satisfies the Optimization Stack, collect preferences on summaries rather than on full documents. If only approximate preservation is available, use the Certificate Stack to report an empirical gap certificate alongside model results. The workflow reduces annotation cost while keeping the source of each guarantee explicit.

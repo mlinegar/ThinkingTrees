@@ -1,0 +1,146 @@
+\section{Seeding the Summarizer with Gold Quasi-Sentence States}\label{app:gold-seeding}
+
+Section~\ref{sec:gold-seeding} summarizes the gold-seeding experiment.
+This appendix specifies the protocol, documents the supervision leak
+the first design contained (and the diagnostic signature that exposed
+it), and reports the per-dimension grid for the corrected protocol.
+
+\subsection{Design}
+
+The experiment asks a budgeted local-to-global question: given a small
+random sample of leaf-window states from a document, can a learned
+summarizer $g$ produce a full-document compact state that a fixed,
+already-trained readout $f$ maps to the document gold? The sampling
+design mirrors the audit of Section~\ref{sec:estimation} (known
+propensities over leaf windows), so a positive answer means the same
+sampled infrastructure that certifies a tree can also seed one.
+
+The protocol, per document: fix a trained $f$ artifact from the
+$\ell = 16$ ladder (Appendix~\ref{app:qsentence-leaf-ladder}); sample
+$16$ leaf windows; represent each sampled window by a state; prompt-optimize
+$g$ (GEPA) to compose those states into a document-level compact state,
+with a reward that mixes direct parseability against the document gold
+($0.75$) and agreement of $f$ applied to $g$'s output ($0.25$). Train
+on $140$ documents, evaluate on the $48$ test documents. Three
+estimators are compared against the full teacher rollup:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{sample baseline}: aggregate the sampled windows'
+          states directly (no $g$); this is what the sample alone is
+          worth.
+    \item \textbf{g\_direct}: parse the document state from $g$'s
+          output.
+    \item \textbf{f\_on\_g}: apply the fixed $f$ to $g$'s output; this
+          is the deployment path.
+\end{itemize}
+
+\subsection{The Gold-State Leak and Its Signature}
+
+The load-bearing design choice is \emph{what state represents a
+sampled window}, controlled by \texttt{--sample-state-source}. The
+first implementation used \texttt{gold\_stats}: the window's gold CMP
+weighted means, injected into $g$'s prompt. The resulting runs scored
+deceptively well and taught nothing: the pipeline regressed gold onto
+gold, $g$'s learned behavior added noise on top of the injected
+answer (it underperformed the sample baseline built from the same
+gold states), and nothing in the loop ever read text. The corrected
+source, \texttt{f\_states} (now the default), represents each sampled
+window by the learned $f$'s own prediction for that window, so gold
+enters training targets only and never the inference path.
+
+The signature that exposed the leak generalizes to any
+tree-supervision pipeline and is cheap to monitor: a widening gap
+between internal agreement and external agreement. A related
+exposure-bias variant appears in the scheduled-sampling control run,
+where a merge trained exclusively on gold child states collapses when
+fed its own generated children at evaluation (internal $r = 0.166$
+while the external number stays high at $0.916$ off the gold rollup).
+Both failures are invisible to any single headline metric and obvious
+in the pair; this is the operational content of reporting internal and
+external columns together throughout
+Appendix~\ref{app:qsentence-leaf-ladder}.
+
+\subsection{Results Under the Corrected Protocol}
+
+Table~\ref{tab:app-gold-seeding} reports the corrected
+(\texttt{f\_states}) run at $\ell = 16$, $16$ sampled windows, one
+sample per document, test split ($n = 48$), Pearson against the full
+teacher rollup.
+
+\begin{table}[htbp]
+    \centering
+    \begin{tabular}{lccc}
+    \toprule
+    dimension & sample baseline & g\_direct & f\_on\_g \\
+    \midrule
+    all dims  & $0.966$ & $0.953$ & $0.951$ \\
+    RILE      & $0.949$ & $0.955$ & $0.957$ \\
+    domain\_1 & $0.749$ & $0.738$ & $0.741$ \\
+    domain\_2 & $0.920$ & $0.917$ & $0.910$ \\
+    domain\_3 & $0.933$ & $0.890$ & $0.898$ \\
+    domain\_4 & $0.876$ & $0.859$ & $0.840$ \\
+    domain\_5 & $0.937$ & $0.898$ & $0.899$ \\
+    domain\_6 & $0.946$ & $0.937$ & $0.923$ \\
+    domain\_7 & $0.697$ & $0.441$ & $0.447$ \\
+    \bottomrule
+    \end{tabular}
+    \caption{Gold-seeded $g$ under the corrected \texttt{f\_states}
+    protocol: Pearson vs.\ the full teacher rollup, $\ell = 16$, $16$
+    sampled leaf windows per document, one sample per document, test
+    split ($n=48$).}
+    \label{tab:app-gold-seeding}
+\end{table}
+
+Three numbers summarize the outcome. The seeded $g$ tracks the full
+rollup at all-dimension $r = 0.953$ against a sample-only baseline of
+$0.966$: composing through the learned summarizer costs about one
+point of correlation relative to using the raw sample, and on RILE the
+composed path is slightly better than the baseline ($0.955$ vs.\
+$0.949$). Agreement between the seeded $g$ and its own sample baseline
+is $0.984$ all-dims, so nearly all remaining error is the sampling
+budget, not the learned composition. The deployment path
+\texttt{f\_on\_g} matches \texttt{g\_direct} to within $0.002$
+all-dims, so reading $g$'s state through the trained readout is
+lossless in practice. Domain\_7 is the one dimension where the learned
+composition genuinely lags its own sample ($0.441$ vs.\ $0.697$); it
+is the sparsest dimension and the same one every experiment in
+Appendix~\ref{app:qsentence-leaf-ladder} flags.
+
+\subsection{Open Arms}
+
+Two companion runs are scoped and incomplete; both are stated here as
+placeholders so their eventual numbers land in a fixed frame.
+
+\paragraph{Scheduled-sampling A/B.} The exposure-bias fix for the
+merge (train on a schedule mixing gold and self-generated children)
+has a completed control arm and an untrained treatment arm. The
+control (rate $0$: gold children only, whose collapse signature is
+quoted above) completed in every run. The treatment (rate $1$) never
+reached $g$-training: neither launch of the leaf-$8$ A/B contains a
+trained $g$ artifact or post-training evaluation records, and the
+leaf-$2$ run's scheduled arm never started. Resuming means running
+the treatment $g$-training stage
+(\texttt{scripts/run\_scheduled\_sampling\_ab\_leaf8.sh} with
+\texttt{--dspy-g-scheduled-sampling-rate 1.0}) and comparing against
+the saved control. The treatment arm's training and evaluation remain
+scoped follow-up work; the control arm and the artifact paths above
+fix the frame its numbers will land in.
+
+\paragraph{Cross-runtime transfer.} Prompt programs trained with
+Gemma-4 against gold quasi-sentence labels, evaluated under the
+DiffusionGemma runtime, would separate ``the program learned the
+task'' from ``the program learned the runtime.'' The earlier transfer
+wrappers produced empty reports because they pointed at a source run
+that crashed before producing $g$ artifacts; complete gold-trained
+$f$+$g$ artifacts exist elsewhere, at leaves $8$ and $16$
+(\texttt{outputs/manifesto\_parallel\_llm\_qsentence\_20260621\_075132/gemma4\_fixed\_leafgrid/dspy/})
+and leaf $1$
+(\texttt{outputs/manifesto\_qsentence\_followon\_all\_missing\_20260623\_182238/gemma4\_full\_leafgrid/dspy/leafq001/}).
+The transfer script
+(\texttt{scripts/run\_manifesto\_qsentence\_gemma4\_gold\_to\_dgemma.sh})
+evaluates from existing artifacts via the \texttt{SOURCE\_RUN\_ROOT},
+\texttt{SOURCE\_GRID}, and \texttt{LEAF\_QS} overrides, so the
+evaluation is runnable without retraining at leaves $1$, $8$, and
+$16$; leaves $2$ and $4$ have no gold-trained $g$ and would need
+training first. The transfer evaluation at leaves $1$, $8$, and $16$
+remains scoped follow-up work; the artifact inventory above fixes the
+frame its numbers will land in.

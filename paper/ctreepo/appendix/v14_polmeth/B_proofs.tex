@@ -64,7 +64,7 @@ classic quantiles, REQ, t-digest, Tuple, and VarOpt as official
 empirical references. CPC, Theta/KMV, Frequent Items, classic
 quantiles, REQ, t-digest, Tuple, and VarOpt should therefore be read
 as empirical-only rows unless a matching local-law artifact is added.
-HLL is the empirical anchor in Section~\ref{sec:hll-parity}, not the
+HLL is the empirical anchor in Appendix~\ref{sec:hll-parity}, not the
 definition of the classical class.
 
 \paragraph{The algebraic view.}
@@ -205,7 +205,7 @@ scalar child answers merge; scalar answer mergeability is a stricter special
 case.
 
 \paragraph{Variants the framework covers.}
-Section~\ref{sec:hll-parity} exhibits this collapse numerically on one
+Appendix~\ref{sec:hll-parity} exhibits this collapse numerically on one
 representative mergeable sketch, HyperLogLog. Running a classical HLL
 (native plus the Apache DataSketches reference) through the unified
 \texttt{fit()} framework with $n_{\mathrm{leaves}} \in \{1, 2, 4, 8,
@@ -387,7 +387,7 @@ state-level nesting theorem, not a law for merging scalar query answers.
 
 \subsection{Kovachki Finite-Dimensionalization Lemmas}\label{app:kovachki-finite-dimensionalization}
 
-The neural-operator step used in Section~\ref{sec:fno-primer} is not a
+The neural-operator step used in Appendix~\ref{sec:fno-primer} is not a
 black box from ``continuous operator'' directly to ``certified
 C-TreePO summarizer.'' It has three parts. Lemma~21 supplies compactness
 for the union of finite-rank approximating images. Lemma~22 uses that
@@ -461,7 +461,7 @@ audit/local-law theorems still perform the certification step.
 
 \subsection{Neural-Operator Realization-to-Local-Law Bridge}\label{app:approx-via-neural-operators}
 
-Section~\ref{sec:fno-primer} isolates the only part of the neural-operator
+Appendix~\ref{sec:fno-primer} isolates the only part of the neural-operator
 literature this paper uses. The external approximation theorem supplies an
 ideal-to-realized approximation witness on compact realized-call sets. The
 finite-dimensionalization part of that route is the Lemma~21/22 layer
@@ -636,7 +636,7 @@ Instantiating the unified gap bound for DPO requires verifying only the downstre
 \]
 where the last step uses Lemma~\ref{lem:dpo-lip} inside the sum and the fact that the generator weights sum to~1.
 
-For GRPO-PL and GRPO-RL, the Lipschitz condition on the expected group loss enters as the explicit assumption \texttt{ExpectedGroupLossLipschitz}: the expected loss over group samples is Lipschitz in oracle distance, with the constant determined by the method-specific structure (Plackett-Luce ranking for GRPO-PL; clipped surrogate plus KL penalty for GRPO-RL). It is a hypothesis passed to the gap theorems, and the formalization proves sufficient conditions for it from first principles: a finite fixed-ranker Plackett--Luce condition for GRPO-PL and a finite pointwise Lipschitz condition for GRPO-RL (\texttt{OPT/RUMSufficientConditions.lean}). The Random Utility Model (Section~\ref{sec:verification}) is one way to motivate the assumption when those sufficient conditions are not directly checkable.
+For GRPO-PL and GRPO-RL, the Lipschitz condition on the expected group loss enters as the explicit assumption \texttt{ExpectedGroupLossLipschitz}: the expected loss over group samples is Lipschitz in oracle distance, with the constant determined by the method-specific structure (Plackett-Luce ranking for GRPO-PL; clipped surrogate plus KL penalty for GRPO-RL). It is a hypothesis passed to the gap theorems, and the formalization proves sufficient conditions for it from first principles: a finite fixed-ranker Plackett--Luce condition for GRPO-PL and a finite pointwise Lipschitz condition for GRPO-RL (\texttt{OPT/RUMSufficientConditions.lean}). The Random Utility Model (Appendix~\ref{sec:verification}) is one way to motivate the assumption when those sufficient conditions are not directly checkable.
 
 \subsection{Proof of Theorem~\ref{thm:e2e} (Audited Preference-Gap Bound)}\label{app:proof-e2e}
 

@@ -1,0 +1,223 @@
+\section{Prior Literature and the Algebraic Target}\label{sec:mergeable-sketches}
+
+The framework is easiest to read as a bridge from five older ideas to one
+learned object. Database systems already distinguish aggregates whose
+fixed-size intermediate state can be combined before finalization
+\citep{GrayEtAl1997DataCube}. Streaming theory formalizes this as
+mergeable summaries \citep{Agarwal2013MergeableTODS}; distributed
+streaming work studies the symmetric unordered case
+\citep{FeldmanEtAl2008MUD}; and functional programming gives the ordered
+analogue through list, or free-monoid, homomorphisms
+\citep{Gibbons1996ThirdHomomorphism}. Finally, the sufficient-statistic
+tradition explains why a compressed state is useful only relative to a
+downstream target \citep{Fisher1922,Blackwell1953}. C-TreePO takes this
+lineage as its algebraic target: learn a bounded state, merge it locally,
+and audit whether the task readout is preserved.
+
+\subsection{Mergeable Summaries in Data Systems}
+
+A \emph{mergeable summary} is a compact data structure equipped with a
+binary merge operation that behaves well under hierarchical aggregation.
+\citet{Agarwal2013MergeableTODS} give the definition that modern streaming
+literature has inherited: a summary scheme of size $k$ for a query $Q$
+(cardinality, frequency, quantile, membership, \dots) is \emph{mergeable}
+if for any two streams $u, v$ there is a merge operator $\oplus$ such that
+$\mathrm{sketch}(u \concat v)$ and
+$\mathrm{sketch}(u) \oplus \mathrm{sketch}(v)$ both answer $Q(u \concat v)$
+equally well, with sketch size bounded by $k$ after merging. The appeal is
+operational: a MapReduce, Dataflow, or Spark job can compute a sketch per
+shard, merge shards pairwise up a tree, and read the query off the root,
+without ever materializing the full stream. The same state-composition
+pattern appears in massive unordered distributed aggregation and in database
+``algebraic'' aggregates, where fixed-size intermediate state is combined
+before finalization \citep{FeldmanEtAl2008MUD,GrayEtAl1997DataCube}.
+
+The mergeable-summary literature is deep. HyperLogLog
+\citep{FlajoletEtAl2007,HeuleEtAl2013} estimates distinct counts in a few
+kilobytes regardless of stream length. Count-Min
+\citep{CormodeMuthukrishnan2005} answers frequency queries under a space
+budget. Bloom filters, Theta/KMV sketches, t-digest, KLL, and GK quantile
+sketches are part of the same systems lane, with different exact or
+approximate merge guarantees. The common thread is that the state,
+merge, and readout are engineered before training, so correctness is
+usually proved from sketch-specific algebra rather than inferred from
+runtime audits. A machine-checked layer of this literature (which
+sketches carry Lean-backed merge laws, and which are wrapped only as
+empirical references) is inventoried in
+Appendix~\ref{app:theory-details}. HLL is
+the empirical anchor below, not the definition of the classical class.
+
+\subsection{The Algebraic View}
+
+Abstractly, a mergeable sketch for a query family indexed by $q \in \mathcal{Q}$
+is a state-level triple $(\mathrm{encode}, \oplus, \mathrm{query})$ with
+\[
+\mathrm{encode} : \Strings \to \mathcal{S}, \quad
+\oplus : \mathcal{S} \times \mathcal{S} \to \mathcal{S}, \quad
+\mathrm{query} : \mathcal{S} \times \mathcal{Q} \to \mathcal{R},
+\]
+and correctness
+\[
+\mathrm{query}\big(\mathrm{encode}(u \concat v),\, q\big)
+\;\approx\;
+\mathrm{query}\big(\mathrm{encode}(u) \oplus \mathrm{encode}(v),\, q\big)
+\]
+for every pair of shards $u, v$ and every query $q$. The merge composes
+\emph{states}, not scalar query answers. Distinct count is the canonical
+warning: $|A \cup B|$ is not determined by $|A|$ and $|B|$ alone, while an
+HLL register vector can still be merged because it carries overlap-relevant
+state. Associativity of $\oplus$ is the schedule-invariance condition: any
+binary aggregation tree reaches the same state, or at least the same readout,
+so the merge schedule can be chosen for execution convenience without
+changing the answer. Commutativity is specific to unordered or symmetric
+inputs; it lets shards be merged without tracking their original order.
+Idempotence is specific to set- or semilattice-like unions such as HLL or
+Bloom-filter-style membership sketches, where it makes re-merging an
+already-absorbed shard harmless; frequency and quantile summaries lack it.
+
+For ordered text, the corresponding algebraic ideal is a list, or free-monoid,
+homomorphism: $h(u \concat v) = h(u) \odot h(v)$ for an associative operator
+$\odot$ on summary states \citep{Gibbons1996ThirdHomomorphism}. The operator
+$\odot$ need not be commutative, because word and paragraph order can matter.
+C-TreePO is an audited learned approximation to this state-level discipline:
+the summaries are learned states, and the local laws test whether those states
+still support the task readout.
+
+HyperLogLog makes the story concrete: a sketch of precision $p$ keeps
+$m = 2^p$ registers, encodes each item by a hash-indexed
+leading-zero count, merges by pointwise max (associative, commutative,
+and idempotent, so every tree-shaped reduction yields the same register
+vector), and reads cardinality off a harmonic-mean formula with
+relative standard error $1.04/\sqrt{m}$ regardless of stream content
+\citep{FlajoletEtAl2007}. This is the pattern C-TreePO generalizes: a
+bounded-size state, an associative merge, and a query that reads out a
+task value. Because encode, merge, and query are deterministic and
+closed-form, a single algebraic proof covers every realized shard and
+no runtime audit is needed. Appendix~\ref{app:classical-parity} gives
+the full mechanics and the parity experiments.
+
+\subsection{The C-TreePO Correspondence}
+
+C-TreePO lifts this recipe to settings where no hand-designed sketch is
+available. The leaf state is a learned summary $g(b)$ of a raw text block;
+the merge operator is the same learned summarizer applied to a
+concatenation $g(s_{u_L} \concat s_{u_R})$; the query is an oracle value
+$\fstar(x)$ that a domain expert would assign to the raw document.
+Table~\ref{tab:sketch-mapping} makes the mapping explicit.
+
+\begin{table}[htbp]
+    \centering
+    \small
+    \begin{tabular}{p{0.46\linewidth}p{0.46\linewidth}}
+        \toprule
+        Classical mergeable sketch & C-TreePO semantic compression \\
+        \midrule
+        Data shard $d_i$ & Leaf text block $b_i$ \\
+        Bounded sketch state $S_B(d_i)$ & Leaf summary $s_i = g(b_i)$ \\
+        Merge operator $\oplus_B$ & Learned merge $g(s_{u_L}\concat s_{u_R})$ \\
+        Query (e.g., distinct count, frequency) & Oracle query $\fstar(x)$ (task value) \\
+        Memory budget $B$ controls what survives merges & Summary budget controls interaction-bearing content retention \\
+        Correctness by algebraic proof (no runtime check) & Correctness by probabilistic audit (Section~\ref{sec:estimation}) \\
+        Error = sketch estimation variance & Error = $L \cdot \Delta_R$ + estimation envelopes (Theorem~\ref{thm:e2e}) \\
+        \bottomrule
+    \end{tabular}
+    \caption{Mapping from a classical mergeable sketch to the C-TreePO setting. In classical sketches, the merge operator is hand-designed and algebraically exact; in C-TreePO, it is learned and certified by audit.}
+    \label{tab:sketch-mapping}
+\end{table}
+
+Two differences matter. First, the merge $g$ is \emph{learned} rather than
+hand-designed: a neural network operating on tokens. Its correctness has no
+sketch-specific algebra to lean on, so Section~\ref{sec:estimation} replaces the
+algebraic proof by a probabilistic audit that samples realized merges and
+estimates how often they preserve the oracle value. In the optimization
+language of Section~\ref{sec:theorems}, the local-law weights are the
+projection pressure that moves this learned operator toward the same
+theorem-eligible subspace that a classical sketch occupies by construction.
+Second, the readout is a \emph{task value}, not necessarily a discrete
+aggregate. For HyperLogLog the readout is a distinct-count estimate; for a
+political-science application it might be a manifesto's RILE score
+\citep{BenoitEtAl2025,ManifestoProject2025a}; for the synthetic task of
+Appendix~\ref{sec:markov-interlude} it is a count of color-regime transitions.
+The common discipline is state composition plus readout preservation. Whether
+a compact state exists is task-specific and is exactly what the audit probes
+when no hand-designed sketch is available.
+
+Classical full mergeable summaries nest in C-TreePO through relational
+state-level C-Trees. Randomized mergeable summaries nest in the same
+formulation in probability: root readout is correct on the event that the
+merged root state is valid. This statement preserves the union
+formalization: shards combine as concatenated datasets, the approximation
+parameter $\varepsilon$ stays fixed in the size/error profile, and
+sample-size or training-data requirements are separate concentration
+side conditions rather than scalar child-query merge laws.
+
+\subsection{The Generalization Claim}
+
+There are two useful limiting cases. The first is a strict oracle
+homomorphism, where the task value itself has a merge operation. This is
+mathematically clean but too strong for many classical sketches: scalar
+distinct count, for example, cannot merge $|A|$ and $|B|$ into $|A\cup B|$
+without overlap information. The second is the actual mergeable-sketch limit,
+where the \emph{state} carries enough information for a bounded readout. The
+following proposition keeps these two cases separate.
+
+\begin{proposition}[Strict and State-Level Mergeable Limits]\label{prop:mergeable-reduction}
+Under Assumption~\ref{ass:context} (context-compatible oracle), suppose $g$ is deterministic and satisfies global versions of the preservation laws:
+\[
+\text{(A1)}\ \forall z,\ g(z) \sim z,\qquad
+\text{(A2)}\ \forall u,v,\ u \concat v \sim g(g(u)\concat g(v)),
+\]
+Define the induced summary merge $\oplus_g(s,t):=g(s\concat t)$. Then:
+\begin{enumerate}[nosep]
+\item \emph{Strict oracle homomorphism.} If there exists
+$m_{\Y}:\Y\times\Y\to\Y$ such that
+$m_{\Y}(\fstar(u),\fstar(v))=\fstar(u\concat v)$ for all $u,v$, then
+$\fstar$ is a homomorphic readout of the induced state: merging summaries and
+then reading out gives the same oracle value as reading the raw concatenation,
+and $\oplus_g$ is associative modulo $\sim$.
+\item \emph{Classical state-level reduction.} More generally, let
+$(\mathrm{encode},\oplus_B,\mathrm{query})$ be a bounded mergeable-summary
+scheme for a query family $Q_q$ in the sense of
+\citet{Agarwal2013MergeableTODS}. If $g$ serializes the sketch state
+($g(x)=\mathrm{encode}(x)$ on raw shards and
+$g(s\concat t)=s\oplus_B t$ on serialized states) and the C-TreePO readout is
+$f(s,q)=\mathrm{query}(s,q)$, then C-TreePO is exactly that classical
+mergeable summary under the induced merge $\oplus_g$.
+\end{enumerate}
+\end{proposition}
+
+\noindent\textit{Proof intuition.} The strict case chains A1 and A2 through
+context compatibility to recover homomorphic readout and associativity modulo
+the oracle. The classical case is state-level: bounded sketch states compose
+by $\oplus_B$, and the readout is applied only after the state has been
+merged. In the randomized Agarwal setting, the same conclusion holds with the
+same success-probability reading: conditional on the root state being valid for the
+merged union stream, the root readout equals the target value. Full proof in
+Appendix~\ref{app:proof-mergeable}.
+
+Appendix~\ref{sec:hll-parity} exhibits this collapse numerically on one
+representative mergeable sketch, HyperLogLog. Running a classical HLL
+(native plus the Apache DataSketches reference) through the unified
+\texttt{fit()} framework with $n_{\mathrm{leaves}} \in \{1, 2, 4, 8,
+16\}$ yields byte-identical register states between TreePO-reduced and
+flat pipelines for the register-based implementation, and
+estimate-equivalence within the HLL relative standard error for the
+DataSketches reference. The same pipeline can swap its oracle $\fstar$
+from analytic cardinality to the
+HLL's own scoring head, and under that oracle a fully end-to-end learned
+$g$ and $f$ track the classical sketch within a small multiple of the RSE
+floor. In the projection language, the
+classical rows start inside the exact local-law subspace, while the
+learned rows test different representable subspaces and readouts for how
+closely training can reach that target. The formal claim extends beyond
+HLL: any sketch that supplies the
+same \texttt{SketchLeafPreserving}, \texttt{SketchMergeCompatible}, and
+\texttt{SketchSummaryCompatible} witnesses enters the exact local-law
+subspace through
+\texttt{mergeableSketchSummaryClass\_subset\_exactLocalLawSubspace}.
+A companion benchmark suite, \texttt{treepo-bench classical-sketches},
+repeats the tree-reduction comparison for the broader official
+DataSketches families through the same \texttt{fit()} interface
+(Appendix~\ref{app:treepo-software}).
+
+Most interesting oracles lie beyond register-like queries. In the Markov example of Appendix~\ref{sec:markov-interlude}, the oracle counts boundary transitions between adjacent colored regions---a cross-span interaction that no commutative register-wise merge can recover from leaves alone. The merge operator has to carry boundary information forward, and that is what motivates the Fourier neural operator in Appendix~\ref{sec:fno-primer}. Section~\ref{sec:framework} develops the local laws, Section~\ref{sec:estimation} the audit, and Section~\ref{sec:theorems} the preference-learning consequences that make the learned version as trustworthy as the classical one.

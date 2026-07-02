@@ -129,7 +129,7 @@ Proposition~\ref{prop:mergeable-reduction} &
 \texttt{FormalProbability/ML/MergeableSummaries/KLLExecutable.lean};
 \texttt{FormalProbability/ML/MergeableSummaries/LiteratureChronology.lean} \\
 
-Scene-register changepoint sketch (Section~\ref{sec:markov-interlude}) &
+Scene-register changepoint sketch (Appendix~\ref{sec:markov-interlude}) &
 \texttt{MarkovCountSketch}, \texttt{MarkovCountSketch.mul}, monoid instance,
 \texttt{reduce\_gExact}, \texttt{L1\_gExact}, \texttt{L2\_gExact},
 \texttt{exactSketch\_root\_distortion\_zero}, \texttt{not\_L3\_gFlip} &
@@ -345,13 +345,8 @@ formalized at two levels. The algebraic/state layer is checked directly:
 ordered list homomorphisms, Gray-style algebraic aggregate state, MUD tree
 invariance, Feldman public-random seedwise streaming-to-general-MUD conversion,
 Feldman exact seedwise success-probability bookkeeping, HLL max-register state
-merge, Count-Min additive state merge, the full Misra--Gries Theorem~1
-(executable capacity/mass/positivity/decrement-debt accounting, the
-\(n/(k+1)\) undercount bound, the \(O(1/\varepsilon)\) size bound, and an
-executable merge with a checked Lemma-2.1 envelope invariant, packaged as the
-concrete instances \texttt{executableMGAlgorithm} /
-\texttt{theorem1\_executable} with no caller-supplied obligations),
-SpaceSaving executable
+merge, Count-Min additive state merge, Misra-Gries executable
+capacity/mass/positivity/decrement-debt accounting, SpaceSaving executable
 capacity/mass bookkeeping, and the state-level sketch/readout reduction. The stricter coverage
 pass also checks a Gibbons Section 5 \emph{stipulated} reference cost model
 (the Big-O memberships are verified for reference growth functions assigned to
@@ -405,20 +400,15 @@ union-bound/bookkeeping layers, together with the random-sample
 (Corollary~3.12) construction; the KLL randomized rank-error concentration
 and Theorem~4/5 space bounds and the GK Theorem~1 space bound and
 Corollary~2 one-way mergeability (each carried as uninstantiated fields of
-the corresponding algorithm bundles); the SpaceSaving frequency-error and
-merge guarantees (the executable SpaceSaving bookkeeping layer is checked,
-but its min-counter overcount analysis and the Corollary~1 MG--SpaceSaving
-transfer are not constructed); and Feldman's randomized/private-coin
-communication lower bounds,
+the corresponding algorithm bundles); the Misra--Gries Theorem~1 size and
+frequency-error bounds (same mechanism; the executable bookkeeping layer is
+checked); and Feldman's randomized/private-coin communication lower bounds,
 including a deterministic linear Symmetric-Index bound and the Theorem~4/5
 separation schemas. Names carrying the \texttt{\_statement} suffix in the
 result map are Prop-valued citation schemas of this kind, not proved
-theorems; the Feldman Theorem~3 schema is stated with concrete computability
-predicates on both sides---the existing public-randomness streaming success
-layer and a private-coin MUD model in which every tree node draws its own
-seed from a finite seed space with uniform-counting success---so that it
-cannot be satisfied vacuously (both predicate classes are checked to be
-inhabited).
+theorems; the Feldman Theorem~3 schema is additionally parameterized by the
+(not-yet-formalized) randomized computability predicates so that it cannot
+be satisfied vacuously.
 Checked bridge lemmas then consume those typed obligations where the paper only
 needs their algebraic consequence.
 

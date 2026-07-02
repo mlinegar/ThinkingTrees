@@ -1,0 +1,153 @@
+\section{The Probabilistic Audit}\label{sec:estimation}
+
+The theory says that local validity composes. The audit turns that structural fact into an operational workflow for a deployed tree. Read through the iff of Section~\ref{sec:theorems}, the audit is the finite-sample estimator of the structural-approximation-error assumption: it measures how far the realized approximation error deviates from vanishing on the C1/C2/C3 subspace, which is the same thing as measuring how far the trained operator lies from the projection target. The audit samples a finite set of leaves, merge nodes, and re-summarized outputs, runs local oracle checks on those units, and transports the resulting estimates into a distortion or gap certificate.
+
+For a realized document $x$, let $U(x)$ denote the finite population of \emph{all realized nodes} in its reduction tree: leaves, internal merges, and the root. The node-sampling law assigns each $u \in U(x)$ its own logged propensity $\pi_u \in (0,1]$. The root gets no special-casing in this node-population definition: it enters the sampled-node estimand through its own propensity, like every other realized node.
+
+This node-population estimand is distinct from the always-available document-level supervision channel used in our simulations. We write
+\[
+y_{\mathrm{doc}} := f^\ast(x)
+\]
+for the full-document label, and
+\[
+y_{\mathrm{tree}}
+\]
+for the final-summary/tree-side oracle target or prediction. These coincide only under exact preservation or exact-control assumptions. Outside those regimes, the top/document loss and the sampled-node tree loss are different objects and should be reported separately.
+
+\paragraph{The audit in four steps.}
+\begin{enumerate}[leftmargin=1.5em]
+    \item Sample units from the finite populations of leaves, merge nodes, and optional re-summarization nodes.
+    \item Run the relevant local oracle checks for C1, C2, and C3 on those sampled units.
+    \item Estimate two kinds of quantities: binary violation rates for diagnosis and mean distortion for certificate transport.
+    \item Combine the distortion estimate with calibration, estimation, and clipping envelopes to obtain a finite-sample gap certificate.
+\end{enumerate}
+
+The audit reports two different objects. \emph{Violation rates} are binary diagnostics telling us which local law fails and how often. \emph{Distortion means} are numeric quantities that feed the gap theorems. Both are estimated from the same sampled nodes, but they play different roles. In the iff language of Section~\ref{sec:theorems}, violation rates answer ``where does the approximation error fail to be zero on the C1/C2/C3 subspace?'' and distortion means answer ``how far is the learned operator from the projection target in oracle units?'' Same sample, two readings; the bound in \S\ref{sec:discussion} uses both.
+
+\begin{figure}[t]
+\centering
+\resizebox{0.97\linewidth}{!}{%
+\begin{tikzpicture}[
+    node distance=0.7cm and 0.7cm,
+    box/.style={rectangle, draw, rounded corners=2pt, minimum width=2.5cm, minimum height=0.8cm, align=center, font=\footnotesize},
+    arr/.style={-{Stealth[length=4pt]}, thick}
+]
+\node[box, fill=blue!8] (tree) {Raw document\\$\rightarrow$ compression tree};
+\node[box, fill=green!8, right=of tree] (sample) {Sample leaves, merges,\\re-summaries};
+\node[box, fill=yellow!10, right=of sample] (checks) {Run C1/C2/C3 checks\\and distortion queries};
+\node[box, fill=orange!10, right=of checks] (ht) {Estimate violation rates\\and HT distortion mean};
+\node[box, fill=red!8, right=of ht] (cert) {Transport through\\gap certificate};
+
+\draw[arr] (tree) -- (sample);
+\draw[arr] (sample) -- (checks);
+\draw[arr] (checks) -- (ht);
+\draw[arr] (ht) -- (cert);
+\end{tikzpicture}%
+}
+\caption{End-to-end audit pipeline. The same sampled nodes support both interpretable local diagnostics (which law fails) and the distortion estimate used in the preference-gap certificate.}
+\label{fig:audit-pipeline}
+\end{figure}
+
+\subsection{The Audit Protocol}
+
+The displayed formulas below are the equal-probability versions. Under unequal inclusion probabilities, replace them with the Horvitz--Thompson (HT) weighted analogs introduced below.
+
+\paragraph{Sampling Leaves (Sufficiency).}
+We sample $n_\ell$ leaf blocks $\{b_i\}$ uniformly from the corpus. For each block, we generate its summary $g(b_i)$ and compare the oracle values:
+\[
+\hat{p}_{\text{suff}} := \frac{1}{n_\ell} \sum_{i=1}^{n_\ell} \One\left\{ \metric\big(\fstar(g(b_i)), \fstar(b_i)\big) > \tau \right\},
+\]
+where $\tau$ is a tolerance threshold (usually 0).
+
+\paragraph{Sampling Merge Consistency.}
+Condition C3 requires a chain of equivalences. We sample $n_m$ merge edges and audit whichever link fits in memory. For a sampled merge node $u$ with children $u_L, u_R$, we can compare the disjoint path either to the raw concatenation,
+\[
+\hat{p}_{\text{assoc,raw}} := \frac{1}{n_m} \sum_{j=1}^{n_m} \One\left\{ \metric\!\big(\fstar(g(g(u_L^j) \concat g(u_R^j))),\; \fstar(u_L^j \concat u_R^j)\big) > \tau \right\},
+\]
+or to the joint-summary path,
+\[
+\hat{p}_{\text{assoc,joint}} := \frac{1}{n_m} \sum_{j=1}^{n_m} \One\left\{ \metric\!\big(\fstar(g(g(u_L^j) \concat g(u_R^j))),\; \fstar(g(u_L^j \concat u_R^j))\big) > \tau \right\}.
+\]
+At leaf boundaries, $u_L$ and $u_R$ are adjacent raw blocks whose concatenation often fits in context; at internal merges, they are stored summaries.
+
+\paragraph{Sampling Stability (Idempotence).}
+If the pipeline includes post-processing rounds, we sample $n_s$ summaries $z_k$ that have already passed through $g$ and check if re-summarization alters the oracle:
+\[
+\hat{p}_{\text{idem}} := \frac{1}{n_s} \sum_{k=1}^{n_s} \One\left\{ \metric\big(\fstar(g(z_k)), \fstar(z_k)\big) > \tau \right\}.
+\]
+
+Under equal-probability sampling within each audit stratum, these sample means are design-unbiased for the corresponding finite-population violation rates. They are primarily diagnostic: they tell us whether the problem is leaf retention, reprocessing drift, or merge failure.
+
+\paragraph{Binary rates vs.\ distortion.}
+The gap theorems in Section~\ref{sec:theorems} bound mean distortion, not binary violation rates. A run can have a small violation rate but still have large distortion on the failing units, or vice versa. The natural workflow is therefore to report both: the $\hat{p}$-rates for interpretability and a distortion mean for certificate transport.
+
+\subsection{Scaling with Tree Size}
+
+Let a realized hierarchy contain $N$ leaves and $M = N-1$ merges. A transparent union bound gives
+\begin{equation}\label{eq:error_budget}
+\Prob\big[\text{root violation}\big]
+\le
+\sum_{i=1}^{N} p_{\text{suff},i}
+\;+\;
+\sum_{j=1}^{M} p_{\text{assoc},j}
+\;+\;
+\sum_{r=1}^{R-1} p_{\text{idem},r},
+\end{equation}
+where each term denotes the true violation probability of the corresponding checked event and $R$ counts optional clean-up rounds. Under homogeneous upper bounds this reduces to $N p_{\text{suff}}^{\max}+M p_{\text{assoc}}^{\max}+(R-1)p_{\text{idem}}^{\max}$, so even tiny local failure probabilities accumulate over large trees.
+
+\paragraph{From violation rates to $\Delta_R$.}
+The bridge is the distortion estimator. With the ideal oracle, instantiating HT with $Y_i^\star=\metric(\fstar(s_i),\fstar(S(i)))$ gives an unbiased estimate of the audited unit-population mean $\mu_{\mathrm{dist}}^\star$. Operationally we usually use an accessible judge $f$, yielding $\hat{\mu}_{\mathrm{HT}}^{J}$ unbiased for $\mu_{\mathrm{dist}}^{J}$; Theorem~\ref{thm:e2e} then carries the difference between the ideal and accessible distortion means through the calibration envelope $B_{\mathrm{cal}}$. Concretely, $\hat{\mu}_{\mathrm{HT}}^{J}$ is the finite-sample estimator of the population distortion $\Delta_R$ from Section~\ref{sec:theorems}; the empirical quantity denoted $\hat\Delta_R$ in Section~\ref{sec:discussion} is this HT mean (plus the union-bound decomposition across leaf, merge, and idempotence audit units).
+
+These statistics describe \emph{edge failure rates}, not correctness of an individual document. If a document has $N$ leaves and sufficiency failure rate $p_{\text{suff}}$, the probability that every leaf is correct is approximately $(1-p_{\text{suff}})^N \approx e^{-Np_{\text{suff}}}$. For large $N$, reliable root summaries therefore require small local error rates.
+
+\subsection{Design-Based Estimation}
+
+We cannot afford to query the oracle at every node, so we sample. This is a finite-population survey problem: the audit units form a population, we draw a random subset, and we want an unbiased estimate of the population mean. For document $x$, the relevant finite population is $U(x)$ itself, not just the subset that happened to be queried. The standard tool is the Horvitz--Thompson estimator, which reweights each sampled unit by the inverse of its inclusion probability. For queried unit $i$ with inclusion indicator $Z_i$, propensity $\pi_i$, and contribution $Y_i$:
+\[
+\hat{\mu}_{\mathrm{HT}} = \frac{1}{N}\sum_{i \in \mathcal{U}} \frac{Z_i}{\pi_i}Y_i.
+\]
+This estimator is conditionally unbiased for the population mean under the usual positivity and logged-propensity conditions.
+
+\paragraph{Document labels vs.\ sampled-node estimation.}
+The HT estimand above concerns the sampled-node population mean over $\mathcal{U}=\bigcup_x U(x)$. The full-document label $y_{\mathrm{doc}}$ is a separate complete-label channel and enters without IPW correction. In the shared-$g$ simulations below, we train the same readout on every realized node, but we evaluate and report two quantities separately: (i) the document-level top loss against $y_{\mathrm{doc}}$, and (ii) the sampled-node full-tree estimand, with naive, HT, and H\'ajek estimators computed from the logged node samples.
+
+The practical bound stack decomposes target error into calibration, estimation, and clipping envelopes in objective units. Writing
+\[
+G^\ast := C_{\mathrm{meth}}\mu_{\mathrm{dist}}^{\star},\quad
+G^J := C_{\mathrm{meth}}\mu_{\mathrm{dist}}^{J},\quad
+G^E := C_{\mathrm{meth}}\hat{\mu}_{\mathrm{HT}}^{J},\quad
+G^C := C_{\mathrm{meth}}\hat{\mu}_{\mathrm{dist}},
+\]
+we obtain
+\[
+|G^\ast-G^C| \le \underbrace{|G^\ast-G^J|}_{B_{\mathrm{cal}}} + \underbrace{|G^J-G^E|}_{B_{\mathrm{est}}} + \underbrace{|G^E-G^C|}_{B_{\mathrm{clip}}}.
+\]
+Plainly: $B_{\mathrm{cal}}$ is judge mismatch, $B_{\mathrm{est}}$ is sampling error, and $B_{\mathrm{clip}}$ is clipping-induced bias. The formal certificate keeps this exact four-piece shape: a local-law term $C_{\mathrm{meth}}\Delta_R$ plus calibration, estimation, and clipping addends. Its high-probability version uses the corresponding event budgets $\delta_{\mathrm{cal}}$, $\delta_{\mathrm{est}}$, and $\delta_{\mathrm{clip}}$ and combines them by a union bound.
+
+\paragraph{Recommended reporting template.}
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{p{0.17\linewidth}p{0.28\linewidth}p{0.44\linewidth}}
+\toprule
+Piece & Reported quantity & What it means \\
+\midrule
+Calibration envelope $B_{\mathrm{cal}}$ & Gold-vs-judge distortion mismatch on a held-out set & How much the accessible judge may differ from the target oracle on the audited population \\
+Estimation envelope $B_{\mathrm{est}}$ & Finite-population radius for $|\mu_{\mathrm{dist}}^{J}-\hat{\mu}_{\mathrm{HT}}^{J}|$ & Sampling uncertainty from querying only a subset of nodes \\
+Clipping envelope $B_{\mathrm{clip}}$ & Exact or conservative bias from clipped inverse-propensity weights & Additional bias introduced by variance-control choices in the estimator \\
+Confidence composition & $\delta=\delta_{\mathrm{cal}}+\delta_{\mathrm{est}}+\delta_{\mathrm{clip}}$ & Final coverage statement for the reported certificate \\
+\bottomrule
+\end{tabular}
+\caption{Minimal reporting template for non-vacuous certificates. The template shows where each source of slack comes from; a bare final bound hides that.}
+\label{tab:reporting-template}
+\end{table}
+
+A robustness-to-adversarial-sampling analysis (a constrained-design variance bound that shows why $\pi_{\min}$ is the primary robustness lever and why certificates should be reported over a stress-test grid of $(\pi_{\min}, w_{\max})$ values) is in Appendix~\ref{app:audit-robustness}. The same layer also gives deterministic clipped-vs-unclipped H\'ajek envelopes, so $B_{\mathrm{clip}}$ can be reported as an explicit sensitivity term rather than folded into the sampling radius.
+
+\subsection{From Audit to Optimization}
+
+Because the audit identifies \emph{which} edges fail and \emph{which} condition each failure violates, it also provides supervision for prompt engineering. In practice, one can treat leaf and merge prompts as parameters $\theta$ and update them against the violation signal. The same audit thus supports both certification and tuning.
+
+\paragraph{Empirical supervision split.}
+In the full-tree shared-$g$ experiments, every document supplies a complete document-level label at the top, while only a random sampled subset of realized nodes in $U(x)$ receives node-level feedback. In that node law the root has its own logged propensity when it is part of the sampled-node channel, like any other node. Held-out evaluation therefore reports the exact full-node objective, the sampled-node naive/HT/H\'ajek estimates, and the separate document-vs-final-summary top loss.
+
+Adaptive chunking and learned judges introduce interference paths. To keep evaluation valid, reporting must be honest about adaptation roles (chunker, summarizer, oracle): adaptation on train-role partitions, evaluation on held-out role intersections. Full details of the honesty protocol are deferred to the Semantic Forests companion.

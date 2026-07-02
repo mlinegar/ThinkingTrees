@@ -1,0 +1,203 @@
+\section{Quasi-Sentence Leaf-Size Ladder: Full Grids}\label{app:qsentence-leaf-ladder}
+
+Section~\ref{sec:qsentence-results} reports the abridged leaf-size
+ladder for the neural-operator family. This appendix gives the full
+grids for both families on the shared bundles of
+Section~\ref{sec:qsentence-harness}, the protocol details needed to
+reproduce them, and the expert-dimension grid with its winning
+hyperparameters.
+
+\subsection{Protocol}
+
+All runs consume the frozen labeled-tree bundles: $218$ Western
+European platforms, split $140/30/48$ (train/validation/test) shared
+across leaf sizes $\ell \in \{1,2,4,8,16\}$ quasi-sentences, every node
+stamped with its gold compact state
+$(\mathrm{RILE}_{\mathrm{norm}}, \mathrm{dom}_1,\dots,\mathrm{dom}_7)$
+by additive CMP-count aggregation (no LLM labeling). The alternating
+schedule is two iterations, $f$ first ($f^1g^1 \to f^2g^1 \to f^2g^2$),
+so the $f$-stage row isolates the readout trained on leaf states with
+the merge untrained, and the $g$-stage row adds the learned merge
+trained against the current $f$.
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Neural-operator family.} Leaves embedded once by
+          \textsc{embeddinggemma-300m}; $f$ and $g$ are FNO stacks
+          ($8$ epochs, batch $16$, learning rate $3\times 10^{-3}$)
+          trained on node-level losses. Embeddings are computed once
+          per bundle and disk-cached; the FNO training itself is
+          seconds per cell.
+    \item \textbf{LLM prompt-program family.} $f$ and $g$ are prompt
+          programs optimized by GEPA (light budget) against node-level
+          accuracy rewards, over a fixed open-weight checkpoint; the
+          two runtimes reported are Gemma-4-31B-IT-NVFP4 and a
+          DiffusionGemma fleet.
+\end{itemize}
+
+Internal metrics compare root predictions to the teacher rollup (gold
+compact state of the root); external metrics compare to the published
+MPDS document score. Both are on the normalized $[0,1]$ scale.
+
+\subsection{Neural-Operator Family Across Leaf Sizes (RILE)}
+
+Table~\ref{tab:app-fno-leafgrid} is the full version of
+Table~\ref{tab:qsentence-fno-ladder}: internal and external Pearson and
+MAE at each stage, test split, $n = 48$.
+
+\begin{table}[htbp]
+    \centering
+    \begin{tabular}{rlcccc}
+    \toprule
+    leaf $\ell$ & stage & int.\ $r$ & ext.\ $r$ & int.\ MAE & ext.\ MAE \\
+    \midrule
+    1  & $f^2g^1$ & $0.454$ & $0.450$ & $0.069$ & $0.071$ \\
+    1  & $f^2g^2$ & $0.486$ & $0.479$ & $0.066$ & $0.069$ \\
+    \addlinespace
+    2  & $f^2g^1$ & $0.558$ & $0.553$ & $0.063$ & $0.065$ \\
+    2  & $f^2g^2$ & $0.537$ & $0.537$ & $0.085$ & $0.085$ \\
+    \addlinespace
+    4  & $f^2g^1$ & $0.545$ & $0.537$ & $0.064$ & $0.065$ \\
+    4  & $f^2g^2$ & $0.547$ & $0.538$ & $0.065$ & $0.066$ \\
+    \addlinespace
+    8  & $f^2g^1$ & $0.669$ & $0.664$ & $0.059$ & $0.060$ \\
+    8  & $f^2g^2$ & $\mathbf{0.719}$ & $\mathbf{0.718}$ & $\mathbf{0.058}$ & $\mathbf{0.058}$ \\
+    \addlinespace
+    16 & $f^2g^1$ & $0.652$ & $0.645$ & $0.069$ & $0.070$ \\
+    16 & $f^2g^2$ & $0.671$ & $0.672$ & $0.070$ & $0.070$ \\
+    \bottomrule
+    \end{tabular}
+    \caption{Neural-operator family, RILE target, test split ($n=48$).
+    Internal $=$ vs.\ teacher rollup; external $=$ vs.\ published MPDS
+    RILE (normalized). Bold marks the grid optimum. The untrained
+    $f^1g^1$ rows (all $r = 0$, constant prediction $0.5$) are omitted.}
+    \label{tab:app-fno-leafgrid}
+\end{table}
+
+Three readings. First, the $\ell = 8$ peak with a genuine $f\to g$
+composition lift ($0.664 \to 0.718$ external) is the ladder's
+headline; the learned merge is doing work there, and the internal and
+external columns agree to within $0.005$ at every cell, which is the
+rollup-validity result of Section~\ref{sec:qsentence-labels} showing up
+as a consistency check. Second, the profile is non-monotone in $\ell$:
+$\ell = 1$ maximizes the number of supervised nodes (about $437$K) but
+also maximizes merge-chain depth for a trained operator, and at this
+fixed training budget the trade resolves at intermediate granularity.
+Third, at $\ell = 2$ the $g$-stage sits slightly below the $f$-stage
+($0.537$ vs.\ $0.553$), the one cell where training the merge does not
+pay; the MAE column shows the same cell as the grid's worst, so the
+effect is a training artifact at the deepest useful chain length rather
+than measurement noise.
+
+\subsection{LLM Prompt-Program Family Across Leaf Sizes}
+
+Table~\ref{tab:app-dspy-leafgrid} reports the DiffusionGemma-runtime
+LLM family on the same bundles (compact-vector target: all eight
+dimensions jointly), test split, $n = 48$.
+
+\begin{table}[htbp]
+    \centering
+    \begin{tabular}{rlccc}
+    \toprule
+    leaf $\ell$ & stage & int.\ $r$ & ext.\ $r$ & int.\ MAE \\
+    \midrule
+    2  & $f^2g^1$ & $1.000$ & $0.999$ & $0.000$ \\
+    2  & $f^2g^2$ & $0.012$ & $0.399$ & $0.091$ \\
+    \addlinespace
+    4  & $f^2g^1$ & $1.000$ & $0.999$ & $0.000$ \\
+    4  & $f^2g^2$ & $0.026$ & $0.026$ & $0.104$ \\
+    \addlinespace
+    8  & $f^2g^1$ & $1.000$ & $0.999$ & $0.000$ \\
+    8  & $f^2g^2$ & $0.011$ & $0.117$ & $0.112$ \\
+    \addlinespace
+    16 & $f^2g^1$ & $1.000$ & $0.999$ & $0.000$ \\
+    16 & $f^2g^2$ & $-0.095$ & $-0.351$ & $0.202$ \\
+    \bottomrule
+    \end{tabular}
+    \caption{LLM prompt-program family (DiffusionGemma runtime),
+    joint compact-vector target, test split ($n=48$). The $f$-stage
+    rows are a gold-label echo (see text); the $g$-stage rows show the
+    learned-merge collapse.}
+    \label{tab:app-dspy-leafgrid}
+\end{table}
+
+The two rows per leaf tell two separate cautionary stories, both
+methodological rather than substrate-specific. The $f$-stage internal
+$r = 1.000$ with MAE $0.000$ is exact: the readout prompt sees the gold
+leaf label in its trace and copies it. Any pipeline whose leaf stage
+can see its own supervision will produce this row, and it looks like a
+perfect model until the label is withheld. The $g$-stage collapse
+(internal $r \in [-0.095, 0.026]$ at $\ell \geq 4$) has the objective-
+mismatch diagnosis given in Section~\ref{sec:qsentence-results}: the
+prompt-search reward is a mean-over-dimensions accuracy, and
+predicting each dimension's corpus mean is a degenerate optimum worth
+about $0.90$ of that reward. Neither failure is an argument that a
+language model cannot implement the merge; both are arguments that the
+objective must price within-dimension fidelity (the local laws) and
+that leaf supervision must be hidden from the stage being evaluated.
+The in-framework fix exists: the $g$-stage objective accepts local-law
+reward terms through the ladder flags
+\texttt{--dspy-g-law-c1-reward-weight},
+\texttt{--dspy-g-law-c3a-reward-weight}, and
+\texttt{--dspy-g-law-c3b-reward-weight}, which price the local laws
+directly in the prompt-search reward (a within-dimension fidelity
+reward is the narrower alternative). All three weights default to
+zero, and no run has yet set them nonzero.
+\fixme{The law-weighted LLM-merge run is pending; the collapse rows
+should be re-evaluated against it before the LLM column is presented
+as a substrate limit.}
+
+\subsection{Expert-Dimension Grid and Winning Hyperparameters}
+
+The expert-dimension reconstruction of
+Section~\ref{sec:qsentence-results} uses the neural-operator family at
+$\ell = 16$ with LLM-generated span supervision at internal nodes,
+scored against the \citet{BenoitEtAl2025} expert means on the test
+split, three seeds per dimension. Hyperparameters were selected by an
+HPO sweep on the economic dimension only
+(best configuration: $384$ Fourier modes, hidden width $32$, two
+layers, head width $256$, $12$ epochs, learning rate
+$2.4\times10^{-3}$, loss weights leaf $1.57$ / merge $0.89$ / root
+$3.08$) and transferred to the other five dimensions with no
+per-dimension tuning.
+
+\begin{table}[htbp]
+    \centering
+    \begin{tabular}{lcccc}
+    \toprule
+    dimension & $g$-stage $r$ (mean $\pm$ sd) & $f$-stage $r$ & $n$ & composition \\
+    \midrule
+    social           & $\mathbf{0.715 \pm 0.024}$ & $0.575$ & $50$ & lift \\
+    economic         & $0.661 \pm 0.045$ & $0.633$ & $50$ & flat \\
+    environment      & $0.642 \pm 0.069$ & $0.658$ & $39$ & flat \\
+    immigration      & $0.438 \pm 0.094$ & $0.421$ & $49$ & flat \\
+    decentralization & $0.244 \pm 0.075$ & $0.277$ & $50$ & none \\
+    EU               & $0.232 \pm 0.054$ & $0.215$ & $49$ & flat \\
+    \bottomrule
+    \end{tabular}
+    \caption{Neural-operator family vs.\ Benoit expert-survey means,
+    $\ell = 16$, test split, three seeds per dimension. The
+    full-document frontier-LLM read sits near $r = 0.86$ on the same
+    task. The composition column marks whether the learned merge
+    improves on the $f$-stage.}
+    \label{tab:app-benoit-6dim-fno}
+\end{table}
+
+The ordering in Table~\ref{tab:app-benoit-6dim-fno} matches the
+CMP-code construct ceiling of Section~\ref{sec:qsentence-labels}
+(cross-validated $R^2$ from code counts: decentralization $0.03$, EU
+$0.18$, up to economic $\sim 0.40$), with one caveat each way:
+immigration's mean is soft (seed spread $0.31$--$0.52$), and
+decentralization has full expert coverage yet still floors, so the
+floor is signal, not sample size. Per-dimension HPO studies exist for
+the four weaker dimensions (about $50$ Optuna trials each; one
+\texttt{best.json} per dimension under
+\texttt{outputs/hpo\_*\_chunkfno/}), with best validation objectives of
+$0.554$ for immigration, $0.615$ for environment, $0.540$ for EU, and
+$0.679$ for decentralization; social, already the strongest dimension
+under the transferred recipe, has no per-dimension study. These are
+validation objectives, not test results, and the decentralization gap
+($0.679$ validation against the $0.244$ transferred-recipe test $r$) is
+wide enough that validation overfitting is plausible.
+\fixme{The per-dimension-tuned three-seed test reconstruction is
+pending; Table~\ref{tab:app-benoit-6dim-fno} reports the transferred
+economic recipe until it lands.}

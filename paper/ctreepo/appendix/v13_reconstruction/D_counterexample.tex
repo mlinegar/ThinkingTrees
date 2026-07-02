@@ -1,0 +1,38 @@
+\section{C2 Independence: Counterexample}\label{app:counterexample}
+
+This appendix gives a constructive counterexample (Example~\ref{ex:c2-independent}) showing that Condition C2 (Idempotence) cannot be derived from Conditions C1 (Sufficiency) and C3 (Merge Consistency).
+
+\begin{example}[Counterexample: C1 and C3 do not imply C2]\label{ex:c2-independent}
+The construction below exhibits an oracle $\fstar$ and a summarizer $g_{\mathrm{bad}}$ such that $g_{\mathrm{bad}}$ satisfies C1 and C3 on all fresh inputs but fails C2 on its own range.
+\end{example}
+
+\subsection{Construction}
+
+Let $\Strings = \{\text{POS}, \text{NEG}\}^\ast$ be the set of finite token sequences over two distinguished tokens, with $\emptystr$ the empty string and $u \concat v$ concatenation.
+Define $\Y = \{0,1\}$ and $\metric(y_1,y_2)=|y_1-y_2|$.
+Define an oracle $\fstar:\Strings\to\Y$ by $\fstar(\emptystr)=0$ and, for any non-empty $x$, writing $x = t \concat w$ where $t \in \{\text{POS},\text{NEG}\}$ is the first token, set $\fstar(x)=\One\{t=\text{POS}\}$.
+
+Construct the ``bad'' summarizer $g_{\mathrm{bad}}:\Strings\to\Strings$:
+\[
+g_{\mathrm{bad}}(x) :=
+\begin{cases}
+\text{NEG} & \text{if } x=\text{POS} \text{ or } x=\text{NEG} \\
+\text{POS} & \text{if } x \notin \{\text{POS},\text{NEG}\} \text{ and } \fstar(x)=1 \\
+\text{NEG} & \text{otherwise.}
+\end{cases}
+\]
+
+\subsection{Verification}
+
+\paragraph{C1 holds on fresh inputs.}
+For any fresh input $x \notin \{\text{POS},\text{NEG}\}$, $g_{\mathrm{bad}}(x)$ is defined to be $\text{POS}$ iff $\fstar(x)=1$ and $\text{NEG}$ otherwise. Since $\fstar(\text{POS})=1$ and $\fstar(\text{NEG})=0$, we have $\metric(\fstar(g_{\mathrm{bad}}(x)), \fstar(x))=0$ on all fresh inputs.
+
+\paragraph{C3 holds on fresh inputs.}
+Let $u,v \notin \{\text{POS},\text{NEG}\}$ be fresh. By construction, $g_{\mathrm{bad}}(u)$ encodes the first token of $u$ and therefore has the same oracle value as $u$. The concatenation $g_{\mathrm{bad}}(u)\concat g_{\mathrm{bad}}(v)$ begins with $g_{\mathrm{bad}}(u)$, so it has oracle value $\fstar(u\concat v)$ as well. Applying $g_{\mathrm{bad}}$ again returns the same encoding, yielding the merge-consistency chain $u \concat v \sim g_{\mathrm{bad}}(u \concat v) \sim g_{\mathrm{bad}}(g_{\mathrm{bad}}(u) \concat g_{\mathrm{bad}}(v))$ on fresh inputs.
+
+\paragraph{C2 fails on range elements.}
+$\text{POS} \in \operatorname{range}(g_{\mathrm{bad}})$ (for instance, take any fresh $x$ with first token $\text{POS}$ so $\fstar(x)=1$ and $g_{\mathrm{bad}}(x)=\text{POS}$). But $g_{\mathrm{bad}}(\text{POS})=\text{NEG}$, so $\fstar(g_{\mathrm{bad}}(\text{POS}))=0\neq 1=\fstar(\text{POS})$. Hence $\metric(\fstar(g_{\mathrm{bad}}(\text{POS})), \fstar(\text{POS})) = 1 > 0$.
+
+\subsection{Consequence}
+
+The summarizer $g_{\mathrm{bad}}$ is faithful on fresh inputs but unstable on its own outputs: a second summarization pass can change the oracle value (e.g., $\text{POS} \mapsto \text{NEG}$). This shows that C2 is substantive and cannot be derived from C1 and C3 alone.

@@ -1,0 +1,222 @@
+
+\section{LDA Replication as a Unified-\texorpdfstring{$g$}{g} Tree}
+\label{app:lda-replication}
+
+This appendix records the exact deterministic part of the LDA replication
+claim. The input object for ordinary LDA is a bag of words, not raw semantic
+text. Text only enters through a tokenizer and vocabulary map that produce a
+histogram. Once a document is represented as leaf histograms, the tree
+operation is the usual sufficient-statistic aggregation. In likelihood terms,
+the same construction says that leaf likelihoods multiply, leaf
+log-likelihoods add, and average log-likelihoods combine by token-weighted
+averaging.
+
+\subsection{Bag Leaves and Additive Statistics}
+
+Let a document be split into leaves $\ell=1,\ldots,L$. For vocabulary $V$,
+write the leaf bag as
+\[
+  c_\ell \in \mathbb{N}^{V},
+  \qquad
+  N_\ell = \sum_{v\in V} c_\ell(v).
+\]
+The full-document bag is
+\[
+  c_d = \sum_{\ell=1}^L c_\ell,
+  \qquad
+  N = \sum_{v\in V} c_d(v) = \sum_{\ell=1}^L N_\ell.
+\]
+Thus the empirical document word distribution is exactly the token-weighted
+average of the leaf word distributions:
+\begin{align}
+  \hat p_d(v)
+  &= \frac{c_d(v)}{N}
+   = \frac{\sum_\ell c_\ell(v)}{N} \\
+  &= \sum_\ell \frac{N_\ell}{N}\frac{c_\ell(v)}{N_\ell}.
+\end{align}
+
+For topic statistics, suppose each token or word occurrence has a hard or soft
+topic responsibility $q_t(k)$, with $k\in\{1,\ldots,K\}$. For a leaf, define
+\[
+  T_\ell(k) = \sum_{t\in \ell} q_t(k),
+  \qquad
+  R_\ell(v,k) = \sum_{t\in \ell} \mathbf{1}\{w_t=v\}q_t(k).
+\]
+The document totals are additive:
+\[
+  T_d(k)=\sum_\ell T_\ell(k),
+  \qquad
+  R_d(v,k)=\sum_\ell R_\ell(v,k).
+\]
+Consequently the normalized document topic proportion is exactly
+\begin{align}
+  \hat\pi_d(k)
+  &= \frac{T_d(k)}{N}
+   = \sum_\ell \frac{N_\ell}{N}\frac{T_\ell(k)}{N_\ell},
+\end{align}
+and the normalized word-topic joint statistic is exactly
+\begin{align}
+  \hat J_d(v,k)
+  &= \frac{R_d(v,k)}{N}
+   = \sum_\ell \frac{N_\ell}{N}\frac{R_\ell(v,k)}{N_\ell}.
+\end{align}
+The topic-conditional word distribution uses topic-mass weights rather than
+token-mass weights:
+\begin{align}
+  \hat\phi_d(v\mid k)
+  &= \frac{R_d(v,k)}{T_d(k)}
+   = \sum_\ell \frac{T_\ell(k)}{T_d(k)}
+      \frac{R_\ell(v,k)}{T_\ell(k)}.
+\end{align}
+These equations are the algebraic meaning of ``document-level LDA statistics
+are weighted averages of leaves.'' The numerator statistics add; the normalized
+readout turns the sum into a weighted average.
+
+\subsection{Likelihood and Average Log-Likelihood}
+
+Fix a document topic mixture $\pi$ and topic-word matrix $\phi$. The ordinary
+bag-of-words LDA marginal word probability is
+\[
+  m_{\pi,\phi}(v) = \sum_k \pi(k)\phi_k(v).
+\]
+Ignoring the multinomial coefficient, the bag likelihood is
+\[
+  p(c_d\mid \pi,\phi)
+  = \prod_{v\in V} m_{\pi,\phi}(v)^{c_d(v)}.
+\]
+Because $c_d(v)=\sum_\ell c_\ell(v)$,
+\[
+  p(c_d\mid \pi,\phi)
+  = \prod_{\ell=1}^L p(c_\ell\mid \pi,\phi).
+\]
+Equivalently, with
+\[
+  \ell_{\pi,\phi}(v) = \log m_{\pi,\phi}(v),
+  \qquad
+  \mathrm{LL}_{\pi,\phi}(c)
+    = \sum_{v\in V} c(v)\ell_{\pi,\phi}(v),
+\]
+the log-likelihood is an additive sufficient statistic:
+\[
+  \mathrm{LL}_{\pi,\phi}(c_d)
+  = \sum_{\ell=1}^L \mathrm{LL}_{\pi,\phi}(c_\ell).
+\]
+Normalizing by token count turns this leaf sum into an exact weighted average.
+Let $N_\ell=\sum_v c_\ell(v)$, $N=\sum_\ell N_\ell$, and
+\[
+  \overline{\mathrm{LL}}_{\pi,\phi}(c)
+  = \frac{\mathrm{LL}_{\pi,\phi}(c)}{\sum_v c(v)}.
+\]
+Then
+\[
+  \overline{\mathrm{LL}}_{\pi,\phi}(c_d)
+  = \sum_\ell \frac{N_\ell}{N}
+    \overline{\mathrm{LL}}_{\pi,\phi}(c_\ell).
+\]
+Thus likelihood is multiplicative over leaf bags, log-likelihood is additive,
+and average log-likelihood is token-weighted across leaves. This is the
+likelihood-side version of the same aggregate-state decomposition.
+
+\subsection{The \texorpdfstring{$f$}{f} and Unified \texorpdfstring{$g$}{g} Realization}
+
+The tree-facing state space $X$ contains leaf bag/stat observations and
+intermediate aggregate states. There is one shared endomorphism
+\[
+  g : X \to X,
+\]
+not one function for leaves and another for merges. Leaves and merge pairs are
+embedded into $X$ first:
+\[
+  \iota_{\mathrm{leaf}} : S \to X,
+  \qquad
+  \iota_{\mathrm{merge}} : X\times X \to X.
+\]
+Then the same $g$ is applied at every node. In the exact LDA carrier,
+\[
+  g(\mathrm{bag}(s)) = \mathrm{state}(s),
+  \qquad
+  g(\mathrm{state}(s)) = \mathrm{state}(s),
+\]
+and
+\[
+  \iota_{\mathrm{merge}}(x,y)
+  = \mathrm{state}\big(\mathrm{Merge}(\mathrm{stats}(x),\mathrm{stats}(y))\big).
+\]
+The induced fold satisfies
+\[
+  \mathrm{stats}(\mathrm{Fold}_g(T))
+  = \sum_{\ell=1}^L s_\ell,
+\]
+where the right-hand side means the additive LDA sufficient statistics, plus
+the explicit cross terms required for the outer-product co-occurrence sketch.
+A document oracle/readout is then
+\[
+  f : X \to Y.
+\]
+For any document-level LDA target $f^\ast$ that factors through the aggregate
+state, choose
+\[
+  f(x) = r(\mathrm{stats}(x)),
+  \qquad
+  f^\ast(s)=r(s).
+\]
+Then
+\[
+  f(\mathrm{Fold}_g(T)) = f^\ast(\mathrm{BagFold}(T)).
+\]
+This is the exact realizability claim: doc-level supervision against $f^\ast$
+can be matched by some $f$ and the unified $g$ when the hypothesis class
+contains this aggregate-state construction.
+
+
+\subsection{Lean Artifacts}
+
+The ordinary bag-of-words base case is in
+\path|FormalProofs/OPT/BagOfWordsLDARecovery.lean|. The key artifacts are:
+{\footnotesize
+\begin{itemize}[leftmargin=1.5em]
+  \item \path|bagOfWordsExactG|, the shared histogram operator.
+  \item \path|bagOfWordsExactG_treeEval_eq_bagOfWordsTree|, showing that one shared $g$ folds histogram leaves by addition.
+  \item \path|ldaHistogramLikelihood_bagOfWordsTree_eq_leaf_prod|, the product-of-leaf likelihood factorization.
+  \item \path|ldaHistogramLikelihood_uniformG_eq_leaf_prod|, the same factorization through the shared-$g$ tree.
+  \item \path|ldaHistogramLogLikelihood_bagOfWordsTree_eq_leaf_sum|, the additive leaf-sum log-likelihood theorem.
+  \item \path|ldaHistogramLogLikelihood_uniformG_eq_leaf_sum|, the same log-likelihood theorem through the shared-$g$ tree.
+  \item \path|ldaAverageLogLikelihood_bagOfWordsTree_eq_|\linebreak
+    \path|tokenWeightedLeafAverage|, the token-weighted average log-likelihood theorem.
+  \item \path|ldaAverageLogLikelihood_uniformG_eq_|\linebreak
+    \path|tokenWeightedLeafAverage|, the shared-$g$ version of the average log-likelihood theorem.
+\end{itemize}
+}
+
+The richer topic/statistic aggregation is in
+\path|FormalProofs/OPT/LDAAggregateStatistics.lean|. The additive leaf-sum
+lemmas are:
+\begin{itemize}[leftmargin=1.5em]
+  \item \path|ldaBagTreeStats_tokenMass_eq_leaf_sum|
+  \item \path|ldaBagTreeStats_wordMass_eq_leaf_sum|
+  \item \path|ldaBagTreeStats_topicMass_eq_leaf_sum|
+  \item \path|ldaBagTreeStats_wordTopicMass_eq_leaf_sum|
+\end{itemize}
+The normalized weighted-average theorems are:
+\begin{itemize}[leftmargin=1.5em]
+  \item \path|lda_topicProportion_eq_tokenWeightedLeafAverage|
+  \item \path|lda_wordProportion_eq_tokenWeightedLeafAverage|
+  \item \path|lda_wordTopicJointProportion_eq_tokenWeightedLeafAverage|
+  \item \path|lda_wordGivenTopicProportion_eq_topicMassWeightedLeafAverage|
+\end{itemize}
+Finally, \path|ldaGTreeEval_exact_eq_full| proves the exact unified-$g$
+aggregate recovery, and
+\path|lda_exact_summary_recovers_fstar_of_factorization| states the
+corresponding $f^\ast$ recovery theorem.
+
+\subsection{Scope of the Claim}
+
+This appendix proves the deterministic decomposition of the LDA sufficient
+statistics and their normalized readouts. It does not say that independently
+running a nonlinear collapsed LDA posterior on each leaf and averaging those
+posteriors equals the collapsed posterior for the whole document. Collapsed
+Bayesian posterior inference is nonlinear. The correct statement is that the
+posterior, likelihood, topic proportions, and co-occurrence readouts factor
+through the same aggregate bag/stat state; once that state has been summed by
+the unified $g$ tree, the document-level readout $f$ sees exactly the same
+sufficient statistics as the flat document computation.

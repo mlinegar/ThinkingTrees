@@ -1,0 +1,129 @@
+\section{The \texttt{treepo} Software}\label{app:treepo-software}
+
+The experiments in Section~\ref{sec:manifesto-deepdive} and the
+controlled validations run on one package, \texttt{treepo}. Its design
+goal is the operator interface of Section~\ref{sec:framework} made
+executable: the framework's objects ($f$, $g$, trees, local-law
+probes, audits) are fixed by the package, and everything
+setting-specific lives behind a small family contract. The same
+harness therefore runs an LLM prompt program, a Fourier neural
+operator, and a classical sketch without changing the surrounding
+loop, which is what makes the substrate comparisons in the main text
+comparisons rather than reconciliations.
+
+\subsection{The Family Contract and \texttt{treepo.fit}}
+
+The public entry point is \texttt{treepo.fit}, which takes a
+declarative spec (family, data, schedule) and runs the alternating
+$f/g$ ladder of Section~\ref{sec:rile-fg-ladder} for any
+\emph{family}: an object implementing the four-method contract
+\begin{lstlisting}[language=Python]
+class FamilyRuntime(Protocol):
+    name: str
+    def train_f(self, *, f_init, g, traces, output_dir, iteration): ...
+    def train_g(self, *, g_init, f, traces, output_dir, iteration): ...
+    def score_roots_with_f(self, *, f, g, trees): ...
+    def validate_artifact(self, *, kind, artifact): ...
+\end{lstlisting}
+A family supplies its own parameterization of the summarizer $g$ and
+readout $f$; the surrounding loop (alternation schedule, node
+sampling, metrics, audit logging) is family-agnostic. The two families
+used in Section~\ref{sec:qsentence-results} implement the contract at
+opposite ends of the parameterization spectrum: \texttt{dspy} trains
+prompt programs over a fixed open-weight checkpoint by prompt search
+against node-level rewards, with text as the inter-node state;
+\texttt{fno} embeds leaves once with a small embedding model and
+trains Fourier neural operators by gradient descent on node-level
+losses, with a learned vector as the state.
+
+\subsection{A Minimal Vignette}
+
+A minimal run is three calls: build the trees, declare the backend,
+fit.
+\begin{lstlisting}[language=Python]
+from treepo import fit
+from treepo.tasks.manifesto import (
+    make_manifesto_replication_trees, manifesto_prompt_template)
+
+train = make_manifesto_replication_trees(
+    split="train", leaf_unit_count=8, doc_unit_kind="qsentence")
+evaltrees = make_manifesto_replication_trees(
+    split="test", leaf_unit_count=8, doc_unit_kind="qsentence")
+
+result = fit({
+    "family": "dspy",              # or "fno"
+    "train_data": train,
+    "eval_data": evaltrees,
+    "backend_config": {
+        "model": "openai/nvidia/Gemma-4-31B-IT-NVFP4",
+        "prompt_template": manifesto_prompt_template(),
+    },
+    "axis": {"axis_kind": "leaf_unit_count", "axis_value": 8,
+             "max_iterations": 2},
+})
+print(result.status, result.metrics["internal_f_mae"])
+\end{lstlisting}
+A complete end-to-end walkthrough (tree construction from raw
+platforms, sampling artifacts, fitting, preference-pair export) ships
+with the package as
+\texttt{examples/methods/run\_manifesto\_end\_to\_end.py}.
+
+\subsection{Research Sweeps}
+
+The research sweeps behind the quasi-sentence tables drive the same
+machinery through a CLI that exposes the leaf-size axis and the family
+switch; the two substrate legs of the ladder differ in a single flag:
+\begin{lstlisting}[language=bash]
+# LLM prompt-program leg
+python scripts/run_manifesto_qsentence_dspy_ladder.py \
+  --family dspy --leaf-qsentences "1,2,4,8,16" \
+  --max-iterations 2 --target-dimensions all \
+  --dspy-optimizer gepa \
+  --dspy-model "openai/nvidia/Gemma-4-31B-IT-NVFP4"
+
+# neural-operator leg: same bundles, same splits
+python scripts/run_manifesto_qsentence_dspy_ladder.py \
+  --family fno --leaf-qsentences "1,2,4,8,16" \
+  --embedding-model google/embeddinggemma-300m \
+  --fno-target-dimension rile --fno-epochs 8
+\end{lstlisting}
+
+\subsection{Artifact Schema}
+
+Every run leaves behind the same artifact layout regardless of family:
+per-stage grid summaries (one row per leaf-size--stage cell, with
+internal and external metrics), per-node prediction records (one JSON
+line per tree node per evaluation pass, carrying the node's predicted
+and gold states), and iteration histories (the full stage trajectory
+with the metrics reported in the ladder tables). Cross-family
+comparisons such as Table~\ref{tab:qsentence-perdim} are computed by
+joining these artifacts on tree and node identifiers; no
+family-specific parsing is involved. The saved per-node records are
+also what the audit of Section~\ref{sec:estimation} consumes: audit
+sampling operates on logged nodes and propensities, so a completed
+training run is auditable after the fact without re-running the model.
+
+\subsection{The \texttt{treepo-bench} Classical-Sketch Suite}
+
+The classical validations run through the same \texttt{fit()}
+interface via the companion \texttt{treepo-bench classical-sketches}
+suite. Beyond the HyperLogLog parity experiment of
+Appendix~\ref{sec:hll-parity}, the suite repeats the tree-reduction
+comparison for official Apache DataSketches distinct-counting,
+frequency, quantile, and set-operation sketches plus Tuple/VarOpt
+sampling checks, reporting memory/error curves over capacities and
+leaf counts, merge-schedule spread, bound coverage, and distance to
+the best official sketch floor. Because the oracle $\fstar$ is a
+constructor argument, the same pipeline swaps between an analytic
+target (exact cardinality) and an official sketch query function
+(the HLL scoring head), which is how the parity and learned rows of
+Appendix~\ref{app:classical-parity} are generated from one code path.
+
+\subsection{Reproduction}
+
+Paper assets regenerate via \texttt{paper/ctreepo/regen\_assets.sh};
+build instructions for the paper and the Lean formalization are in
+\texttt{paper/ctreepo/REPRODUCIBILITY.md}. Each results table in
+Appendices~\ref{app:benoit-replication}--\ref{app:gold-seeding} names
+the run directory that produced it, and each run directory contains
+the exact command line in its job log.
