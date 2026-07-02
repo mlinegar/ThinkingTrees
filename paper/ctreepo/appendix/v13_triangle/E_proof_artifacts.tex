@@ -136,8 +136,31 @@ Scene-register changepoint sketch (Section~\ref{sec:markov-interlude}) &
 \texttt{OPT/MarkovCountSketchExample.lean} \\
 
 Proposition~\ref{prop:m_lt_k} (appendix-only sketch boundary) &
-No dedicated Lean theorem; finite counterexample used as a paper-only mechanism diagnostic &
-\texttt{paper/ctreepo/appendix/B\_proofs.tex} \\
+\texttt{paper\_m\_lt\_k\_sketch\_state\_collision} (identical top-$m$ state,
+different target values, paper witnesses $r^{-}/r^{+}$ verbatim),
+\texttt{paper\_m\_lt\_k\_no\_estimator} (no estimator on the sketch state
+computes $\tau_k$); model surface \texttt{onesCount},
+\texttt{thresholdTarget}, \texttt{topMState}, \texttt{prefixOnes} &
+\texttt{OPT/PaperSupportingLemmas.lean} \\
+
+Appendix supporting lemmas~\ref{lem:sigmoid-lip}, \ref{lem:neglogsig-lip},
+\ref{lem:dpo-lip}, \ref{lem:dpo-oracle-meas}, \ref{lem:zero-dist-support} &
+\texttt{paper\_sigmoid\_lipschitz}, \texttt{paper\_sigmoid\_abs\_sub\_le},
+\texttt{paper\_neg\_log\_sigmoid\_lipschitz},
+\texttt{paper\_neg\_log\_sigmoid\_abs\_sub\_le},
+\texttt{paper\_neg\_log\_sigmoid\_comp\_lipschitz} (abstract two-score form),
+\texttt{paper\_dpo\_loss\_pointwise\_lipschitz},
+\texttt{paper\_dpo\_loss\_oracle\_measurable},
+\nolinkurl{paper_expected_dpo_loss_factors_through_oracle},
+\nolinkurl{paper_zero_on_support_of_Exp_eq_zero},
+\texttt{paper\_zero\_dist\_support}, \texttt{paper\_zero\_dist\_support\_ZR};
+paper-facing re-exports of \texttt{sigmoid\_lipschitz},
+\texttt{neg\_log\_sigmoid\_lipschitz}, \texttt{dpo\_loss\_pointwise\_lipschitz},
+\texttt{dpo\_loss\_oracle\_measurable},
+\nolinkurl{dist_zero_on_support_of_Exp_zero} &
+\texttt{OPT/PaperSupportingLemmas.lean}; backing proofs in
+\texttt{OPT/PreferenceBounds.lean}, \texttt{OPT/PreferenceLearning.lean},
+\texttt{OPT/TheoremBackingConsequences.lean} \\
 
 Proposition~\ref{prop:neural-operator-bridge} &
 \texttt{DiscretizationInvariantFamily}, \texttt{UniformOperatorApproxOnCompact}, \texttt{NeuralOperatorUniversalApproxUniform}, \texttt{approxLocalLawsBundle\_of\_uniformApproxExactTheoremBacked}, \texttt{approxTheoremBacked\_of\_uniformApproxExactTheoremBacked} &
