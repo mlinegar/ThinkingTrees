@@ -12622,7 +12622,16 @@ def _build_supervision_recovery_phase(
         raise ValueError(
             f"unknown supervision recovery structural grid: {structural_grid!r}"
         ) from exc
-    structural_cell = _supervision_recovery_structural_cell_name(args)
+    from src.ctreepo.sim.core.markov_hazard_panels import (
+        canonicalize_structural_v2_cell_id,
+    )
+
+    structural_cell = (
+        canonicalize_structural_v2_cell_id(
+            _supervision_recovery_structural_cell_name(args)
+        )
+        or _supervision_recovery_structural_cell_name(args)
+    )
     if structural_cell not in valid_structural_cells:
         raise ValueError(
             f"unknown supervision recovery structural cell: {structural_cell!r}; "
