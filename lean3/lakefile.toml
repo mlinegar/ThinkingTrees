@@ -1,7 +1,7 @@
 name = "lean3"
 version = "0.1.0"
 keywords = ["math"]
-defaultTargets = ["FormalProofs", "FormalProofsEconometrics"]
+defaultTargets = ["FormalProofs", "FormalProofsEconometrics", "FormalProofsEconometricsSemiparametric"]
 
 [leanOptions]
 pp.unicode.fun = true # pretty-prints `fun a ↦ b`
@@ -36,3 +36,11 @@ name = "FormalProofs"
 [[lean_lib]]
 name = "FormalProofsEconometrics"
 roots = ["FormalProofs.Econometrics"]
+
+# AsymptoticOLS+dependents and Overidentification use the
+# FormalProbability.Econometrics.* namespace route, which clashes with the
+# local Econometrics.Core names in a shared environment; they get their own
+# root so both halves stay built.
+[[lean_lib]]
+name = "FormalProofsEconometricsSemiparametric"
+roots = ["FormalProofs.EconometricsSemiparametric"]

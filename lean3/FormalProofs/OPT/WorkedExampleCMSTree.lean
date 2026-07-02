@@ -87,7 +87,6 @@ theorem merge_counter_bucket0 :
 theorem merge_counter_bucket1 :
     cmsMerged.counters row0 bucket1 = 2 := by
   simp [cmsMerged, cmsLeafA, cmsLeafB, merge, bucket0, bucket1, row0]
-  decide
 
 -- This is EXACT: CMS(A ∪ B) = CMS(A) + CMS(B). No approximation error from merge.
 -- This is C3 in its purest form: the merge algebra is perfectly compositional.
@@ -268,24 +267,24 @@ theorem lossy_tree_4leaf_without_reencode :
 -- Clean comparison: exact operator (identity) vs lossy operator
 -- Both have exact merge. The difference is ONLY in the decode.
 
--- Exact operator: encode=id, merge=add, decode=id
--- decode(merge(merge(3,2), merge(1,4))) = 10 ✓
+-- Exact operator: encode=id, merge=monoid op (multiplication on `Nat`), decode=id
+-- decode(merge(merge(3,2), merge(1,4))) = 3·2·(1·4) = 24 ✓
 theorem exact_tree_correct :
     let op := identitySketchOperator (Strings := Nat)
     op.decode (op.merge (op.merge (op.encode 3) (op.encode 2))
-                        (op.merge (op.encode 1) (op.encode 4))) = 10 := by
+                        (op.merge (op.encode 1) (op.encode 4))) = 24 := by
   simp [identitySketchOperator]
 
 -- Re-encoding under exact operator is harmless (C2 holds)
 -- decode(merge(encode(decode(merge(3,2))), encode(decode(merge(1,4)))))
--- = merge(merge(3,2), merge(1,4)) = 10 ✓
+-- = merge(merge(3,2), merge(1,4)) = 24 ✓
 theorem exact_tree_with_reencode_still_correct :
     let op := identitySketchOperator (Strings := Nat)
     let ab := op.merge (op.encode 3) (op.encode 2)
     let cd := op.merge (op.encode 1) (op.encode 4)
     let ab_re := op.encode (op.decode ab)
     let cd_re := op.encode (op.decode cd)
-    op.decode (op.merge ab_re cd_re) = 10 := by
+    op.decode (op.merge ab_re cd_re) = 24 := by
   simp [identitySketchOperator]
 
 /-!

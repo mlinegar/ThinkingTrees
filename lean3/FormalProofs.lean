@@ -124,6 +124,7 @@ import FormalProofs.OPT.PreferenceBounds
 import FormalProofs.OPT.TrainingPipeline
 import FormalProofs.OPT.CutBudgetGuidance
 import FormalProofs.OPT.CounterexampleExistence
+import FormalProofs.OPT.PaperSupportingLemmas
 import FormalProofs.OPT.AuditBounds
 import FormalProofs.OPT.AuditSizes
 import FormalProofs.OPT.SerflingAudit

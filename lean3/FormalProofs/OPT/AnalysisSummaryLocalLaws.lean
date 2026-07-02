@@ -68,13 +68,12 @@ theorem affineQuadraticUtility_error_bound
         (linearUtility θ πHat - linearUtility θ πTrue)
           + lam * (quadraticUtility W πHat - quadraticUtility W πTrue) := by
     simp [affineQuadraticUtility, sub_eq_add_neg, mul_add, add_assoc, add_left_comm, add_comm]
-    ring
   rw [hsplit]
   calc
     |(linearUtility θ πHat - linearUtility θ πTrue) + lam * (quadraticUtility W πHat - quadraticUtility W πTrue)|
         ≤ |linearUtility θ πHat - linearUtility θ πTrue|
           + |lam * (quadraticUtility W πHat - quadraticUtility W πTrue)| := by
-            exact abs_add _ _
+            exact abs_add_le _ _
     _ = |linearUtility θ πHat - linearUtility θ πTrue|
           + |lam| * |quadraticUtility W πHat - quadraticUtility W πTrue| := by
             rw [abs_mul]

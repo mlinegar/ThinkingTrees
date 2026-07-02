@@ -36,16 +36,15 @@ def analysisMixture (ρ : α → ι → ℝ) (π : ι → κ → ℝ) : α → �
   fun a => weightedMean (ρ a) π
 
 /-- Exact alignment overlap: each analysis section selects one latent section. -/
-def identityOverlap (e : α ≃ ι) : α → ι → ℝ :=
+def identityOverlap [DecidableEq ι] (e : α ≃ ι) : α → ι → ℝ :=
   fun a b => if e a = b then 1 else 0
 
-theorem analysisMixture_identityOverlap
+theorem analysisMixture_identityOverlap [DecidableEq ι]
     (e : α ≃ ι) (π : ι → κ → ℝ) :
     analysisMixture (identityOverlap e) π = fun a => π (e a) := by
-  classical
   funext a
   funext k
-  simp [analysisMixture, identityOverlap, weightedMean]
+  simp [analysisMixture, identityOverlap, weightedMean, ite_mul]
 
 /-- The analysis-partition gap is still carried entirely by the quadratic term. -/
 theorem analysis_gap_eq_quadratic_gap
@@ -69,7 +68,7 @@ theorem analysis_gap_zero_lambda
       (ω := ω) (π := analysisMixture ρ π) (θ := θ) (W := W)
 
 /-- Under exact alignment, the analysis-partition target equals the latent target. -/
-theorem aligned_partition_zero_gap
+theorem aligned_partition_zero_gap [DecidableEq ι]
     (e : α ≃ ι) (ω : α → ℝ) (π : ι → κ → ℝ) (θ : κ → ℝ) (W : κ → κ → ℝ) (lam : ℝ) :
     (∑ a : α, ω a * affineQuadraticUtility θ W lam (analysisMixture (identityOverlap e) π a))
       =
