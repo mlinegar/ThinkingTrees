@@ -1,22 +1,22 @@
 # ThinkingTrees: Oracle-Preserving Summarization (OPS)
 
+> **Note:** ThinkingTrees is the earlier research codebase for C-TreePO, the
+> method in *What Makes a Good Summary? Learning Sufficient Representations at
+> Scale* ([paper](https://mlinegar.github.io/research.html)). It holds the
+> experiment pipelines, Lean proofs, and paper drafts (some under earlier
+> working titles). The packaged, documented library is
+> [treepo](https://github.com/mlinegar/treepo); start there to use the method.
+> Author: Mitchell Linegar ([mlinegar.github.io](https://mlinegar.github.io)).
+
 Hierarchical summarization with verifiable information preservation guarantees. Build recursive summarization trees that maintain task-critical information through probabilistic auditing and DSPy-based optimization.
 
 ## ThinkingTrees And `treepo`
 
-This repository now exposes two public faces:
-
 - `ThinkingTrees`: the full platform for long-document OPS pipelines, task plugins, training, and deployment.
-- `treepo`: a focused PyTorch package under [`treepo/`](./treepo) for method-level simulations and reports.
+- `treepo`: the canonical C-TreePO core (local laws, objectives, sampling, and the HyperLogLog/sketch helpers). It used to be vendored under `treepo/` here and now lives in its own repository, [mlinegar/treepo](https://github.com/mlinegar/treepo); see its README for install and benchmark commands.
 
-The `treepo` package is the canonical home for the new HyperLogLog streaming/cardinality work. Typical commands:
-
-```bash
-cd treepo
-pip install -e ".[torch]"
-treepo-bench suite cardinality-paper --out-root ../outputs/cardinality --jobs 4
-treepo-bench report cardinality --output-root ../outputs/cardinality
-```
+ThinkingTrees depends on `treepo`: `pyproject.toml` resolves it from a sibling
+checkout at `../treepo`, so clone both repositories side by side.
 
 ## Supported Runtime-Eval Quick Start
 
@@ -120,8 +120,7 @@ XLA_PYTHON_CLIENT_PREALLOCATE=false ctreepo sim run contextual-sbijax \
   --output-root outputs/contextual_sbijax_exact_zero_smoke
 ```
 
-Use `ctreepo-contextual-sbijax` as the equivalent standalone console script
-after reinstalling editable entrypoints. See
+See
 [`docs/contextual_sbijax_walkthrough.md`](docs/contextual_sbijax_walkthrough.md)
 and [`docs/markov_hazard_panels.md`](docs/markov_hazard_panels.md) for the
 exact-sketch oracle checks and leaf-length grid commands. Paper-facing
@@ -137,8 +136,9 @@ post-resolution status page is
 [`docs/markov_sim_status.md`](docs/markov_sim_status.md). The post-resolution
 ablation handoff is
 [`docs/markov_contextual_sufficiency_ablation_handoff_2026-05-05.md`](docs/markov_contextual_sufficiency_ablation_handoff_2026-05-05.md);
-the full 93-row table report is
-[`outputs/markov_contextual_ablation_grid_report_20260505.md`](outputs/markov_contextual_ablation_grid_report_20260505.md).
+the full table report is written locally to
+`outputs/markov_contextual_ablation_grid_report_20260505.md` (`outputs/` is not
+tracked in git).
 Those ablations show that local-law / Markov-sketch supervision is still the
 sufficiency selector: NASSS helps as a low-weight auxiliary, learned merge and
 learned decoder work inside the local-law lane, and the standalone
@@ -380,7 +380,8 @@ class Node:
 Tasks are composed from generic building blocks, not hardcoded:
 
 ```python
-from src.tasks.base import ScoringTask, ScaleDefinition
+from src.tasks.base import ScaleDefinition
+from src.tasks.scoring import ScoringTask
 from src.core import ScaleScorer, GenericSummarizer
 
 # Define your scale
@@ -403,7 +404,7 @@ task = ScoringTask(
 Example using RILE building blocks from `src/tasks/manifesto/`:
 
 ```python
-from src.tasks.base import ScoringTask
+from src.tasks.scoring import ScoringTask
 from src.tasks.manifesto import (
     RILE_SCALE,                  # ScaleDefinition(-100, +100)
     RILE_PRESERVATION_RUBRIC,   # Domain rubric
